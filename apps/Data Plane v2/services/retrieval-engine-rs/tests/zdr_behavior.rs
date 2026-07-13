@@ -10,7 +10,7 @@
 use sqlx::PgPool;
 
 use retrieval_engine::pipeline::types::{
-    PipelineTimings, RetrievalFiltersInput, RetrievalRequest, ScoredCandidate,
+    PipelineTimings, RetrievalFiltersInput, RetrievalRequest, ScoredCandidate, ZdrMode,
 };
 use retrieval_engine::trace::persist_trace;
 
@@ -108,8 +108,13 @@ fn make_request(zdr_mode: &str) -> RetrievalRequest {
         filters: RetrievalFiltersInput::default(),
         context_budget_tokens: None,
         context_format: None,
-        zdr_mode: Some(zdr_mode.into()),
+        zdr_mode: Some(
+            zdr_mode
+                .parse::<ZdrMode>()
+                .expect("supported test ZDR mode"),
+        ),
         user_id: None,
+        verified_bearer: None,
         query_expansion: None,
         reranker_model: None,
         mode_mix: None,
@@ -147,11 +152,9 @@ async fn count_traces(pool: &PgPool) -> i64 {
 // ─── Test 1: persist_trace inserts a row in non-ephemeral modes ─────────────
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
 async fn test_persist_trace_creates_row_when_not_ephemeral() {
-    let Some(url) = test_db_url() else {
-        eprintln!("TEST_DATABASE_URL not set, skipping");
-        return;
-    };
+    let url = test_db_url().expect("TEST_DATABASE_URL is required for this ignored test");
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
     cleanup(&pool).await;

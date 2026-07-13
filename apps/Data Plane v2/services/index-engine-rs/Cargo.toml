@@ -22,10 +22,14 @@ chrono.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 envy = "0.4"
-async-nats = "0.38"
+async-nats.workspace = true
+nats-connection-rs = { path = "../nats-connection-rs" }
 futures = "0.3"
+event-envelope-rs = { path = "../event-envelope-rs" }
 regex.workspace = true
 once_cell.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }

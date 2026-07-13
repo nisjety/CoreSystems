@@ -47,6 +47,13 @@ pub struct Config {
     #[serde(default = "default_community_min_size")]
     #[allow(dead_code)] // consumed by detect_communities once that path is wired
     pub community_min_size: usize,
+
+    #[serde(default)]
+    pub embedding_event_public_key_path: String,
+    #[serde(default)]
+    pub index_event_public_key_path: String,
+    #[serde(default = "default_event_auth_audience")]
+    pub event_auth_audience: String,
 }
 
 impl Config {
@@ -106,4 +113,8 @@ fn default_max_entities_per_chunk() -> usize {
 
 fn default_community_min_size() -> usize {
     3
+}
+
+fn default_event_auth_audience() -> String {
+    "dataplane-events".into()
 }

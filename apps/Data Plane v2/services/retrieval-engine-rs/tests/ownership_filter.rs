@@ -25,7 +25,7 @@ const OWNERSHIP_GATE_SQL: &str = r#"
       AND deleted_at IS NULL
       AND ($2::text IS NULL
            OR owner_id = $2
-           OR visibility IN ('org', 'shared')
+           OR visibility = 'org'
            OR document_id = ANY($3))
 "#;
 
@@ -73,7 +73,7 @@ async fn setup(pool: &PgPool, org: &str) {
     for (id, owner, vis) in [
         ("org-doc", "user-a", "org"),       // visible to everyone in the org
         ("a-private", "user-a", "private"), // visible only to A
-        ("a-shared", "user-a", "private"),  // private but granted to B
+        ("a-shared", "user-a", "shared"),   // shared only through an explicit grant
     ] {
         sqlx::query(
             "INSERT INTO documents (document_id, org_id, owner_id, visibility) VALUES ($1,$2,$3,$4)",
@@ -89,11 +89,9 @@ async fn setup(pool: &PgPool, org: &str) {
 }
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
 async fn ownership_gate_enforces_per_user_visibility() {
-    let Some(url) = test_db_url() else {
-        eprintln!("TEST_DATABASE_URL not set, skipping");
-        return;
-    };
+    let url = test_db_url().expect("TEST_DATABASE_URL is required for this ignored test");
     let pool = PgPool::connect(&url).await.unwrap();
     let org = format!("owntest-{}", std::process::id());
     setup(&pool, &org).await;
@@ -110,7 +108,8 @@ async fn ownership_gate_enforces_per_user_visibility() {
     let legacy = gate(&pool, &all, None, &[]).await;
     assert_eq!(legacy.len(), 3, "no-viewer path must see all org docs");
 
-    // User B, no grant: sees the org doc only — both private docs are hidden.
+    // User B, no grant: sees the org doc only — private and grant-only shared
+    // docs are hidden.
     let b = gate(&pool, &all, Some("user-b"), &[]).await;
     assert!(b.contains(&org_doc), "B must see the org-visible doc");
     assert!(!b.contains(&a_private), "B must NOT see A's private doc");

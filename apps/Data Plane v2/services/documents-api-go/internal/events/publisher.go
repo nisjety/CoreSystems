@@ -28,11 +28,16 @@ func DefaultSourceObjectSubjects() SourceObjectSubjects {
 }
 
 type Publisher struct {
-	nc *nats.Conn
+	nc     *nats.Conn
+	signer interface {
+		Sign(eventType string, payload []byte) ([]byte, error)
+	}
 }
 
-func NewPublisher(nc *nats.Conn) *Publisher {
-	return &Publisher{nc: nc}
+func NewPublisher(nc *nats.Conn, signer interface {
+	Sign(eventType string, payload []byte) ([]byte, error)
+}) *Publisher {
+	return &Publisher{nc: nc, signer: signer}
 }
 
 type DocumentCreatedEvent struct {
@@ -41,11 +46,15 @@ type DocumentCreatedEvent struct {
 	Source     string `json:"source"`
 	Type       string `json:"type"`
 	Title      string `json:"title"`
+	UserID     string `json:"user_id,omitempty"`
+	ZDR        bool   `json:"zdr"`
 }
 
 type DocumentDeletedEvent struct {
 	DocumentID string `json:"document_id"`
 	OrgID      string `json:"org_id"`
+	UserID     string `json:"user_id,omitempty"`
+	ZDR        bool   `json:"zdr"`
 }
 
 func (p *Publisher) PublishDocumentCreated(evt DocumentCreatedEvent) error {
@@ -53,7 +62,7 @@ func (p *Publisher) PublishDocumentCreated(evt DocumentCreatedEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal doc created event: %w", err)
 	}
-	return p.nc.Publish(SubjectDocCreated, data)
+	return p.publishSigned(SubjectDocCreated, data)
 }
 
 func (p *Publisher) PublishDocumentDeleted(evt DocumentDeletedEvent) error {
@@ -61,7 +70,7 @@ func (p *Publisher) PublishDocumentDeleted(evt DocumentDeletedEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal doc deleted event: %w", err)
 	}
-	return p.nc.Publish(SubjectDocDeleted, data)
+	return p.publishSigned(SubjectDocDeleted, data)
 }
 
 // DocumentUpdatedEvent signals that an existing document's content changed
@@ -74,6 +83,8 @@ type DocumentUpdatedEvent struct {
 	Source     string `json:"source"`
 	Type       string `json:"type"`
 	Title      string `json:"title"`
+	UserID     string `json:"user_id,omitempty"`
+	ZDR        bool   `json:"zdr"`
 }
 
 func (p *Publisher) PublishDocumentUpdated(evt DocumentUpdatedEvent) error {
@@ -81,5 +92,16 @@ func (p *Publisher) PublishDocumentUpdated(evt DocumentUpdatedEvent) error {
 	if err != nil {
 		return fmt.Errorf("marshal doc updated event: %w", err)
 	}
-	return p.nc.Publish(SubjectDocUpdated, data)
+	return p.publishSigned(SubjectDocUpdated, data)
+}
+
+func (p *Publisher) publishSigned(subject string, payload []byte) error {
+	if p == nil || p.nc == nil || p.signer == nil {
+		return fmt.Errorf("signed event publisher unavailable")
+	}
+	envelope, err := p.signer.Sign(subject, payload)
+	if err != nil {
+		return fmt.Errorf("sign event: %w", err)
+	}
+	return p.nc.Publish(subject, envelope)
 }

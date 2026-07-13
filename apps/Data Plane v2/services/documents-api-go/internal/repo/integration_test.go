@@ -55,6 +55,22 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_idempotency
     ON documents (org_id, idempotency_key)
     WHERE idempotency_key IS NOT NULL AND deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS documents_outbox (
+    outbox_id BIGSERIAL PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    published BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    published_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS org_versions (
+    org_id TEXT PRIMARY KEY,
+    version BIGINT NOT NULL,
+    bumped_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
 
 func setupPostgres(t *testing.T) (*pgxpool.Pool, func()) {
@@ -274,6 +290,71 @@ func TestSoftDeleteOrgScope(t *testing.T) {
 	}
 	if got.DocumentID == "" {
 		t.Errorf("doc unexpectedly deleted")
+	}
+}
+
+func TestCreateUpdateDeleteLifecycleOutboxIsAtomic(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+	factory := func(document *model.Document, updated bool) (string, []byte, error) {
+		eventType := "dataplane.documents.created"
+		if updated {
+			eventType = "dataplane.documents.updated"
+		}
+		payload, err := json.Marshal(map[string]any{
+			"document_id": document.DocumentID,
+			"org_id":      document.OrgID,
+			"zdr":         false,
+		})
+		return eventType, payload, err
+	}
+	input := model.CreateDocumentInput{
+		OrgID: "org-outbox", Source: "s", Type: "t", Title: "A", Content: "one",
+		OwnerID: "user-a", CreatedBy: "user-a", IdempotencyKey: "outbox-fixture-1",
+	}
+	created, err := r.CreateWithOutbox(ctx, input, factory)
+	if err != nil {
+		t.Fatalf("create with outbox: %v", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents_outbox").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("created outbox count=%d err=%v", count, err)
+	}
+	reused, err := r.CreateWithOutbox(ctx, input, factory)
+	if err != nil || !reused.Reused {
+		t.Fatalf("idempotent reuse: result=%+v err=%v", reused, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents_outbox").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("reuse emitted duplicate outbox count=%d err=%v", count, err)
+	}
+	input.Content = "two"
+	updated, err := r.CreateWithOutbox(ctx, input, factory)
+	if err != nil || !updated.Updated {
+		t.Fatalf("update with outbox: result=%+v err=%v", updated, err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents_outbox").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("updated outbox count=%d err=%v", count, err)
+	}
+	deletePayload := []byte(fmt.Sprintf(`{"document_id":%q,"org_id":"org-outbox","zdr":false}`, created.Document.DocumentID))
+	if err := r.SoftDeleteWithOutbox(ctx, "org-outbox", created.Document.DocumentID, "user-a", "dataplane.documents.deleted", deletePayload); err != nil {
+		t.Fatalf("delete with outbox: %v", err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents_outbox").Scan(&count); err != nil || count != 3 {
+		t.Fatalf("deleted outbox count=%d err=%v", count, err)
+	}
+
+	if _, err := pool.Exec(ctx, "DROP TABLE documents_outbox"); err != nil {
+		t.Fatalf("drop outbox for rollback proof: %v", err)
+	}
+	input.IdempotencyKey = "outbox-fixture-2"
+	input.Content = "rollback"
+	if _, err := r.CreateWithOutbox(ctx, input, factory); err == nil {
+		t.Fatal("create succeeded without durable outbox")
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents WHERE idempotency_key='outbox-fixture-2'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("document commit escaped failed outbox count=%d err=%v", count, err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -41,6 +42,12 @@ func newVerifier(cfg Config) (*verifier, error) {
 		audience: strings.TrimSpace(cfg.Audience),
 		issuer:   strings.TrimSpace(cfg.ExpectedIssuer),
 	}
+	if v.audience == "" {
+		return nil, errors.New("authctx: required audience is empty")
+	}
+	if v.issuer == "" {
+		return nil, errors.New("authctx: expected issuer is empty")
+	}
 
 	if path := strings.TrimSpace(os.Getenv("JWT_PUBLIC_KEY_FILE")); path != "" {
 		pem, err := os.ReadFile(path)
@@ -54,7 +61,18 @@ func newVerifier(cfg Config) (*verifier, error) {
 		v.staticKey = key
 	}
 
-	if jwksURL := strings.TrimSpace(os.Getenv(cfg.jwksEnvOr())); jwksURL != "" {
+	jwksURL := strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL"))
+	if jwksURL == "" {
+		jwksURL = strings.TrimSpace(os.Getenv("JWT_JWKS_URL"))
+	}
+	if jwksURL == "" {
+		jwksURL = strings.TrimSpace(cfg.JWKSURL)
+	}
+	if jwksURL != "" {
+		parsedURL, err := url.ParseRequestURI(jwksURL)
+		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" || parsedURL.User != nil {
+			return nil, fmt.Errorf("authctx: invalid JWKS URL %q", jwksURL)
+		}
 		v.jwks = newJWKSCache(jwksURL)
 	}
 
@@ -62,15 +80,6 @@ func newVerifier(cfg Config) (*verifier, error) {
 		return nil, errors.New("authctx: enforce mode needs JWT_PUBLIC_KEY_FILE or a JWKS URL, both unset")
 	}
 	return v, nil
-}
-
-func (c *Config) jwksEnvOr() string {
-	// The JWKS URL doubles as the middleware Config.JWKSURL default, but the
-	// operational override is the env var so it can be tuned per-deploy.
-	if strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL")) != "" {
-		return "AUTH_CORE_JWKS_URL"
-	}
-	return "JWT_JWKS_URL"
 }
 
 // Verify checks the token's RS256 signature, audience, issuer, and expiry
@@ -99,6 +108,8 @@ func (v *verifier) Verify(token string) (*Claims, error) {
 	opts := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{"RS256"}),
 		jwt.WithLeeway(30 * time.Second),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
 	}
 	if v.audience != "" {
 		opts = append(opts, jwt.WithAudience(v.audience))
@@ -120,8 +131,21 @@ func (v *verifier) Verify(token string) (*Claims, error) {
 		return nil, errors.New("unexpected claims type")
 	}
 	claims := claimsFromMap(mc)
+	if claims.IssuedAt <= 0 || claims.NotBefore <= 0 {
+		return nil, errors.New("token missing required iat or nbf claim")
+	}
 	if claims.OrgID == "" {
 		return nil, errors.New("token missing org_id claim")
+	}
+	identityValid := false
+	switch claims.PrincipalType {
+	case "user":
+		identityValid = claims.UserID != "" && claims.ServiceID == "" && claims.UserID == claims.Subject
+	case "service":
+		identityValid = claims.ServiceID != "" && claims.UserID == "" && claims.ServiceID == claims.Subject && len(claims.Scopes) > 0
+	}
+	if !identityValid || claims.Subject == "" {
+		return nil, errors.New("token has missing or ambiguous principal identity")
 	}
 	claims.Verified = true
 	return claims, nil
@@ -144,14 +168,16 @@ func claimsFromMap(mc jwt.MapClaims) *Claims {
 		return 0
 	}
 	c := &Claims{
-		UserID:    getStr("user_id"),
-		OrgID:     getStr("org_id"),
-		Email:     getStr("email"),
-		Issuer:    getStr("iss"),
-		Subject:   getStr("sub"),
-		IssuedAt:  getInt("iat"),
-		NotBefore: getInt("nbf"),
-		ExpiresAt: getInt("exp"),
+		UserID:        getStr("user_id"),
+		ServiceID:     getStr("service_id"),
+		PrincipalType: getStr("principal_type"),
+		OrgID:         getStr("org_id"),
+		Email:         getStr("email"),
+		Issuer:        getStr("iss"),
+		Subject:       getStr("sub"),
+		IssuedAt:      getInt("iat"),
+		NotBefore:     getInt("nbf"),
+		ExpiresAt:     getInt("exp"),
 	}
 	// aud may be a string or an array; take the first string form.
 	switch aud := mc["aud"].(type) {
@@ -166,7 +192,7 @@ func claimsFromMap(mc jwt.MapClaims) *Claims {
 	}
 	if scopes, ok := mc["scopes"].([]interface{}); ok {
 		for _, s := range scopes {
-			if str, ok := s.(string); ok {
+			if str, ok := s.(string); ok && str != "" && str == strings.TrimSpace(str) {
 				c.Scopes = append(c.Scopes, str)
 			}
 		}
@@ -182,11 +208,17 @@ type jwksCache struct {
 
 	mu   sync.RWMutex
 	keys map[string]*rsa.PublicKey
-	last time.Time
+	// retryAfter bounds outbound refreshes for attacker-controlled unknown
+	// kids. It is cleared when a refresh actually finds the requested kid,
+	// allowing a legitimate subsequent rotation to be picked up immediately.
+	retryAfter time.Time
 }
 
 func newJWKSCache(url string) *jwksCache {
-	return &jwksCache{url: url, keys: map[string]*rsa.PublicKey{}}
+	return &jwksCache{
+		url:  url,
+		keys: map[string]*rsa.PublicKey{},
+	}
 }
 
 func (j *jwksCache) keyForKid(kid string) (*rsa.PublicKey, error) {
@@ -203,13 +235,16 @@ func (j *jwksCache) keyForKid(kid string) (*rsa.PublicKey, error) {
 	if key := j.keys[kid]; key != nil {
 		return key, nil
 	}
-	if !j.last.IsZero() && time.Since(j.last) < 30*time.Second {
+	now := time.Now()
+	if now.Before(j.retryAfter) {
 		return nil, fmt.Errorf("kid %q not in cached JWKS", kid)
 	}
+	j.retryAfter = now.Add(30 * time.Second)
 	if err := j.refreshLocked(); err != nil {
 		return nil, err
 	}
 	if key := j.keys[kid]; key != nil {
+		j.retryAfter = time.Time{}
 		return key, nil
 	}
 	return nil, fmt.Errorf("kid %q not found in JWKS", kid)
@@ -262,6 +297,5 @@ func (j *jwksCache) refreshLocked() error {
 		}
 	}
 	j.keys = next
-	j.last = time.Now()
 	return nil
 }

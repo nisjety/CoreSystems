@@ -3,7 +3,7 @@
 # Build context: repository root. This module uses ../../gen/go via go.mod
 # replace, so the generated module must be available during dependency fetch.
 
-FROM golang:1.26.2-bookworm AS builder
+FROM golang:1.26.5-bookworm AS builder
 WORKDIR /workspace/services/wiki-store-go
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
@@ -26,6 +26,11 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     go build -ldflags="-s -w" -o /wiki-store ./cmd
 
 FROM debian:bookworm-slim AS runtime
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
+      org.opencontainers.image.created=$BUILD_DATE
+ENV SOURCE_REVISION=$SOURCE_REVISION BUILD_DATE=$BUILD_DATE
 ARG DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -38,7 +43,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         exit 1; \
     fi; \
     rm -f /tmp/apt-install.log
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
+RUN groupadd --gid 10001 dpv2 \
+    && useradd --uid 10001 --gid dpv2 --no-create-home --shell /usr/sbin/nologin dpv2
 USER dpv2
 
 COPY --from=builder /wiki-store /usr/local/bin/wiki-store

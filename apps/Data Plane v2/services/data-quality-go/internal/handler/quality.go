@@ -3,11 +3,17 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog/log"
+
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/cost"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/eval"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/gates"
@@ -16,37 +22,77 @@ import (
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/trust"
 )
 
-type contextKey string
-
-const orgIDKey contextKey = "org_id"
-
-func OrgIDMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.Header.Get("X-Org-ID")
-		if orgID == "" {
-			writeError(w, http.StatusBadRequest, "X-Org-ID header required")
-			return
-		}
-		ctx := context.WithValue(r.Context(), orgIDKey, orgID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 func orgIDFrom(ctx context.Context) string {
-	v, _ := ctx.Value(orgIDKey).(string)
-	return v
+	claims, ok := authctx.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return claims.OrgID
 }
 
 type QualityHandler struct {
-	runner    *eval.Runner
+	runner    EvalRunner
 	scorer    *trust.Scorer
 	checker   *gates.Checker
 	linter    *lint.Linter
 	costQuery *cost.Query
 }
 
-func NewQualityHandler(r *eval.Runner, s *trust.Scorer, c *gates.Checker, l *lint.Linter, cq *cost.Query) *QualityHandler {
+type EvalRunner interface {
+	CreateEval(context.Context, model.CreateEvalInput) (*model.EvalRun, bool, error)
+	RunEval(context.Context, string, string) error
+	GetEval(context.Context, string, string) (*model.EvalRun, error)
+	RunCompare(context.Context, model.CompareEvalInput) (*model.CompareResult, error)
+}
+
+func NewQualityHandler(r EvalRunner, s *trust.Scorer, c *gates.Checker, l *lint.Linter, cq *cost.Query) *QualityHandler {
 	return &QualityHandler{runner: r, scorer: s, checker: c, linter: l, costQuery: cq}
+}
+
+type qualityRouteHandlers struct {
+	runEval     http.HandlerFunc
+	getEval     http.HandlerFunc
+	compareEval http.HandlerFunc
+	scoreTrust  http.HandlerFunc
+	checkGates  http.HandlerFunc
+	lint        http.HandlerFunc
+	costSummary http.HandlerFunc
+}
+
+// MountProtectedRoutes keeps the auth boundary and the complete sensitive
+// route table together so adding a route cannot accidentally bypass it.
+func MountProtectedRoutes(r chi.Router, auth func(http.Handler) http.Handler, h *QualityHandler) {
+	mountProtectedRoutes(r, auth, qualityRouteHandlers{
+		runEval:     h.RunEval,
+		getEval:     h.GetEval,
+		compareEval: h.CompareEval,
+		scoreTrust:  h.ScoreTrust,
+		checkGates:  h.CheckGates,
+		lint:        h.Lint,
+		costSummary: h.CostSummary,
+	})
+}
+
+func mountProtectedRoutes(r chi.Router, auth func(http.Handler) http.Handler, h qualityRouteHandlers) {
+	r.Route("/v1/evals", func(r chi.Router) {
+		r.Use(auth)
+		r.Use(authctx.RequireScope("data:quality:admin"))
+		r.Post("/retrieval", h.runEval)
+		r.Get("/retrieval/{evalID}", h.getEval)
+		r.Post("/compare", h.compareEval)
+	})
+	r.Route("/v1/quality", func(r chi.Router) {
+		r.Use(auth)
+		r.Use(authctx.RequireScope("data:quality:admin"))
+		r.Post("/trust", h.scoreTrust)
+		r.Get("/gates", h.checkGates)
+		r.Get("/lint", h.lint)
+	})
+	r.Route("/v1/cost", func(r chi.Router) {
+		r.Use(auth)
+		r.Use(authctx.RequireScope("data:quality:admin"))
+		r.Get("/summary", h.costSummary)
+	})
 }
 
 // CostSummary returns aggregated cost events for an org over a time window.
@@ -100,6 +146,11 @@ func (h *QualityHandler) Lint(w http.ResponseWriter, r *http.Request) {
 
 func (h *QualityHandler) RunEval(w http.ResponseWriter, r *http.Request) {
 	orgID := orgIDFrom(r.Context())
+	idempotencyKey, err := requestIdempotencyKey(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var input model.CreateEvalInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -107,33 +158,61 @@ func (h *QualityHandler) RunEval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.OrgID = orgID
+	input.IdempotencyKey = idempotencyKey
 
 	if input.Strategy == "" {
 		writeError(w, http.StatusBadRequest, "strategy required")
 		return
 	}
 
-	evalRun, err := h.runner.CreateEval(r.Context(), input)
+	evalRun, created, err := h.runner.CreateEval(r.Context(), input)
+	if errors.Is(err, eval.ErrIdempotencyConflict) {
+		writeError(w, http.StatusConflict, "idempotency key is bound to another request")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create eval")
 		return
 	}
 
-	go func() {
-		h.runner.RunEval(context.Background(), evalRun)
-	}()
+	if created {
+		evalCtx := context.WithoutCancel(r.Context())
+		go func() {
+			if err := h.runner.RunEval(evalCtx, orgID, evalRun.EvalID); err != nil {
+				log.Error().Err(err).Str("eval_id", evalRun.EvalID).Str("org_id", orgID).Msg("quality evaluation failed")
+			}
+		}()
+	}
 
 	writeJSON(w, http.StatusAccepted, evalRun)
 }
 
 func (h *QualityHandler) GetEval(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"message": "eval lookup by ID — requires persistent storage (future)",
-	})
+	orgID := orgIDFrom(r.Context())
+	evalID := strings.TrimSpace(chi.URLParam(r, "evalID"))
+	if evalID == "" {
+		writeError(w, http.StatusBadRequest, "eval ID required")
+		return
+	}
+	run, err := h.runner.GetEval(r.Context(), orgID, evalID)
+	if errors.Is(err, eval.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "evaluation not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "evaluation lookup failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 func (h *QualityHandler) CompareEval(w http.ResponseWriter, r *http.Request) {
 	orgID := orgIDFrom(r.Context())
+	idempotencyKey, err := requestIdempotencyKey(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var input model.CompareEvalInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -141,6 +220,7 @@ func (h *QualityHandler) CompareEval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.OrgID = orgID
+	input.IdempotencyKey = idempotencyKey
 
 	if input.StrategyA == "" || input.StrategyB == "" {
 		writeError(w, http.StatusBadRequest, "strategy_a and strategy_b required")
@@ -154,6 +234,19 @@ func (h *QualityHandler) CompareEval(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+func requestIdempotencyKey(r *http.Request) (string, error) {
+	key := r.Header.Get("Idempotency-Key")
+	if key != strings.TrimSpace(key) || len(key) < 8 || len(key) > 120 {
+		return "", errors.New("Idempotency-Key must be 8-120 non-whitespace characters")
+	}
+	for _, char := range key {
+		if char <= 0x20 || char >= 0x7f {
+			return "", errors.New("Idempotency-Key must be 8-120 non-whitespace characters")
+		}
+	}
+	return key, nil
 }
 
 func (h *QualityHandler) ScoreTrust(w http.ResponseWriter, r *http.Request) {

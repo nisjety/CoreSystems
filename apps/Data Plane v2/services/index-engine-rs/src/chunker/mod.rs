@@ -84,7 +84,10 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<Chunk> {
                 current.clear();
                 current_tokens = 0;
             }
-            let step = config.chunk_size.saturating_sub(config.chunk_overlap).max(1);
+            let step = config
+                .chunk_size
+                .saturating_sub(config.chunk_overlap)
+                .max(1);
             let chars: Vec<char> = segment.text.chars().collect();
             let char_step = step * 4;
             let char_size = config.chunk_size * 4;

@@ -147,6 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_ku_text_fts         ON knowledge_units USING GIN(
 CREATE TABLE IF NOT EXISTS retrieval_runs (
     trace_id              TEXT         PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
     org_id                TEXT         NOT NULL,
+    actor_user_id         TEXT,
     query                 TEXT         NOT NULL,
     query_embedding_model TEXT,
     index_version         TEXT,
@@ -169,6 +170,7 @@ CREATE TABLE IF NOT EXISTS retrieval_runs (
 CREATE INDEX IF NOT EXISTS idx_retrieval_runs_org    ON retrieval_runs (org_id);
 CREATE INDEX IF NOT EXISTS idx_retrieval_runs_time   ON retrieval_runs (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_retrieval_runs_zdr    ON retrieval_runs (org_id, zdr_mode);
+CREATE INDEX IF NOT EXISTS idx_retrieval_runs_actor  ON retrieval_runs (org_id, actor_user_id, created_at DESC);
 
 -- ── retrieval_candidates ─────────────────────────────────────────────────────
 
@@ -274,7 +276,8 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
     backlinks          JSONB,
     metadata           JSONB,
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    deleted_at         TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_wp_org       ON wiki_pages (org_id);
@@ -307,6 +310,12 @@ CREATE INDEX IF NOT EXISTS idx_wpv_created ON wiki_page_versions (page_id, creat
 CREATE TABLE IF NOT EXISTS wiki_source_logs (
     log_id              TEXT         PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
     page_id             TEXT         NOT NULL REFERENCES wiki_pages(page_id) ON DELETE CASCADE,
+    org_id              TEXT         NOT NULL,
+    source_type         TEXT         NOT NULL,
+    source_ref          TEXT         NOT NULL,
+    sync_status         TEXT         NOT NULL DEFAULT 'synced',
+    details             JSONB        NOT NULL DEFAULT '{}'::JSONB,
+    -- Legacy synthesis provenance remains readable during contract migration.
     original_chunks     JSONB,
     processing_model    TEXT,
     synthesis_prompt_hash TEXT,
@@ -321,6 +330,13 @@ CREATE INDEX IF NOT EXISTS idx_wsl_page ON wiki_source_logs (page_id);
 CREATE TABLE IF NOT EXISTS wiki_maintenance_logs (
     log_id       TEXT         PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
     page_id      Text         NOT NULL REFERENCES wiki_pages(page_id) ON DELETE CASCADE,
+    org_id       TEXT         NOT NULL,
+    action       TEXT         NOT NULL,
+    actor        TEXT         NOT NULL,
+    details      JSONB        NOT NULL DEFAULT '{}'::JSONB,
+    kind         TEXT,
+    detected_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    -- Legacy issue workflow remains available to existing readers.
     issue_type   TEXT,
     issue_details JSONB,
     proposed_fix  TEXT,
@@ -332,6 +348,52 @@ CREATE TABLE IF NOT EXISTS wiki_maintenance_logs (
 
 CREATE INDEX IF NOT EXISTS idx_wml_page   ON wiki_maintenance_logs (page_id);
 CREATE INDEX IF NOT EXISTS idx_wml_status ON wiki_maintenance_logs (page_id, issue_status);
+CREATE INDEX IF NOT EXISTS idx_wsl_org_page_created ON wiki_source_logs (org_id, page_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wml_org_page_created ON wiki_maintenance_logs (org_id, page_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION sync_wiki_source_log_contract()
+RETURNS TRIGGER AS $$
+BEGIN
+    SELECT page.org_id INTO NEW.org_id FROM wiki_pages AS page WHERE page.page_id = NEW.page_id;
+    NEW.source_type := COALESCE(NULLIF(NEW.source_type, ''), 'legacy');
+    NEW.source_ref := COALESCE(NULLIF(NEW.source_ref, ''), NULLIF(NEW.synthesis_prompt_hash, ''), 'legacy:' || NEW.log_id);
+    NEW.sync_status := COALESCE(NULLIF(NEW.sync_status, ''), 'synced');
+    NEW.details := COALESCE(NEW.details, NEW.metadata, '{}'::JSONB);
+    NEW.synthesis_prompt_hash := COALESCE(NEW.synthesis_prompt_hash, NEW.source_ref);
+    NEW.metadata := COALESCE(NEW.metadata, NEW.details);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER sync_wiki_source_log_contract_before_write
+    BEFORE INSERT OR UPDATE ON wiki_source_logs
+    FOR EACH ROW EXECUTE FUNCTION sync_wiki_source_log_contract();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE OR REPLACE FUNCTION sync_wiki_maintenance_log_contract()
+RETURNS TRIGGER AS $$
+BEGIN
+    SELECT page.org_id INTO NEW.org_id FROM wiki_pages AS page WHERE page.page_id = NEW.page_id;
+    NEW.action := COALESCE(NULLIF(NEW.action, ''), NULLIF(NEW.kind, ''), NULLIF(NEW.issue_type, ''), 'legacy');
+    NEW.actor := COALESCE(NULLIF(NEW.actor, ''), 'legacy');
+    NEW.details := COALESCE(NEW.details, NEW.issue_details, NEW.metadata, '{}'::JSONB);
+    NEW.kind := COALESCE(NEW.kind, NEW.action);
+    NEW.issue_type := COALESCE(NEW.issue_type, NEW.action);
+    NEW.issue_details := COALESCE(NEW.issue_details, NEW.details);
+    NEW.metadata := COALESCE(NEW.metadata, NEW.details);
+    NEW.detected_at := COALESCE(NEW.detected_at, NEW.created_at, NOW());
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+    CREATE TRIGGER sync_wiki_maintenance_log_contract_before_write
+    BEFORE INSERT OR UPDATE ON wiki_maintenance_logs
+    FOR EACH ROW EXECUTE FUNCTION sync_wiki_maintenance_log_contract();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ── wiki_proposals ───────────────────────────────────────────────────────────
 

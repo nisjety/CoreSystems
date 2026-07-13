@@ -9,6 +9,8 @@ mod wiki_consumer;
 
 use crate::config::Config;
 use crate::provider::EmbeddingProvider;
+use event_envelope_rs::{EventSigner, EventVerifier};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,64 +60,203 @@ async fn main() -> anyhow::Result<()> {
         "embedding backend selected"
     );
 
-    let nats_client = async_nats::connect(&cfg.nats_url).await?;
-    let js = async_nats::jetstream::new(nats_client.clone());
+    let signed_events_enabled = signed_event_consumers_enabled(
+        std::env::var("ENABLE_SIGNED_EVENT_CONSUMERS")
+            .as_deref()
+            .unwrap_or(""),
+    );
+    let legacy_events_enabled = unverified_legacy_events_enabled(
+        std::env::var("ALLOW_UNVERIFIED_LEGACY_EVENTS")
+            .as_deref()
+            .unwrap_or(""),
+        std::env::var("ALLOW_INSECURE_DEV_DEFAULTS")
+            .as_deref()
+            .unwrap_or(""),
+    );
+    let legacy_page_images_enabled = unsigned_page_image_mutations_enabled(
+        signed_events_enabled,
+        std::env::var("ALLOW_UNVERIFIED_LEGACY_EVENTS")
+            .as_deref()
+            .unwrap_or(""),
+        std::env::var("ALLOW_INSECURE_DEV_DEFAULTS")
+            .as_deref()
+            .unwrap_or(""),
+    );
+    let event_runtime = if signed_events_enabled {
+        if cfg.index_event_public_key_path.is_empty()
+            || cfg.wiki_event_public_key_path.is_empty()
+            || cfg.embedding_event_private_key_path.is_empty()
+        {
+            anyhow::bail!(
+                "signed event consumers require producer public and local private key paths"
+            );
+        }
+        let verifier = Arc::new(EventVerifier::from_rsa_pem(
+            &std::fs::read(&cfg.index_event_public_key_path)?,
+            "service:index-engine-rs",
+            "index-events-v1",
+            &cfg.event_auth_audience,
+            "events:index:publish",
+            100_000,
+        )?);
+        let signer = Arc::new(EventSigner::from_rsa_pem(
+            &std::fs::read(&cfg.embedding_event_private_key_path)?,
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            &cfg.event_auth_audience,
+            "events:embedding:publish",
+        )?);
+        let wiki_verifier = Arc::new(EventVerifier::from_rsa_pem(
+            &std::fs::read(&cfg.wiki_event_public_key_path)?,
+            "service:wiki-store-go",
+            "wiki-events-v1",
+            &cfg.event_auth_audience,
+            "events:wiki:publish",
+            100_000,
+        )?);
+        let nats_client = nats_connection::connect(&cfg.nats_url).await?;
+        let js = async_nats::jetstream::new(nats_client.clone());
+        stream::setup_stream(&js).await?;
+        let consumer = stream::create_consumer(&js).await?;
+        wiki_consumer::spawn(js.clone(), qdrant.clone(), provider.clone(), wiki_verifier).await?;
+        Some((consumer, nats_client, Some(verifier), Some(signer)))
+    } else if legacy_events_enabled {
+        tracing::warn!("unsigned embedding mutation consumers enabled for insecure development");
+        let nats_client = nats_connection::connect(&cfg.nats_url).await?;
+        let js = async_nats::jetstream::new(nats_client.clone());
 
-    stream::setup_stream(&js).await?;
-    let consumer = stream::create_consumer(&js).await?;
+        stream::setup_stream(&js).await?;
+        let consumer = stream::create_consumer(&js).await?;
 
-    // §16.3.8 — wiki publish subscriber: now DURABLE JetStream (own
-    // DATAPLANE_WIKI stream + durable consumer) so wiki embeds survive restarts
-    // and retry on failure, instead of best-effort core-NATS.
-    if let Err(e) = wiki_consumer::spawn(js.clone(), qdrant.clone(), provider.clone()).await {
-        tracing::warn!(error = %e, "wiki subscriber failed to start; continuing");
-    }
-
-    // Visual RAG arm — Cohere Embed v4 page-image embeddings. Online only when
-    // COHERE_EMBED_V4_ENDPOINT is configured; otherwise the visual collection and
-    // consumer are skipped (text-only deployment).
-    match crate::provider::visual::VisualEmbeddingProvider::from_config(&cfg) {
-        Ok(Some(visual)) => {
-            tracing::info!(model = visual.model_name(), "visual embedding (Embed v4) enabled");
-            if let Err(e) = qdrant_writer::ensure_collection(
-                &qdrant,
-                &cfg.qdrant_visual_collection,
-                cfg.visual_embedding_dimension,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "visual collection ensure failed; continuing");
+        // These legacy consumers trust tenant and content fields in the event
+        // payload. Keep every mutation arm under the same explicit dev gate
+        // until producer-scoped signed envelopes are available.
+        // Visual RAG arm — Cohere Embed v4 page-image embeddings. Online only when
+        // COHERE_EMBED_V4_ENDPOINT is configured; otherwise the visual collection and
+        // consumer are skipped (text-only deployment).
+        if !legacy_page_images_enabled {
+            anyhow::bail!(
+                "unsigned page-image mutations are disabled outside isolated legacy development"
+            );
+        }
+        match crate::provider::visual::VisualEmbeddingProvider::from_config(&cfg) {
+            Ok(Some(visual)) => {
+                tracing::info!(
+                    model = visual.model_name(),
+                    "visual embedding (Embed v4) enabled"
+                );
+                if let Err(e) = qdrant_writer::ensure_collection(
+                    &qdrant,
+                    &cfg.qdrant_visual_collection,
+                    cfg.visual_embedding_dimension,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "visual collection ensure failed; continuing");
+                }
+                if let Err(e) = image_consumer::spawn(
+                    js.clone(),
+                    qdrant.clone(),
+                    visual,
+                    cfg.qdrant_visual_collection.clone(),
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "page-image subscriber failed to start; continuing");
+                }
             }
-            if let Err(e) = image_consumer::spawn(
-                js.clone(),
-                qdrant.clone(),
-                visual,
-                cfg.qdrant_visual_collection.clone(),
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "page-image subscriber failed to start; continuing");
+            Ok(None) => {
+                tracing::info!("visual embedding disabled (COHERE_EMBED_V4_ENDPOINT unset)")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "visual embedding misconfigured; continuing without visual arm")
             }
         }
-        Ok(None) => tracing::info!("visual embedding disabled (COHERE_EMBED_V4_ENDPOINT unset)"),
-        Err(e) => {
-            tracing::warn!(error = %e, "visual embedding misconfigured; continuing without visual arm")
-        }
-    }
+
+        Some((consumer, nats_client, None, None))
+    } else {
+        tracing::warn!("embedding, wiki, and page-image consumers disabled until signed producer-scoped envelopes are available");
+        None
+    };
 
     let admin_app = api::router();
     let admin_addr = format!("0.0.0.0:{}", cfg.admin_port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!("admin on {admin_addr}");
 
+    let consumer_task = async move {
+        match event_runtime {
+            Some((consumer, nats_client, verifier, signer)) => {
+                stream::run_consumer(
+                    consumer,
+                    pool,
+                    qdrant,
+                    provider,
+                    cfg,
+                    nats_client,
+                    stream::EventSecurity { verifier, signer },
+                )
+                .await
+            }
+            None => std::future::pending::<anyhow::Result<()>>().await,
+        }
+    };
+
     tokio::select! {
         res = axum::serve(admin_listener, admin_app) => {
             if let Err(e) = res { tracing::error!(err = %e, "admin error"); }
         }
-        res = stream::run_consumer(consumer, pool, qdrant, provider, cfg, nats_client) => {
+        res = consumer_task => {
             if let Err(e) = res { tracing::error!(err = %e, "consumer error"); }
         }
     }
 
     Ok(())
+}
+
+fn unverified_legacy_events_enabled(legacy: &str, insecure_dev: &str) -> bool {
+    legacy == "1" && insecure_dev == "1"
+}
+
+fn signed_event_consumers_enabled(value: &str) -> bool {
+    value == "1"
+}
+
+fn unsigned_page_image_mutations_enabled(
+    signed_events_enabled: bool,
+    legacy: &str,
+    insecure_dev: &str,
+) -> bool {
+    !signed_events_enabled && legacy == "1" && insecure_dev == "1"
+}
+
+#[cfg(test)]
+mod event_containment_tests {
+    use super::{
+        signed_event_consumers_enabled, unsigned_page_image_mutations_enabled,
+        unverified_legacy_events_enabled,
+    };
+
+    #[test]
+    fn unsigned_embedding_mutations_require_two_explicit_dev_gates() {
+        assert!(!unverified_legacy_events_enabled("", ""));
+        assert!(!unverified_legacy_events_enabled("1", ""));
+        assert!(!unverified_legacy_events_enabled("", "1"));
+        assert!(unverified_legacy_events_enabled("1", "1"));
+    }
+
+    #[test]
+    fn signed_consumers_require_explicit_enablement() {
+        assert!(!signed_event_consumers_enabled(""));
+        assert!(signed_event_consumers_enabled("1"));
+    }
+
+    #[test]
+    fn unsigned_page_image_deletion_is_impossible_in_signed_or_production_posture() {
+        assert!(!unsigned_page_image_mutations_enabled(false, "", ""));
+        assert!(!unsigned_page_image_mutations_enabled(false, "1", ""));
+        assert!(!unsigned_page_image_mutations_enabled(false, "", "1"));
+        assert!(!unsigned_page_image_mutations_enabled(true, "1", "1"));
+        assert!(unsigned_page_image_mutations_enabled(false, "1", "1"));
+    }
 }

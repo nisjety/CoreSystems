@@ -79,7 +79,7 @@ impl EffectiveAcl {
 
 /// Populated by the auth middleware at request entry; consumed by the
 /// retrieval pipeline + audit-log writer. Cheap to clone (small vectors).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct AuthContext {
     pub user_id: Option<String>,
     pub org_id: String,
@@ -89,12 +89,18 @@ pub struct AuthContext {
     /// Echoed back to the caller in `X-Request-Id` and persisted in
     /// `access_audit_log.request_id` for cross-service correlation.
     pub request_id: String,
+    /// Original bearer retained only in memory after cryptographic verification
+    /// so Control can independently prove an end-user delegation. Never log or
+    /// serialize this value.
+    #[serde(skip_serializing)]
+    pub verified_bearer: Option<String>,
 }
 
 impl AuthContext {
     /// Build a context that grants org-scoped access only (no per-user ACL).
     /// Used when `CONTROL_PLANE_ENFORCEMENT=off` or for `API_KEY`-only calls
     /// where there is no user identity to enforce against.
+    #[allow(dead_code)]
     pub fn org_scoped(org_id: impl Into<String>, method: AuthMethod, request_id: String) -> Self {
         Self {
             user_id: None,
@@ -103,6 +109,7 @@ impl AuthContext {
             scopes: vec![],
             acl: EffectiveAcl::allow_all(),
             request_id,
+            verified_bearer: None,
         }
     }
 
@@ -180,6 +187,7 @@ impl AuthContext {
         if self.user_id.is_some() {
             req.user_id = self.user_id.clone();
         }
+        req.verified_bearer = self.verified_bearer.clone();
 
         // Org-admin super-visibility derives ONLY from a verified scope. This is
         // reached only on the JWT HTTP path; the api-key/agent path carries no
@@ -192,15 +200,28 @@ impl AuthContext {
 /// handlers (graph / wiki / contradictions / timeline / semantic-cache) use
 /// bespoke request structs rather than `RetrievalRequest`, so they can't call
 /// [`AuthContext::apply_to_request`]; this gives them the same org pin. The
-/// verified principal's org ALWAYS overrides a client-supplied body `org_id`, so
-/// a valid caller for org A can't read org B by putting B in the JSON body.
+/// An absent body org is populated from claims. A conflicting body org is
+/// rejected before data access so spoof attempts remain observable and receive
+/// a deterministic 403 instead of being silently rewritten.
 /// No-op when there is no context (mirrors the `/v1/retrieve` Option pattern).
-pub fn pin_org_from_ctx(ctx: Option<&AuthContext>, org_id: &mut String) {
+#[derive(Debug, thiserror::Error)]
+#[error("authenticated tenant does not match requested tenant")]
+pub struct OrgScopeMismatch;
+
+pub fn pin_org_from_ctx(
+    ctx: Option<&AuthContext>,
+    org_id: &mut String,
+) -> Result<(), OrgScopeMismatch> {
     if let Some(ctx) = ctx {
         if !ctx.org_id.is_empty() {
-            *org_id = ctx.org_id.clone();
+            if org_id.is_empty() {
+                *org_id = ctx.org_id.clone();
+            } else if *org_id != ctx.org_id {
+                return Err(OrgScopeMismatch);
+            }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -218,7 +239,17 @@ mod tests {
                 ..Default::default()
             },
             request_id: "req".into(),
+            verified_bearer: None,
         }
+    }
+
+    #[test]
+    fn verified_bearer_is_never_serialized() {
+        let mut ctx = ctx_with_acl(vec![]);
+        ctx.verified_bearer = Some("sensitive.jwt.proof".into());
+        let encoded = serde_json::to_string(&ctx).expect("serialize auth context");
+        assert!(!encoded.contains("sensitive.jwt.proof"));
+        assert!(!encoded.contains("verified_bearer"));
     }
 
     #[test]
@@ -252,17 +283,28 @@ mod tests {
     }
 
     #[test]
-    fn pin_org_overrides_body_org_from_verified_ctx() {
+    fn pin_org_rejects_body_org_mismatch() {
         let ctx = AuthContext::org_scoped("org-a", AuthMethod::Jwt, "req".into());
         let mut body_org = "org-b".to_string(); // attacker-supplied body org
-        pin_org_from_ctx(Some(&ctx), &mut body_org);
-        assert_eq!(body_org, "org-a", "verified ctx org must override body org");
+        assert!(pin_org_from_ctx(Some(&ctx), &mut body_org).is_err());
+        assert_eq!(
+            body_org, "org-b",
+            "mismatched request must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn pin_org_populates_an_absent_body_org() {
+        let ctx = AuthContext::org_scoped("org-a", AuthMethod::Jwt, "req".into());
+        let mut body_org = String::new();
+        pin_org_from_ctx(Some(&ctx), &mut body_org).expect("claim should populate empty org");
+        assert_eq!(body_org, "org-a");
     }
 
     #[test]
     fn pin_org_is_noop_without_ctx() {
         let mut body_org = "org-b".to_string();
-        pin_org_from_ctx(None, &mut body_org);
+        pin_org_from_ctx(None, &mut body_org).expect("no context remains a no-op");
         assert_eq!(
             body_org, "org-b",
             "no ctx → unchanged (same Option semantics as /v1/retrieve)"

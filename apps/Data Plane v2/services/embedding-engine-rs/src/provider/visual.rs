@@ -178,8 +178,10 @@ impl VisualEmbeddingProvider {
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    let parsed: VisualEmbedResponse =
-                        resp.json().await.context("parse visual embedding response")?;
+                    let parsed: VisualEmbedResponse = resp
+                        .json()
+                        .await
+                        .context("parse visual embedding response")?;
                     if parsed.data.len() != inputs.len() {
                         anyhow::bail!(
                             "visual embedding count mismatch: got {}, want {}",
@@ -193,7 +195,9 @@ impl VisualEmbeddingProvider {
                     let status = resp.status();
                     let body_text = resp.text().await.unwrap_or_default();
                     tracing::warn!(%status, body = %body_text, "visual embedding retryable failure");
-                    last_err = Some(anyhow::anyhow!("visual embedding API {status}: {body_text}"));
+                    last_err = Some(anyhow::anyhow!(
+                        "visual embedding API {status}: {body_text}"
+                    ));
                     continue;
                 }
                 Ok(resp) => {
@@ -249,11 +253,9 @@ mod tests {
 
     #[test]
     fn from_config_requires_key_when_endpoint_set() {
-        let err = VisualEmbeddingProvider::from_config(&cfg_with(
-            "https://x.services.ai.azure.com",
-            "",
-        ))
-        .unwrap_err();
+        let err =
+            VisualEmbeddingProvider::from_config(&cfg_with("https://x.services.ai.azure.com", ""))
+                .unwrap_err();
         assert!(
             err.to_string().contains("COHERE_EMBED_V4_API_KEY"),
             "unexpected error: {err}"

@@ -12,7 +12,17 @@
 | `dataplane.wiki.version.published` | wiki-store-go → embedding-engine-rs | `CreatePage` / `CreateVersion` commit |
 | `dataplane.wiki.page.deleted` | wiki-store-go → embedding-engine-rs | (reserved — not emitted yet) |
 
-## Payload — `dataplane.wiki.version.published`
+## Signed envelope
+
+The NATS message is an RS256-signed Data Plane event envelope, not raw domain
+JSON. The JWT contract is fixed to issuer/subject `service:wiki-store-go`, key
+ID `wiki-events-v1`, audience `dataplane-events`, and scope
+`events:wiki:publish`. It binds the subject, tenant, optional verified caller,
+`zdr=false`, payload SHA-256, issued/expiry times, and a replay identifier.
+Consumers must verify that contract before decoding `data` and must reject
+plain JSON, claim/payload conflicts, tampering, replay, and ZDR content.
+
+## Domain payload — `dataplane.wiki.version.published`
 
 ```json
 {
@@ -22,7 +32,9 @@
   "workspace_id": "string",
   "title":        "string",
   "path":         "string",
-  "content":      "string"
+  "content":      "string",
+  "user_id":     "string (optional for service jobs)",
+  "zdr":          false
 }
 ```
 
@@ -37,13 +49,14 @@
 | `title` | yes | Display label; carried in payload for retrieval result rendering |
 | `path` | yes | URL-routable path; carried in payload |
 | `content` | yes | Full text to embed. May be Markdown or sanitized HTML — the embedder does not distinguish |
+| `user_id` | no | Verified caller identity when the mutation originated from a user |
+| `zdr` | yes | Always `false`; wiki publication is durable and therefore incompatible with ZDR |
 
 ### Unknown fields
 
-Consumers MUST accept unknown fields and pass them through (forward-compat).
-The Rust consumer uses `#[serde(default)]` on optional fields; Go consumers
-should use `json.Unmarshal` into a struct with the canonical fields plus
-a `Extra map[string]json.RawMessage` if they need passthrough.
+Consumers may accept additive unknown domain fields for forward compatibility,
+but the signature covers the exact encoded payload and the security fields must
+remain claim-bound.
 
 ### Versioning
 
@@ -54,7 +67,7 @@ field) stay on `v1`.
 
 ## Cross-language test
 
-[`services/retrieval-engine-rs/tests/wiki_event_schema.rs`](../../services/retrieval-engine-rs/tests/wiki_event_schema.rs)
+[`services/embedding-engine-rs/tests/wiki_event_schema.rs`](../../services/embedding-engine-rs/tests/wiki_event_schema.rs)
 freezes a canonical JSON literal against the consumer struct. CI runs
 it on every Rust workspace test. Go-side counterpart in
 [`services/wiki-store-go/internal/events/publisher_schema_test.go`](../../services/wiki-store-go/internal/events/publisher_schema_test.go)

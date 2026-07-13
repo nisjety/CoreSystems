@@ -62,6 +62,8 @@ func (h *SourceObjectHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		// metadata-only re-sync; full-text consumers still re-index on every
 		// changed event to pick up renamed paths, ACL changes, etc.
 		"content_changed": result.Inserted || result.ContentChanged,
+		"user_id":         eventUserID(r),
+		"zdr":             false,
 	})
 
 	status := http.StatusOK
@@ -103,6 +105,8 @@ func (h *SourceObjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		"org_id":           obj.OrgID,
 		"connector":        obj.Connector,
 		"external_id":      obj.ExternalID,
+		"user_id":          eventUserID(r),
+		"zdr":              false,
 	})
 
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})

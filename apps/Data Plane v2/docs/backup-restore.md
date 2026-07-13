@@ -1,5 +1,17 @@
 # Data Plane v2 — Backup & Restore
 
+> **Verified 2026-07-10.** Re-checked against live containers (`docker ps`), the current
+> `scripts/backup.sh` / `scripts/restore.sh` / `scripts/smoke-test.sh`, the Makefile, and the
+> `data-orchestrator-go` HTTP router. Ports, Postgres version (16), the default Qdrant collection
+> name (`dataplane_knowledge`), and `EMBEDDING_DIMENSION` were all confirmed correct. Two
+> inaccuracies were found and fixed below: the Scenario B reindex `curl` example pointed at a
+> route that doesn't exist and was missing a required header, and the claim that `restore.sh`
+> "skips Postgres if the dump is absent" is false (it hard-fails with `exit 1`). See
+> `apps/Data Plane v2/docs/core-research/plane-audit-2026-07-02.md` for the broader plane audit,
+> including the live-confirmed finding that the orchestrator's `X-Org-ID` header on this same
+> reindex endpoint is accepted with no credential check (any caller can create reindex jobs for
+> any org).
+
 ## Overview
 
 Data Plane v2 stores canonical state in two places:
@@ -66,12 +78,22 @@ aws s3 sync /var/backups/dpv2/ s3://aquatiq-dpv2-backups/ \
 4. Qdrant vectors are already correct — no rebuild needed
 
 ### Scenario B: corrupted Qdrant, intact Postgres
-1. Restore Qdrant snapshots via `restore.sh` (it skips Postgres if dump is absent — but our script always overwrites both; for Qdrant-only, run upload manually)
-2. **OR** rebuild from Postgres: trigger reindex job via orchestrator:
+1. Restore Qdrant snapshots via `restore.sh` — **note:** the script does NOT skip Postgres if the
+   dump is absent; it hard-fails with `exit 1` ("missing Postgres dump"). For a Qdrant-only
+   restore, either place an (even empty/no-op) Postgres dump at `<backup-dir>/postgres.sql.gz`
+   first, or upload the Qdrant snapshots manually with `curl -X POST
+   $QDRANT_URL/collections/<name>/snapshots/upload -F snapshot=@<file>` instead of running the
+   full script.
+2. **OR** rebuild from Postgres: trigger a reindex job via the orchestrator. The real route is
+   `POST /v1/orchestrator/reindex` (not `/v1/jobs`), it requires an `X-Org-ID` header (the
+   orchestrator does not currently authenticate this header — treat it as a known gap, not a
+   feature), and there is no `full`/wildcard org-wide flag — you must pass the explicit
+   `document_ids` to reindex (fetch the org's document IDs from documents-api first):
    ```bash
-   curl -X POST http://localhost:8012/v1/jobs \
+   curl -X POST http://localhost:8012/v1/orchestrator/reindex \
      -H "Content-Type: application/json" \
-     -d '{"type":"reindex","org_id":"*","params":{"full":true}}'
+     -H "X-Org-ID: <org-id>" \
+     -d '{"document_ids":["<doc-id-1>","<doc-id-2>"]}'
    ```
    Reindex is slower (re-embeds every chunk) but always works from canonical state.
 

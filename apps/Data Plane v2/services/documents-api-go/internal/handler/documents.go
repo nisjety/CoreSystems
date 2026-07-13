@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -19,26 +20,94 @@ import (
 )
 
 type DocumentHandler struct {
-	repo      *repo.DocumentRepo
-	publisher *events.Publisher
+	repo *repo.DocumentRepo
 	// authz resolves a viewer's explicit document grants from user-core. May be
 	// nil (grant resolution disabled — owner + org/shared visibility still apply).
 	authz *userauthz.Client
 }
 
-func NewDocumentHandler(r *repo.DocumentRepo, p *events.Publisher, authz *userauthz.Client) *DocumentHandler {
-	return &DocumentHandler{repo: r, publisher: p, authz: authz}
+func NewDocumentHandler(r *repo.DocumentRepo, authz *userauthz.Client) *DocumentHandler {
+	return &DocumentHandler{repo: r, authz: authz}
 }
 
-// viewerID returns the requesting user's id: a verified authctx JWT claim wins;
-// otherwise the X-User-Id header forwarded by the gateway (the route is already
-// behind the internal-key gate, so the header is from a trusted caller). Empty
-// → ownership filtering is skipped (legacy org-scoped behaviour).
+// viewerID returns identity only from cryptographically verified claims. An
+// explicitly scoped org-wide reader has no per-user filter; all other callers
+// retain private-until-shared visibility. Forwarded identity headers are never
+// authorization inputs.
 func viewerID(r *http.Request) string {
-	if claims, ok := authctx.FromContext(r.Context()); ok && claims.UserID != "" {
+	if claims := verifiedClaims(r); claims != nil {
+		if claims.HasScope("org:data:read_all") {
+			return ""
+		}
+		return claims.PrincipalID()
+	}
+	return ""
+}
+
+func verifiedClaims(r *http.Request) *authctx.Claims {
+	if claims, ok := authctx.FromContext(r.Context()); ok && claims.Verified {
+		return claims
+	}
+	return nil
+}
+
+func principalID(r *http.Request) string {
+	if claims := verifiedClaims(r); claims != nil {
+		return claims.PrincipalID()
+	}
+	return ""
+}
+
+func eventUserID(r *http.Request) string {
+	if claims := verifiedClaims(r); claims != nil && !claims.IsService() {
 		return claims.UserID
 	}
-	return strings.TrimSpace(r.Header.Get("X-User-Id"))
+	return ""
+}
+
+func rejectsPersistentZDRContent(input *model.CreateDocumentInput) bool {
+	return input != nil && input.IngestPolicy.IsZeroRetention()
+}
+
+func lifecycleEventFactory(userID string) repo.OutboxEventFactory {
+	return func(document *model.Document, updated bool) (string, []byte, error) {
+		if updated {
+			payload, err := json.Marshal(events.DocumentUpdatedEvent{
+				DocumentID: document.DocumentID, OrgID: document.OrgID,
+				Source: document.Source, Type: document.Type, Title: document.Title,
+				UserID: userID, ZDR: false,
+			})
+			return events.SubjectDocUpdated, payload, err
+		}
+		payload, err := json.Marshal(events.DocumentCreatedEvent{
+			DocumentID: document.DocumentID, OrgID: document.OrgID,
+			Source: document.Source, Type: document.Type, Title: document.Title,
+			UserID: userID, ZDR: false,
+		})
+		return events.SubjectDocCreated, payload, err
+	}
+}
+
+// pinDocumentOwner prevents callers from assigning durable content to another
+// principal. It returns true when a conflicting owner was supplied.
+func pinDocumentOwner(input *model.CreateDocumentInput, principal string) bool {
+	if input == nil || principal == "" {
+		return true
+	}
+	if input.OwnerID != "" && input.OwnerID != principal {
+		return true
+	}
+	input.OwnerID = principal
+	input.CreatedBy = principal
+	return false
+}
+
+func canDeleteDocument(document *model.Document, claims *authctx.Claims) bool {
+	principal := claims.PrincipalID()
+	if document == nil || principal == "" {
+		return false
+	}
+	return document.OwnerID == principal || claims.HasScope("org:data:write_all")
 }
 
 // callerHasAdminScope reports whether the request carries a VERIFIED admin scope
@@ -46,7 +115,7 @@ func viewerID(r *http.Request) string {
 // verified, so until authctx verification is enforced this is false for end users
 // (fail-closed) — only trusted system callers (no viewer) bypass the org gate.
 func callerHasAdminScope(r *http.Request) bool {
-	if claims, ok := authctx.FromContext(r.Context()); ok {
+	if claims := verifiedClaims(r); claims != nil {
 		return claims.HasScope("org:data:write_all")
 	}
 	return false
@@ -80,16 +149,20 @@ func applyVisibilityPolicy(r *http.Request, input *model.CreateDocumentInput) (f
 	return false
 }
 
-// grantedDocs resolves the viewer's explicit document grants. Fails OPEN: on any
-// error it returns nil so the viewer still sees owned + org/shared docs (never a
-// leak — at worst a doc shared specifically to them is briefly hidden).
+// grantedDocs resolves the viewer's explicit document grants. It fails closed
+// for grant-only content: on any error the viewer still sees owned + org-visible
+// documents, while specifically shared documents remain hidden.
 func (h *DocumentHandler) grantedDocs(r *http.Request, orgID, viewer string) []string {
 	if viewer == "" || h.authz == nil {
 		return nil
 	}
-	ids, err := h.authz.ListVisibleDocuments(r.Context(), orgID, viewer)
+	authorization, ok := authctx.AuthorizationHeader(r.Context())
+	if !ok {
+		return nil
+	}
+	ids, err := h.authz.ListVisibleDocuments(r.Context(), orgID, viewer, authorization)
 	if err != nil {
-		log.Warn().Err(err).Msg("documents: failed to resolve viewer grants; failing open to owner+org/shared")
+		log.Warn().Err(err).Msg("documents: failed to resolve viewer grants; grant-only documents remain hidden")
 		return nil
 	}
 	return ids
@@ -161,13 +234,9 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.OrgID = orgID
-	// Stamp the creator as owner when an interactive viewer is present and the
-	// caller did not specify one. Server-to-server ingests (no viewer) fall back
-	// to created_by / the system account in the repo.
-	if input.OwnerID == "" {
-		if v := viewerID(r); v != "" {
-			input.OwnerID = v
-		}
+	if pinDocumentOwner(&input, principalID(r)) {
+		writeError(w, http.StatusForbidden, "owner_id must match the verified principal")
+		return
 	}
 
 	// Step 10+11: default visibility (private for users, org for system ingest)
@@ -183,12 +252,11 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ZDR enforcement at the receive boundary — Quarry's IngestClient
-	// pre-checks too, but defense in depth: reject ANY incoming request
-	// that combines a non-empty content body with an ephemeral/ZDR policy.
-	if input.IngestPolicy.IsZeroRetention() && input.Content != "" {
+	// ZDR enforcement at the receive boundary: this durable-document API cannot
+	// create even a metadata row under an ephemeral-only policy.
+	if rejectsPersistentZDRContent(&input) {
 		writeError(w, http.StatusForbidden,
-			"ingest_policy.zdr_mode=on or ephemeral_only=true rejects requests with non-empty content; submit metadata-only or disable ZDR")
+			"ingest_policy.zdr_mode=on or ephemeral_only=true forbids durable document persistence")
 		return
 	}
 
@@ -197,32 +265,14 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.repo.Create(r.Context(), input)
+	result, err := h.repo.CreateWithOutbox(r.Context(), input, lifecycleEventFactory(eventUserID(r)))
 	if err != nil {
+		if errors.Is(err, repo.ErrIdempotencyOwnershipConflict) {
+			writeError(w, http.StatusConflict, "idempotency key is unavailable")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create document")
 		return
-	}
-
-	// Emit the right lifecycle event: created for new docs, updated when an
-	// idempotent re-ingest changed the content. A true no-op (Reused) fires
-	// nothing so chunking/embedding don't re-run needlessly.
-	switch {
-	case result.Updated:
-		_ = h.publisher.PublishDocumentUpdated(events.DocumentUpdatedEvent{
-			DocumentID: result.Document.DocumentID,
-			OrgID:      result.Document.OrgID,
-			Source:     result.Document.Source,
-			Type:       result.Document.Type,
-			Title:      result.Document.Title,
-		})
-	case !result.Reused:
-		_ = h.publisher.PublishDocumentCreated(events.DocumentCreatedEvent{
-			DocumentID: result.Document.DocumentID,
-			OrgID:      result.Document.OrgID,
-			Source:     result.Document.Source,
-			Type:       result.Document.Type,
-			Title:      result.Document.Title,
-		})
 	}
 
 	status := http.StatusCreated
@@ -241,20 +291,34 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// guessing its id (confused deputy). A no-viewer (service) caller keeps the
 	// legacy org-scoped behaviour. deletedBy records who performed the deletion.
 	viewer := viewerID(r)
-	if _, err := h.repo.Get(r.Context(), orgID, docID, viewer, h.grantedDocs(r, orgID, viewer)); err != nil {
+	document, err := h.repo.Get(r.Context(), orgID, docID, viewer, h.grantedDocs(r, orgID, viewer))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "document not found")
+		return
+	}
+	claims := verifiedClaims(r)
+	if !canDeleteDocument(document, claims) {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
 	}
 
-	if err := h.repo.SoftDelete(r.Context(), orgID, docID, viewer); err != nil {
-		writeError(w, http.StatusNotFound, "document not found")
-		return
-	}
-
-	_ = h.publisher.PublishDocumentDeleted(events.DocumentDeletedEvent{
+	deleteEvent := events.DocumentDeletedEvent{
 		DocumentID: docID,
 		OrgID:      orgID,
-	})
+		UserID:     eventUserID(r),
+		ZDR:        false,
+	}
+	payload, err := json.Marshal(deleteEvent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to prepare deletion")
+		return
+	}
+	if err := h.repo.SoftDeleteWithOutbox(
+		r.Context(), orgID, docID, claims.PrincipalID(), events.SubjectDocDeleted, payload,
+	); err != nil {
+		writeError(w, http.StatusNotFound, "document not found")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
@@ -291,13 +355,20 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	rejectionReasons := []string{}
 
-	bulkViewer := viewerID(r)
+	bulkPrincipal := principalID(r)
 	var reused int
 	var updated int
 	for i, input := range req.Documents {
 		input.OrgID = orgID
-		if input.OwnerID == "" && bulkViewer != "" {
-			input.OwnerID = bulkViewer
+		if rejectsPersistentZDRContent(&input) {
+			rejected++
+			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: ZDR content cannot be persisted", i))
+			continue
+		}
+		if pinDocumentOwner(&input, bulkPrincipal) {
+			rejected++
+			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: owner_id must match the verified principal", i))
+			continue
 		}
 		// Step 10+11: default visibility + admin-gate org-global writes (per doc).
 		if applyVisibilityPolicy(r, &input) {
@@ -310,7 +381,7 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: %s", i, err.Error()))
 			continue
 		}
-		result, err := h.repo.Create(r.Context(), input)
+		result, err := h.repo.CreateWithOutbox(r.Context(), input, lifecycleEventFactory(eventUserID(r)))
 		if err != nil {
 			rejected++
 			continue
@@ -326,24 +397,8 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 			reused++
 		case result.Updated:
 			updated++
-			evtPayload, _ := json.Marshal(events.DocumentUpdatedEvent{
-				DocumentID: result.Document.DocumentID,
-				OrgID:      result.Document.OrgID,
-				Source:     result.Document.Source,
-				Type:       result.Document.Type,
-				Title:      result.Document.Title,
-			})
-			_ = h.repo.EnqueueOutbox(r.Context(), result.Document.OrgID, events.SubjectDocUpdated, evtPayload)
 		default:
 			accepted++
-			evtPayload, _ := json.Marshal(events.DocumentCreatedEvent{
-				DocumentID: result.Document.DocumentID,
-				OrgID:      result.Document.OrgID,
-				Source:     result.Document.Source,
-				Type:       result.Document.Type,
-				Title:      result.Document.Title,
-			})
-			_ = h.repo.EnqueueOutbox(r.Context(), result.Document.OrgID, events.SubjectDocCreated, evtPayload)
 		}
 	}
 

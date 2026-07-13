@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -15,138 +16,149 @@ import (
 )
 
 type Runner struct {
-	pool *pgxpool.Pool
+	store  EvalStore
+	traces TraceSource
+}
+
+// Recover claims persisted pending evaluations and requeues executions whose
+// lease expired. Start's conditional transition makes this safe across replicas.
+func (r *Runner) Recover(ctx context.Context, staleAfter time.Duration) error {
+	store, ok := r.store.(recoverableEvalStore)
+	if !ok {
+		return fmt.Errorf("evaluation recovery store is unavailable")
+	}
+	if staleAfter <= 0 {
+		staleAfter = 5 * time.Minute
+	}
+	runs, err := store.Recoverable(ctx, time.Now().UTC().Add(-staleAfter), 100)
+	if err != nil {
+		return err
+	}
+	var recoveryErr error
+	for _, run := range runs {
+		if err := r.RunEval(ctx, run.OrgID, run.EvalID); err != nil && !errors.Is(err, ErrInvalidTransition) {
+			recoveryErr = errors.Join(recoveryErr, err)
+		}
+	}
+	return recoveryErr
 }
 
 func NewRunner(pool *pgxpool.Pool) *Runner {
-	return &Runner{pool: pool}
+	return NewRunnerWithStores(NewPostgresEvalStore(pool), NewPostgresTraceSource(pool))
 }
 
-func (r *Runner) CreateEval(ctx context.Context, input model.CreateEvalInput) (*model.EvalRun, error) {
-	eval := &model.EvalRun{
-		EvalID:    uuid.New().String(),
-		OrgID:     input.OrgID,
-		Strategy:  input.Strategy,
-		Status:    model.EvalPending,
-		Corpus:    input.Corpus,
-		CreatedAt: time.Now(),
+func NewRunnerWithStores(store EvalStore, traces TraceSource) *Runner {
+	return &Runner{store: store, traces: traces}
+}
+
+func (r *Runner) CreateEval(ctx context.Context, input model.CreateEvalInput) (*model.EvalRun, bool, error) {
+	now := time.Now().UTC()
+	run := model.EvalRun{
+		EvalID:         uuid.NewString(),
+		OrgID:          input.OrgID,
+		Strategy:       input.Strategy,
+		Status:         model.EvalPending,
+		Corpus:         input.Corpus,
+		IdempotencyKey: input.IdempotencyKey,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
-	return eval, nil
+	return r.store.Create(ctx, run)
 }
 
-func (r *Runner) RunEval(ctx context.Context, eval *model.EvalRun) error {
-	eval.Status = model.EvalRunning
-
-	rows, err := r.pool.Query(ctx, `
-		SELECT trace_id, query, total_ms, candidate_count_reranked
-		FROM retrieval_runs
-		WHERE org_id = $1
-		ORDER BY created_at DESC
-		LIMIT 100
-	`, eval.OrgID)
+func (r *Runner) RunEval(ctx context.Context, orgID, evalID string) error {
+	run, err := r.store.Start(ctx, orgID, evalID)
 	if err != nil {
-		return fmt.Errorf("fetch traces: %w", err)
-	}
-	defer rows.Close()
-
-	var results []model.QueryResult
-	for rows.Next() {
-		var traceID, query string
-		var totalMs, candidates int
-		if err := rows.Scan(&traceID, &query, &totalMs, &candidates); err != nil {
-			continue
-		}
-		recall := math.Min(float64(candidates)/10.0, 1.0)
-		ndcg := recall * 0.9
-		mrr := 0.0
-		if candidates > 0 {
-			mrr = 1.0
-		}
-		results = append(results, model.QueryResult{
-			Query:      query,
-			RecallAt10: recall,
-			NDCGAt10:   ndcg,
-			MRR:        mrr,
-			LatencyMs:  float64(totalMs),
-			Candidates: candidates,
-		})
+		return fmt.Errorf("start eval: %w", err)
 	}
 
-	if len(results) == 0 {
-		errMsg := "no retrieval traces found for evaluation"
-		eval.Status = model.EvalFailed
-		eval.Error = &errMsg
-		now := time.Now()
-		eval.FinishedAt = &now
+	traces, err := r.traces.Recent(ctx, orgID, 100)
+	if err != nil {
+		message := "fetch traces: " + err.Error()
+		if _, persistErr := r.store.Fail(ctx, orgID, evalID, message); persistErr != nil {
+			return fmt.Errorf("%s; persist failure: %w", message, persistErr)
+		}
+		return fmt.Errorf("%s", message)
+	}
+
+	if len(traces) == 0 {
+		_, err = r.store.Fail(ctx, orgID, evalID, "no retrieval traces found for evaluation")
+		if err != nil {
+			return fmt.Errorf("persist empty evaluation: %w", err)
+		}
 		return nil
 	}
 
-	var sumRecall, sumNDCG, sumMRR, sumLatency float64
-	var latencies []float64
-	for _, r := range results {
-		sumRecall += r.RecallAt10
-		sumNDCG += r.NDCGAt10
-		sumMRR += r.MRR
-		sumLatency += r.LatencyMs
-		latencies = append(latencies, r.LatencyMs)
+	scorecard := score(run.Strategy, traces)
+	data, err := json.Marshal(scorecard)
+	if err != nil {
+		message := "encode scorecard: " + err.Error()
+		_, _ = r.store.Fail(ctx, orgID, evalID, message)
+		return fmt.Errorf("%s", message)
 	}
-	n := float64(len(results))
-
-	sort.Float64s(latencies)
-	p95Idx := int(math.Ceil(0.95*float64(len(latencies)))) - 1
-	if p95Idx < 0 {
-		p95Idx = 0
+	if _, err := r.store.Complete(ctx, orgID, evalID, data); err != nil {
+		return fmt.Errorf("persist completed eval: %w", err)
 	}
-
-	scorecard := model.Scorecard{
-		Strategy:    eval.Strategy,
-		QueriesRun:  len(results),
-		MeanRecall:  sumRecall / n,
-		MeanNDCG:    sumNDCG / n,
-		MeanMRR:     sumMRR / n,
-		MeanLatency: sumLatency / n,
-		P95Latency:  latencies[p95Idx],
-		Details:     results,
-	}
-
-	data, _ := json.Marshal(scorecard)
-	eval.Scorecard = data
-	eval.Status = model.EvalCompleted
-	now := time.Now()
-	eval.FinishedAt = &now
-
 	return nil
 }
 
-func (r *Runner) GetEval(eval *model.EvalRun) *model.EvalRun {
-	return eval
+func (r *Runner) GetEval(ctx context.Context, orgID, evalID string) (*model.EvalRun, error) {
+	return r.store.Get(ctx, orgID, evalID)
 }
 
 func (r *Runner) RunCompare(ctx context.Context, input model.CompareEvalInput) (*model.CompareResult, error) {
-	evalA, err := r.CreateEval(ctx, model.CreateEvalInput{OrgID: input.OrgID, Strategy: input.StrategyA, Corpus: input.Corpus})
+	baseKey := input.IdempotencyKey
+	if baseKey == "" {
+		baseKey = "compare-" + uuid.NewString()
+	}
+	evalA, createdA, err := r.CreateEval(ctx, model.CreateEvalInput{
+		OrgID: input.OrgID, Strategy: input.StrategyA, Corpus: input.Corpus, IdempotencyKey: baseKey + "-a",
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create eval A: %w", err)
 	}
-	if err := r.RunEval(ctx, evalA); err != nil {
-		return nil, fmt.Errorf("run eval A: %w", err)
+	if createdA {
+		if err := r.RunEval(ctx, input.OrgID, evalA.EvalID); err != nil {
+			return nil, fmt.Errorf("run eval A: %w", err)
+		}
 	}
 
-	evalB, err := r.CreateEval(ctx, model.CreateEvalInput{OrgID: input.OrgID, Strategy: input.StrategyB, Corpus: input.Corpus})
+	evalB, createdB, err := r.CreateEval(ctx, model.CreateEvalInput{
+		OrgID: input.OrgID, Strategy: input.StrategyB, Corpus: input.Corpus, IdempotencyKey: baseKey + "-b",
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create eval B: %w", err)
 	}
-	if err := r.RunEval(ctx, evalB); err != nil {
-		return nil, fmt.Errorf("run eval B: %w", err)
+	if createdB {
+		if err := r.RunEval(ctx, input.OrgID, evalB.EvalID); err != nil {
+			return nil, fmt.Errorf("run eval B: %w", err)
+		}
+	}
+
+	evalA, err = r.GetEval(ctx, input.OrgID, evalA.EvalID)
+	if err != nil {
+		return nil, fmt.Errorf("load eval A: %w", err)
+	}
+	evalB, err = r.GetEval(ctx, input.OrgID, evalB.EvalID)
+	if err != nil {
+		return nil, fmt.Errorf("load eval B: %w", err)
+	}
+	if evalA.Status != model.EvalCompleted || evalB.Status != model.EvalCompleted {
+		return nil, fmt.Errorf("comparison evaluations are not completed")
 	}
 
 	var scA, scB model.Scorecard
-	_ = json.Unmarshal(evalA.Scorecard, &scA)
-	_ = json.Unmarshal(evalB.Scorecard, &scB)
+	if err := json.Unmarshal(evalA.Scorecard, &scA); err != nil {
+		return nil, fmt.Errorf("decode eval A scorecard: %w", err)
+	}
+	if err := json.Unmarshal(evalB.Scorecard, &scB); err != nil {
+		return nil, fmt.Errorf("decode eval B scorecard: %w", err)
+	}
 
 	diffs := map[string]float64{
-		"recall_at_10":   scA.MeanRecall - scB.MeanRecall,
-		"ndcg_at_10":     scA.MeanNDCG - scB.MeanNDCG,
-		"mrr":            scA.MeanMRR - scB.MeanMRR,
+		"recall_at_10":    scA.MeanRecall - scB.MeanRecall,
+		"ndcg_at_10":      scA.MeanNDCG - scB.MeanNDCG,
+		"mrr":             scA.MeanMRR - scB.MeanMRR,
 		"mean_latency_ms": scA.MeanLatency - scB.MeanLatency,
 		"p95_latency_ms":  scA.P95Latency - scB.P95Latency,
 	}
@@ -160,10 +172,37 @@ func (r *Runner) RunCompare(ctx context.Context, input model.CompareEvalInput) (
 		winner = "tie"
 	}
 
-	return &model.CompareResult{
-		ScorecardA: scA,
-		ScorecardB: scB,
-		Diffs:      diffs,
-		Winner:     winner,
-	}, nil
+	return &model.CompareResult{ScorecardA: scA, ScorecardB: scB, Diffs: diffs, Winner: winner}, nil
+}
+
+func score(strategy string, traces []RetrievalTrace) model.Scorecard {
+	results := make([]model.QueryResult, 0, len(traces))
+	var sumRecall, sumNDCG, sumMRR, sumLatency float64
+	latencies := make([]float64, 0, len(traces))
+	for _, trace := range traces {
+		recall := math.Min(float64(trace.Candidates)/10.0, 1.0)
+		ndcg := recall * 0.9
+		mrr := 0.0
+		if trace.Candidates > 0 {
+			mrr = 1.0
+		}
+		result := model.QueryResult{
+			Query: trace.Query, RecallAt10: recall, NDCGAt10: ndcg, MRR: mrr,
+			LatencyMs: float64(trace.TotalMS), Candidates: trace.Candidates,
+		}
+		results = append(results, result)
+		sumRecall += recall
+		sumNDCG += ndcg
+		sumMRR += mrr
+		sumLatency += result.LatencyMs
+		latencies = append(latencies, result.LatencyMs)
+	}
+	sort.Float64s(latencies)
+	p95Idx := int(math.Ceil(0.95*float64(len(latencies)))) - 1
+	n := float64(len(results))
+	return model.Scorecard{
+		Strategy: strategy, QueriesRun: len(results), MeanRecall: sumRecall / n,
+		MeanNDCG: sumNDCG / n, MeanMRR: sumMRR / n, MeanLatency: sumLatency / n,
+		P95Latency: latencies[p95Idx], Details: results,
+	}
 }

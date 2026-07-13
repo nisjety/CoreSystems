@@ -2,6 +2,8 @@
 
 Generated: 2026-06-07
 
+**Verified 2026-07-10**: Live `docker ps` against the running `dpv2-*` compose stack reconfirms every port/container in the topology table below (all 15 containers healthy, ports unchanged). The HTTP route lists for `documents-api-go` and `wiki-store-go` were re-checked against current source and remain accurate. Two "not implemented" claims in the original 2026-06-07 draft are now stale — see the updated `documents-api-go` and `retrieval-engine-rs` Maturity notes below. This document still does not cover the security/compliance findings uncovered in the later plane audit — org-scoped no-credential access on `graph-index-rs`/`data-quality-go`/`data-orchestrator-go`, the `wiki-store-go` `deleted_at` HTTP 500, and ZDR persistence gaps. For those, `docs/core-research/plane-audit-2026-07-02.md` (with its 2026-07-10 addendum) is the current, more authoritative source of truth; this deep dive remains useful as the structural/topology map.
+
 Scope: `/apps/Data Plane v2`
 
 This document maps what is in Data Plane v2, how the services work together, which relationships are currently wired, and which surfaces appear stale, partial, placeholder, or intentionally scaffolded.
@@ -143,7 +145,7 @@ Relationships:
 Maturity notes:
 
 - Active and central.
-- `pkg/authctx/authctx.go` is explicitly a Phase A stub. Observe mode parses unverified JWT claims; enforce mode is fail-closed and returns `503` because signature verification is not implemented yet.
+- **Updated 2026-07-10**: `pkg/authctx` is no longer an unimplemented stub. `pkg/authctx/verify.go` (committed 2026-07-07) implements real RS256 JWT verification against a static `JWT_PUBLIC_KEY_FILE` and/or an auth-core JWKS endpoint (with `kid` rotation), with passing tests in `verify_test.go`. The running `dpv2-documents-api` container has `AUTHCTX_ENFORCE=0` (observe mode) but already has a valid key mounted at `/app/keys/convex-auth.pub`, so flipping to enforce mode today would perform real signature verification, not a blanket `503`. `503` now only fires if enforce mode is on and neither the key file nor a JWKS URL resolves. The package's own top-of-file doc comment still describes the Verify path as "intentionally stubbed" — that source comment is itself stale and should be corrected.
 - The handler wiring creates a usage publisher, but the documented comment says the call sites are still follow-up work.
 
 ### index-engine-rs
@@ -216,7 +218,7 @@ Maturity notes:
 - Active and feature-rich.
 - JWKS support exists, but compose and docs show multiple transitional auth/policy modes are still in play.
 - Compose comments record a known deeper gRPC issue on the Data Plane -> Model Plane embedding hop; the service works around it by defaulting query embeddings to direct Azure HTTP.
-- `tests/pipeline_e2e.rs` is still a scaffold: only `happy_path` is implemented, while ZDR rejection and cache invalidation cases remain TODOs.
+- **Updated 2026-07-10**: `tests/pipeline_e2e.rs` is no longer a scaffold. All three tests (`happy_path`, `zdr_reject_filters_restricted`, `cache_invalidation_via_org_version`) have real, non-trivial bodies. The latter two carry `#[ignore = "requires docker-compose stack"]` so a bare `cargo test` skips them, but they are implemented, not unwritten TODOs.
 
 ### graph-index-rs
 
@@ -372,8 +374,8 @@ The scan covered `stub`, `mock`, `placeholder`, `TODO`, `FIXME`, `not implemente
 
 Runtime-relevant findings:
 
-- `services/documents-api-go/pkg/authctx/authctx.go` is a declared stub. Enforce-mode JWT verification is not implemented and intentionally returns `503`.
-- `services/retrieval-engine-rs/tests/pipeline_e2e.rs` is still scaffolded; two of the three ignored tests are TODO stubs.
+- **Updated 2026-07-10**: `services/documents-api-go/pkg/authctx/authctx.go`'s package doc comment still calls the Verify path stubbed, but `verify.go` (added 2026-07-07) implements it for real; `503` now only fires if `AUTHCTX_ENFORCE=1` and neither a key file nor a JWKS URL resolves — not because verification code is missing.
+- **Updated 2026-07-10**: `services/retrieval-engine-rs/tests/pipeline_e2e.rs` re-verified; all three tests are implemented (not TODO stubs). Two are `#[ignore]`d pending a live docker-compose stack rather than unwritten.
 - `tests/e2e/README.md` describes more complete scenarios than the current `pipeline_e2e.rs` implementation actually provides.
 - `docs/gap-data.md` still describes `retrieval-eval-py` as a scaffold target, but the current tree does not show a populated Python runtime service under `services/retrieval-eval-py`.
 - `Makefile` still refers to creating `velion-net` as a local stub network name; current compose actually uses `inter-plane-bus`.
@@ -395,7 +397,7 @@ Mapped and active:
 
 Mapped but partial:
 
-- Data Plane auth transition is incomplete: `authctx` observe mode exists, signature verification does not.
+- Data Plane auth transition is incomplete in *rollout*, not in *code*: `authctx` signature verification now exists and passes tests (updated 2026-07-10), but the plane still defaults to observe mode (`AUTHCTX_ENFORCE=0`), so the multi-tenant header-trust gap stays open in practice pending the rollout flip.
 - Retrieval and embedding default to direct Azure HTTP in compose because the intended Data Plane -> Model Plane embedding gRPC hop still has a documented issue.
 - End-to-end pipeline testing is only partially realized in code.
 - Optional NATS on `wiki-store-go` means some local/dev modes suppress downstream embedding propagation.
@@ -440,7 +442,7 @@ cd "apps/Data Plane v2" && cargo test -p quickwit-adapter-rs
 
 ## Follow-Up Candidates
 
-1. Complete verified JWT enforcement in `documents-api-go/pkg/authctx`.
+1. ~~Complete verified JWT enforcement in `documents-api-go/pkg/authctx`~~ — implemented 2026-07-07 (`verify.go`); remaining work is flipping `AUTHCTX_ENFORCE=1` plane-wide once upstream callers mint audience-scoped tokens, and closing the still-open org-trust gaps on `graph-index-rs`/`data-quality-go`/`data-orchestrator-go` documented in `docs/core-research/plane-audit-2026-07-02.md`.
 2. Resolve the Data Plane -> Model Plane embedding gRPC hop so compose defaults can move off direct Azure HTTP.
 3. Either implement the documented e2e retrieval scenarios or reduce the README claims to match the checked-in tests.
 4. Decide whether `retrieval-eval-py` should exist as a real lab directory or be removed from current-state docs.

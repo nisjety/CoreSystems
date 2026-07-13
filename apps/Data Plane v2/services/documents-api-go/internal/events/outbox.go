@@ -31,25 +31,40 @@ const (
 
 type OutboxPublisher struct {
 	pool         *pgxpool.Pool
-	nc           *nats.Conn
+	js           jetStreamPublisher
 	pollInterval time.Duration
+	signer       interface {
+		Sign(eventType string, payload []byte) ([]byte, error)
+	}
 }
 
-func NewOutboxPublisher(pool *pgxpool.Pool, nc *nats.Conn) *OutboxPublisher {
+type jetStreamPublisher interface {
+	Publish(subject string, data []byte, opts ...nats.PubOpt) (*nats.PubAck, error)
+}
+
+func NewOutboxPublisher(pool *pgxpool.Pool, nc *nats.Conn, signer interface {
+	Sign(eventType string, payload []byte) ([]byte, error)
+}) (*OutboxPublisher, error) {
+	if pool == nil || nc == nil || signer == nil {
+		return nil, fmt.Errorf("documents outbox requires postgres, NATS, and event signer")
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		return nil, fmt.Errorf("initialize JetStream outbox publisher: %w", err)
+	}
 	return &OutboxPublisher{
 		pool:         pool,
-		nc:           nc,
+		js:           js,
 		pollInterval: defaultOutboxPollInterval,
-	}
+		signer:       signer,
+	}, nil
 }
 
 // Start kicks off the background loop. Returns immediately; honors ctx
 // cancellation for graceful shutdown.
 func (p *OutboxPublisher) Start(ctx context.Context) {
-	if p == nil || p.nc == nil {
-		// Disabled — no NATS attached. Outbox rows accumulate and a
-		// later operator can drain via SQL.
-		return
+	if p == nil || p.js == nil {
+		panic("documents outbox started without acknowledged JetStream publisher")
 	}
 	go p.loop(ctx)
 }
@@ -115,14 +130,11 @@ func (p *OutboxPublisher) drainOnce(ctx context.Context) error {
 	for _, r := range batch {
 		// `event_type` doubles as the NATS subject — the outbox writer
 		// chose it deliberately. This keeps the publisher contract-free.
-		if err := p.nc.Publish(r.eventType, r.payload); err != nil {
-			fmt.Printf("warn: nats publish %s: %v\n", r.eventType, err)
+		if err := p.publishAcknowledged(r.eventType, r.payload, fmt.Sprintf("documents-outbox-%d", r.id)); err != nil {
+			fmt.Printf("warn: signed JetStream publish %s: %v\n", r.eventType, err)
 			continue
 		}
 		publishedIDs = append(publishedIDs, r.id)
-	}
-	if err := p.nc.Flush(); err != nil {
-		fmt.Printf("warn: nats flush: %v\n", err)
 	}
 
 	if len(publishedIDs) == 0 {
@@ -137,4 +149,25 @@ func (p *OutboxPublisher) drainOnce(ctx context.Context) error {
 		return fmt.Errorf("mark published: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+func (p *OutboxPublisher) publishAcknowledged(eventType string, payload []byte, messageID string) error {
+	if p == nil || p.signer == nil || p.js == nil {
+		return fmt.Errorf("signed acknowledged outbox publisher unavailable")
+	}
+	envelope, err := p.signer.Sign(eventType, payload)
+	if err != nil {
+		return fmt.Errorf("sign event: %w", err)
+	}
+	if messageID == "" {
+		return fmt.Errorf("stable outbox message id is required")
+	}
+	ack, err := p.js.Publish(eventType, envelope, nats.MsgId(messageID))
+	if err != nil {
+		return fmt.Errorf("JetStream publish acknowledgement: %w", err)
+	}
+	if ack == nil || ack.Stream == "" {
+		return fmt.Errorf("JetStream publish returned an invalid acknowledgement")
+	}
+	return nil
 }

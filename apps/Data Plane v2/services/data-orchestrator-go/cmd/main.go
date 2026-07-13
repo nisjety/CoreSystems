@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/config"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/cost"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/handler"
@@ -29,6 +30,16 @@ func main() {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Str("service", "data-orchestrator-go").Logger()
 
 	cfg := config.Load()
+	verifier, err := authctx.NewVerifier(authctx.Config{
+		Audience:      cfg.JWTAudience,
+		Issuer:        cfg.JWTIssuer,
+		PublicKeyFile: cfg.JWTPublicKeyFile,
+		JWKSURL:       cfg.JWKSURL,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("JWT verification configuration invalid")
+	}
+	authMiddleware := authctx.Middleware(verifier)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -50,22 +61,37 @@ func main() {
 		log.Fatal().Err(err).Msg("postgres ping failed")
 	}
 
-	nc, err := nats.Connect(cfg.NatsURL)
-	if err != nil {
-		log.Fatal().Err(err).Str("url", cfg.NatsURL).Msg("nats connect failed")
+	legacyEventsEnabled := unverifiedLegacyEventsEnabled()
+	var nc *nats.Conn
+	if legacyEventsEnabled {
+		natsOptions := []nats.Option{nats.Name("data-orchestrator")}
+		if cfg.NatsToken != "" {
+			natsOptions = append(natsOptions, nats.Token(cfg.NatsToken))
+		}
+		nc, err = nats.Connect(cfg.NatsURL, natsOptions...)
+		if err != nil {
+			log.Fatal().Err(err).Msg("nats connect failed")
+		}
+		defer nc.Close()
 	}
-	defer nc.Close()
 
-	executor := jobs.NewExecutor(pool, nc)
+	executor := jobs.NewExecutor(pool, nc, legacyEventsEnabled)
 	staleDetector := jobs.NewStaleDetector(pool)
 	orchHandler := handler.NewOrchestratorHandler(executor, staleDetector)
 
-	// Cost ledger consumer: subscribes to dataplane.cost.ledger and persists.
-	costConsumer := cost.NewConsumer(pool, nc)
-	if cleanup, err := costConsumer.Start(ctx); err != nil {
-		log.Warn().Err(err).Msg("cost ledger consumer failed to start; continuing without")
+	// Unsigned legacy cost events can select arbitrary tenants and values. Keep
+	// the mutation consumer fail-closed until producer-scoped signed envelopes
+	// and NATS subject ACLs are deployed.
+	if legacyEventsEnabled {
+		log.Warn().Msg("unsigned cost ledger consumer enabled for insecure development")
+		costConsumer := cost.NewConsumer(pool, nc)
+		if cleanup, err := costConsumer.Start(ctx); err != nil {
+			log.Warn().Err(err).Msg("cost ledger consumer failed to start; continuing without")
+		} else {
+			defer cleanup()
+		}
 	} else {
-		defer cleanup()
+		log.Warn().Msg("cost ledger consumer disabled until signed producer-scoped envelopes are available")
 	}
 
 	r := chi.NewRouter()
@@ -79,12 +105,7 @@ func main() {
 	r.Get("/readyz", handler.Readyz)
 	r.Method("GET", "/metrics", metrics.Handler())
 
-	r.Route("/v1/orchestrator", func(r chi.Router) {
-		r.Use(handler.OrgIDMiddleware)
-		r.Post("/jobs", orchHandler.CreateJob)
-		r.Post("/reindex", orchHandler.Reindex)
-		r.Get("/stale-embeddings", orchHandler.StaleEmbeddings)
-	})
+	handler.MountProtectedRoutes(r, authMiddleware, orchHandler)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r}
@@ -104,4 +125,10 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	srv.Shutdown(shutdownCtx)
+}
+
+func unverifiedLegacyEventsEnabled() bool {
+	return os.Getenv("ALLOW_UNVERIFIED_LEGACY_EVENTS") == "1" &&
+		os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" &&
+		os.Getenv("ISOLATED_E2E") == "1"
 }

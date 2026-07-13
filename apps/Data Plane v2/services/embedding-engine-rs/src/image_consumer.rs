@@ -318,7 +318,10 @@ async fn handle_created(
     payload.insert("chunk_index".to_string(), int_val(evt.page_no));
     payload.insert("page_no".to_string(), int_val(evt.page_no));
     payload.insert("source_type".to_string(), str_val("page_image"));
-    payload.insert("content_hash".to_string(), str_val(evt.content_hash.clone()));
+    payload.insert(
+        "content_hash".to_string(),
+        str_val(evt.content_hash.clone()),
+    );
     payload.insert("image_url".to_string(), str_val(evt.image_url.clone()));
     // Visual candidates carry no text body; the page image IS the content. The
     // optional fused title rides along for display/citation.
@@ -327,7 +330,11 @@ async fn handle_created(
         str_val(evt.title.clone().unwrap_or_default()),
     );
 
-    let point = PointStruct::new(page_point_id(&evt.document_id, evt.page_no), vector, payload);
+    let point = PointStruct::new(
+        page_point_id(&evt.document_id, evt.page_no),
+        vector,
+        payload,
+    );
     qdrant
         .upsert_points(UpsertPointsBuilder::new(collection, vec![point]).wait(true))
         .await

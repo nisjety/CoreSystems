@@ -12,12 +12,61 @@ impl GraphStore {
         Self { pool }
     }
 
+    /// Returns chunks only when their canonical document is live and visible
+    /// to the whole verified organization. Private/shared grants are not a
+    /// graph authorization source in the secure MVP.
+    pub async fn load_org_visible_chunks(
+        &self,
+        org_id: &str,
+        document_id: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(sqlx::query_as(
+            "SELECT ku.knowledge_id, ku.text
+             FROM knowledge_units AS ku
+             JOIN documents AS d
+               ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+             WHERE d.document_id = $1 AND d.org_id = $2
+               AND d.visibility = 'org' AND d.deleted_at IS NULL",
+        )
+        .bind(document_id)
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    async fn knowledge_unit_is_org_visible(
+        &self,
+        org_id: &str,
+        knowledge_id: &str,
+    ) -> anyhow::Result<bool> {
+        let (visible,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS (
+                SELECT 1 FROM knowledge_units AS ku
+                JOIN documents AS d
+                  ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                WHERE ku.knowledge_id = $1 AND ku.org_id = $2
+                  AND d.visibility = 'org' AND d.deleted_at IS NULL
+             )",
+        )
+        .bind(knowledge_id)
+        .bind(org_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(visible)
+    }
+
     pub async fn persist_extraction(
         &self,
         org_id: &str,
         knowledge_id: &str,
         result: &ExtractionResult,
     ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        if !self
+            .knowledge_unit_is_org_visible(org_id, knowledge_id)
+            .await?
+        {
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
+        }
         let source_ref = serde_json::json!([knowledge_id]);
 
         let mut entity_ids = Vec::new();
@@ -112,6 +161,12 @@ impl GraphStore {
         relationship_ids: &[String],
         claim_ids: &[String],
     ) -> anyhow::Result<()> {
+        if !self
+            .knowledge_unit_is_org_visible(org_id, knowledge_id)
+            .await?
+        {
+            return Ok(());
+        }
         for eid in entity_ids {
             sqlx::query(
                 "INSERT INTO graph_text_units (org_id, knowledge_id, entity_id, rel_id, claim_id)
@@ -180,8 +235,15 @@ impl GraphStore {
         entity_id: &str,
     ) -> anyhow::Result<Option<Entity>> {
         let row = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
-            "SELECT entity_id, org_id, entity_type, entity_text, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-             FROM graph_entities WHERE entity_id = $1 AND org_id = $2"
+            "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
+             FROM graph_entities AS ge WHERE ge.entity_id = $1 AND ge.org_id = $2
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
         )
         .bind(entity_id)
         .bind(org_id)
@@ -212,21 +274,46 @@ impl GraphStore {
         limit_edges: i32,
     ) -> anyhow::Result<(Vec<Entity>, Vec<Relationship>, i64, i64)> {
         let (n_total,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM graph_entities WHERE org_id = $1")
+            sqlx::query_as(
+                "SELECT COUNT(*) FROM graph_entities AS ge WHERE ge.org_id = $1
+                 AND EXISTS (
+                   SELECT 1 FROM graph_text_units AS gtu
+                   JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                   JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                   WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                     AND d.visibility = 'org' AND d.deleted_at IS NULL
+                 )",
+            )
                 .bind(org_id)
                 .fetch_one(&self.pool)
                 .await?;
 
         let (e_total,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM graph_relationships WHERE org_id = $1")
+            sqlx::query_as(
+                "SELECT COUNT(*) FROM graph_relationships AS gr WHERE gr.org_id = $1
+                 AND EXISTS (
+                   SELECT 1 FROM graph_text_units AS gtu
+                   JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                   JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                   WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                     AND d.visibility = 'org' AND d.deleted_at IS NULL
+                 )",
+            )
                 .bind(org_id)
                 .fetch_one(&self.pool)
                 .await?;
 
         let node_rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
-            "SELECT entity_id, org_id, entity_type, entity_text, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-             FROM graph_entities WHERE org_id = $1
-             ORDER BY created_at DESC LIMIT $2"
+            "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
+             FROM graph_entities AS ge WHERE ge.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             ORDER BY ge.created_at DESC LIMIT $2"
         )
         .bind(org_id)
         .bind(limit_nodes)
@@ -234,9 +321,16 @@ impl GraphStore {
         .await?;
 
         let edge_rows = sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
-            "SELECT rel_id, org_id, entity_a_id, entity_b_id, relation_type, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-             FROM graph_relationships WHERE org_id = $1
-             ORDER BY created_at DESC LIMIT $2"
+            "SELECT gr.rel_id, gr.org_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type, COALESCE(gr.confidence, 0), COALESCE(gr.provenance, ''), COALESCE(gr.source_refs, '[]')
+             FROM graph_relationships AS gr WHERE gr.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             ORDER BY gr.created_at DESC LIMIT $2"
         )
         .bind(org_id)
         .bind(limit_edges)
@@ -281,7 +375,14 @@ impl GraphStore {
         offset: i32,
     ) -> anyhow::Result<(Vec<Entity>, i64)> {
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM graph_entities WHERE org_id = $1 AND entity_type = $2",
+            "SELECT COUNT(*) FROM graph_entities AS ge WHERE ge.org_id = $1 AND ge.entity_type = $2
+             AND EXISTS (
+               SELECT 1 FROM graph_text_units AS gtu
+               JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+               JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+               WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                 AND d.visibility = 'org' AND d.deleted_at IS NULL
+             )",
         )
         .bind(org_id)
         .bind(entity_type)
@@ -289,9 +390,16 @@ impl GraphStore {
         .await?;
 
         let rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
-            "SELECT entity_id, org_id, entity_type, entity_text, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-             FROM graph_entities WHERE org_id = $1 AND entity_type = $2
-             ORDER BY created_at DESC LIMIT $3 OFFSET $4"
+            "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
+             FROM graph_entities AS ge WHERE ge.org_id = $1 AND ge.entity_type = $2
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             ORDER BY ge.created_at DESC LIMIT $3 OFFSET $4"
         )
         .bind(org_id)
         .bind(entity_type)
@@ -324,8 +432,16 @@ impl GraphStore {
     ) -> anyhow::Result<Vec<Relationship>> {
         let rows = if let Some(rt) = relation_type {
             sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
-                "SELECT rel_id, org_id, entity_a_id, entity_b_id, relation_type, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-                 FROM graph_relationships WHERE org_id = $1 AND (entity_a_id = $2 OR entity_b_id = $2) AND relation_type = $3"
+                "SELECT gr.rel_id, gr.org_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type, COALESCE(gr.confidence, 0), COALESCE(gr.provenance, ''), COALESCE(gr.source_refs, '[]')
+                 FROM graph_relationships AS gr
+                 WHERE gr.org_id = $1 AND (gr.entity_a_id = $2 OR gr.entity_b_id = $2) AND gr.relation_type = $3
+                   AND EXISTS (
+                     SELECT 1 FROM graph_text_units AS gtu
+                     JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                     JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                     WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                       AND d.visibility = 'org' AND d.deleted_at IS NULL
+                   )"
             )
             .bind(org_id)
             .bind(entity_id)
@@ -334,8 +450,16 @@ impl GraphStore {
             .await?
         } else {
             sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
-                "SELECT rel_id, org_id, entity_a_id, entity_b_id, relation_type, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-                 FROM graph_relationships WHERE org_id = $1 AND (entity_a_id = $2 OR entity_b_id = $2)"
+                "SELECT gr.rel_id, gr.org_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type, COALESCE(gr.confidence, 0), COALESCE(gr.provenance, ''), COALESCE(gr.source_refs, '[]')
+                 FROM graph_relationships AS gr
+                 WHERE gr.org_id = $1 AND (gr.entity_a_id = $2 OR gr.entity_b_id = $2)
+                   AND EXISTS (
+                     SELECT 1 FROM graph_text_units AS gtu
+                     JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                     JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                     WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                       AND d.visibility = 'org' AND d.deleted_at IS NULL
+                   )"
             )
             .bind(org_id)
             .bind(entity_id)
@@ -365,18 +489,25 @@ impl GraphStore {
         status: Option<&str>,
     ) -> anyhow::Result<Vec<Claim>> {
         let mut q = String::from(
-            "SELECT claim_id, org_id, claim_text, COALESCE(entity_ids, '[]'), COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]'), COALESCE(contradicted_by_claim_ids, '[]'), COALESCE(claim_status, 'active')
-             FROM graph_claims WHERE org_id = $1"
+            "SELECT gc.claim_id, gc.org_id, gc.claim_text, COALESCE(gc.entity_ids, '[]'), COALESCE(gc.confidence, 0), COALESCE(gc.provenance, ''), COALESCE(gc.source_refs, '[]'), COALESCE(gc.contradicted_by_claim_ids, '[]'), COALESCE(gc.claim_status, 'active')
+             FROM graph_claims AS gc WHERE gc.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.claim_id = gc.claim_id AND gtu.org_id = gc.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
         );
         let mut params: Vec<String> = vec![org_id.to_string()];
 
         if let Some(eid) = entity_id {
             params.push(eid.to_string());
-            q.push_str(&format!(" AND entity_ids @> ${}::jsonb", params.len()));
+            q.push_str(&format!(" AND gc.entity_ids @> ${}::jsonb", params.len()));
         }
         if let Some(s) = status {
             params.push(s.to_string());
-            q.push_str(&format!(" AND claim_status = ${}", params.len()));
+            q.push_str(&format!(" AND gc.claim_status = ${}", params.len()));
         }
 
         let mut query = sqlx::query_as::<
@@ -423,16 +554,32 @@ impl GraphStore {
         offset: i32,
     ) -> anyhow::Result<(Vec<Claim>, i64)> {
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM graph_claims WHERE org_id = $1 AND jsonb_array_length(COALESCE(contradicted_by_claim_ids, '[]')) > 0"
+            "SELECT COUNT(*) FROM graph_claims AS gc
+             WHERE gc.org_id = $1 AND jsonb_array_length(COALESCE(gc.contradicted_by_claim_ids, '[]')) > 0
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.claim_id = gc.claim_id AND gtu.org_id = gc.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
         )
         .bind(org_id)
         .fetch_one(&self.pool)
         .await?;
 
         let rows = sqlx::query_as::<_, (String, String, String, serde_json::Value, f64, String, serde_json::Value, serde_json::Value, String)>(
-            "SELECT claim_id, org_id, claim_text, COALESCE(entity_ids, '[]'), COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]'), COALESCE(contradicted_by_claim_ids, '[]'), COALESCE(claim_status, 'active')
-             FROM graph_claims WHERE org_id = $1 AND jsonb_array_length(COALESCE(contradicted_by_claim_ids, '[]')) > 0
-             ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+            "SELECT gc.claim_id, gc.org_id, gc.claim_text, COALESCE(gc.entity_ids, '[]'), COALESCE(gc.confidence, 0), COALESCE(gc.provenance, ''), COALESCE(gc.source_refs, '[]'), COALESCE(gc.contradicted_by_claim_ids, '[]'), COALESCE(gc.claim_status, 'active')
+             FROM graph_claims AS gc
+             WHERE gc.org_id = $1 AND jsonb_array_length(COALESCE(gc.contradicted_by_claim_ids, '[]')) > 0
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.claim_id = gc.claim_id AND gtu.org_id = gc.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             ORDER BY gc.created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(org_id)
         .bind(limit)
@@ -461,20 +608,10 @@ impl GraphStore {
     }
 
     #[allow(dead_code)] // called by detect_communities; that entry point lands in a later phase
-    pub async fn save_community(&self, community: &Community) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO graph_communities (community_id, org_id, entity_ids, summary, level)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (community_id) DO UPDATE SET entity_ids = $3, summary = $4, level = $5",
+    pub async fn save_community(&self, _community: &Community) -> anyhow::Result<()> {
+        anyhow::bail!(
+            "community persistence disabled until communities carry canonical document provenance"
         )
-        .bind(&community.community_id)
-        .bind(&community.org_id)
-        .bind(serde_json::json!(&community.entity_ids))
-        .bind(&community.summary)
-        .bind(community.level)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 
     pub async fn get_graph_expansion(
@@ -516,5 +653,202 @@ impl GraphStore {
         }
 
         Ok((all_entities, all_rels))
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    const FIXTURE_SQL: &str = r#"
+        CREATE TABLE documents (
+            document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+            visibility TEXT NOT NULL, deleted_at TIMESTAMPTZ
+        );
+        CREATE TABLE knowledge_units (
+            knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL,
+            text TEXT NOT NULL
+        );
+        CREATE TABLE graph_entities (
+            entity_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+            entity_text TEXT NOT NULL, confidence DOUBLE PRECISION, provenance TEXT,
+            source_refs JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE graph_relationships (
+            rel_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, entity_a_id TEXT NOT NULL,
+            entity_b_id TEXT NOT NULL, relation_type TEXT NOT NULL,
+            confidence DOUBLE PRECISION, provenance TEXT, source_refs JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE graph_claims (
+            claim_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, claim_text TEXT NOT NULL,
+            entity_ids JSONB, confidence DOUBLE PRECISION, provenance TEXT,
+            source_refs JSONB, contradicted_by_claim_ids JSONB, claim_status TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE graph_text_units (
+            id BIGSERIAL PRIMARY KEY, org_id TEXT NOT NULL, knowledge_id TEXT NOT NULL,
+            entity_id TEXT, rel_id TEXT, claim_id TEXT
+        );
+
+        INSERT INTO documents VALUES
+            ('doc-org', 'org-a', 'user-a', 'org', NULL),
+            ('doc-private', 'org-a', 'user-a', 'private', NULL),
+            ('doc-shared', 'org-a', 'user-a', 'shared', NULL),
+            ('doc-deleted', 'org-a', 'user-a', 'org', NOW()),
+            ('doc-other', 'org-b', 'user-c', 'org', NULL);
+        INSERT INTO knowledge_units VALUES
+            ('k-org', 'doc-org', 'org-a', 'org visible'),
+            ('k-private', 'doc-private', 'org-a', 'private'),
+            ('k-shared', 'doc-shared', 'org-a', 'shared'),
+            ('k-deleted', 'doc-deleted', 'org-a', 'deleted'),
+            ('k-other', 'doc-other', 'org-b', 'other org');
+        INSERT INTO graph_entities VALUES
+            ('e-org-a', 'org-a', 'Person', 'Org A', 1, 'test', '[]', NOW()),
+            ('e-org-b', 'org-a', 'Person', 'Org B', 1, 'test', '[]', NOW()),
+            ('e-private', 'org-a', 'Person', 'Private', 1, 'test', '[]', NOW()),
+            ('e-shared', 'org-a', 'Person', 'Shared', 1, 'test', '[]', NOW()),
+            ('e-deleted', 'org-a', 'Person', 'Deleted', 1, 'test', '[]', NOW()),
+            ('e-other', 'org-b', 'Person', 'Other', 1, 'test', '[]', NOW());
+        INSERT INTO graph_relationships VALUES
+            ('r-org', 'org-a', 'e-org-a', 'e-org-b', 'knows', 1, 'test', '[]', NOW()),
+            ('r-private', 'org-a', 'e-private', 'e-private', 'knows', 1, 'test', '[]', NOW()),
+            ('r-shared', 'org-a', 'e-shared', 'e-shared', 'knows', 1, 'test', '[]', NOW()),
+            ('r-deleted', 'org-a', 'e-deleted', 'e-deleted', 'knows', 1, 'test', '[]', NOW()),
+            ('r-other', 'org-b', 'e-other', 'e-other', 'knows', 1, 'test', '[]', NOW());
+        INSERT INTO graph_claims VALUES
+            ('c-org', 'org-a', 'org claim', '["e-org-a"]', 1, 'test', '[]', '["c-x"]', 'active', NOW()),
+            ('c-private', 'org-a', 'private claim', '["e-private"]', 1, 'test', '[]', '["c-x"]', 'active', NOW()),
+            ('c-shared', 'org-a', 'shared claim', '["e-shared"]', 1, 'test', '[]', '["c-x"]', 'active', NOW()),
+            ('c-deleted', 'org-a', 'deleted claim', '["e-deleted"]', 1, 'test', '[]', '["c-x"]', 'active', NOW()),
+            ('c-other', 'org-b', 'other claim', '["e-other"]', 1, 'test', '[]', '["c-x"]', 'active', NOW());
+        INSERT INTO graph_text_units (org_id, knowledge_id, entity_id) VALUES
+            ('org-a', 'k-org', 'e-org-a'), ('org-a', 'k-org', 'e-org-b'),
+            ('org-a', 'k-private', 'e-private'), ('org-a', 'k-shared', 'e-shared'),
+            ('org-a', 'k-deleted', 'e-deleted'), ('org-b', 'k-other', 'e-other');
+        INSERT INTO graph_text_units (org_id, knowledge_id, rel_id) VALUES
+            ('org-a', 'k-org', 'r-org'), ('org-a', 'k-private', 'r-private'),
+            ('org-a', 'k-shared', 'r-shared'), ('org-a', 'k-deleted', 'r-deleted'),
+            ('org-b', 'k-other', 'r-other');
+        INSERT INTO graph_text_units (org_id, knowledge_id, claim_id) VALUES
+            ('org-a', 'k-org', 'c-org'), ('org-a', 'k-private', 'c-private'),
+            ('org-a', 'k-shared', 'c-shared'), ('org-a', 'k-deleted', 'c-deleted'),
+            ('org-b', 'k-other', 'c-other');
+    "#;
+
+    async fn fixture() -> (GraphStore, PgPool, String) {
+        let database_url = std::env::var("GRAPH_TEST_DATABASE_URL")
+            .expect("GRAPH_TEST_DATABASE_URL must point to disposable PostgreSQL");
+        assert!(
+            (database_url.contains("localhost") || database_url.contains("127.0.0.1"))
+                && database_url.contains("/graph_test"),
+            "refusing non-local or non-graph_test database"
+        );
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect disposable admin database");
+        let schema = format!("graph_visibility_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("create isolated graph schema");
+        admin.close().await;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect isolated graph pool");
+        sqlx::query(&format!("SET search_path TO {schema}"))
+            .execute(&pool)
+            .await
+            .expect("select isolated graph schema");
+        sqlx::raw_sql(FIXTURE_SQL)
+            .execute(&pool)
+            .await
+            .expect("create graph visibility fixture");
+        (GraphStore::new(pool.clone()), pool, schema)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GRAPH_TEST_DATABASE_URL pointing to disposable PostgreSQL"]
+    async fn only_live_org_visible_provenance_is_queryable_for_same_org_users() {
+        let (store, pool, schema) = fixture().await;
+
+        for _conceptual_user in ["user-a", "user-b"] {
+            let (entities, relationships, entity_total, relationship_total) =
+                store.snapshot_org_graph("org-a", 100, 100).await.unwrap();
+            assert_eq!(entity_total, 2);
+            assert_eq!(relationship_total, 1);
+            assert_eq!(entities.len(), 2);
+            assert_eq!(relationships.len(), 1);
+            assert!(store
+                .get_entity("org-a", "e-org-a")
+                .await
+                .unwrap()
+                .is_some());
+            for hidden in ["e-private", "e-shared", "e-deleted", "e-other"] {
+                assert!(store.get_entity("org-a", hidden).await.unwrap().is_none());
+            }
+            let (listed, total) = store
+                .list_entities_by_type("org-a", "Person", 100, 0)
+                .await
+                .unwrap();
+            assert_eq!((listed.len(), total), (2, 2));
+            assert_eq!(
+                store
+                    .get_relationships("org-a", "e-org-a", None)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(store
+                .get_relationships("org-a", "e-private", None)
+                .await
+                .unwrap()
+                .is_empty());
+            let claims = store.get_claims("org-a", None, None).await.unwrap();
+            assert_eq!(
+                claims
+                    .iter()
+                    .map(|c| c.claim_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["c-org"]
+            );
+            let (contradictions, total) = store.get_contradictions("org-a", 100, 0).await.unwrap();
+            assert_eq!(total, 1);
+            assert_eq!(contradictions[0].claim_id, "c-org");
+            let (expanded, rels) = store
+                .get_graph_expansion("org-a", &["e-org-a".into()], 1, 100)
+                .await
+                .unwrap();
+            assert_eq!(expanded[0].entity_id, "e-org-b");
+            assert_eq!(rels[0].rel_id, "r-org");
+        }
+
+        assert_eq!(
+            store
+                .load_org_visible_chunks("org-a", "doc-org")
+                .await
+                .unwrap(),
+            vec![("k-org".into(), "org visible".into())]
+        );
+        for hidden_doc in ["doc-private", "doc-shared", "doc-deleted", "doc-other"] {
+            assert!(store
+                .load_org_visible_chunks("org-a", hidden_doc)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("drop isolated graph schema");
+        pool.close().await;
     }
 }

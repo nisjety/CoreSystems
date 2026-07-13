@@ -132,6 +132,8 @@ pub struct Config {
 
     #[serde(default)]
     pub internal_api_key: Option<String>,
+    #[serde(default)]
+    pub user_core_service_token: Option<String>,
 
     // gRPC TLS (env-gated). When both paths point to readable PEM files
     // AND the binary was built with the `grpc-tls` feature, the Tonic server

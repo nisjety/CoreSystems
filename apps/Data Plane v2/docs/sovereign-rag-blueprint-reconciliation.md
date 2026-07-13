@@ -6,20 +6,55 @@
 > this before picking a "deep dive" — three of the blueprint's choices fork against
 > work that already exists.
 
+> **Verified 2026-07-10** — re-checked against live containers + current source.
+> Two facts below have moved since this doc was written (single commit,
+> 2026-06-23) and are corrected in place:
+> 1. **PR-F (MinIO CAS + page-image producer) has since shipped and is live.**
+>    `dpv2-minio` bucket `dataplane-cas` holds real page-image PNGs (org- and
+>    doc-scoped, timestamps through 2026-07-05); Qdrant `dataplane_page_images`
+>    holds 12 indexed points (`status: green`); the live `dpv2-retrieval-engine`
+>    container has `W_VISUAL=0.2`, not `0`. The "ships dark" framing and the
+>    "Recommended sequence" step 1 (PR-F) below are **stale — that step is done**.
+> 2. **The Dragonfly "no RediSearch → cannot do vector search" premise is now
+>    wrong.** The deployed `dpv2-dragonfly` is `df-v1.37.0`, which ships a
+>    `search` module supporting `FT.CREATE ... VECTOR HNSW` and `FT.SEARCH ...
+>    KNN` — live-tested here with real cosine-similarity ranking, not just
+>    command-acceptance. Decision-table row 1's *recommendation* (split
+>    Dragonfly=KV / Qdrant=semantic-vector) may still be reasonable for other
+>    reasons (Qdrant already owns the vector SoR; avoid a second vector layer to
+>    keep in sync), but re-justify it on those grounds, not on Dragonfly being
+>    incapable — it isn't, as of this version.
+>
+> Everything else checked (RRF `fusion.rs` k=60 folding in dense+sparse+wiki+
+> visual via three sequential pairwise calls in `orchestrator.rs`; semantic-cache
+> collection name `semantic_response_cache` matching `config.rs`'s
+> `default_semantic_cache_collection()`; rerank model still `rerank-english-v3.0`
+> per `.env`/live container) held up as described.
+>
+> One more shift worth knowing before re-reading Decision 1: ColQwen2 already has
+> a foothold in the code as an **opt-in late-interaction reranker** over Embed
+> v4's top-K visual candidates (`VISUAL_RERANK_ENABLED`, `src/search/colqwen.rs`,
+> calls out to a separate GPU inference server) — currently `false` in the live
+> env. That is *not* the "replace Embed v4 as the embedder" fork Decision 1
+> describes; it's a smaller, already-built, disabled-by-default add-on. Decision
+> 1 itself (embedder choice) is still open.
+
 ## Starting point (built + verified this session)
 
 The visual RAG core is implemented and passing real tests (`cargo test`,
 exit-code-checked): authz-safe semantic cache (PR-A), **Cohere Embed v4** image
 provider (PR-B), page-image consumer → Qdrant `dataplane_page_images` (PR-D),
 visual query arm + `w_visual` RRF fusion (PR-C), structural chunker keeping
-tables/code atomic (PR-E). It ships **dark** (`W_VISUAL=0`, no producer yet).
-Detail: `visual-rag-integration-plan.md`.
+tables/code atomic (PR-E). ~~It ships **dark** (`W_VISUAL=0`, no producer yet).~~
+**Superseded 2026-07-10: PR-F (CAS + producer) has since shipped; the live
+deployment runs `W_VISUAL=0.2` with real indexed page-images — see the verified
+note above.** Detail: `visual-rag-integration-plan.md`.
 
 ## Component-by-component reconciliation
 
 | Blueprint component | Reality in CoreSystem | Verdict |
 |---|---|---|
-| **Dragonfly "semantic cache"** (entry firewall + *semantic vector match*) | Dragonfly has **no RediSearch → cannot do vector search**. Exact-match KV only. The *semantic* cache is **Qdrant `semantic_response_cache`** (built; authz-scoped in PR-A). | ⚠️ **Technically wrong as drawn.** Split it: Dragonfly = exact-KV firewall; semantic similarity cache = Qdrant. |
+| **Dragonfly "semantic cache"** (entry firewall + *semantic vector match*) | ~~Dragonfly has **no RediSearch → cannot do vector search**. Exact-match KV only.~~ **Corrected 2026-07-10: the deployed `df-v1.37.0` DOES support real `FT.CREATE ... VECTOR HNSW` + `FT.SEARCH ... KNN` (live-tested, real cosine ranking) — this premise is outdated.** The *semantic* cache is still implemented as **Qdrant `semantic_response_cache`** (built; authz-scoped in PR-A; currently `SEMANTIC_CACHE_ENABLED=false` in the live env). | ⚠️ Split still stands, but re-justify on "Qdrant is already the vector SoR, avoid a second synced ANN store" — not on Dragonfly being incapable. |
 | **Not Diamond meta-router** | Model Plane already has an intent/router layer (cost-core complexity scoring, model-router, inference-core `FallbackChain` Budget/Balance/Genius). | ⚠️ **Plane boundary + sovereignty.** This is **Model Plane**, not Data Plane, and partly exists. "Not Diamond" is an external **US SaaS** called per query — contradicts the sovereignty thesis and adds latency. Use a **local** classifier (the blueprint itself says "localized random forest"). |
 | **Cohere Command R+ reasoner + LangGraph/Agno loop** | Model Plane **execution-core** (Rust agent loop, governed multi-tool, HITL, runs-history) + inference-core. | ⚠️ **Plane boundary.** Reasoning/agent loop is **Model Plane** and already exists in Rust. Don't bolt on a second (Python LangGraph/Agno) runtime — add Command R+ as an inference-core **provider**. |
 | **Local Llama 3.3 via vLLM** | Not present. | ✅ **Net-new** — but a **Model Plane** inference-core provider, not a Data Plane component. |
@@ -27,7 +62,7 @@ Detail: `visual-rag-integration-plan.md`.
 | **Postgres + pgvector + pgvectorscale** | Postgres **graph** is built (`graph_entities/relationships/communities`, full-text) + hard permissions. Vectors live in **Qdrant**, not pgvector. | ✅ Graph aligns. ❌ **Drop pgvector** — redundant with the Qdrant SoR; two ANN stores = sync burden for no gain. |
 | **Quickwit sparse (cold text on MinIO)** | Quickwit `dataplane-corpus` on MinIO + Postgres `ts_rank` fallback. | ✅ **Built.** |
 | **Meilisearch keyword (typo-tolerant IDs)** | Not present. | ✅ **Net-new, additive** — a genuine 4th arm (exact codes/IDs/typos) Quickwit/BM25 doesn't serve well. |
-| **MinIO CAS (immutable binaries + PixelRAG images)** | Not present for documents (MinIO exists only as Quickwit's segment backend). | 🔜 **= PR-F**, the gating dependency. Same work regardless of Decision 1. |
+| **MinIO CAS (immutable binaries + PixelRAG images)** | ~~Not present for documents (MinIO exists only as Quickwit's segment backend).~~ **Corrected 2026-07-10: PR-F shipped.** `dataplane-cas` bucket holds real org/doc-scoped page-image PNGs; feeds Qdrant `dataplane_page_images` (12 points, green). | ✅ **Done, not `🔜`.** PR-F is no longer the gating dependency — see "Recommended sequence" note. |
 | **Redis "Live Context Engine" (multi-turn session)** | Multi-turn session/run state = Model Plane **session-core** (durable). The Redis fleet already migrated to Dragonfly. | ⚠️ **Plane boundary + redundant.** Sessions are **Model Plane**; don't stand up a second Redis in Data Plane. |
 | **RRF fusion** | `fusion.rs` RRF (k=60), built; fuses dense+sparse+wiki+visual. Graph is a separate endpoint. | ✅ Built. Arm-set differs (see Decision 3). |
 | **Cohere Rerank 4** | `rerank-english-v3.0` wired. | ✅ Built; bump model id = trivial config. |
@@ -70,10 +105,14 @@ router, Llama/vLLM, Command R+, LangGraph, Redis session → **Model Plane** cha
 
 ## Recommended sequence
 
-1. **PR-F — MinIO CAS + page-image producer.** Lights up the visual arm already
+1. ~~**PR-F — MinIO CAS + page-image producer.** Lights up the visual arm already
    built; identical work whether Decision 1 picks Embed v4 or ColQwen2 (only the
-   embedder model swaps). **Highest leverage, no blocked forks.**
-2. **Resolve Decision 1** (visual embedder) — gates GPU sizing.
+   embedder model swaps). **Highest leverage, no blocked forks.**~~ **Done as of
+   2026-07-10 (see verified note at top) — `dataplane-cas` populated, `W_VISUAL=0.2`
+   live, `dataplane_page_images` indexed. Start execution at step 2.**
+2. **Resolve Decision 1** (visual embedder) — gates GPU sizing. (Note: ColQwen2
+   already has a disabled-by-default reranker foothold — see verified note — but
+   the embedder-choice fork itself is still open.)
 3. **Fold graph into the fused RRF path** + (optionally) **add Meilisearch** as the
    keyword arm → matches the blueprint's 4-arm retrieval (Data Plane).
 4. **Model Plane track** (separate): local router classifier, Command R+ provider,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/model"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/repo"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/sanitize"
@@ -27,33 +28,89 @@ func applySafeHTML(v *model.WikiPageVersion) {
 	v.SafeHTMLOK = ok
 }
 
-type contextKey string
-
-const orgIDKey contextKey = "org_id"
-
-func OrgIDMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.Header.Get("X-Org-ID")
-		if orgID == "" {
-			writeError(w, http.StatusBadRequest, "X-Org-ID header required")
-			return
-		}
-		ctx := context.WithValue(r.Context(), orgIDKey, orgID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func orgIDFrom(ctx context.Context) string {
+	claims, ok := authctx.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return claims.OrgID
 }
 
-func orgIDFrom(ctx context.Context) string {
-	v, _ := ctx.Value(orgIDKey).(string)
-	return v
+func principalIDFrom(ctx context.Context) string {
+	claims, ok := authctx.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return claims.PrincipalID()
 }
 
 type WikiHandler struct {
-	repo *repo.WikiRepo
+	repo                 *repo.WikiRepo
+	createMaintenanceLog func(context.Context, model.CreateMaintenanceLogInput) (*model.MaintenanceLog, error)
 }
 
 func NewWikiHandler(r *repo.WikiRepo) *WikiHandler {
-	return &WikiHandler{repo: r}
+	return &WikiHandler{repo: r, createMaintenanceLog: r.CreateMaintenanceLog}
+}
+
+type wikiRouteHandlers struct {
+	getOperatingMap, submitOperatingMapProposal, reviewOperatingMapProposal http.Handler
+	createOperatingMapBlueprintSuggestion, refreshOperatingMap              http.Handler
+	createPage, listPages, getPageByPath, getPage, updateVersion            http.Handler
+	listVersions, diffVersions, getBacklinks, submitProposal                http.Handler
+	reviewProposal, createSourceLog, listSourceLogs                         http.Handler
+	createMaintenanceLog, listMaintenanceLogs, maintenanceSweep             http.Handler
+}
+
+// MountRoutes installs the complete sensitive wiki HTTP surface behind one
+// mandatory authentication boundary.
+func MountRoutes(r chi.Router, authMiddleware func(http.Handler) http.Handler, h *WikiHandler) {
+	mountProtectedRoutes(r, authMiddleware, wikiRouteHandlers{
+		getOperatingMap:                       http.HandlerFunc(h.GetOperatingMap),
+		submitOperatingMapProposal:            http.HandlerFunc(h.SubmitOperatingMapProposal),
+		reviewOperatingMapProposal:            http.HandlerFunc(h.ReviewOperatingMapProposal),
+		createOperatingMapBlueprintSuggestion: http.HandlerFunc(h.CreateOperatingMapBlueprintSuggestion),
+		refreshOperatingMap:                   http.HandlerFunc(h.RefreshOperatingMap),
+		createPage:                            http.HandlerFunc(h.CreatePage), listPages: http.HandlerFunc(h.ListPages),
+		getPageByPath: http.HandlerFunc(h.GetPageByPath), getPage: http.HandlerFunc(h.GetPage),
+		updateVersion: http.HandlerFunc(h.UpdateVersion), listVersions: http.HandlerFunc(h.ListVersions),
+		diffVersions: http.HandlerFunc(h.DiffVersions), getBacklinks: http.HandlerFunc(h.GetBacklinks),
+		submitProposal: http.HandlerFunc(h.SubmitProposal), reviewProposal: http.HandlerFunc(h.ReviewProposal),
+		createSourceLog: http.HandlerFunc(h.CreateSourceLog), listSourceLogs: http.HandlerFunc(h.ListSourceLogs),
+		createMaintenanceLog: http.HandlerFunc(h.CreateMaintenanceLog),
+		listMaintenanceLogs:  http.HandlerFunc(h.ListMaintenanceLogs),
+		maintenanceSweep:     http.HandlerFunc(h.MaintenanceSweep),
+	})
+}
+
+func mountProtectedRoutes(r chi.Router, authMiddleware func(http.Handler) http.Handler, h wikiRouteHandlers) {
+	r.Route("/v1/wiki", func(r chi.Router) {
+		r.Use(authMiddleware)
+		read := r.With(authctx.RequireScope("wiki.read"))
+		write := r.With(authctx.RequireScope("wiki.write"))
+		approve := r.With(authctx.RequireScope("wiki.approve"))
+		maintenance := r.With(authctx.RequireScope("wiki.maintenance.write"))
+		read.Method(http.MethodGet, "/operating-map", h.getOperatingMap)
+		write.Method(http.MethodPost, "/operating-map/proposals", h.submitOperatingMapProposal)
+		approve.Method(http.MethodPost, "/operating-map/proposals/{proposalID}/review", h.reviewOperatingMapProposal)
+		write.Method(http.MethodPost, "/operating-map/agent-blueprints", h.createOperatingMapBlueprintSuggestion)
+		write.Method(http.MethodPost, "/operating-map/refresh", h.refreshOperatingMap)
+		write.Method(http.MethodPost, "/pages", h.createPage)
+		read.Method(http.MethodGet, "/pages", h.listPages)
+		read.Method(http.MethodGet, "/pages/by-path", h.getPageByPath)
+		read.Method(http.MethodGet, "/pages/{pageID}", h.getPage)
+		write.Method(http.MethodPost, "/pages/{pageID}/versions", h.updateVersion)
+		read.Method(http.MethodGet, "/pages/{pageID}/versions", h.listVersions)
+		read.Method(http.MethodGet, "/pages/{pageID}/diff", h.diffVersions)
+		read.Method(http.MethodGet, "/pages/{pageID}/backlinks", h.getBacklinks)
+		write.Method(http.MethodPost, "/pages/{pageID}/proposals", h.submitProposal)
+		approve.Method(http.MethodPost, "/proposals/review", h.reviewProposal)
+		write.Method(http.MethodPost, "/pages/{pageID}/source-logs", h.createSourceLog)
+		read.Method(http.MethodGet, "/pages/{pageID}/source-logs", h.listSourceLogs)
+		maintenance.Method(http.MethodPost, "/pages/{pageID}/maintenance-logs", h.createMaintenanceLog)
+		read.Method(http.MethodGet, "/pages/{pageID}/maintenance-logs", h.listMaintenanceLogs)
+		maintenance.Method(http.MethodPost, "/maintenance/sweep", h.maintenanceSweep)
+	})
 }
 
 func (h *WikiHandler) GetPage(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +125,7 @@ func (h *WikiHandler) GetPage(w http.ResponseWriter, r *http.Request) {
 
 	var version *model.WikiPageVersion
 	if page.CurrentVersionID != nil {
-		version, _ = h.repo.GetVersion(r.Context(), *page.CurrentVersionID)
+		version, _ = h.repo.GetVersionForPage(r.Context(), orgID, pageID, *page.CurrentVersionID)
 		applySafeHTML(version)
 	}
 
@@ -87,7 +144,7 @@ func (h *WikiHandler) GetPageByPath(w http.ResponseWriter, r *http.Request) {
 
 	var version *model.WikiPageVersion
 	if page.CurrentVersionID != nil {
-		version, _ = h.repo.GetVersion(r.Context(), *page.CurrentVersionID)
+		version, _ = h.repo.GetVersionForPage(r.Context(), orgID, page.PageID, *page.CurrentVersionID)
 		applySafeHTML(version)
 	}
 
@@ -145,6 +202,8 @@ func (h *WikiHandler) UpdateVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	input.PageID = pageID
 	input.OrgID = orgID
+	proposedBy := principalIDFrom(r.Context())
+	input.ProposedBy = &proposedBy
 
 	version, err := h.repo.CreateVersion(r.Context(), input)
 	if err != nil {
@@ -165,6 +224,7 @@ func (h *WikiHandler) SubmitProposal(w http.ResponseWriter, r *http.Request) {
 	}
 	input.PageID = pageID
 	input.OrgID = orgID
+	input.ProposedByAgent = principalIDFrom(r.Context())
 
 	proposal, err := h.repo.SubmitProposal(r.Context(), input)
 	if err != nil {
@@ -183,6 +243,7 @@ func (h *WikiHandler) ReviewProposal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.OrgID = orgID
+	input.ReviewedBy = principalIDFrom(r.Context())
 
 	proposal, version, err := h.repo.ReviewProposal(r.Context(), input)
 	if err != nil {
@@ -248,9 +309,10 @@ func (h *WikiHandler) CreateMaintenanceLog(w http.ResponseWriter, r *http.Reques
 	}
 	input.OrgID = orgID
 	input.PageID = pageID
+	input.Actor = principalIDFrom(r.Context())
 
-	if input.Action == "" || input.Actor == "" {
-		writeError(w, http.StatusBadRequest, "action and actor required")
+	if input.Action == "" {
+		writeError(w, http.StatusBadRequest, "action required")
 		return
 	}
 
@@ -298,6 +360,7 @@ func Health(w http.ResponseWriter, r *http.Request) {
 // DiffVersions returns a line-based diff between two versions of a wiki page.
 // Query params: from_version_id, to_version_id (both required).
 func (h *WikiHandler) DiffVersions(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
 	pageID := chi.URLParam(r, "pageID")
 	from := r.URL.Query().Get("from_version_id")
 	to := r.URL.Query().Get("to_version_id")
@@ -306,13 +369,13 @@ func (h *WikiHandler) DiffVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromV, err := h.repo.GetVersion(r.Context(), from)
-	if err != nil || fromV == nil || fromV.PageID != pageID {
+	fromV, err := h.repo.GetVersionForPage(r.Context(), orgID, pageID, from)
+	if err != nil || fromV == nil {
 		writeError(w, http.StatusNotFound, "from version not found for page")
 		return
 	}
-	toV, err := h.repo.GetVersion(r.Context(), to)
-	if err != nil || toV == nil || toV.PageID != pageID {
+	toV, err := h.repo.GetVersionForPage(r.Context(), orgID, pageID, to)
+	if err != nil || toV == nil {
 		writeError(w, http.StatusNotFound, "to version not found for page")
 		return
 	}
@@ -489,10 +552,11 @@ func (h *WikiHandler) ListPages(w http.ResponseWriter, r *http.Request) {
 //	}
 //
 // Returns: `{"accepted": N, "rejected": N, "errors": [...]}`. Accepts batch
-// writes; individual failures don't fail the request — matches the
-// "honest partial success" pattern used by BulkIngest.
+// writes. Partial success returns 200 with per-item outcomes; total validation
+// or storage failure is non-2xx so callers cannot mistake a no-op for success.
 func (h *WikiHandler) MaintenanceSweep(w http.ResponseWriter, r *http.Request) {
 	orgID := orgIDFrom(r.Context())
+	principalID := principalIDFrom(r.Context())
 
 	var req struct {
 		Items []struct {
@@ -517,37 +581,49 @@ func (h *WikiHandler) MaintenanceSweep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var accepted, rejected int
+	var accepted, rejected, writeFailures int
 	var errs []string
+	allowedKinds := map[string]struct{}{
+		"stale_wiki": {}, "orphan_wiki": {}, "weak_citation": {},
+		"contradiction": {}, "stale": {}, "orphan": {},
+	}
 
 	for i, it := range req.Items {
-		if it.Kind == "" {
+		if it.PageID == "" {
 			rejected++
-			errs = append(errs, fmt.Sprintf("item[%d]: kind required", i))
+			errs = append(errs, fmt.Sprintf("item[%d]: page_id required", i))
 			continue
 		}
-		actor := it.Actor
-		if actor == "" {
-			actor = "wiki-maintenance-sweep"
+		if _, ok := allowedKinds[it.Kind]; !ok {
+			rejected++
+			errs = append(errs, fmt.Sprintf("item[%d]: unsupported kind", i))
+			continue
 		}
 		// We map spec kinds onto the existing `action` column for backward
 		// compat; the migration also adds a dedicated `kind` column.
-		_, err := h.repo.CreateMaintenanceLog(r.Context(), model.CreateMaintenanceLogInput{
+		_, err := h.createMaintenanceLog(r.Context(), model.CreateMaintenanceLogInput{
 			OrgID:   orgID,
 			PageID:  it.PageID,
 			Action:  it.Kind,
-			Actor:   actor,
+			Actor:   principalID,
 			Details: it.Details,
 		})
 		if err != nil {
 			rejected++
-			errs = append(errs, fmt.Sprintf("item[%d]: %s", i, err.Error()))
+			writeFailures++
+			errs = append(errs, fmt.Sprintf("item[%d]: write failed", i))
 			continue
 		}
 		accepted++
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	statusCode := http.StatusOK
+	if accepted == 0 && writeFailures > 0 {
+		statusCode = http.StatusInternalServerError
+	} else if accepted == 0 && rejected > 0 {
+		statusCode = http.StatusBadRequest
+	}
+	writeJSON(w, statusCode, map[string]any{
 		"accepted": accepted,
 		"rejected": rejected,
 		"errors":   errs,
@@ -589,6 +665,7 @@ func (h *WikiHandler) RefreshOperatingMap(w http.ResponseWriter, r *http.Request
 		return
 	}
 	input.OrgID = orgID
+	input.RequestedBy = principalIDFrom(r.Context())
 
 	proposal, err := h.repo.RefreshOperatingMap(r.Context(), input)
 	if err != nil {
@@ -613,9 +690,7 @@ func (h *WikiHandler) ReviewOperatingMapProposal(w http.ResponseWriter, r *http.
 	}
 	input.OrgID = orgID
 	input.ProposalID = proposalID
-	if input.ReviewedBy == "" {
-		input.ReviewedBy = "velion"
-	}
+	input.ReviewedBy = principalIDFrom(r.Context())
 
 	proposal, version, err := h.repo.ReviewOperatingMapProposal(r.Context(), input)
 	if err != nil {
@@ -636,6 +711,7 @@ func (h *WikiHandler) CreateOperatingMapBlueprintSuggestion(w http.ResponseWrite
 		return
 	}
 	input.OrgID = orgID
+	input.RequestedBy = principalIDFrom(r.Context())
 
 	suggestion, err := h.repo.CreateOperatingMapBlueprintSuggestion(r.Context(), input)
 	if err != nil {

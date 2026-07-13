@@ -87,6 +87,10 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn semantic_cache_allowed(zdr: bool) -> bool {
+    !zdr
+}
+
 /// Deterministic point id from the cache coordinates so re-storing the same
 /// `(namespace, org, model, scope, prompt)` overwrites in place rather than
 /// accumulating duplicate points. A 64-bit collision only ever yields a cache
@@ -148,7 +152,7 @@ pub async fn search(
     zdr: bool,
     scope_key: Option<&str>,
 ) -> anyhow::Result<Option<SemanticHit>> {
-    if !cfg.semantic_cache_enabled {
+    if !semantic_cache_allowed(zdr) || !cfg.semantic_cache_enabled {
         return Ok(None);
     }
     // Authz gate: no scope under a require-scope deployment ⇒ fail closed before
@@ -232,7 +236,7 @@ pub async fn store(
     zdr: bool,
     scope_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    if !cfg.semantic_cache_enabled || response.is_empty() {
+    if !semantic_cache_allowed(zdr) || !cfg.semantic_cache_enabled || response.is_empty() {
         return Ok(());
     }
     // Authz gate (see `search`): never persist a response under a scope we
@@ -271,21 +275,30 @@ pub async fn store(
 /// Returns how many were removed (0 when the collection does not exist). Qdrant
 /// has no native per-point TTL, so a periodic caller (a cron hitting the admin
 /// endpoint) keeps the collection from growing unbounded.
-pub async fn prune(qdrant: &Qdrant, cfg: &Config, older_than_secs: i64) -> anyhow::Result<u64> {
+pub async fn prune(
+    qdrant: &Qdrant,
+    cfg: &Config,
+    org_id: &str,
+    older_than_secs: i64,
+    dry_run: bool,
+) -> anyhow::Result<u64> {
     let collection = &cfg.semantic_cache_collection;
     if !qdrant.collection_exists(collection).await? {
         return Ok(0);
     }
     let cutoff = now_secs().saturating_sub(older_than_secs.max(0));
     let filter = Filter {
-        must: vec![Condition::from(FieldCondition {
-            key: "created_at".to_string(),
-            range: Some(Range {
-                lt: Some(cutoff as f64),
+        must: vec![
+            keyword("org_id", org_id),
+            Condition::from(FieldCondition {
+                key: "created_at".to_string(),
+                range: Some(Range {
+                    lt: Some(cutoff as f64),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
-            ..Default::default()
-        })],
+        ],
         ..Default::default()
     };
     // `delete_points` reports no count, so count the matches against the same
@@ -300,16 +313,18 @@ pub async fn prune(qdrant: &Qdrant, cfg: &Config, older_than_secs: i64) -> anyho
         .context("count stale semantic-cache points")?
         .result
         .map_or(0, |r| r.count);
-    qdrant
-        .delete_points(
-            DeletePointsBuilder::new(collection)
-                .points(filter)
-                .wait(true),
-        )
-        .await
-        .context("prune stale semantic-cache points")?;
-    if pruned > 0 {
-        tracing::info!(collection, pruned, cutoff, "semantic-cache pruned");
+    if !dry_run {
+        qdrant
+            .delete_points(
+                DeletePointsBuilder::new(collection)
+                    .points(filter)
+                    .wait(true),
+            )
+            .await
+            .context("prune stale semantic-cache points")?;
+        if pruned > 0 {
+            tracing::info!(collection, pruned, cutoff, "semantic-cache pruned");
+        }
     }
     Ok(pruned)
 }
@@ -365,6 +380,12 @@ mod tests {
             point_id("a", "b", "c", "d", "e"),
             point_id("ab", "c", "d", "e", "")
         );
+    }
+
+    #[test]
+    fn zdr_requests_bypass_semantic_cache_reads_and_writes() {
+        assert!(!semantic_cache_allowed(true));
+        assert!(semantic_cache_allowed(false));
     }
 
     #[test]

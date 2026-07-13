@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
+use crate::auth::Principal;
 use crate::model::{Claim, Entity, Relationship};
 use crate::store::GraphStore;
 
@@ -27,9 +28,17 @@ impl GraphGrpc {
     pub fn new(store: Arc<GraphStore>) -> Self {
         Self { store }
     }
+}
 
-    pub fn into_server(self) -> GraphServiceServer<Self> {
-        GraphServiceServer::new(self)
+fn verified_principal<T>(request: &Request<T>) -> Option<&Principal> {
+    request.extensions().get::<Principal>()
+}
+
+fn claimed_org<'a>(principal: &'a Principal, requested_org_id: &str) -> Option<&'a str> {
+    if principal.authorizes_org(requested_org_id) {
+        Some(&principal.org_id)
+    } else {
+        None
     }
 }
 
@@ -90,10 +99,15 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         &self,
         request: Request<pb::GetEntityRequest>,
     ) -> Result<Response<pb::GetEntityResponse>, Status> {
+        let principal = verified_principal(&request)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
         let req = request.into_inner();
+        let org_id = claimed_org(&principal, &req.org_id)
+            .ok_or_else(|| Status::permission_denied("tenant mismatch"))?;
         let entity = self
             .store
-            .get_entity(&req.org_id, &req.entity_id)
+            .get_entity(org_id, &req.entity_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(pb::GetEntityResponse {
@@ -105,11 +119,16 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         &self,
         request: Request<pb::ListEntitiesByTypeRequest>,
     ) -> Result<Response<pb::ListEntitiesByTypeResponse>, Status> {
+        let principal = verified_principal(&request)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
         let req = request.into_inner();
+        let org_id = claimed_org(&principal, &req.org_id)
+            .ok_or_else(|| Status::permission_denied("tenant mismatch"))?;
         let limit = if req.limit > 0 { req.limit } else { 50 };
         let (rows, total) = self
             .store
-            .list_entities_by_type(&req.org_id, &req.entity_type, limit, req.offset)
+            .list_entities_by_type(org_id, &req.entity_type, limit, req.offset)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(pb::ListEntitiesByTypeResponse {
@@ -122,7 +141,12 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         &self,
         request: Request<pb::GetRelationshipsRequest>,
     ) -> Result<Response<pb::GetRelationshipsResponse>, Status> {
+        let principal = verified_principal(&request)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
         let req = request.into_inner();
+        let org_id = claimed_org(&principal, &req.org_id)
+            .ok_or_else(|| Status::permission_denied("tenant mismatch"))?;
         let filter = if req.relation_type.is_empty() {
             None
         } else {
@@ -130,7 +154,7 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         };
         let rows = self
             .store
-            .get_relationships(&req.org_id, &req.entity_id, filter)
+            .get_relationships(org_id, &req.entity_id, filter)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(pb::GetRelationshipsResponse {
@@ -142,7 +166,12 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         &self,
         request: Request<pb::GetClaimsRequest>,
     ) -> Result<Response<pb::GetClaimsResponse>, Status> {
+        let principal = verified_principal(&request)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
         let req = request.into_inner();
+        let org_id = claimed_org(&principal, &req.org_id)
+            .ok_or_else(|| Status::permission_denied("tenant mismatch"))?;
         let entity = if req.entity_id.is_empty() {
             None
         } else {
@@ -155,7 +184,7 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         };
         let rows = self
             .store
-            .get_claims(&req.org_id, entity, status)
+            .get_claims(org_id, entity, status)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(pb::GetClaimsResponse {
@@ -167,7 +196,12 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         &self,
         request: Request<pb::GraphExpansionRequest>,
     ) -> Result<Response<pb::GraphExpansionResponse>, Status> {
+        let principal = verified_principal(&request)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
         let req = request.into_inner();
+        let org_id = claimed_org(&principal, &req.org_id)
+            .ok_or_else(|| Status::permission_denied("tenant mismatch"))?;
         let max_hops = if req.max_hops > 0 { req.max_hops } else { 2 };
         let max_entities = if req.max_entities > 0 {
             req.max_entities
@@ -176,7 +210,7 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         };
         let (entities, relationships) = self
             .store
-            .get_graph_expansion(&req.org_id, &req.entity_ids, max_hops, max_entities)
+            .get_graph_expansion(org_id, &req.entity_ids, max_hops, max_entities)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         let new_entities = i32::try_from(
@@ -206,11 +240,16 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
         &self,
         request: Request<pb::GetContradictionsRequest>,
     ) -> Result<Response<pb::GetContradictionsResponse>, Status> {
+        let principal = verified_principal(&request)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
         let req = request.into_inner();
+        let org_id = claimed_org(&principal, &req.org_id)
+            .ok_or_else(|| Status::permission_denied("tenant mismatch"))?;
         let limit = if req.limit > 0 { req.limit } else { 50 };
         let (rows, total) = self
             .store
-            .get_contradictions(&req.org_id, limit, req.offset)
+            .get_contradictions(org_id, limit, req.offset)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         // Proto carries optional entity_id; the store doesn't filter by it
@@ -233,6 +272,28 @@ impl pb::graph_service_server::GraphService for GraphGrpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{Principal, PrincipalKind};
+
+    fn principal(org_id: &str) -> Principal {
+        Principal {
+            subject_id: "user-1".into(),
+            org_id: org_id.into(),
+            kind: PrincipalKind::User,
+        }
+    }
+
+    #[test]
+    fn tenant_guard_accepts_claim_org_and_denies_spoofed_org() {
+        let principal = principal("org-a");
+        assert_eq!(claimed_org(&principal, "org-a"), Some("org-a"));
+        assert_eq!(claimed_org(&principal, "org-b"), None);
+    }
+
+    #[test]
+    fn request_without_interceptor_principal_is_unauthenticated() {
+        let request = Request::new(pb::GetEntityRequest::default());
+        assert!(verified_principal(&request).is_none());
+    }
 
     #[test]
     fn entity_to_pb_maps_fields() {

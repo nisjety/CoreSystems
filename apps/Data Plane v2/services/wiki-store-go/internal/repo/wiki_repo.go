@@ -12,37 +12,46 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/events"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/model"
 )
 
 type WikiRepo struct {
-	pool      *pgxpool.Pool
-	publisher *events.Publisher
+	pool *pgxpool.Pool
 }
 
 func NewWikiRepo(pool *pgxpool.Pool) *WikiRepo {
 	return &WikiRepo{pool: pool}
 }
 
-// SetPublisher attaches a NATS event publisher to the repo. Optional —
-// nil keeps the repo silent (used in tests). §16.3.8 wires this in
-// cmd/main.go so every published version emits a NATS event that
-// embedding-engine subscribes to.
-func (r *WikiRepo) SetPublisher(p *events.Publisher) {
-	r.publisher = p
+func verifiedPrincipalID(ctx context.Context) string {
+	claims, ok := authctx.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return claims.PrincipalID()
 }
 
-// emitPublished is a best-effort hook called after CreatePage /
-// CreateVersion commit. Failure logs but does not propagate — the
-// version is already durable in Postgres.
-func (r *WikiRepo) emitPublished(evt events.WikiVersionPublishedEvent) {
-	if r.publisher == nil {
-		return
+func enqueueWikiPublished(ctx context.Context, tx pgx.Tx, event events.WikiVersionPublishedEvent) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal wiki outbox event: %w", err)
 	}
-	if err := r.publisher.PublishWikiVersionPublished(evt); err != nil {
-		fmt.Printf("warn: wiki publish event failed: %v\n", err)
+	var userID any
+	if event.UserID != "" {
+		userID = event.UserID
 	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO wiki_event_outbox
+			(org_id, user_id, event_type, payload, idempotency_key)
+		VALUES ($1, $2, $3, $4::jsonb, $5)
+		ON CONFLICT (idempotency_key) DO NOTHING
+	`, event.OrgID, userID, events.SubjectWikiPublished, string(payload), "wiki.published:"+event.VersionID)
+	if err != nil {
+		return fmt.Errorf("enqueue wiki published event: %w", err)
+	}
+	return nil
 }
 
 // ListPages — Wave 3.1 / Wave 11.C-b close: paginated wiki page enumeration
@@ -72,7 +81,8 @@ func (r *WikiRepo) ListPages(
 	case workspaceID != "" && status != "":
 		err = r.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM wiki_pages
-             WHERE org_id = $1 AND workspace_id = $2 AND page_status = $3 AND deleted_at IS NULL`,
+             WHERE org_id = $1 AND workspace_id = $2 AND page_status = $3
+               AND deleted_at IS NULL AND LOWER(COALESCE(page_status, '')) <> 'deleted'`,
 			orgID, workspaceID, status,
 		).Scan(&total)
 		if err != nil {
@@ -82,13 +92,15 @@ func (r *WikiRepo) ListPages(
             SELECT page_id, org_id, workspace_id, title, path, current_version_id,
                    page_status, backlinks, metadata, created_at, updated_at
             FROM wiki_pages
-            WHERE org_id = $1 AND workspace_id = $2 AND page_status = $3 AND deleted_at IS NULL
+            WHERE org_id = $1 AND workspace_id = $2 AND page_status = $3
+              AND deleted_at IS NULL AND LOWER(COALESCE(page_status, '')) <> 'deleted'
             ORDER BY updated_at DESC LIMIT $4 OFFSET $5
         `, orgID, workspaceID, status, limit, offset)
 	case workspaceID != "":
 		err = r.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM wiki_pages
-             WHERE org_id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+             WHERE org_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
+               AND LOWER(COALESCE(page_status, '')) <> 'deleted'`,
 			orgID, workspaceID,
 		).Scan(&total)
 		if err != nil {
@@ -99,12 +111,14 @@ func (r *WikiRepo) ListPages(
                    page_status, backlinks, metadata, created_at, updated_at
             FROM wiki_pages
             WHERE org_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
+              AND LOWER(COALESCE(page_status, '')) <> 'deleted'
             ORDER BY updated_at DESC LIMIT $3 OFFSET $4
         `, orgID, workspaceID, limit, offset)
 	case status != "":
 		err = r.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM wiki_pages
-             WHERE org_id = $1 AND page_status = $2 AND deleted_at IS NULL`,
+             WHERE org_id = $1 AND page_status = $2 AND deleted_at IS NULL
+               AND LOWER(COALESCE(page_status, '')) <> 'deleted'`,
 			orgID, status,
 		).Scan(&total)
 		if err != nil {
@@ -115,11 +129,13 @@ func (r *WikiRepo) ListPages(
                    page_status, backlinks, metadata, created_at, updated_at
             FROM wiki_pages
             WHERE org_id = $1 AND page_status = $2 AND deleted_at IS NULL
+              AND LOWER(COALESCE(page_status, '')) <> 'deleted'
             ORDER BY updated_at DESC LIMIT $3 OFFSET $4
         `, orgID, status, limit, offset)
 	default:
 		err = r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM wiki_pages WHERE org_id = $1 AND deleted_at IS NULL`,
+			`SELECT COUNT(*) FROM wiki_pages WHERE org_id = $1 AND deleted_at IS NULL
+             AND LOWER(COALESCE(page_status, '')) <> 'deleted'`,
 			orgID,
 		).Scan(&total)
 		if err != nil {
@@ -130,6 +146,7 @@ func (r *WikiRepo) ListPages(
                    page_status, backlinks, metadata, created_at, updated_at
             FROM wiki_pages
             WHERE org_id = $1 AND deleted_at IS NULL
+              AND LOWER(COALESCE(page_status, '')) <> 'deleted'
             ORDER BY updated_at DESC LIMIT $2 OFFSET $3
         `, orgID, limit, offset)
 	}
@@ -158,7 +175,8 @@ func (r *WikiRepo) GetPage(ctx context.Context, orgID, pageID string) (*model.Wi
 	err := r.pool.QueryRow(ctx, `
 		SELECT page_id, org_id, workspace_id, title, path, current_version_id, page_status,
 		       backlinks, metadata, created_at, updated_at
-		FROM wiki_pages WHERE page_id = $1 AND org_id = $2
+		FROM wiki_pages WHERE page_id = $1 AND org_id = $2 AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
 	`, pageID, orgID).Scan(
 		&p.PageID, &p.OrgID, &p.WorkspaceID, &p.Title, &p.Path, &p.CurrentVersionID,
 		&p.Status, &p.Backlinks, &p.Metadata, &p.CreatedAt, &p.UpdatedAt,
@@ -174,7 +192,8 @@ func (r *WikiRepo) GetPageByPath(ctx context.Context, orgID, path string) (*mode
 	err := r.pool.QueryRow(ctx, `
 		SELECT page_id, org_id, workspace_id, title, path, current_version_id, page_status,
 		       backlinks, metadata, created_at, updated_at
-		FROM wiki_pages WHERE org_id = $1 AND path = $2
+		FROM wiki_pages WHERE org_id = $1 AND path = $2 AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
 	`, orgID, path).Scan(
 		&p.PageID, &p.OrgID, &p.WorkspaceID, &p.Title, &p.Path, &p.CurrentVersionID,
 		&p.Status, &p.Backlinks, &p.Metadata, &p.CreatedAt, &p.UpdatedAt,
@@ -185,19 +204,22 @@ func (r *WikiRepo) GetPageByPath(ctx context.Context, orgID, path string) (*mode
 	return &p, nil
 }
 
-func (r *WikiRepo) GetVersion(ctx context.Context, versionID string) (*model.WikiPageVersion, error) {
+func (r *WikiRepo) GetVersionForPage(ctx context.Context, orgID, pageID, versionID string) (*model.WikiPageVersion, error) {
 	var v model.WikiPageVersion
 	err := r.pool.QueryRow(ctx, `
-		SELECT version_id, page_id, content, source_refs, proposed_by_agent, proposed_by_user,
-		       approved_by, edit_reason, version_status, metadata, created_at, published_at
-		FROM wiki_page_versions WHERE version_id = $1
-	`, versionID).Scan(
+		SELECT v.version_id, v.page_id, v.content, v.source_refs, v.proposed_by_agent, v.proposed_by_user,
+		       v.approved_by, v.edit_reason, v.version_status, v.metadata, v.created_at, v.published_at
+		FROM wiki_page_versions AS v
+		JOIN wiki_pages AS p ON p.page_id = v.page_id
+		WHERE v.version_id = $1 AND v.page_id = $2 AND p.org_id = $3 AND p.deleted_at IS NULL
+		  AND LOWER(COALESCE(p.page_status, '')) <> 'deleted'
+	`, versionID, pageID, orgID).Scan(
 		&v.VersionID, &v.PageID, &v.Content, &v.SourceRefs, &v.ProposedByAgent,
 		&v.ProposedByUser, &v.ApprovedBy, &v.EditReason, &v.VersionStatus,
 		&v.Metadata, &v.CreatedAt, &v.PublishedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get version: %w", err)
+		return nil, fmt.Errorf("get version for page: %w", err)
 	}
 	return &v, nil
 }
@@ -205,7 +227,7 @@ func (r *WikiRepo) GetVersion(ctx context.Context, versionID string) (*model.Wik
 func (r *WikiRepo) ListVersions(ctx context.Context, orgID, pageID string, limit, offset int) ([]model.WikiPageVersion, int, error) {
 	var total int
 	err := r.pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM wiki_page_versions v JOIN wiki_pages p ON v.page_id = p.page_id WHERE v.page_id = $1 AND p.org_id = $2",
+		"SELECT COUNT(*) FROM wiki_page_versions v JOIN wiki_pages p ON v.page_id = p.page_id WHERE v.page_id = $1 AND p.org_id = $2 AND p.deleted_at IS NULL AND LOWER(COALESCE(p.page_status, '')) <> 'deleted'",
 		pageID, orgID).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("count versions: %w", err)
@@ -216,7 +238,8 @@ func (r *WikiRepo) ListVersions(ctx context.Context, orgID, pageID string, limit
 		       v.proposed_by_user, v.approved_by, v.edit_reason, v.version_status,
 		       v.metadata, v.created_at, v.published_at
 		FROM wiki_page_versions v JOIN wiki_pages p ON v.page_id = p.page_id
-		WHERE v.page_id = $1 AND p.org_id = $2
+		WHERE v.page_id = $1 AND p.org_id = $2 AND p.deleted_at IS NULL
+		  AND LOWER(COALESCE(p.page_status, '')) <> 'deleted'
 		ORDER BY v.created_at DESC LIMIT $3 OFFSET $4
 	`, pageID, orgID, limit, offset)
 	if err != nil {
@@ -265,25 +288,21 @@ func (r *WikiRepo) CreatePage(ctx context.Context, input model.CreatePageInput) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("insert version: %w", err)
 	}
+	if err := enqueueWikiPublished(ctx, tx, events.WikiVersionPublishedEvent{
+		PageID: pageID, VersionID: versionID, OrgID: input.OrgID,
+		WorkspaceID: input.WorkspaceID, Title: input.Title, Path: input.Path,
+		Content: input.InitialContent, UserID: verifiedPrincipalID(ctx), ZDR: false,
+	}); err != nil {
+		return nil, nil, err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("commit: %w", err)
 	}
 
 	page, _ := r.GetPage(ctx, input.OrgID, pageID)
-	version, _ := r.GetVersion(ctx, versionID)
+	version, _ := r.GetVersionForPage(ctx, input.OrgID, pageID, versionID)
 
-	// §16.3.8 — emit publish event so embedding-engine writes this version
-	// into the wiki_block_embeddings Qdrant collection. Best-effort.
-	r.emitPublished(events.WikiVersionPublishedEvent{
-		PageID:      pageID,
-		VersionID:   versionID,
-		OrgID:       input.OrgID,
-		WorkspaceID: input.WorkspaceID,
-		Title:       input.Title,
-		Path:        input.Path,
-		Content:     input.InitialContent,
-	})
 	return page, version, nil
 }
 
@@ -296,6 +315,15 @@ func (r *WikiRepo) CreateVersion(ctx context.Context, input model.UpdateVersionI
 
 	versionID := uuid.New().String()
 	now := time.Now()
+	var workspaceID, title, path string
+	if err := tx.QueryRow(ctx, `
+		SELECT workspace_id, title, path FROM wiki_pages
+		WHERE page_id = $1 AND org_id = $2 AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
+		FOR UPDATE
+	`, input.PageID, input.OrgID).Scan(&workspaceID, &title, &path); err != nil {
+		return nil, fmt.Errorf("load page for version: %w", err)
+	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO wiki_page_versions (version_id, page_id, content, edit_reason, proposed_by_user, version_status, created_at, published_at)
@@ -311,39 +339,37 @@ func (r *WikiRepo) CreateVersion(ctx context.Context, input model.UpdateVersionI
 	if err != nil {
 		return nil, fmt.Errorf("update page version: %w", err)
 	}
+	if err := enqueueWikiPublished(ctx, tx, events.WikiVersionPublishedEvent{
+		PageID: input.PageID, VersionID: versionID, OrgID: input.OrgID,
+		WorkspaceID: workspaceID, Title: title, Path: path,
+		Content: input.NewContent, UserID: verifiedPrincipalID(ctx), ZDR: false,
+	}); err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	// §16.3.8 — emit publish event so embedding-engine reembeds this
-	// version. We re-fetch the page to surface workspace_id / title for
-	// the consumer; a fetch failure logs but doesn't block.
-	if page, err := r.GetPage(ctx, input.OrgID, input.PageID); err == nil && page != nil {
-		r.emitPublished(events.WikiVersionPublishedEvent{
-			PageID:      input.PageID,
-			VersionID:   versionID,
-			OrgID:       input.OrgID,
-			WorkspaceID: page.WorkspaceID,
-			Title:       page.Title,
-			Path:        page.Path,
-			Content:     input.NewContent,
-		})
-	}
-
-	return r.GetVersion(ctx, versionID)
+	return r.GetVersionForPage(ctx, input.OrgID, input.PageID, versionID)
 }
 
 func (r *WikiRepo) SubmitProposal(ctx context.Context, input model.SubmitProposalInput) (*model.WikiProposal, error) {
 	id := uuid.New().String()
 	refs, _ := json.Marshal(input.SourceRefs)
 
-	_, err := r.pool.Exec(ctx, `
+	result, err := r.pool.Exec(ctx, `
 		INSERT INTO wiki_proposals (proposal_id, page_id, org_id, proposed_content, edit_reason, proposed_by_agent, source_refs, proposal_status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+		SELECT $1, page_id, org_id, $4, $5, $6, $7, 'pending'
+		FROM wiki_pages
+		WHERE page_id = $2 AND org_id = $3 AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
 	`, id, input.PageID, input.OrgID, input.ProposedContent, input.EditReason, input.ProposedByAgent, refs)
 	if err != nil {
 		return nil, fmt.Errorf("insert proposal: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return nil, fmt.Errorf("insert proposal: %w", pgx.ErrNoRows)
 	}
 
 	return r.GetProposal(ctx, input.OrgID, id)
@@ -352,9 +378,14 @@ func (r *WikiRepo) SubmitProposal(ctx context.Context, input model.SubmitProposa
 func (r *WikiRepo) GetProposal(ctx context.Context, orgID, proposalID string) (*model.WikiProposal, error) {
 	var p model.WikiProposal
 	err := r.pool.QueryRow(ctx, `
-		SELECT proposal_id, page_id, org_id, proposed_content, edit_reason, proposed_by_agent,
-		       source_refs, proposal_status, reviewed_by, metadata, created_at
-		FROM wiki_proposals WHERE proposal_id = $1 AND org_id = $2
+		SELECT proposal.proposal_id, proposal.page_id, proposal.org_id, proposal.proposed_content,
+		       proposal.edit_reason, proposal.proposed_by_agent, proposal.source_refs,
+		       proposal.proposal_status, proposal.reviewed_by, proposal.metadata, proposal.created_at
+		FROM wiki_proposals AS proposal
+		JOIN wiki_pages AS page ON page.page_id = proposal.page_id
+		WHERE proposal.proposal_id = $1 AND proposal.org_id = $2
+		  AND page.org_id = proposal.org_id AND page.deleted_at IS NULL
+		  AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'
 	`, proposalID, orgID).Scan(
 		&p.ProposalID, &p.PageID, &p.OrgID, &p.ProposedContent, &p.EditReason,
 		&p.ProposedByAgent, &p.SourceRefs, &p.ProposalStatus, &p.ReviewedBy,
@@ -378,8 +409,8 @@ func (r *WikiRepo) ReviewProposal(ctx context.Context, input model.ReviewProposa
 	}
 
 	_, err = r.pool.Exec(ctx,
-		"UPDATE wiki_proposals SET proposal_status = $1, reviewed_by = $2 WHERE proposal_id = $3",
-		status, input.ReviewedBy, input.ProposalID)
+		"UPDATE wiki_proposals SET proposal_status = $1, reviewed_by = $2 WHERE proposal_id = $3 AND org_id = $4",
+		status, input.ReviewedBy, input.ProposalID, input.OrgID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("update proposal status: %w", err)
 	}
@@ -410,17 +441,23 @@ func (r *WikiRepo) CreateSourceLog(ctx context.Context, input model.CreateSource
 	if details == nil {
 		details = json.RawMessage(`{}`)
 	}
-	_, err := r.pool.Exec(ctx, `
+	result, err := r.pool.Exec(ctx, `
 		INSERT INTO wiki_source_logs (log_id, org_id, page_id, source_type, source_ref, sync_status, details)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		SELECT $1, org_id, page_id, $4, $5, $6, $7
+		FROM wiki_pages
+		WHERE org_id = $2 AND page_id = $3 AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
 	`, id, input.OrgID, input.PageID, input.SourceType, input.SourceRef, input.SyncStatus, details)
 	if err != nil {
 		return nil, fmt.Errorf("insert source log: %w", err)
 	}
+	if result.RowsAffected() != 1 {
+		return nil, fmt.Errorf("insert source log: %w", pgx.ErrNoRows)
+	}
 
 	var sl model.SourceLog
 	err = r.pool.QueryRow(ctx,
-		"SELECT log_id, org_id, page_id, source_type, source_ref, sync_status, details, created_at FROM wiki_source_logs WHERE log_id = $1", id,
+		"SELECT log_id, org_id, page_id, source_type, source_ref, sync_status, details, created_at FROM wiki_source_logs WHERE log_id = $1 AND org_id = $2", id, input.OrgID,
 	).Scan(&sl.LogID, &sl.OrgID, &sl.PageID, &sl.SourceType, &sl.SourceRef, &sl.SyncStatus, &sl.Details, &sl.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("read source log: %w", err)
@@ -431,16 +468,23 @@ func (r *WikiRepo) CreateSourceLog(ctx context.Context, input model.CreateSource
 func (r *WikiRepo) ListSourceLogs(ctx context.Context, orgID, pageID string, limit, offset int) ([]model.SourceLog, int, error) {
 	var total int
 	err := r.pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM wiki_source_logs WHERE org_id = $1 AND page_id = $2",
+		`SELECT COUNT(*) FROM wiki_source_logs AS log
+		 JOIN wiki_pages AS page ON page.page_id = log.page_id AND page.org_id = log.org_id
+		 WHERE log.org_id = $1 AND log.page_id = $2 AND page.deleted_at IS NULL
+		   AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'`,
 		orgID, pageID).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("count source logs: %w", err)
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT log_id, org_id, page_id, source_type, source_ref, sync_status, details, created_at
-		FROM wiki_source_logs WHERE org_id = $1 AND page_id = $2
-		ORDER BY created_at DESC LIMIT $3 OFFSET $4
+		SELECT log.log_id, log.org_id, log.page_id, log.source_type, log.source_ref,
+		       log.sync_status, log.details, log.created_at
+		FROM wiki_source_logs AS log
+		JOIN wiki_pages AS page ON page.page_id = log.page_id AND page.org_id = log.org_id
+		WHERE log.org_id = $1 AND log.page_id = $2 AND page.deleted_at IS NULL
+		  AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'
+		ORDER BY log.created_at DESC LIMIT $3 OFFSET $4
 	`, orgID, pageID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list source logs: %w", err)
@@ -464,17 +508,23 @@ func (r *WikiRepo) CreateMaintenanceLog(ctx context.Context, input model.CreateM
 	if details == nil {
 		details = json.RawMessage(`{}`)
 	}
-	_, err := r.pool.Exec(ctx, `
+	result, err := r.pool.Exec(ctx, `
 		INSERT INTO wiki_maintenance_logs (log_id, org_id, page_id, action, actor, details)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		SELECT $1, org_id, page_id, $4, $5, $6
+		FROM wiki_pages
+		WHERE org_id = $2 AND page_id = $3 AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
 	`, id, input.OrgID, input.PageID, input.Action, input.Actor, details)
 	if err != nil {
 		return nil, fmt.Errorf("insert maintenance log: %w", err)
 	}
+	if result.RowsAffected() != 1 {
+		return nil, fmt.Errorf("insert maintenance log: %w", pgx.ErrNoRows)
+	}
 
 	var ml model.MaintenanceLog
 	err = r.pool.QueryRow(ctx,
-		"SELECT log_id, org_id, page_id, action, actor, details, created_at FROM wiki_maintenance_logs WHERE log_id = $1", id,
+		"SELECT log_id, org_id, page_id, action, actor, details, created_at FROM wiki_maintenance_logs WHERE log_id = $1 AND org_id = $2", id, input.OrgID,
 	).Scan(&ml.LogID, &ml.OrgID, &ml.PageID, &ml.Action, &ml.Actor, &ml.Details, &ml.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("read maintenance log: %w", err)
@@ -483,18 +533,34 @@ func (r *WikiRepo) CreateMaintenanceLog(ctx context.Context, input model.CreateM
 }
 
 func (r *WikiRepo) ListMaintenanceLogs(ctx context.Context, orgID, pageID string, limit, offset int) ([]model.MaintenanceLog, int, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if pageID == "" {
+		return r.listOrgMaintenanceLogs(ctx, orgID, limit, offset)
+	}
+
 	var total int
 	err := r.pool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM wiki_maintenance_logs WHERE org_id = $1 AND page_id = $2",
+		`SELECT COUNT(*) FROM wiki_maintenance_logs AS log
+		 JOIN wiki_pages AS page ON page.page_id = log.page_id AND page.org_id = log.org_id
+		 WHERE log.org_id = $1 AND log.page_id = $2 AND page.deleted_at IS NULL
+		   AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'`,
 		orgID, pageID).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("count maintenance logs: %w", err)
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT log_id, org_id, page_id, action, actor, details, created_at
-		FROM wiki_maintenance_logs WHERE org_id = $1 AND page_id = $2
-		ORDER BY created_at DESC LIMIT $3 OFFSET $4
+		SELECT log.log_id, log.org_id, log.page_id, log.action, log.actor, log.details, log.created_at
+		FROM wiki_maintenance_logs AS log
+		JOIN wiki_pages AS page ON page.page_id = log.page_id AND page.org_id = log.org_id
+		WHERE log.org_id = $1 AND log.page_id = $2 AND page.deleted_at IS NULL
+		  AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'
+		ORDER BY log.created_at DESC LIMIT $3 OFFSET $4
 	`, orgID, pageID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list maintenance logs: %w", err)
@@ -512,12 +578,53 @@ func (r *WikiRepo) ListMaintenanceLogs(ctx context.Context, orgID, pageID string
 	return logs, total, nil
 }
 
+func (r *WikiRepo) listOrgMaintenanceLogs(ctx context.Context, orgID string, limit, offset int) ([]model.MaintenanceLog, int, error) {
+	var total int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM wiki_maintenance_logs AS log
+		 JOIN wiki_pages AS page ON page.page_id = log.page_id AND page.org_id = log.org_id
+		 WHERE log.org_id = $1 AND page.deleted_at IS NULL
+		   AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'`,
+		orgID,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count org maintenance logs: %w", err)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT log.log_id, log.org_id, log.page_id, log.action, log.actor, log.details, log.created_at
+		FROM wiki_maintenance_logs AS log
+		JOIN wiki_pages AS page ON page.page_id = log.page_id AND page.org_id = log.org_id
+		WHERE log.org_id = $1 AND page.deleted_at IS NULL
+		  AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'
+		ORDER BY log.created_at DESC LIMIT $2 OFFSET $3
+	`, orgID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list org maintenance logs: %w", err)
+	}
+	defer rows.Close()
+
+	logs := make([]model.MaintenanceLog, 0, total)
+	for rows.Next() {
+		var maintenanceLog model.MaintenanceLog
+		if err := rows.Scan(
+			&maintenanceLog.LogID, &maintenanceLog.OrgID, &maintenanceLog.PageID,
+			&maintenanceLog.Action, &maintenanceLog.Actor, &maintenanceLog.Details,
+			&maintenanceLog.CreatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan org maintenance log: %w", err)
+		}
+		logs = append(logs, maintenanceLog)
+	}
+	return logs, total, rows.Err()
+}
+
 func (r *WikiRepo) GetBacklinks(ctx context.Context, orgID, pageID string) ([]model.WikiPage, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT page_id, org_id, workspace_id, title, path, current_version_id, page_status,
 		       backlinks, metadata, created_at, updated_at
 		FROM wiki_pages
-		WHERE org_id = $1 AND backlinks @> $2::jsonb
+		WHERE org_id = $1 AND backlinks @> $2::jsonb AND deleted_at IS NULL
+		  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
 	`, orgID, fmt.Sprintf(`["%s"]`, pageID))
 	if err != nil {
 		return nil, fmt.Errorf("get backlinks: %w", err)

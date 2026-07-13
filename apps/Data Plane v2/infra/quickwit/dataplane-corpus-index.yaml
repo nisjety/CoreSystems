@@ -10,6 +10,11 @@ doc_mapping:
         - rfc3339
       fast_precision: seconds
       fast: true
+    - name: rebuild_batch_id
+      type: text
+      tokenizer: raw
+      fast:
+        normalizer: lowercase
     - name: entity_type
       type: text
       tokenizer: raw

@@ -1,8 +1,52 @@
 use qdrant_client::qdrant::Value as QdrantValue;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ZdrMode {
+    #[default]
+    Disabled,
+    Reject,
+    Ephemeral,
+}
+
+impl ZdrMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Reject => "reject",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+
+    #[must_use]
+    pub const fn restricts_egress(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    #[must_use]
+    pub const fn is_ephemeral(self) -> bool {
+        matches!(self, Self::Ephemeral)
+    }
+}
+
+impl FromStr for ZdrMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "disabled" => Ok(Self::Disabled),
+            "reject" => Ok(Self::Reject),
+            "ephemeral" => Ok(Self::Ephemeral),
+            _ => Err("zdr_mode must be one of: disabled, reject, ephemeral"),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RetrievalRequest {
     pub org_id: String,
     pub query: String,
@@ -14,9 +58,13 @@ pub struct RetrievalRequest {
     /// `skip_deserializing` makes a body-supplied `user_id` impossible (anti-spoof).
     #[serde(skip_deserializing)]
     pub user_id: Option<String>,
+    /// Verified request proof used only for the Control grant lookup. It is
+    /// boundary-injected and excluded from request/trace serialization.
+    #[serde(skip)]
+    pub verified_bearer: Option<String>,
     pub query_expansion: Option<String>,
     pub reranker_model: Option<String>,
-    pub zdr_mode: Option<String>,
+    pub zdr_mode: Option<ZdrMode>,
     pub context_budget_tokens: Option<usize>,
     pub context_format: Option<String>,
     /// Optional per-request blend weights (D4+D5 spec §7).
@@ -237,6 +285,27 @@ pub struct PipelineTimings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zdr_mode_deserialization_is_exact_and_fail_closed() {
+        #[derive(Deserialize)]
+        struct Input {
+            zdr_mode: ZdrMode,
+        }
+
+        let valid: Input = serde_json::from_str(r#"{"zdr_mode":"ephemeral"}"#)
+            .expect("exact supported mode must parse");
+        assert_eq!(valid.zdr_mode, ZdrMode::Ephemeral);
+        assert!(serde_json::from_str::<Input>(r#"{"zdr_mode":"Ephemeral"}"#).is_err());
+        assert!(serde_json::from_str::<Input>(r#"{"zdr_mode":"unknown"}"#).is_err());
+    }
+
+    #[test]
+    fn every_restrictive_mode_suppresses_retaining_egress() {
+        assert!(!ZdrMode::Disabled.restricts_egress());
+        assert!(ZdrMode::Reject.restricts_egress());
+        assert!(ZdrMode::Ephemeral.restricts_egress());
+    }
 
     fn weights(w_dense: f32, w_bm25: f32) -> ResolvedWeights {
         ResolvedWeights {

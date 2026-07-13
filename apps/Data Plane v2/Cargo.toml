@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "services/nats-connection-rs",
+    "services/event-envelope-rs",
     "services/retrieval-engine-rs",
     "services/index-engine-rs",
     "services/embedding-engine-rs",
@@ -46,9 +48,11 @@ tracing-opentelemetry = "0.30"
 tonic-build = "0.12"
 futures = "0.3"
 jsonwebtoken = "9"
+sha2 = "0.10"
 regex = "1"
 once_cell = "1"
 async-trait = "0.1"
+async-nats = "0.49.1"
 moka = { version = "0.12", features = ["future"] }
 tiktoken-rs = "0.6"
 governor = "0.7"

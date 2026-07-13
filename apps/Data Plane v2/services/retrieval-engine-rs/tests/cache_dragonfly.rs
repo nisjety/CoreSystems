@@ -6,11 +6,9 @@ fn cache_test_url() -> Option<String> {
 }
 
 #[tokio::test]
+#[ignore = "requires DPV2_CACHE_TEST_URL pointing to disposable Dragonfly/Redis"]
 async fn cache_layer_supports_dragonfly_command_surface() {
-    let Some(url) = cache_test_url() else {
-        eprintln!("skipping Dragonfly cache compatibility test; set DPV2_CACHE_TEST_URL");
-        return;
-    };
+    let url = cache_test_url().expect("DPV2_CACHE_TEST_URL is required for this ignored test");
 
     let cache = CacheLayer::connect(&url).await.expect("connect cache");
     assert!(cache.health_check().await, "cache health check failed");

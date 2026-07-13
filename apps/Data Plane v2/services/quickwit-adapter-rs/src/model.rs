@@ -5,6 +5,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickwitDocument {
     pub timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuild_batch_id: Option<String>,
     pub entity_type: String,
     pub org_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -7,7 +7,7 @@ target/
 *.profraw
 
 # Tests / CI / development
-tests/load/
+tests/
 .github/
 **/.venv/
 **/venv/
@@ -24,6 +24,7 @@ gen/*
 !gen/go/**
 bin/
 backups/
+.codegraph/
 
 # Non-Rust services and labs that are not needed by root-context builds. Most
 # Go services have their own build context; wiki-store-go intentionally stays in
@@ -43,11 +44,18 @@ services/colqwen-reranker/
 .env
 .env.*
 !.env.example
+.secrets/
+**/.secrets/
+**/*.pem
+**/*.key
+signin_output.txt
 
 # Docs (not needed at build time)
 docs/
 *.md
 !Cargo.toml
+docker-compose*.yml
+Makefile
 
 # Git
 .git/

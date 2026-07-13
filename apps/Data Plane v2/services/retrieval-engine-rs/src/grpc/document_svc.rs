@@ -8,11 +8,56 @@ use super::pb_documents::*;
 
 pub struct DocumentSvc {
     pool: Arc<PgPool>,
+    policy: Arc<dyn crate::authz::PolicyClient>,
+    visibility: Arc<dyn crate::authz::VisibilityClient>,
 }
 
 impl DocumentSvc {
-    pub fn new(pool: Arc<PgPool>) -> Self {
-        Self { pool }
+    pub fn new(
+        pool: Arc<PgPool>,
+        policy: Arc<dyn crate::authz::PolicyClient>,
+        visibility: Arc<dyn crate::authz::VisibilityClient>,
+    ) -> Self {
+        Self {
+            pool,
+            policy,
+            visibility,
+        }
+    }
+
+    async fn authorize<T>(
+        &self,
+        request: &Request<T>,
+        org_id: &str,
+    ) -> Result<crate::authz::AuthContext, Status> {
+        super::interceptor::authorize_request(self.policy.as_ref(), request, org_id, None).await
+    }
+
+    async fn grants(&self, ctx: &crate::authz::AuthContext) -> Vec<String> {
+        match ctx.user_id.as_deref() {
+            Some(user_id) => {
+                self.visibility
+                    .visible_documents(&ctx.org_id, user_id, ctx.verified_bearer.as_deref())
+                    .await
+            }
+            None => Vec::new(),
+        }
+    }
+
+    // Keep the native tonic error type at this authorization boundary.
+    #[allow(clippy::result_large_err)]
+    fn require_write_scope(ctx: &crate::authz::AuthContext) -> Result<(), Status> {
+        if ctx.scopes.iter().any(|scope| scope == "org:data:write_all") {
+            Ok(())
+        } else {
+            Err(Status::permission_denied("document write scope required"))
+        }
+    }
+
+    fn deprecated_write(operation: &str, canonical_route: &str) -> Status {
+        Status::failed_precondition(format!(
+            "gRPC DocumentService.{operation} is disabled; use documents-api-go {canonical_route}"
+        ))
     }
 }
 
@@ -22,7 +67,9 @@ impl DocumentService for DocumentSvc {
         &self,
         request: Request<GetDocumentRequest>,
     ) -> Result<Response<GetDocumentResponse>, Status> {
+        let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
         let req = request.into_inner();
+        let grants = self.grants(&ctx).await;
         let row = sqlx::query_as::<
             _,
             (
@@ -37,10 +84,13 @@ impl DocumentService for DocumentSvc {
             ),
         >(
             "SELECT document_id, org_id, source, type, title, content, status, zdr_classification
-             FROM documents WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL",
+             FROM documents WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL
+               AND (owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))",
         )
         .bind(&req.document_id)
-        .bind(&req.org_id)
+        .bind(&ctx.org_id)
+        .bind(ctx.user_id.as_deref())
+        .bind(&grants)
         .fetch_optional(self.pool.as_ref())
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -73,7 +123,9 @@ impl DocumentService for DocumentSvc {
         &self,
         request: Request<ListDocumentsRequest>,
     ) -> Result<Response<ListDocumentsResponse>, Status> {
+        let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
         let req = request.into_inner();
+        let grants = self.grants(&ctx).await;
         let limit = if req.limit > 0 { req.limit } else { 50 };
         let offset = req.offset;
 
@@ -93,11 +145,14 @@ impl DocumentService for DocumentSvc {
             >(
                 "SELECT document_id, org_id, source, type, title, '', status, zdr_classification
                  FROM documents WHERE org_id = $1 AND deleted_at IS NULL
+                   AND (owner_id = $4 OR visibility = 'org' OR document_id = ANY($5))
                  ORDER BY created_at DESC LIMIT $2 OFFSET $3",
             )
-            .bind(&req.org_id)
+            .bind(&ctx.org_id)
             .bind(limit)
             .bind(offset)
+            .bind(ctx.user_id.as_deref())
+            .bind(&grants)
             .fetch_all(self.pool.as_ref())
             .await
         } else {
@@ -116,21 +171,27 @@ impl DocumentService for DocumentSvc {
             >(
                 "SELECT document_id, org_id, source, type, title, '', status, zdr_classification
                  FROM documents WHERE org_id = $1 AND type = $4 AND deleted_at IS NULL
+                   AND (owner_id = $5 OR visibility = 'org' OR document_id = ANY($6))
                  ORDER BY created_at DESC LIMIT $2 OFFSET $3",
             )
-            .bind(&req.org_id)
+            .bind(&ctx.org_id)
             .bind(limit)
             .bind(offset)
             .bind(&req.r#type)
+            .bind(ctx.user_id.as_deref())
+            .bind(&grants)
             .fetch_all(self.pool.as_ref())
             .await
         }
         .map_err(|e| Status::internal(e.to_string()))?;
 
         let total_row = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM documents WHERE org_id = $1 AND deleted_at IS NULL",
+            "SELECT COUNT(*) FROM documents WHERE org_id = $1 AND deleted_at IS NULL
+               AND (owner_id = $2 OR visibility = 'org' OR document_id = ANY($3))",
         )
-        .bind(&req.org_id)
+        .bind(&ctx.org_id)
+        .bind(ctx.user_id.as_deref())
+        .bind(&grants)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -166,148 +227,45 @@ impl DocumentService for DocumentSvc {
         &self,
         request: Request<CreateDocumentRequest>,
     ) -> Result<Response<CreateDocumentResponse>, Status> {
-        // §17.3.4 — gRPC `DocumentService.CreateDocument` is deprecated.
-        // The canonical write path is `documents-api-go POST /v1/documents`
-        // (and `/v1/documents/bulk`), which carries validation,
-        // idempotency, outbox publish, org_version bump. This gRPC path
-        // bypasses all of that and only writes the Postgres row. We
-        // refuse new writes here and tell callers where to migrate.
-        // Until every Model Plane caller is on HTTP we keep the route
-        // discoverable but no-op-with-error.
-        if std::env::var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES").as_deref() != Ok("1") {
-            return Err(Status::failed_precondition(
-                "gRPC DocumentService.CreateDocument is deprecated (§17.3.4); \
-                 use documents-api-go POST /v1/documents instead. \
-                 Set DPV2_ALLOW_GRPC_DOCUMENT_WRITES=1 to opt back in for migration.",
-            ));
-        }
-        tracing::warn!("deprecated gRPC create_document called; migrate to documents-api-go HTTP");
-        let req = request.into_inner();
-        let zdr = if req.zdr_classification.is_empty() {
-            "internal".to_string()
-        } else {
-            req.zdr_classification
-        };
-
-        let row = sqlx::query_as::<_, (String,)>(
-            "INSERT INTO documents (org_id, source, type, title, content, zdr_classification)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING document_id",
-        )
-        .bind(&req.org_id)
-        .bind(&req.source)
-        .bind(&req.r#type)
-        .bind(&req.title)
-        .bind(&req.content)
-        .bind(&zdr)
-        .fetch_one(self.pool.as_ref())
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        Ok(Response::new(CreateDocumentResponse {
-            document: Some(Document {
-                document_id: row.0,
-                org_id: req.org_id,
-                source: req.source,
-                r#type: req.r#type,
-                title: req.title,
-                content: req.content,
-                status: "pending".into(),
-                metadata: None,
-                created_at: None,
-                updated_at: None,
-                deleted_at: None,
-                zdr_classification: zdr,
-                zdr_reason: None,
-            }),
-        }))
+        let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
+        Self::require_write_scope(&ctx)?;
+        Err(Self::deprecated_write(
+            "CreateDocument",
+            "POST /v1/documents instead",
+        ))
     }
 
     async fn delete_document(
         &self,
         request: Request<DeleteDocumentRequest>,
     ) -> Result<Response<DeleteDocumentResponse>, Status> {
-        // §17.3.4 — same deprecation gate as `create_document`. Soft-delete
-        // bypasses org_version bump + outbox publish on this path.
-        if std::env::var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES").as_deref() != Ok("1") {
-            return Err(Status::failed_precondition(
-                "gRPC DocumentService.DeleteDocument is deprecated (§17.3.4); \
-                 use documents-api-go DELETE /v1/documents/{id} instead.",
-            ));
-        }
-        tracing::warn!("deprecated gRPC delete_document called; migrate to documents-api-go HTTP");
-        let req = request.into_inner();
-        let result = sqlx::query(
-            "UPDATE documents SET deleted_at = NOW() WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL"
-        )
-        .bind(&req.document_id)
-        .bind(&req.org_id)
-        .execute(self.pool.as_ref())
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-        Ok(Response::new(DeleteDocumentResponse {
-            success: result.rows_affected() > 0,
-        }))
+        let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
+        Self::require_write_scope(&ctx)?;
+        Err(Self::deprecated_write(
+            "DeleteDocument",
+            "DELETE /v1/documents/{id} instead",
+        ))
     }
 
     async fn bulk_ingest(
         &self,
         request: Request<BulkIngestRequest>,
     ) -> Result<Response<BulkIngestResponse>, Status> {
-        // §17.3.4 — deprecated. See `create_document` for migration path.
-        if std::env::var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES").as_deref() != Ok("1") {
-            return Err(Status::failed_precondition(
-                "gRPC DocumentService.BulkIngest is deprecated (§17.3.4); \
-                 use documents-api-go POST /v1/documents/bulk instead.",
-            ));
-        }
-        tracing::warn!("deprecated gRPC bulk_ingest called; migrate to documents-api-go HTTP");
-        let req = request.into_inner();
-        let mut accepted = 0i32;
-        let mut rejected = 0i32;
-        let mut doc_ids = Vec::new();
-
-        for doc in &req.documents {
-            let zdr = if doc.zdr_classification.is_empty() {
-                "internal"
-            } else {
-                &doc.zdr_classification
-            };
-            match sqlx::query_as::<_, (String,)>(
-                "INSERT INTO documents (org_id, source, type, title, content, zdr_classification)
-                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING document_id",
-            )
-            .bind(&req.org_id)
-            .bind(&doc.source)
-            .bind(&doc.r#type)
-            .bind(&doc.title)
-            .bind(&doc.content)
-            .bind(zdr)
-            .fetch_one(self.pool.as_ref())
-            .await
-            {
-                Ok((id,)) => {
-                    accepted += 1;
-                    doc_ids.push(id);
-                }
-                Err(_) => {
-                    rejected += 1;
-                }
-            }
-        }
-
-        Ok(Response::new(BulkIngestResponse {
-            accepted,
-            rejected,
-            document_ids: doc_ids,
-        }))
+        let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
+        Self::require_write_scope(&ctx)?;
+        Err(Self::deprecated_write(
+            "BulkIngest",
+            "POST /v1/documents/bulk instead",
+        ))
     }
 
     async fn get_document_index_status(
         &self,
         request: Request<GetDocumentIndexStatusRequest>,
     ) -> Result<Response<GetDocumentIndexStatusResponse>, Status> {
+        let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
         let req = request.into_inner();
+        let grants = self.grants(&ctx).await;
 
         let chunk_row = sqlx::query_as::<_, (i64, i64, i64)>(
             // embedding-engine writes status 'done' (batch/mod.rs mark_units_done);
@@ -316,10 +274,16 @@ impl DocumentService for DocumentSvc {
             "SELECT COUNT(*),
                     COUNT(*) FILTER (WHERE embedding_status = 'done'),
                     COUNT(*) FILTER (WHERE embedding_status = 'failed')
-             FROM knowledge_units WHERE document_id = $1 AND org_id = $2",
+             FROM knowledge_units ku
+             JOIN documents d ON d.document_id = ku.document_id
+             WHERE ku.document_id = $1 AND ku.org_id = $2
+               AND d.deleted_at IS NULL
+               AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))",
         )
         .bind(&req.document_id)
-        .bind(&req.org_id)
+        .bind(&ctx.org_id)
+        .bind(ctx.user_id.as_deref())
+        .bind(&grants)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -337,7 +301,7 @@ impl DocumentService for DocumentSvc {
         Ok(Response::new(GetDocumentIndexStatusResponse {
             status: Some(DocumentIndexStatus {
                 document_id: req.document_id,
-                org_id: req.org_id,
+                org_id: ctx.org_id,
                 chunk_count: total as i32,
                 chunk_status: chunk_status.into(),
                 embed_status: embed_status.into(),
@@ -353,7 +317,7 @@ impl DocumentService for DocumentSvc {
         &self,
         request: Request<IngestStatusRequest>,
     ) -> Result<Response<IngestStatusResponse>, Status> {
-        let _req = request.into_inner();
+        self.authorize(&request, &request.get_ref().org_id).await?;
         Ok(Response::new(IngestStatusResponse {
             policy: Some(IngestPolicy {
                 zdr_mode: "disabled".into(),
@@ -363,5 +327,109 @@ impl DocumentService for DocumentSvc {
             is_active: true,
             next_batch_window: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use sqlx::PgPool;
+    use tonic::{Code, Request};
+
+    use super::*;
+    use crate::authz::{
+        AuthContext, AuthMethod, EffectiveAcl, NoopPolicyClient, NoopVisibilityClient,
+    };
+    use crate::grpc::pb_documents::document_service_server::DocumentService;
+
+    async fn closed_pool_service() -> DocumentSvc {
+        let pool = PgPool::connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+            .expect("valid lazy test pool configuration");
+        pool.close().await;
+        DocumentSvc::new(
+            Arc::new(pool),
+            Arc::new(NoopPolicyClient),
+            Arc::new(NoopVisibilityClient),
+        )
+    }
+
+    fn authenticated<T>(message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(AuthContext {
+            user_id: Some("user-test".into()),
+            org_id: "org-test".into(),
+            auth_method: AuthMethod::Jwt,
+            scopes: vec!["org:data:write_all".into()],
+            acl: EffectiveAcl::allow_all(),
+            request_id: "grpc-document-write-regression".into(),
+            verified_bearer: None,
+        });
+        request
+    }
+
+    fn restrictive_policy() -> IngestPolicy {
+        IngestPolicy {
+            zdr_mode: "ephemeral".into(),
+            index_schedule: "disabled".into(),
+            ephemeral_only: true,
+        }
+    }
+
+    fn create_request(ingest_policy: Option<IngestPolicy>) -> CreateDocumentRequest {
+        CreateDocumentRequest {
+            org_id: "org-test".into(),
+            source: "regression".into(),
+            r#type: "text".into(),
+            title: "non-sensitive fixture".into(),
+            content: "non-sensitive fixture".into(),
+            metadata: None,
+            zdr_classification: "restricted".into(),
+            ingest_policy,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_environment_gate_alone_cannot_enable_create() {
+        std::env::set_var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES", "1");
+        let service = closed_pool_service().await;
+
+        let error = service
+            .create_document(authenticated(create_request(None)))
+            .await
+            .expect_err("deprecated gRPC create must remain disabled");
+
+        assert_eq!(error.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn restrictive_zdr_create_is_rejected_before_persistence() {
+        std::env::set_var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES", "1");
+        let service = closed_pool_service().await;
+
+        let error = service
+            .create_document(authenticated(create_request(Some(restrictive_policy()))))
+            .await
+            .expect_err("restrictive ZDR create must never reach storage");
+
+        assert_eq!(error.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn restrictive_zdr_bulk_is_rejected_before_persistence() {
+        std::env::set_var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES", "1");
+        let service = closed_pool_service().await;
+        let request = BulkIngestRequest {
+            org_id: "org-test".into(),
+            documents: vec![create_request(Some(restrictive_policy()))],
+            ingest_policy: Some(restrictive_policy()),
+        };
+
+        let error = service
+            .bulk_ingest(authenticated(request))
+            .await
+            .expect_err("restrictive ZDR bulk must never reach storage");
+
+        assert_eq!(error.code(), Code::FailedPrecondition);
     }
 }

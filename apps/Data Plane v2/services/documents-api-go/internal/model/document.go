@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -65,7 +66,10 @@ func (p *IngestPolicy) IsZeroRetention() bool {
 	if p == nil {
 		return false
 	}
-	return p.ZDRMode == "on" || p.EphemeralOnly
+	mode := strings.ToLower(strings.TrimSpace(p.ZDRMode))
+	// Unknown non-empty modes are restrictive by default. Validation can still
+	// reject the malformed value, but it must never fall through to persistence.
+	return p.EphemeralOnly || (mode != "" && mode != "off")
 }
 
 type ListDocumentsInput struct {

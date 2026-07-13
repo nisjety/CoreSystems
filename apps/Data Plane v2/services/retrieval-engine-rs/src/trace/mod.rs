@@ -3,6 +3,42 @@ use uuid::Uuid;
 
 use crate::pipeline::types::*;
 
+const TRACE_INSERT_SQL: &str = r#"
+    INSERT INTO retrieval_runs (
+        trace_id, org_id, query, query_embedding_model, index_version,
+        filters_json, reranker_name, zdr_mode, top_k,
+        dense_retrieval_ms, sparse_retrieval_ms, rerank_ms, total_ms,
+        candidate_count_dense, candidate_count_sparse,
+        candidate_count_fused, candidate_count_reranked, mode_mix,
+        zdr_actions_applied, mode_mix_applied, actor_user_id
+    ) VALUES (
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9,
+        $10, $11, $12, $13,
+        $14, $15, $16, $17, $18,
+        $19, $20, $21
+    )
+"#;
+
+const TRACE_LOOKUP_SQL: &str = r#"
+    SELECT trace_id, org_id, query, query_embedding_model, index_version,
+           reranker_name, zdr_mode, dense_retrieval_ms, sparse_retrieval_ms,
+           rerank_ms, total_ms, candidate_count_dense, candidate_count_sparse,
+           candidate_count_fused, candidate_count_reranked, created_at,
+           mode_mix
+    FROM retrieval_runs
+    WHERE trace_id = $1 AND org_id = $2
+      AND ($3::text IS NULL OR actor_user_id = $3)
+"#;
+
+fn trace_insert_sql() -> &'static str {
+    TRACE_INSERT_SQL
+}
+
+fn trace_lookup_sql() -> &'static str {
+    TRACE_LOOKUP_SQL
+}
+
 #[tracing::instrument(
     name = "postgres.persist_trace",
     skip_all,
@@ -70,46 +106,30 @@ pub async fn persist_trace(
         })
     });
 
-    sqlx::query(
-        r#"
-        INSERT INTO retrieval_runs (
-            trace_id, org_id, query, query_embedding_model, index_version,
-            filters_json, reranker_name, zdr_mode, top_k,
-            dense_retrieval_ms, sparse_retrieval_ms, rerank_ms, total_ms,
-            candidate_count_dense, candidate_count_sparse,
-            candidate_count_fused, candidate_count_reranked, mode_mix,
-            zdr_actions_applied, mode_mix_applied
-        ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9,
-            $10, $11, $12, $13,
-            $14, $15, $16, $17, $18,
-            $19, $20
-        )
-        "#,
-    )
-    .bind(&trace_id)
-    .bind(&req.org_id)
-    .bind(&req.query)
-    .bind("text-embedding-3-large")
-    .bind("v2-current")
-    .bind(serde_json::to_value(&req.filters).unwrap_or_default())
-    .bind(reranker_name)
-    .bind(zdr_mode)
-    .bind(req.top_k.map(|k| k as i32))
-    .bind(timings.dense_ms as i32)
-    .bind(timings.sparse_ms as i32)
-    .bind(timings.rerank_ms as i32)
-    .bind(timings.total_ms as i32)
-    .bind(timings.candidate_count_dense as i32)
-    .bind(timings.candidate_count_sparse as i32)
-    .bind(timings.candidate_count_fused as i32)
-    .bind(timings.candidate_count_reranked as i32)
-    .bind(mode_mix_json)
-    .bind(zdr_actions_json)
-    .bind(mode_mix_applied_json)
-    .execute(pool)
-    .await?;
+    sqlx::query(trace_insert_sql())
+        .bind(&trace_id)
+        .bind(&req.org_id)
+        .bind(&req.query)
+        .bind("text-embedding-3-large")
+        .bind("v2-current")
+        .bind(serde_json::to_value(&req.filters).unwrap_or_default())
+        .bind(reranker_name)
+        .bind(zdr_mode)
+        .bind(req.top_k.map(|k| k as i32))
+        .bind(timings.dense_ms as i32)
+        .bind(timings.sparse_ms as i32)
+        .bind(timings.rerank_ms as i32)
+        .bind(timings.total_ms as i32)
+        .bind(timings.candidate_count_dense as i32)
+        .bind(timings.candidate_count_sparse as i32)
+        .bind(timings.candidate_count_fused as i32)
+        .bind(timings.candidate_count_reranked as i32)
+        .bind(mode_mix_json)
+        .bind(zdr_actions_json)
+        .bind(mode_mix_applied_json)
+        .bind(&req.user_id)
+        .execute(pool)
+        .await?;
 
     // Persist individual candidates
     for (rank, candidate) in candidates.iter().enumerate() {
@@ -143,22 +163,14 @@ pub async fn get_trace(
     pool: &PgPool,
     trace_id: &str,
     org_id: &str,
+    actor_user_id: Option<&str>,
 ) -> anyhow::Result<Option<TraceDetail>> {
-    let run = sqlx::query_as::<_, TraceRun>(
-        r#"
-        SELECT trace_id, org_id, query, query_embedding_model, index_version,
-               reranker_name, zdr_mode, dense_retrieval_ms, sparse_retrieval_ms,
-               rerank_ms, total_ms, candidate_count_dense, candidate_count_sparse,
-               candidate_count_fused, candidate_count_reranked, created_at,
-               mode_mix
-        FROM retrieval_runs
-        WHERE trace_id = $1 AND org_id = $2
-        "#,
-    )
-    .bind(trace_id)
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?;
+    let run = sqlx::query_as::<_, TraceRun>(trace_lookup_sql())
+        .bind(trace_id)
+        .bind(org_id)
+        .bind(actor_user_id)
+        .fetch_optional(pool)
+        .await?;
 
     let Some(run) = run else {
         return Ok(None);
@@ -219,4 +231,22 @@ pub struct TraceCandidateRow {
 pub struct TraceDetail {
     pub run: TraceRun,
     pub candidates: Vec<TraceCandidateRow>,
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn trace_reads_are_tenant_and_actor_scoped() {
+        let sql = trace_lookup_sql();
+        assert!(sql.contains("trace_id = $1"));
+        assert!(sql.contains("org_id = $2"));
+        assert!(sql.contains("actor_user_id = $3"));
+    }
+
+    #[test]
+    fn trace_writes_persist_the_verified_actor() {
+        assert!(trace_insert_sql().contains("actor_user_id"));
+    }
 }

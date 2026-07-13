@@ -1,22 +1,42 @@
-// k6 load test for HTTP retrieval endpoints
-// Install: brew install k6  OR  https://k6.io/docs/get-started/installation/
-//
-// Usage:
-//   k6 run tests/load/http-retrieve.js
-//   k6 run --vus 50 --duration 60s tests/load/http-retrieve.js
-//   BASE_URL=http://host:8014 API_KEY=xxx k6 run tests/load/http-retrieve.js
+// Isolated-only HTTP retrieval load test.
+// Required:
+//   BASE_URL=http://127.0.0.1:<explicit-local-port>
+//   DPV2_USER_BEARER=<short-lived data-plane JWT>
+//   DPV2_TEST_ORG_ID=<disposable organization>
 
 import http from "k6/http";
 import { check, sleep } from "k6";
 import { Rate, Trend } from "k6/metrics";
 
-const BASE_URL = __ENV.BASE_URL || "http://localhost:8014";
-const API_KEY = __ENV.API_KEY || "";
+function required(name) {
+  const value = __ENV[name];
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+const BASE_URL = required("BASE_URL").replace(/\/$/, "");
+const USER_BEARER = required("DPV2_USER_BEARER");
+const TEST_ORG_ID = required("DPV2_TEST_ORG_ID");
+
+const parsedBase = new URL(BASE_URL);
+if (
+  parsedBase.protocol !== "http:" ||
+  !["localhost", "127.0.0.1", "[::1]", "::1"].includes(parsedBase.hostname)
+) {
+  throw new Error("BASE_URL must be an explicit loopback HTTP endpoint");
+}
+if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(USER_BEARER)) {
+  throw new Error("DPV2_USER_BEARER must be a compact JWT");
+}
+if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(TEST_ORG_ID)) {
+  throw new Error("DPV2_TEST_ORG_ID has an invalid format");
+}
 
 const retrieveLatency = new Trend("retrieve_latency", true);
 const retrieveErrors = new Rate("retrieve_errors");
 
 export const options = {
+  discardResponseBodies: true,
   stages: [
     { duration: "10s", target: 10 },
     { duration: "30s", target: 50 },
@@ -32,77 +52,42 @@ export const options = {
 
 const headers = {
   "Content-Type": "application/json",
+  Authorization: `Bearer ${USER_BEARER}`,
+  "X-Org-ID": TEST_ORG_ID,
 };
-if (API_KEY) {
-  headers["x-api-key"] = API_KEY;
-}
 
 const queries = [
-  "What is the company vacation policy?",
-  "How do I submit an expense report?",
-  "What are the security requirements for production deployments?",
-  "Explain the data retention policy for customer information",
-  "What is the onboarding process for new employees?",
+  "authorization-safe retrieval load probe one",
+  "authorization-safe retrieval load probe two",
+  "authorization-safe retrieval load probe three",
 ];
 
 export default function () {
   const query = queries[Math.floor(Math.random() * queries.length)];
-
-  // Core retrieval
-  const retrieveRes = http.post(
+  const response = http.post(
     `${BASE_URL}/v1/retrieve`,
     JSON.stringify({
-      org_id: "org-loadtest",
-      query: query,
+      org_id: TEST_ORG_ID,
+      query,
+      top_k: 10,
+      zdr_mode: "ephemeral",
       filters: {},
     }),
-    { headers, timeout: "30s" }
+    { headers, timeout: "30s", responseType: "none" }
   );
 
-  retrieveLatency.add(retrieveRes.timings.duration);
-  const retrieveOk = check(retrieveRes, {
-    "retrieve status 200": (r) => r.status === 200,
-    "retrieve has candidates": (r) => {
-      try {
-        const body = JSON.parse(r.body);
-        return body.candidates !== undefined;
-      } catch {
-        return false;
-      }
-    },
-  });
-  if (!retrieveOk) retrieveErrors.add(1);
-  else retrieveErrors.add(0);
-
-  sleep(0.1);
-
-  // Health check (lightweight baseline)
-  const healthRes = http.get(`${BASE_URL}/health`);
-  check(healthRes, {
-    "health 200": (r) => r.status === 200,
-  });
-
+  retrieveLatency.add(response.timings.duration);
+  const ok = check(response, { "retrieve status 200": (result) => result.status === 200 });
+  retrieveErrors.add(ok ? 0 : 1);
   sleep(0.5);
 }
 
 export function handleSummary(data) {
-  const p95 = data.metrics.retrieve_latency
-    ? data.metrics.retrieve_latency.values["p(95)"]
-    : "N/A";
-  const p99 = data.metrics.retrieve_latency
-    ? data.metrics.retrieve_latency.values["p(99)"]
-    : "N/A";
-  const errRate = data.metrics.retrieve_errors
-    ? data.metrics.retrieve_errors.values.rate
-    : "N/A";
-
-  console.log("\n═══════════════════════════════════════════════");
-  console.log(" Data Plane v2 — Load Test Summary");
-  console.log("═══════════════════════════════════════════════");
-  console.log(` Retrieve p95: ${p95}ms`);
-  console.log(` Retrieve p99: ${p99}ms`);
-  console.log(` Error rate:   ${errRate}`);
-  console.log("═══════════════════════════════════════════════\n");
-
+  const latency = data.metrics.retrieve_latency?.values || {};
+  const errorRate = data.metrics.retrieve_errors?.values?.rate ?? "N/A";
+  console.log("Data Plane v2 isolated retrieval load summary (response bodies suppressed)");
+  console.log(`Retrieve p95: ${latency["p(95)"] ?? "N/A"}ms`);
+  console.log(`Retrieve p99: ${latency["p(99)"] ?? "N/A"}ms`);
+  console.log(`Error rate: ${errorRate}`);
   return {};
 }

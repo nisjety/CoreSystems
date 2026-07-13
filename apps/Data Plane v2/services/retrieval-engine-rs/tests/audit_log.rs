@@ -45,11 +45,9 @@ async fn cleanup(pool: &PgPool) {
 }
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
 async fn writes_one_row_per_event() {
-    let Some(url) = test_db_url() else {
-        eprintln!("TEST_DATABASE_URL not set, skipping");
-        return;
-    };
+    let url = test_db_url().expect("TEST_DATABASE_URL is required for this ignored test");
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
     cleanup(&pool).await;
@@ -61,6 +59,7 @@ async fn writes_one_row_per_event() {
         scopes: vec!["read".into()],
         acl: EffectiveAcl::allow_all(),
         request_id: "req-test-1".into(),
+        verified_bearer: None,
     };
 
     record_access(

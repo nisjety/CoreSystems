@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/config"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/cost"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/eval"
@@ -31,6 +32,16 @@ func main() {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Str("service", "data-quality-go").Logger()
 
 	cfg := config.Load()
+	verifier, err := authctx.NewVerifier(authctx.Config{
+		Audience:      cfg.JWTAudience,
+		Issuer:        cfg.JWTIssuer,
+		PublicKeyFile: cfg.JWTPublicKeyFile,
+		JWKSURL:       cfg.JWKSURL,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("JWT verification configuration invalid")
+	}
+	authMiddleware := authctx.Middleware(verifier)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -53,6 +64,20 @@ func main() {
 	}
 
 	runner := eval.NewRunner(pool)
+	go func() {
+		const recoveryInterval = time.Minute
+		const staleAfter = 5 * time.Minute
+		for {
+			if err := runner.Recover(ctx, staleAfter); err != nil {
+				log.Error().Err(err).Msg("durable evaluation recovery failed")
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(recoveryInterval):
+			}
+		}
+	}()
 	scorer := trust.NewScorer(pool)
 	checker := gates.NewChecker(pool)
 	linter := lint.NewLinter(pool)
@@ -70,24 +95,7 @@ func main() {
 	r.Get("/readyz", handler.Readyz)
 	r.Method("GET", "/metrics", metrics.Handler())
 
-	r.Route("/v1/evals", func(r chi.Router) {
-		r.Use(handler.OrgIDMiddleware)
-		r.Post("/retrieval", qualityHandler.RunEval)
-		r.Get("/retrieval/{evalID}", qualityHandler.GetEval)
-		r.Post("/compare", qualityHandler.CompareEval)
-	})
-
-	r.Route("/v1/quality", func(r chi.Router) {
-		r.Use(handler.OrgIDMiddleware)
-		r.Post("/trust", qualityHandler.ScoreTrust)
-		r.Get("/gates", qualityHandler.CheckGates)
-		r.Get("/lint", qualityHandler.Lint)
-	})
-
-	r.Route("/v1/cost", func(r chi.Router) {
-		r.Use(handler.OrgIDMiddleware)
-		r.Get("/summary", qualityHandler.CostSummary)
-	})
+	handler.MountProtectedRoutes(r, authMiddleware, qualityHandler)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r}

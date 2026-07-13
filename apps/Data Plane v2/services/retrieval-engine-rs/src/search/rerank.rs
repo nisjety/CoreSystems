@@ -23,6 +23,18 @@ pub struct RerankClient {
     use_bearer: bool,
 }
 
+#[cfg(test)]
+mod security_tests {
+    use super::sanitized_rerank_status_error;
+
+    #[test]
+    fn provider_error_does_not_include_response_body() {
+        let error = sanitized_rerank_status_error(reqwest::StatusCode::BAD_GATEWAY).to_string();
+        assert_eq!(error, "rerank API returned HTTP status 502");
+        assert!(!error.contains("document"));
+    }
+}
+
 #[derive(Serialize)]
 struct RerankRequest {
     model: String,
@@ -43,6 +55,7 @@ struct RerankResult {
 }
 
 impl RerankClient {
+    #[allow(dead_code)]
     pub fn new(api_key: &str, model: &str) -> Self {
         Self::with_endpoint(api_key, model, "https://api.cohere.ai/v1/rerank", true)
     }
@@ -128,12 +141,7 @@ impl RerankClient {
                     tokio::time::sleep(backoff).await;
                 }
 
-                let resp = match self
-                    .rerank_post()
-                    .json(&body)
-                    .send()
-                    .await
-                {
+                let resp = match self.rerank_post().json(&body).send().await {
                     Ok(r) => r,
                     Err(e) => {
                         last_err = Some(anyhow::anyhow!(e).context("rerank API call failed"));
@@ -143,15 +151,13 @@ impl RerankClient {
 
                 if resp.status().is_server_error() || resp.status().as_u16() == 429 {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    last_err = Some(anyhow::anyhow!("rerank API returned {status}: {text}"));
+                    last_err = Some(sanitized_rerank_status_error(status));
                     continue;
                 }
 
                 if !resp.status().is_success() {
                     let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    anyhow::bail!("rerank API returned {status}: {text}");
+                    return Err(sanitized_rerank_status_error(status));
                 }
 
                 result = Some(
@@ -270,8 +276,7 @@ impl RerankClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("rerank API returned {status}: {text}");
+            return Err(sanitized_rerank_status_error(status));
         }
 
         let rerank_resp: RerankResponse = resp.json().await.context("parse rerank response")?;
@@ -294,4 +299,8 @@ impl RerankClient {
             })
             .collect())
     }
+}
+
+fn sanitized_rerank_status_error(status: reqwest::StatusCode) -> anyhow::Error {
+    anyhow::anyhow!("rerank API returned HTTP status {}", status.as_u16())
 }

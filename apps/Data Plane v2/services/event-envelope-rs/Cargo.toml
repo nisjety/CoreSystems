@@ -1,0 +1,19 @@
+[package]
+name = "event-envelope-rs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64 = "0.22"
+chrono.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/model"
 )
 
@@ -26,157 +28,183 @@ const (
 )
 
 type Executor struct {
+	store     JobStore
+	publisher EventPublisher
+	auditor   JobAuditor
+	available bool
+}
+
+var ErrExecutionUnavailable = errors.New("durable signed job execution is unavailable")
+
+func NewExecutor(pool *pgxpool.Pool, nc *nats.Conn, allowUnverifiedLegacyEvents bool) *Executor {
+	var publisher EventPublisher = disabledEventPublisher{}
+	if allowUnverifiedLegacyEvents && nc != nil {
+		publisher = nc
+	}
+	return &Executor{
+		store:     NewPostgresJobStore(pool),
+		publisher: publisher,
+		auditor:   &PostgresJobAuditor{pool: pool},
+		available: allowUnverifiedLegacyEvents && nc != nil,
+	}
+}
+
+type disabledEventPublisher struct{}
+
+func (disabledEventPublisher) Publish(string, []byte) error {
+	return errors.New("unsigned asynchronous job events are disabled")
+}
+
+type EventPublisher interface {
+	Publish(string, []byte) error
+}
+
+type JobAuditor interface {
+	RecordCreated(context.Context, model.Job) error
+}
+
+type PostgresJobAuditor struct {
 	pool *pgxpool.Pool
-	nc   *nats.Conn
 }
 
-func NewExecutor(pool *pgxpool.Pool, nc *nats.Conn) *Executor {
-	return &Executor{pool: pool, nc: nc}
-}
-
-func (e *Executor) CreateJob(ctx context.Context, input model.CreateJobInput) (*model.Job, error) {
-	id := uuid.New().String()
-	now := time.Now()
-
-	docIDs, _ := json.Marshal(input.DocumentIDs)
-
-	_, err := e.pool.Exec(ctx, `
-		INSERT INTO data_plane_audit_log (user_id, org_id, action, resource_type, resource_id, details)
-		VALUES ('system', $1, 'job_created', 'job', $2, $3)
-	`, input.OrgID, id, string(docIDs))
+func (a *PostgresJobAuditor) RecordCreated(ctx context.Context, job model.Job) error {
+	details, err := json.Marshal(map[string]any{
+		"document_count": len(job.DocumentIDs),
+		"job_type":       job.JobType,
+	})
 	if err != nil {
-		log.Warn().Err(err).Msg("audit log insert failed")
+		return err
 	}
-
-	job := &model.Job{
-		JobID:       id,
-		OrgID:       input.OrgID,
-		JobType:     input.JobType,
-		Status:      model.StatusPending,
-		DocumentIDs: input.DocumentIDs,
-		Progress:    0,
-		Total:       len(input.DocumentIDs),
-		CreatedAt:   now,
-	}
-
-	return job, nil
+	_, err = a.pool.Exec(ctx, `
+		INSERT INTO data_plane_audit_log
+			(user_id, org_id, action, resource_type, resource_id, details)
+		VALUES ('system', $1, 'job_created', 'job', $2, $3::jsonb)
+	`, job.OrgID, job.JobID, details)
+	return err
 }
 
-func (e *Executor) ExecuteReindex(ctx context.Context, job *model.Job) error {
-	now := time.Now()
-	job.Status = model.StatusRunning
-	job.StartedAt = &now
+func NewExecutorWithDependencies(store JobStore, publisher EventPublisher) *Executor {
+	_, disabled := publisher.(disabledEventPublisher)
+	return &Executor{store: store, publisher: publisher, available: !disabled}
+}
 
-	for i, docID := range job.DocumentIDs {
-		evt := map[string]string{
-			"document_id": docID,
+func (e *Executor) CreateJob(ctx context.Context, input model.CreateJobInput, idempotencyKey string) (*model.Job, bool, error) {
+	if e == nil || !e.available {
+		return nil, false, ErrExecutionUnavailable
+	}
+	if input.OrgID == "" || idempotencyKey == "" {
+		return nil, false, errors.New("organization and idempotency key are required")
+	}
+	switch input.JobType {
+	case model.JobReindex, model.JobGraphBuild, model.JobWikiRefresh:
+	default:
+		return nil, false, fmt.Errorf("unsupported job type: %s", input.JobType)
+	}
+	now := time.Now().UTC()
+	job := model.Job{
+		JobID:          uuid.NewString(),
+		OrgID:          input.OrgID,
+		JobType:        input.JobType,
+		Status:         model.StatusPending,
+		DocumentIDs:    append([]string(nil), input.DocumentIDs...),
+		Progress:       0,
+		Total:          len(input.DocumentIDs),
+		IdempotencyKey: idempotencyKey,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	persisted, created, err := e.store.Create(ctx, job)
+	if err != nil {
+		return nil, false, err
+	}
+	if created && e.auditor != nil {
+		if err := e.auditor.RecordCreated(ctx, *persisted); err != nil {
+			log.Warn().Err(err).Str("job_id", persisted.JobID).Msg("audit log insert failed")
+		}
+	}
+	return persisted, created, nil
+}
+
+func (e *Executor) GetJob(ctx context.Context, orgID, jobID string) (*model.Job, error) {
+	return e.store.Get(ctx, orgID, jobID)
+}
+
+func (e *Executor) Run(ctx context.Context, job model.Job) error {
+	running, err := e.store.Start(ctx, job.OrgID, job.JobID)
+	if err != nil {
+		return err
+	}
+
+	var result json.RawMessage
+	switch running.JobType {
+	case model.JobReindex:
+		result, err = e.publishDocuments(ctx, *running, SubjectDocCreated)
+	case model.JobGraphBuild:
+		result, err = e.publishDocuments(ctx, *running, SubjectDocsIndexed)
+	case model.JobWikiRefresh:
+		result, err = e.refreshWiki(ctx, *running)
+	default:
+		err = fmt.Errorf("unsupported persisted job type: %s", running.JobType)
+	}
+	if err != nil {
+		if _, persistErr := e.store.Fail(ctx, running.OrgID, running.JobID, err.Error()); persistErr != nil {
+			return errors.Join(err, fmt.Errorf("persist job failure: %w", persistErr))
+		}
+		return err
+	}
+	if _, err := e.store.Complete(ctx, running.OrgID, running.JobID, result); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *Executor) publishDocuments(ctx context.Context, job model.Job, subject string) (json.RawMessage, error) {
+	for i, documentID := range job.DocumentIDs {
+		event, err := json.Marshal(map[string]string{
+			"document_id": documentID,
 			"org_id":      job.OrgID,
 			"job_id":      job.JobID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("encode job event: %w", err)
 		}
-		data, _ := json.Marshal(evt)
-		if err := e.nc.Publish(SubjectDocCreated, data); err != nil {
-			return fmt.Errorf("publish reindex event for %s: %w", docID, err)
+		if err := e.publisher.Publish(subject, event); err != nil {
+			return nil, fmt.Errorf("publish job event: %w", err)
 		}
-		job.Progress = i + 1
+		if _, err := e.store.SetProgress(ctx, job.OrgID, job.JobID, i+1); err != nil {
+			return nil, err
+		}
 	}
-
-	done := time.Now()
-	job.Status = model.StatusCompleted
-	job.CompletedAt = &done
-
-	log.Info().
-		Str("job_id", job.JobID).
-		Str("org_id", job.OrgID).
-		Int("documents", len(job.DocumentIDs)).
-		Msg("reindex job completed")
-
-	return nil
+	result, err := json.Marshal(map[string]any{"published": len(job.DocumentIDs)})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func (e *Executor) ExecuteGraphBuild(ctx context.Context, job *model.Job) error {
-	now := time.Now()
-	job.Status = model.StatusRunning
-	job.StartedAt = &now
-
-	for i, docID := range job.DocumentIDs {
-		evt := map[string]string{
-			"document_id": docID,
-			"org_id":      job.OrgID,
-		}
-		data, _ := json.Marshal(evt)
-		if err := e.nc.Publish(SubjectDocsIndexed, data); err != nil {
-			return fmt.Errorf("publish graph build event for %s: %w", docID, err)
-		}
-		job.Progress = i + 1
-	}
-
-	done := time.Now()
-	job.Status = model.StatusCompleted
-	job.CompletedAt = &done
-
-	log.Info().
-		Str("job_id", job.JobID).
-		Int("documents", len(job.DocumentIDs)).
-		Msg("graph build job completed")
-
-	return nil
-}
-
-func (e *Executor) ExecuteWikiRefresh(ctx context.Context, job *model.Job) error {
-	now := time.Now()
-	job.Status = model.StatusRunning
-	job.StartedAt = &now
-
-	log.Info().
-		Str("job_id", job.JobID).
-		Str("org_id", job.OrgID).
-		Msg("wiki refresh — calling lint → maintenance/sweep pipeline")
-
-	// Wave-2 D5-6 close: read lint findings from data-quality-go and POST
-	// them to wiki-store's /v1/wiki/maintenance/sweep. Both URLs are
-	// container-internal DNS; configurable via env for cross-cluster runs.
-	dqURL := getenvDefault("DATA_QUALITY_URL", "http://data-quality:8013")
+func (e *Executor) refreshWiki(ctx context.Context, job model.Job) (json.RawMessage, error) {
+	dataQualityURL := getenvDefault("DATA_QUALITY_URL", "http://data-quality:8013")
 	wikiURL := getenvDefault("WIKI_STORE_URL", "http://wiki-store:8011")
-
-	items, err := fetchLintItems(ctx, dqURL, job.OrgID)
+	items, err := fetchLintItems(ctx, dataQualityURL, job.OrgID)
 	if err != nil {
-		failJob(job, fmt.Errorf("fetch lint: %w", err))
-		return err
-	}
-	if len(items) == 0 {
-		log.Info().Str("job_id", job.JobID).Msg("no lint findings; sweep skipped")
-		done := time.Now()
-		job.Status = model.StatusCompleted
-		job.CompletedAt = &done
-		return nil
+		return nil, fmt.Errorf("fetch lint: %w", err)
 	}
 
-	accepted, rejected, err := postSweep(ctx, wikiURL, job.OrgID, items)
+	accepted, rejected := 0, 0
+	if len(items) > 0 {
+		accepted, rejected, err = postSweep(ctx, wikiURL, job.OrgID, items)
+		if err != nil {
+			return nil, fmt.Errorf("post sweep: %w", err)
+		}
+	}
+	result, err := json.Marshal(map[string]int{
+		"accepted": accepted,
+		"rejected": rejected,
+	})
 	if err != nil {
-		failJob(job, fmt.Errorf("post sweep: %w", err))
-		return err
+		return nil, err
 	}
-
-	log.Info().
-		Str("job_id", job.JobID).
-		Int("accepted", accepted).
-		Int("rejected", rejected).
-		Msg("wiki maintenance sweep complete")
-
-	done := time.Now()
-	job.Status = model.StatusCompleted
-	job.CompletedAt = &done
-	return nil
-}
-
-// failJob marks a job as failed with the error message, preserving its
-// original StartedAt timestamp.
-func failJob(job *model.Job, err error) {
-	now := time.Now()
-	msg := err.Error()
-	job.Status = model.StatusFailed
-	job.ErrorMessage = &msg
-	job.CompletedAt = &now
+	return result, nil
 }
 
 func getenvDefault(key, fallback string) string {
@@ -207,7 +235,9 @@ func fetchLintItems(ctx context.Context, baseURL, orgID string) ([]sweepItem, er
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("X-Org-ID", orgID)
+	if err := applyVerifiedIdentity(ctx, req, orgID); err != nil {
+		return nil, err
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -259,7 +289,9 @@ func postSweep(ctx context.Context, baseURL, orgID string, items []sweepItem) (i
 		return 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Org-ID", orgID)
+	if err := applyVerifiedIdentity(ctx, req, orgID); err != nil {
+		return 0, 0, err
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -279,19 +311,26 @@ func postSweep(ctx context.Context, baseURL, orgID string, items []sweepItem) (i
 	return sweepResp.Accepted, sweepResp.Rejected, nil
 }
 
+// applyVerifiedIdentity forwards the already-verified, same-audience bearer
+// for immediate internal callbacks. The requested org must equal the signed
+// claim; the credential never enters job state, logs, storage, or events.
+func applyVerifiedIdentity(ctx context.Context, req *http.Request, orgID string) error {
+	claims, ok := authctx.FromContext(ctx)
+	if !ok {
+		return errors.New("verified callback identity missing")
+	}
+	if strings.TrimSpace(orgID) == "" || orgID != claims.OrgID {
+		return errors.New("callback tenant does not match verified identity")
+	}
+	authorization, ok := authctx.AuthorizationHeader(ctx)
+	if !ok {
+		return errors.New("verified callback bearer missing")
+	}
+	req.Header.Set("Authorization", authorization)
+	req.Header.Set("X-Org-ID", claims.OrgID)
+	return nil
+}
+
 // 30s upper bound covers a 1000-item sweep on a slow link; the underlying
 // wiki-store endpoint is bounded to 1000 items per call anyway.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
-
-func (e *Executor) Run(ctx context.Context, job *model.Job) error {
-	switch job.JobType {
-	case model.JobReindex:
-		return e.ExecuteReindex(ctx, job)
-	case model.JobGraphBuild:
-		return e.ExecuteGraphBuild(ctx, job)
-	case model.JobWikiRefresh:
-		return e.ExecuteWikiRefresh(ctx, job)
-	default:
-		return fmt.Errorf("unknown job type: %s", job.JobType)
-	}
-}

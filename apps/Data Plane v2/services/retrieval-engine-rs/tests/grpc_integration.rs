@@ -4,10 +4,12 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Server};
-use tonic::Request;
+use tonic::{Request, Status};
 
+use retrieval_engine::authz::{
+    AuthContext, AuthMethod, EffectiveAcl, NoopPolicyClient, NoopVisibilityClient,
+};
 use retrieval_engine::grpc::document_svc::DocumentSvc;
-use retrieval_engine::grpc::interceptor::ApiKeyInterceptor;
 use retrieval_engine::grpc::knowledge_svc::KnowledgeSvc;
 use retrieval_engine::grpc::pb_documents;
 use retrieval_engine::grpc::pb_documents::document_service_client::DocumentServiceClient;
@@ -16,7 +18,6 @@ use retrieval_engine::grpc::pb_knowledge;
 use retrieval_engine::grpc::pb_knowledge::knowledge_service_client::KnowledgeServiceClient;
 use retrieval_engine::grpc::pb_knowledge::knowledge_service_server::KnowledgeServiceServer;
 
-const TEST_API_KEY: &str = "test-integration-key";
 const TEST_ORG: &str = "org-integration-test";
 
 fn test_db_url() -> Option<String> {
@@ -28,6 +29,8 @@ async fn setup_schema(pool: &PgPool) {
         "CREATE TABLE IF NOT EXISTS documents (
             document_id  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
             org_id       TEXT NOT NULL,
+            owner_id     TEXT NOT NULL DEFAULT 'test-user',
+            visibility   TEXT NOT NULL DEFAULT 'org',
             source       TEXT NOT NULL DEFAULT '',
             type         TEXT NOT NULL DEFAULT '',
             title        TEXT NOT NULL DEFAULT '',
@@ -78,15 +81,40 @@ async fn cleanup(pool: &PgPool) {
         .ok();
 }
 
+/// Test-fixture setup only. Production document writes must use
+/// documents-api-go; direct SQL here keeps read-path integration tests
+/// independent from the permanently disabled legacy gRPC mutations.
+async fn insert_test_document(
+    pool: &PgPool,
+    org_id: &str,
+    title: &str,
+    content: &str,
+    zdr_classification: &str,
+) -> String {
+    sqlx::query_as::<_, (String,)>(
+        "INSERT INTO documents (org_id, source, type, title, content, zdr_classification)
+         VALUES ($1, 'test-fixture', 'article', $2, $3, $4) RETURNING document_id",
+    )
+    .bind(org_id)
+    .bind(title)
+    .bind(content)
+    .bind(zdr_classification)
+    .fetch_one(pool)
+    .await
+    .expect("insert isolated test document")
+    .0
+}
+
 async fn start_server(pool: PgPool) -> (SocketAddr, PgPool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
     let addr = listener.local_addr().unwrap();
 
-    let interceptor = ApiKeyInterceptor::new(Some(TEST_API_KEY.into()));
-    let doc_svc = DocumentSvc::new(Arc::new(pool.clone()));
-    let know_svc = KnowledgeSvc::new(Arc::new(pool.clone()));
+    let policy = Arc::new(NoopPolicyClient);
+    let visibility = Arc::new(NoopVisibilityClient);
+    let doc_svc = DocumentSvc::new(Arc::new(pool.clone()), policy.clone(), visibility.clone());
+    let know_svc = KnowledgeSvc::new(Arc::new(pool.clone()), policy, visibility);
 
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
@@ -94,11 +122,11 @@ async fn start_server(pool: PgPool) -> (SocketAddr, PgPool) {
         Server::builder()
             .add_service(DocumentServiceServer::with_interceptor(
                 doc_svc,
-                interceptor.clone(),
+                test_principal,
             ))
             .add_service(KnowledgeServiceServer::with_interceptor(
                 know_svc,
-                interceptor,
+                test_principal,
             ))
             .serve_with_incoming(incoming)
             .await
@@ -117,21 +145,96 @@ async fn connect(addr: SocketAddr) -> Channel {
         .unwrap()
 }
 
+#[allow(clippy::result_large_err)]
+fn test_principal(mut request: Request<()>) -> Result<Request<()>, Status> {
+    request
+        .metadata()
+        .get("x-test-org")
+        .filter(|value| value.as_bytes() == TEST_ORG.as_bytes())
+        .ok_or_else(|| Status::unauthenticated("missing test principal"))?;
+    request.extensions_mut().insert(AuthContext {
+        user_id: Some("test-user".into()),
+        org_id: TEST_ORG.into(),
+        auth_method: AuthMethod::Jwt,
+        scopes: vec!["org:data:write_all".into()],
+        acl: EffectiveAcl::allow_all(),
+        request_id: "grpc-integration-test".into(),
+        verified_bearer: None,
+    });
+    Ok(request)
+}
+
 fn authed<T>(inner: T) -> Request<T> {
-    let mut req = Request::new(inner);
-    req.metadata_mut()
-        .insert("x-api-key", MetadataValue::try_from(TEST_API_KEY).unwrap());
-    req
+    let mut request = Request::new(inner);
+    request.metadata_mut().insert(
+        "x-test-org",
+        MetadataValue::try_from(TEST_ORG).expect("valid test org metadata"),
+    );
+    request
 }
 
 // ─── Document Service Tests ────────────────────────────────────────
 
 #[tokio::test]
-async fn test_create_and_get_document() {
-    let Some(url) = test_db_url() else {
-        eprintln!("TEST_DATABASE_URL not set, skipping");
-        return;
+async fn test_deprecated_mutations_are_contained_without_a_database() {
+    std::env::set_var("DPV2_ALLOW_GRPC_DOCUMENT_WRITES", "1");
+    let pool = PgPool::connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+        .expect("valid lazy test pool configuration");
+    pool.close().await;
+
+    let (addr, _pool) = start_server(pool).await;
+    let ch = connect(addr).await;
+    let mut client = DocumentServiceClient::new(ch);
+
+    let create = pb_documents::CreateDocumentRequest {
+        org_id: TEST_ORG.into(),
+        source: "offline-regression".into(),
+        r#type: "text".into(),
+        title: "non-sensitive fixture".into(),
+        content: "non-sensitive fixture".into(),
+        zdr_classification: "restricted".into(),
+        metadata: None,
+        ingest_policy: Some(pb_documents::IngestPolicy {
+            zdr_mode: "ephemeral".into(),
+            index_schedule: "disabled".into(),
+            ephemeral_only: true,
+        }),
     };
+
+    let create_error = client
+        .create_document(authed(create.clone()))
+        .await
+        .expect_err("deprecated create must fail before database access");
+    assert_eq!(create_error.code(), tonic::Code::FailedPrecondition);
+
+    let delete_error = client
+        .delete_document(authed(pb_documents::DeleteDocumentRequest {
+            document_id: "fixture-document".into(),
+            org_id: TEST_ORG.into(),
+        }))
+        .await
+        .expect_err("deprecated delete must fail before database access");
+    assert_eq!(delete_error.code(), tonic::Code::FailedPrecondition);
+
+    let bulk_error = client
+        .bulk_ingest(authed(pb_documents::BulkIngestRequest {
+            org_id: TEST_ORG.into(),
+            documents: vec![create],
+            ingest_policy: Some(pb_documents::IngestPolicy {
+                zdr_mode: "ephemeral".into(),
+                index_schedule: "disabled".into(),
+                ephemeral_only: true,
+            }),
+        }))
+        .await
+        .expect_err("deprecated bulk ingest must fail before database access");
+    assert_eq!(bulk_error.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
+async fn test_create_containment_and_get_seeded_document() {
+    let url = test_db_url().expect("TEST_DATABASE_URL is required for this ignored test");
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
     cleanup(&pool).await;
@@ -140,7 +243,7 @@ async fn test_create_and_get_document() {
     let ch = connect(addr).await;
     let mut client = DocumentServiceClient::new(ch);
 
-    let create_resp = client
+    let create_error = client
         .create_document(authed(pb_documents::CreateDocumentRequest {
             org_id: TEST_ORG.into(),
             source: "test-source".into(),
@@ -152,27 +255,28 @@ async fn test_create_and_get_document() {
             ingest_policy: None,
         }))
         .await
-        .expect("create document");
+        .expect_err("legacy gRPC create must remain disabled");
+    assert_eq!(create_error.code(), tonic::Code::FailedPrecondition);
 
-    let doc = create_resp
-        .into_inner()
-        .document
-        .expect("document in response");
-    assert!(!doc.document_id.is_empty());
-    assert_eq!(doc.org_id, TEST_ORG);
-    assert_eq!(doc.title, "Integration Test Doc");
-    assert_eq!(doc.status, "pending");
+    let document_id = insert_test_document(
+        &pool,
+        TEST_ORG,
+        "Integration Test Doc",
+        "This is test content for integration testing.",
+        "internal",
+    )
+    .await;
 
     let get_resp = client
         .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc.document_id.clone(),
+            document_id: document_id.clone(),
             org_id: TEST_ORG.into(),
         }))
         .await
         .expect("get document");
 
     let fetched = get_resp.into_inner().document.expect("document");
-    assert_eq!(fetched.document_id, doc.document_id);
+    assert_eq!(fetched.document_id, document_id);
     assert_eq!(
         fetched.content,
         "This is test content for integration testing."
@@ -193,19 +297,14 @@ async fn test_list_documents() {
     let mut client = DocumentServiceClient::new(ch);
 
     for i in 0..3 {
-        client
-            .create_document(authed(pb_documents::CreateDocumentRequest {
-                org_id: TEST_ORG.into(),
-                source: "test".into(),
-                r#type: "article".into(),
-                title: format!("Doc {i}"),
-                content: format!("Content {i}"),
-                zdr_classification: String::new(),
-                metadata: None,
-                ingest_policy: None,
-            }))
-            .await
-            .unwrap();
+        insert_test_document(
+            &pool,
+            TEST_ORG,
+            &format!("Doc {i}"),
+            &format!("Content {i}"),
+            "internal",
+        )
+        .await;
     }
 
     let list_resp = client
@@ -238,7 +337,7 @@ async fn test_list_documents() {
 }
 
 #[tokio::test]
-async fn test_delete_document() {
+async fn test_delete_document_is_permanently_disabled() {
     let Some(url) = test_db_url() else { return };
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
@@ -248,48 +347,31 @@ async fn test_delete_document() {
     let ch = connect(addr).await;
     let mut client = DocumentServiceClient::new(ch);
 
-    let doc = client
-        .create_document(authed(pb_documents::CreateDocumentRequest {
-            org_id: TEST_ORG.into(),
-            source: "s".into(),
-            r#type: "t".into(),
-            title: "to-delete".into(),
-            content: "gone".into(),
-            zdr_classification: String::new(),
-            metadata: None,
-            ingest_policy: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .document
-        .unwrap();
+    let document_id = insert_test_document(&pool, TEST_ORG, "to-delete", "gone", "internal").await;
 
-    let del_resp = client
+    let delete_error = client
         .delete_document(authed(pb_documents::DeleteDocumentRequest {
-            document_id: doc.document_id.clone(),
+            document_id: document_id.clone(),
             org_id: TEST_ORG.into(),
         }))
         .await
-        .unwrap();
+        .expect_err("legacy gRPC delete must remain disabled");
+    assert_eq!(delete_error.code(), tonic::Code::FailedPrecondition);
 
-    assert!(del_resp.into_inner().success);
-
-    let err = client
+    let still_present = client
         .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc.document_id,
+            document_id,
             org_id: TEST_ORG.into(),
         }))
         .await
-        .unwrap_err();
-
-    assert_eq!(err.code(), tonic::Code::NotFound);
+        .expect("disabled delete must not mutate the fixture");
+    assert!(still_present.into_inner().document.is_some());
 
     cleanup(&pool).await;
 }
 
 #[tokio::test]
-async fn test_bulk_ingest() {
+async fn test_bulk_ingest_is_permanently_disabled() {
     let Some(url) = test_db_url() else { return };
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
@@ -312,19 +394,22 @@ async fn test_bulk_ingest() {
         })
         .collect();
 
-    let resp = client
+    let error = client
         .bulk_ingest(authed(pb_documents::BulkIngestRequest {
             org_id: TEST_ORG.into(),
             documents: docs,
             ingest_policy: None,
         }))
         .await
-        .unwrap()
-        .into_inner();
+        .expect_err("legacy gRPC bulk ingest must remain disabled");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
-    assert_eq!(resp.accepted, 5);
-    assert_eq!(resp.rejected, 0);
-    assert_eq!(resp.document_ids.len(), 5);
+    let persisted: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM documents WHERE org_id = $1")
+        .bind(TEST_ORG)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(persisted.0, 0, "disabled bulk ingest must not persist rows");
 
     cleanup(&pool).await;
 }
@@ -340,22 +425,8 @@ async fn test_document_index_status() {
     let ch = connect(addr).await;
     let mut client = DocumentServiceClient::new(ch);
 
-    let doc = client
-        .create_document(authed(pb_documents::CreateDocumentRequest {
-            org_id: TEST_ORG.into(),
-            source: "s".into(),
-            r#type: "t".into(),
-            title: "idx-test".into(),
-            content: "content".into(),
-            zdr_classification: String::new(),
-            metadata: None,
-            ingest_policy: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .document
-        .unwrap();
+    let document_id =
+        insert_test_document(&pool, TEST_ORG, "idx-test", "content", "internal").await;
 
     sqlx::query(
         "INSERT INTO knowledge_units (document_id, org_id, chunk_index, text, content_hash, embedding_status)
@@ -363,7 +434,7 @@ async fn test_document_index_status() {
                 ($1, $2, 1, 'chunk 1', 'hash1', 'completed'),
                 ($1, $2, 2, 'chunk 2', 'hash2', 'failed')"
     )
-    .bind(&doc.document_id)
+    .bind(&document_id)
     .bind(TEST_ORG)
     .execute(&pool)
     .await
@@ -371,7 +442,7 @@ async fn test_document_index_status() {
 
     let status = client
         .get_document_index_status(authed(pb_documents::GetDocumentIndexStatusRequest {
-            document_id: doc.document_id,
+            document_id,
             org_id: TEST_ORG.into(),
         }))
         .await
@@ -442,30 +513,15 @@ async fn test_check_permissions_allowed() {
     let (addr, pool) = start_server(pool).await;
     let ch = connect(addr).await;
 
-    let mut doc_client = DocumentServiceClient::new(ch.clone());
     let mut know_client = KnowledgeServiceClient::new(ch);
 
-    let doc = doc_client
-        .create_document(authed(pb_documents::CreateDocumentRequest {
-            org_id: TEST_ORG.into(),
-            source: "s".into(),
-            r#type: "t".into(),
-            title: "internal doc".into(),
-            content: "safe".into(),
-            zdr_classification: "internal".into(),
-            metadata: None,
-            ingest_policy: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .document
-        .unwrap();
+    let document_id =
+        insert_test_document(&pool, TEST_ORG, "internal doc", "safe", "internal").await;
 
     let resp = know_client
         .check_permissions(authed(pb_knowledge::CheckPermissionsRequest {
             org_id: TEST_ORG.into(),
-            document_id: doc.document_id,
+            document_id,
             user_id: "user-1".into(),
         }))
         .await
@@ -524,32 +580,17 @@ async fn test_get_knowledge_units() {
     let (addr, pool) = start_server(pool).await;
     let ch = connect(addr).await;
 
-    let mut doc_client = DocumentServiceClient::new(ch.clone());
     let mut know_client = KnowledgeServiceClient::new(ch);
 
-    let doc = doc_client
-        .create_document(authed(pb_documents::CreateDocumentRequest {
-            org_id: TEST_ORG.into(),
-            source: "s".into(),
-            r#type: "t".into(),
-            title: "chunked doc".into(),
-            content: "full content".into(),
-            zdr_classification: String::new(),
-            metadata: None,
-            ingest_policy: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .document
-        .unwrap();
+    let document_id =
+        insert_test_document(&pool, TEST_ORG, "chunked doc", "full content", "internal").await;
 
     for i in 0..3 {
         sqlx::query(
             "INSERT INTO knowledge_units (document_id, org_id, chunk_index, text, content_hash, embedding_status)
              VALUES ($1, $2, $3, $4, $5, 'completed')"
         )
-        .bind(&doc.document_id)
+        .bind(&document_id)
         .bind(TEST_ORG)
         .bind(i)
         .bind(format!("chunk text {i}"))
@@ -561,7 +602,7 @@ async fn test_get_knowledge_units() {
 
     let resp = know_client
         .get_knowledge_units(authed(pb_knowledge::GetKnowledgeUnitsRequest {
-            document_id: doc.document_id,
+            document_id,
             org_id: TEST_ORG.into(),
         }))
         .await

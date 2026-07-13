@@ -6,6 +6,7 @@ use sqlx::PgPool;
 
 use crate::provider::EmbeddingProvider;
 use crate::qdrant_writer::{self, EmbeddingPoint};
+use event_envelope_rs::EventSigner;
 use qdrant_client::Qdrant;
 
 // §17.3.3 — named subject, lint-checked. See infra/nats/SUBJECTS.md.
@@ -22,6 +23,7 @@ pub struct BatchItem {
     /// (see `stream`). Drives the embed egress guard: a restricted doc must not
     /// egress to a retaining (direct-Azure) embedding provider.
     pub zdr: bool,
+    pub user_id: Option<String>,
 }
 
 pub async fn process_batch(
@@ -31,6 +33,7 @@ pub async fn process_batch(
     pool: &PgPool,
     collection: &str,
     nats: &async_nats::Client,
+    event_signer: Option<&EventSigner>,
 ) -> anyhow::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -38,7 +41,6 @@ pub async fn process_batch(
 
     let kid_list: Vec<String> = items.iter().map(|i| i.knowledge_id.clone()).collect();
     let doc_ids: Vec<String> = items.iter().map(|i| i.document_id.clone()).collect();
-    let org_ids: Vec<String> = items.iter().map(|i| i.org_id.clone()).collect();
 
     // 1. Embed
     let vectors = match embed_items_by_org(items, provider).await {
@@ -84,30 +86,55 @@ pub async fn process_batch(
             // gateway/UI use this to flip an Indexing→Ready signal honestly.
             "embedded_at": chrono::Utc::now().to_rfc3339(),
             "idempotency_key": idempotency_key,
+            "user_id": items.iter().find(|item| item.document_id == doc.document_id).and_then(|item| item.user_id.as_deref()),
+            "zdr": items.iter().find(|item| item.document_id == doc.document_id).is_some_and(|item| item.zdr),
         });
+        let event_item = items
+            .iter()
+            .find(|item| item.document_id == doc.document_id)
+            .context("indexed document missing source event authority")?;
+        let event_payload = encode_outbound_event(
+            event_signer,
+            SUBJECT_DOC_INDEXED,
+            &doc.org_id,
+            event_item.user_id.as_deref(),
+            event_item.zdr,
+            &event,
+        )?;
         let _ = nats
-            .publish(SUBJECT_DOC_INDEXED, serde_json::to_vec(&event)?.into())
+            .publish(SUBJECT_DOC_INDEXED, event_payload.into())
             .await;
     }
 
     // 5. Publish cost ledger event
     let cost_idempotency_key =
         make_idempotency_key("embed.cost", &kid_list.join(","), provider.model_name());
-    let cost_event = serde_json::json!({
-        "event_type": "embedding",
-        "model": provider.model_name(),
-        "provider": provider.provider_name(),
-        "count": items.len(),
-        "estimated_tokens": items.iter().map(|i| i.text.len() / 4).sum::<usize>(),
-        "org_ids": org_ids.iter().collect::<std::collections::HashSet<_>>(),
-        "idempotency_key": cost_idempotency_key,
-    });
-    let _ = nats
-        .publish(
+    let mut cost_groups: HashMap<(&str, Option<&str>, bool), (usize, usize)> = HashMap::new();
+    for item in items {
+        let group = cost_groups
+            .entry((item.org_id.as_str(), item.user_id.as_deref(), item.zdr))
+            .or_default();
+        group.0 += 1;
+        group.1 += item.text.len() / 4;
+    }
+    for ((org_id, user_id, zdr), (count, estimated_tokens)) in cost_groups {
+        let cost_event = serde_json::json!({
+            "event_type": "embedding", "model": provider.model_name(),
+            "provider": provider.provider_name(), "count": count,
+            "estimated_tokens": estimated_tokens, "org_id": org_id,
+            "user_id": user_id, "zdr": zdr,
+            "idempotency_key": cost_idempotency_key,
+        });
+        let payload = encode_outbound_event(
+            event_signer,
             "dataplane.cost.ledger",
-            serde_json::to_vec(&cost_event)?.into(),
-        )
-        .await;
+            org_id,
+            user_id,
+            zdr,
+            &cost_event,
+        )?;
+        let _ = nats.publish("dataplane.cost.ledger", payload.into()).await;
+    }
 
     tracing::info!(
         count = items.len(),
@@ -116,6 +143,21 @@ pub async fn process_batch(
     );
 
     Ok(())
+}
+
+fn encode_outbound_event(
+    signer: Option<&EventSigner>,
+    subject: &str,
+    org_id: &str,
+    user_id: Option<&str>,
+    zdr: bool,
+    value: &serde_json::Value,
+) -> anyhow::Result<Vec<u8>> {
+    let raw = serde_json::to_vec(value)?;
+    match signer {
+        Some(signer) => Ok(signer.sign(subject, org_id, user_id, zdr, &raw)?),
+        None => Ok(raw),
+    }
 }
 
 async fn embed_items_by_org(

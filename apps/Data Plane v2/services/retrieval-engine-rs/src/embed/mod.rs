@@ -29,6 +29,7 @@ pub struct EmbeddingClient {
 enum EmbeddingBackend {
     ModelPlane(ModelPlaneEmbeddingClient),
     AzureOpenAi(AzureOpenAiEmbeddingClient),
+    DeterministicTest { dimension: usize },
 }
 
 #[derive(Clone)]
@@ -79,6 +80,14 @@ impl EmbeddingClient {
                 &cfg.azure_openai_api_key,
                 &cfg.azure_openai_embedding_deployment,
             ),
+            "deterministic_test"
+                if deterministic_test_allowed(
+                    std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").ok().as_deref(),
+                    std::env::var("ISOLATED_E2E").ok().as_deref(),
+                ) =>
+            {
+                Self::deterministic_test(cfg.embedding_dimension)
+            }
             other => anyhow::bail!(
                 "unsupported EMBEDDING_PROVIDER `{other}`; expected `model_plane` or `azure_openai`"
             ),
@@ -126,10 +135,21 @@ impl EmbeddingClient {
         })
     }
 
+    fn deterministic_test(dimension: usize) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            (1..=65_536).contains(&dimension),
+            "deterministic test embedding dimension is invalid"
+        );
+        Ok(Self {
+            inner: EmbeddingBackend::DeterministicTest { dimension },
+        })
+    }
+
     pub fn provider_name(&self) -> &'static str {
         match &self.inner {
             EmbeddingBackend::ModelPlane(_) => "model_plane",
             EmbeddingBackend::AzureOpenAi(_) => "azure_openai",
+            EmbeddingBackend::DeterministicTest { .. } => "deterministic_test",
         }
     }
 
@@ -137,6 +157,7 @@ impl EmbeddingClient {
         match &self.inner {
             EmbeddingBackend::ModelPlane(client) => &client.model,
             EmbeddingBackend::AzureOpenAi(client) => &client.deployment,
+            EmbeddingBackend::DeterministicTest { .. } => "deterministic-isolated",
         }
     }
 
@@ -152,6 +173,9 @@ impl EmbeddingClient {
             }
             EmbeddingBackend::AzureOpenAi(client) => {
                 format!("{}:{}", self.provider_name(), client.deployment)
+            }
+            EmbeddingBackend::DeterministicTest { dimension } => {
+                format!("deterministic_test:{dimension}")
             }
         }
     }
@@ -192,8 +216,27 @@ impl EmbeddingClient {
         match &self.inner {
             EmbeddingBackend::ModelPlane(client) => client.embed_batch(org_id, texts, zdr).await,
             EmbeddingBackend::AzureOpenAi(client) => client.embed_batch(texts, zdr).await,
+            EmbeddingBackend::DeterministicTest { dimension } => Ok(texts
+                .iter()
+                .map(|text| deterministic_vector(org_id, text, *dimension))
+                .collect()),
         }
     }
+}
+
+fn deterministic_test_allowed(
+    allow_insecure_dev_defaults: Option<&str>,
+    isolated_e2e: Option<&str>,
+) -> bool {
+    allow_insecure_dev_defaults == Some("1") && isolated_e2e == Some("1")
+}
+
+fn deterministic_vector(org_id: &str, text: &str, dimension: usize) -> Vec<f32> {
+    let digest = blake3::hash(format!("{org_id}\0{text}").as_bytes());
+    let bytes = digest.as_bytes();
+    (0..dimension)
+        .map(|index| (f32::from(bytes[index % bytes.len()]) / 127.5) - 1.0)
+        .collect()
 }
 
 impl ModelPlaneEmbeddingClient {
@@ -326,15 +369,13 @@ impl AzureOpenAiEmbeddingClient {
 
             if resp.status().is_server_error() || resp.status().as_u16() == 429 {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                last_err = Some(anyhow::anyhow!("embedding API returned {status}: {text}"));
+                last_err = Some(sanitized_provider_status_error("embedding API", status));
                 continue;
             }
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("embedding API returned {status}: {text}");
+                return Err(sanitized_provider_status_error("embedding API", status));
             }
 
             let embed_resp: EmbedResponse =
@@ -344,6 +385,10 @@ impl AzureOpenAiEmbeddingClient {
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("embed retries exhausted")))
     }
+}
+
+fn sanitized_provider_status_error(provider: &str, status: reqwest::StatusCode) -> anyhow::Error {
+    anyhow::anyhow!("{provider} returned HTTP status {}", status.as_u16())
 }
 
 fn normalize_provider(provider: &str) -> String {
@@ -376,6 +421,40 @@ mod tests {
         assert_eq!(normalize_provider("inference_core"), "model_plane");
         assert_eq!(normalize_provider("ai_core"), "model_plane");
         assert_eq!(normalize_provider("azure-openai"), "azure_openai");
+    }
+
+    #[test]
+    fn upstream_status_errors_never_include_provider_response_bodies() {
+        let error = sanitized_provider_status_error(
+            "embedding API",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .to_string();
+        assert_eq!(error, "embedding API returned HTTP status 500");
+        assert!(!error.contains("response"));
+    }
+
+    #[test]
+    fn deterministic_backend_requires_two_explicit_isolation_gates() {
+        assert!(!deterministic_test_allowed(Some("1"), None));
+        assert!(!deterministic_test_allowed(None, Some("1")));
+        assert!(!deterministic_test_allowed(Some("true"), Some("1")));
+        assert!(deterministic_test_allowed(Some("1"), Some("1")));
+    }
+
+    #[tokio::test]
+    async fn deterministic_backend_is_stable_and_dimension_bounded() {
+        let client = EmbeddingClient::deterministic_test(8).expect("test backend");
+        let first = client
+            .embed_query("org-1", "isolated query", true)
+            .await
+            .expect("embedding");
+        let second = client
+            .embed_query("org-1", "isolated query", true)
+            .await
+            .expect("embedding");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 8);
     }
 
     #[tokio::test]

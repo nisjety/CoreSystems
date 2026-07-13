@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/config"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/eventauth"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/events"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/gdpr"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/handler"
@@ -37,15 +37,11 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("config load failed")
 	}
-	if cfg.InternalAPIKey == "" {
-		// Fail closed: an empty key previously let the auth middleware wave every
-		// request through (fail-open). Refuse to start unless an operator has
-		// explicitly opted into the insecure local mode.
-		if os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" {
-			log.Warn().Msg("INTERNAL_API_KEY is empty and ALLOW_INSECURE_DEV_DEFAULTS=1 — documents API is UNAUTHENTICATED (local dev only)")
-		} else {
-			log.Fatal().Msg("INTERNAL_API_KEY is required (set ALLOW_INSECURE_DEV_DEFAULTS=1 to run unauthenticated locally)")
-		}
+	if cfg.UserCoreServiceToken == "" {
+		// This audience-bound credential is outbound-only for user-core grant
+		// resolution. Missing grant authority must fail the
+		// service closed instead of silently broadening document visibility.
+		log.Fatal().Msg("USER_CORE_SERVICE_TOKEN is required for user-core grant resolution")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,15 +64,32 @@ func main() {
 		log.Fatal().Err(err).Msg("postgres ping failed")
 	}
 
-	nc, err := nats.Connect(cfg.NatsURL)
+	natsOptions := []nats.Option{nats.Name("documents-api")}
+	if cfg.NatsToken != "" {
+		natsOptions = append(natsOptions, nats.Token(cfg.NatsToken))
+	}
+	nc, err := nats.Connect(cfg.NatsURL, natsOptions...)
 	if err != nil {
-		log.Fatal().Err(err).Str("url", cfg.NatsURL).Msg("nats connect failed")
+		log.Fatal().Err(err).Msg("nats connect failed")
 	}
 	defer nc.Close()
+	eventKey, err := os.ReadFile(cfg.EventSigningPrivateKeyPath)
+	if err != nil {
+		log.Fatal().Err(err).Msg("event signing key unavailable")
+	}
+	eventSigner, err := eventauth.NewSigner(
+		eventKey,
+		"service:documents-api-go",
+		envOrDefault("EVENT_SIGNING_KEY_ID", "documents-events-v1"),
+		envOrDefault("EVENT_AUTH_AUDIENCE", "dataplane-events"),
+		"events:documents:publish",
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("event signing configuration invalid")
+	}
 
 	docRepo := repo.NewDocumentRepo(pool)
 	sourceObjectRepo := repo.NewSourceObjectRepo(pool)
-	publisher := events.NewPublisher(nc)
 
 	// Per-User Data Ownership (GDPR): subscribe to the cross-plane erasure
 	// fan-out on the SHARED bus and transfer an erased user's owned documents to
@@ -84,13 +97,14 @@ func main() {
 	// fan-out is published by user-core on velion-nats, not the Data-Plane bus, so
 	// this uses a separate shared connection. Best-effort: a missing shared bus
 	// just means the transfer doesn't run here (logged), never a startup failure.
-	if cfg.SharedNatsURL != "" {
+	if unverifiedLegacyEventsEnabled() && cfg.SharedNatsURL != "" {
+		log.Warn().Msg("unsigned GDPR ownership-transfer consumer enabled for insecure development")
 		sharedOpts := []nats.Option{nats.Name("documents-api-gdpr-sub")}
 		if cfg.SharedNatsToken != "" {
 			sharedOpts = append(sharedOpts, nats.Token(cfg.SharedNatsToken))
 		}
 		if sharedNc, sErr := nats.Connect(cfg.SharedNatsURL, sharedOpts...); sErr != nil {
-			log.Warn().Err(sErr).Str("url", cfg.SharedNatsURL).Msg("shared NATS connect failed; GDPR ownership-transfer subscriber disabled")
+			log.Warn().Err(sErr).Msg("shared NATS connect failed; GDPR ownership-transfer subscriber disabled")
 		} else {
 			defer sharedNc.Close()
 			if subErr := gdpr.StartSubscriber(sharedNc, docRepo); subErr != nil {
@@ -98,7 +112,7 @@ func main() {
 			}
 		}
 	} else {
-		log.Warn().Msg("NATS_SHARED_URL unset; GDPR ownership-transfer subscriber disabled")
+		log.Warn().Msg("GDPR ownership-transfer subscriber disabled until signed producer-scoped envelopes are available")
 	}
 	// Phase A · A1.5 — usage + audit publisher. Logs-only on connect
 	// failure (the existing nc above is already required, so failure
@@ -110,14 +124,18 @@ func main() {
 	// though no call site forwards it yet.
 	// Per-user authz facade client (user-core). Resolves a viewer's explicit
 	// document grants so List/Get can enforce ownership at the source.
-	authzClient := userauthz.New(cfg.UserCoreURL, cfg.InternalAPIKey)
-	docHandler := handler.NewDocumentHandler(docRepo, publisher, authzClient)
+	authzClient := userauthz.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
+	docHandler := handler.NewDocumentHandler(docRepo, authzClient)
 	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo, docRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`
 	// every 500ms with FOR UPDATE SKIP LOCKED so multiple replicas don't
 	// double-publish. Honors `ctx.Done()` for graceful shutdown.
-	events.NewOutboxPublisher(pool, nc).Start(ctx)
+	outboxPublisher, err := events.NewOutboxPublisher(pool, nc, eventSigner)
+	if err != nil {
+		log.Fatal().Err(err).Msg("documents outbox publisher unavailable")
+	}
+	outboxPublisher.Start(ctx)
 
 	// NOTE: the legacy shared-NATS "quarry.documents.crawled" subscriber was
 	// removed. Quarry-v2 never published that subject (it emits quarry.run.* /
@@ -137,27 +155,26 @@ func main() {
 	r.Get("/readyz", handler.Readyz)
 	r.Method("GET", "/metrics", metrics.Handler())
 
-	// Phase A · A1.2 — observe-mode authctx middleware. Decodes the
-	// auth-core JWT (unverified, observe-only) and stuffs `Claims` into
-	// the request context. Once every velion call site mints an
-	// audience-scoped JWT we flip AUTHCTX_ENFORCE=1 — at that point
-	// signature verification kicks in and the legacy X-Org-ID header
-	// stops being trusted.
-	authctxMiddleware := authctx.Middleware(authctx.Config{
+	authConfig := authctx.Config{
 		Audience:       "data-plane",
 		JWKSURL:        envOrDefault("AUTH_CORE_JWKS_URL", "http://auth-core:3011/api/convex-auth/jwks"),
 		ExpectedIssuer: envOrDefault("AUTH_CORE_ISSUER", "http://auth-core:3011/api/convex-auth"),
-	})
+	}
+	if err := authctx.Validate(authConfig); err != nil {
+		log.Fatal().Err(err).Msg("JWT verification configuration invalid")
+	}
+	authctxMiddleware := authctx.Middleware(authConfig)
 
 	r.Route("/v1/documents", func(r chi.Router) {
-		r.Use(internalAuthMiddleware(cfg.InternalAPIKey))
 		r.Use(authctxMiddleware)
 		r.Use(handler.OrgIDMiddleware)
-		r.Get("/", docHandler.List)
-		r.Post("/", docHandler.Create)
-		r.Post("/bulk", docHandler.BulkIngest)
-		r.Get("/{documentID}", docHandler.Get)
-		r.Delete("/{documentID}", docHandler.Delete)
+		read := r.With(authctx.RequireServiceScope("documents:read"))
+		write := r.With(authctx.RequireServiceScope("documents:write"))
+		read.Get("/", docHandler.List)
+		write.Post("/", docHandler.Create)
+		write.Post("/bulk", docHandler.BulkIngest)
+		read.Get("/{documentID}", docHandler.Get)
+		write.Delete("/{documentID}", docHandler.Delete)
 	})
 
 	// U1-2 (velion ui-ux-velion-gap.md §10): distinct sources facet for the
@@ -165,19 +182,18 @@ func main() {
 	// `documents` with their source URL; the answer to "how many sources
 	// do I have" is COUNT(DISTINCT source) here, not anywhere in Quarry.
 	r.Route("/v1/sources", func(r chi.Router) {
-		r.Use(internalAuthMiddleware(cfg.InternalAPIKey))
 		r.Use(authctxMiddleware)
 		r.Use(handler.OrgIDMiddleware)
-		r.Get("/", docHandler.Sources)
+		r.With(authctx.RequireServiceScope("documents:read")).Get("/", docHandler.Sources)
 	})
 
 	r.Route("/v1/source-objects", func(r chi.Router) {
-		r.Use(internalAuthMiddleware(cfg.InternalAPIKey))
 		r.Use(authctxMiddleware)
 		r.Use(handler.OrgIDMiddleware)
-		r.Get("/duplicates", sourceObjectHandler.Duplicates)
-		r.Post("/", sourceObjectHandler.Upsert)
-		r.Post("/delete", sourceObjectHandler.Delete)
+		r.With(authctx.RequireServiceScope("documents:read")).Get("/duplicates", sourceObjectHandler.Duplicates)
+		write := r.With(authctx.RequireServiceScope("documents:write"))
+		write.Post("/", sourceObjectHandler.Upsert)
+		write.Post("/delete", sourceObjectHandler.Delete)
 	})
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
@@ -200,6 +216,11 @@ func main() {
 	srv.Shutdown(shutdownCtx)
 }
 
+func unverifiedLegacyEventsEnabled() bool {
+	return os.Getenv("ALLOW_UNVERIFIED_LEGACY_EVENTS") == "1" &&
+		os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1"
+}
+
 // envOrDefault reads an environment variable or returns the supplied
 // fallback. Used to wire the Phase A · A1.2 authctx middleware without
 // dragging an extra config-struct field through the codebase before the
@@ -210,32 +231,4 @@ func envOrDefault(name, fallback string) string {
 		return fallback
 	}
 	return v
-}
-
-func internalAuthMiddleware(expected string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if expected == "" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			provided := r.Header.Get("X-Internal-Api-Key")
-			if provided == "" {
-				provided = r.Header.Get("X-Internal-Key")
-			}
-			if provided == "" {
-				provided = r.Header.Get("X-Api-Key")
-			}
-
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
 }

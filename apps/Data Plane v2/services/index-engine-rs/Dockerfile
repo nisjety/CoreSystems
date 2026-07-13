@@ -3,9 +3,9 @@
 # See services/retrieval-engine-rs/Dockerfile for design notes.
 # Build context: project root.
 
-FROM rust:1-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.97-bookworm@sha256:974d873357408b6ececac8729285204664e23f5aab21a34e353ae5bf9bb899a2 AS chef
 ARG DEBIAN_FRONTEND=noninteractive
-ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=git \
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120 \
     CARGO_HTTP_MULTIPLEXING=false
@@ -21,17 +21,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         exit 1; \
     fi; \
     rm -f /tmp/apt-install.log
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    set -e; \
-    for i in 1 2 3 4 5; do \
-        if cargo install cargo-chef --locked --version 0.1.77; then \
-            exit 0; \
-        fi; \
-        echo "cargo-chef install retry $i"; \
-        sleep 8; \
-    done; \
-    exit 1
 WORKDIR /build
 
 FROM chef AS planner
@@ -58,6 +47,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp target/release/index-engine /usr/local/bin/index-engine
 
 FROM debian:bookworm-slim AS runtime
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
+      org.opencontainers.image.created=$BUILD_DATE
+ENV SOURCE_REVISION=$SOURCE_REVISION BUILD_DATE=$BUILD_DATE
 ARG DEBIAN_FRONTEND=noninteractive
 RUN set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
@@ -70,7 +64,8 @@ RUN set -e; \
     fi; \
     rm -f /tmp/apt-install.log; \
     rm -rf /var/lib/apt/lists/*
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin dpv2
+RUN groupadd --gid 10001 dpv2 \
+    && useradd --uid 10001 --gid dpv2 --no-create-home --shell /usr/sbin/nologin dpv2
 USER dpv2
 
 COPY --from=builder /usr/local/bin/index-engine /usr/local/bin/index-engine

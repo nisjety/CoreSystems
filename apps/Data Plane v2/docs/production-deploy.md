@@ -1,8 +1,20 @@
 # Data Plane v2 — production deployment runbook
 
 > Operator-facing reference for shipping DPv2 to Kubernetes (or a managed
-> equivalent). Companion to `docs/operations.md` (local stack) and
+> equivalent). Companion to `../DATA_PLANE_DEEP_DIVE.md` (current runtime
+> shape; local stack is run via the plane `Makefile`'s `make up`) and
 > `docs/gap-data.md` (closure log).
+
+> **Verified 2026-07-10**: Re-checked against live containers and source.
+> Container ports, the `MODEL_PLANE_AI_CORE_GRPC_URL` default, and
+> `make migrate-up` all match current `docker-compose.yml`/`Makefile`. Two
+> copy-pasteable commands in this doc did not match the actual Makefile/Cargo
+> target names (fixed below: `make smoke`, `cargo run --bin dlq_replay`), and
+> the `docs/operations.md` companion reference pointed at a file that does
+> not exist in this plane (repointed above). Separately, note that no
+> Kubernetes manifests exist yet anywhere in this plane (`manifests/` and
+> `infra/` hold data/observability config only) — this runbook is
+> forward-looking guidance, not a description of an already-deployed cluster.
 
 ## Topology
 
@@ -77,14 +89,16 @@ commit values.
    `dpv2_postgres_pool_saturation`.
 3. **Full rollout** if canary metrics stay green: rolling update with
    `maxSurge=1, maxUnavailable=0`.
-4. **Smoke** `make smoke-test` against the production ingress.
+4. **Smoke** `make smoke` (runs `scripts/smoke-test.sh`) against the
+   production ingress.
 
 ## Observability checks
 
 - `dpv2_postgres_pool_saturation` ≥ 0.8 → page (§16.2.7).
 - `dpv2_retrieve_latency_seconds{quantile="0.95"}` > 1.5s → warn.
 - `dpv2_dlq_messages_total` rate > 1/min → page (§16.2.4 — replay via
-  `cargo run --bin dlq-replay`).
+  `cargo run --manifest-path services/retrieval-engine-rs/Cargo.toml --bin
+  dlq_replay -- ...`; the bin target is `dlq_replay`, not `dlq-replay`).
 - `dpv2_rate_limit_429_total` rate > 10/min/org → notify org owner.
 
 ## Incident playbook (high level)

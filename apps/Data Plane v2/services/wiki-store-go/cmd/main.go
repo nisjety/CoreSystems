@@ -19,7 +19,9 @@ import (
 	"google.golang.org/grpc"
 
 	wikipb "github.com/triodelab/dataplane/gen/go/wiki/v1"
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/config"
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/eventauth"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/events"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/grpcserver"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/handler"
@@ -33,6 +35,19 @@ func main() {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Str("service", "wiki-store-go").Logger()
 
 	cfg := config.Load()
+	if err := cfg.ValidateEventSecurity(); err != nil {
+		log.Fatal().Err(err).Msg("wiki event security configuration invalid")
+	}
+	verifier, err := authctx.NewVerifier(authctx.Config{
+		Audience:      cfg.JWTAudience,
+		Issuer:        cfg.JWTIssuer,
+		PublicKeyFile: cfg.JWTPublicKeyFile,
+		JWKSURL:       cfg.JWKSURL,
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("JWT verification configuration invalid")
+	}
+	authMiddleware := authctx.Middleware(verifier)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -56,18 +71,37 @@ func main() {
 
 	wikiRepo := repo.NewWikiRepo(pool)
 
-	// §16.3.8 — attach a NATS publisher so CreatePage / CreateVersion emit
-	// `dataplane.wiki.version.published`. Empty NatsURL keeps the repo
-	// silent (publisher = nil), useful in local dev without NATS.
+	// §16.3.8 — attach the mandatory signed NATS publisher so CreatePage /
+	// CreateVersion emit `dataplane.wiki.version.published`. Production
+	// posture was validated above and cannot silently disable this boundary.
 	if cfg.NatsURL != "" {
-		nc, err := nats.Connect(cfg.NatsURL)
+		privateKey, err := os.ReadFile(cfg.EventSigningPrivateKeyPath)
 		if err != nil {
-			log.Warn().Err(err).Str("url", cfg.NatsURL).Msg("NATS connect failed; wiki publish events disabled")
-		} else {
-			defer nc.Close()
-			wikiRepo.SetPublisher(events.NewPublisher(nc))
-			log.Info().Str("url", cfg.NatsURL).Msg("wiki publisher attached")
+			log.Fatal().Err(err).Msg("wiki event signing key unavailable")
 		}
+		signer, err := eventauth.NewSigner(privateKey)
+		if err != nil {
+			log.Fatal().Err(err).Msg("wiki event signing key invalid")
+		}
+		natsOptions := []nats.Option{nats.Name("wiki-store")}
+		if cfg.NatsToken != "" {
+			natsOptions = append(natsOptions, nats.Token(cfg.NatsToken))
+		}
+		nc, err := nats.Connect(cfg.NatsURL, natsOptions...)
+		if err != nil {
+			log.Fatal().Err(err).Msg("NATS connect failed")
+		}
+		defer nc.Close()
+		publisher, err := events.NewPublisher(nc, signer)
+		if err != nil {
+			log.Fatal().Err(err).Msg("acknowledged wiki publisher initialization failed")
+		}
+		outbox, err := events.NewOutboxPublisher(pool, publisher)
+		if err != nil {
+			log.Fatal().Err(err).Msg("wiki outbox initialization failed")
+		}
+		outbox.Start(ctx)
+		log.Info().Msg("signed acknowledged wiki outbox publisher attached")
 	}
 
 	wikiHandler := handler.NewWikiHandler(wikiRepo)
@@ -83,31 +117,7 @@ func main() {
 	r.Get("/readyz", handler.Readyz)
 	r.Method("GET", "/metrics", metrics.Handler())
 
-	r.Route("/v1/wiki", func(r chi.Router) {
-		r.Use(handler.OrgIDMiddleware)
-		r.Get("/operating-map", wikiHandler.GetOperatingMap)
-		r.Post("/operating-map/proposals", wikiHandler.SubmitOperatingMapProposal)
-		r.Post("/operating-map/proposals/{proposalID}/review", wikiHandler.ReviewOperatingMapProposal)
-		r.Post("/operating-map/agent-blueprints", wikiHandler.CreateOperatingMapBlueprintSuggestion)
-		r.Post("/operating-map/refresh", wikiHandler.RefreshOperatingMap)
-		r.Post("/pages", wikiHandler.CreatePage)
-		// Wave 3.1 / Wave 11.C-b — paginated list-all-pages for velion sidebar.
-		r.Get("/pages", wikiHandler.ListPages)
-		r.Get("/pages/by-path", wikiHandler.GetPageByPath)
-		r.Get("/pages/{pageID}", wikiHandler.GetPage)
-		r.Post("/pages/{pageID}/versions", wikiHandler.UpdateVersion)
-		r.Get("/pages/{pageID}/versions", wikiHandler.ListVersions)
-		r.Get("/pages/{pageID}/diff", wikiHandler.DiffVersions)
-		r.Get("/pages/{pageID}/backlinks", wikiHandler.GetBacklinks)
-		r.Post("/pages/{pageID}/proposals", wikiHandler.SubmitProposal)
-		r.Post("/proposals/review", wikiHandler.ReviewProposal)
-		r.Post("/pages/{pageID}/source-logs", wikiHandler.CreateSourceLog)
-		r.Get("/pages/{pageID}/source-logs", wikiHandler.ListSourceLogs)
-		r.Post("/pages/{pageID}/maintenance-logs", wikiHandler.CreateMaintenanceLog)
-		r.Get("/pages/{pageID}/maintenance-logs", wikiHandler.ListMaintenanceLogs)
-		// D4+D5 spec §3.4: batch ingest of lint findings (orphan/stale/weak-citation/contradiction).
-		r.Post("/maintenance/sweep", wikiHandler.MaintenanceSweep)
-	})
+	handler.MountRoutes(r, authMiddleware, wikiHandler)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r}
@@ -125,7 +135,7 @@ func main() {
 	if gerr != nil {
 		log.Fatal().Err(gerr).Str("addr", grpcAddr).Msg("grpc listen failed")
 	}
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(authctx.UnaryServerInterceptor(verifier)))
 	wikipb.RegisterWikiServiceServer(grpcSrv, grpcserver.New(wikiRepo))
 	go func() {
 		log.Info().Str("addr", grpcAddr).Msg("wiki-store-go gRPC starting")

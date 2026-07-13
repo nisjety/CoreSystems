@@ -1,0 +1,31 @@
+services:
+  authority-mock:
+    image: node:20-alpine
+    restart: "no"
+    init: true
+    command: ["node", "/mock/authority-mock.mjs"]
+    environment:
+      CONTROL_POLICY_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:?required}
+      CONTROL_POLICY_BEARER: ${ISOLATED_CONTROL_POLICY_BEARER:?required}
+      USER_CORE_RETRIEVAL_TOKEN: ${USER_CORE_RETRIEVAL_TOKEN:?required}
+      USER_CORE_DOCUMENTS_TOKEN: ${USER_CORE_DOCUMENTS_TOKEN:?required}
+    volumes:
+      - ./tests/e2e/isolated/authority-mock.mjs:/mock/authority-mock.mjs:ro
+      - ${ISOLATED_JWKS_FILE:?required}:/fixtures/jwks.json:ro
+    expose: ["3011", "3012"]
+    networks:
+      inter-plane-bus:
+        aliases: ["auth-core", "user-core"]
+
+  retrieval-engine:
+    environment:
+      EMBEDDING_PROVIDER: deterministic_test
+      ALLOW_INSECURE_DEV_DEFAULTS: "1"
+      ISOLATED_E2E: "1"
+      JWT_REQUIRED_ISSUER: http://auth-core:3011/api/convex-auth
+    volumes:
+      - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/app/keys/convex-auth.pub:ro
+
+  quickwit-adapter:
+    volumes:
+      - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/app/keys/convex-auth.pub:ro

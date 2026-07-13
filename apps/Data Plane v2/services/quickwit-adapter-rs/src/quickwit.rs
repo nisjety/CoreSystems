@@ -88,6 +88,18 @@ impl QuickwitClient {
     }
 
     pub async fn ingest(&self, docs: &[QuickwitDocument]) -> anyhow::Result<()> {
+        self.ingest_with_commit(docs, "auto").await
+    }
+
+    pub async fn ingest_rebuild_batch(&self, docs: &[QuickwitDocument]) -> anyhow::Result<()> {
+        self.ingest_with_commit(docs, "force").await
+    }
+
+    async fn ingest_with_commit(
+        &self,
+        docs: &[QuickwitDocument],
+        commit: &str,
+    ) -> anyhow::Result<()> {
         if docs.is_empty() {
             return Ok(());
         }
@@ -99,8 +111,8 @@ impl QuickwitClient {
         }
 
         let url = format!(
-            "{}/api/v1/{}/ingest?commit=auto",
-            self.base_url, self.index_id
+            "{}/api/v1/{}/ingest?commit={commit}",
+            self.base_url, self.index_id,
         );
         let response = self
             .http
@@ -119,6 +131,38 @@ impl QuickwitClient {
             response.status(),
             response.text().await.unwrap_or_default()
         )
+    }
+
+    pub async fn count_documents(&self, org_id: Option<&str>) -> anyhow::Result<u64> {
+        let query = org_id
+            .map(|org| format!("org_id:{}", quote_query_value(org)))
+            .unwrap_or_else(|| "*".to_string());
+        self.count_query(&query).await
+    }
+
+    pub async fn count_rebuild_batch(&self, batch_id: &str) -> anyhow::Result<u64> {
+        self.count_query(&format!("rebuild_batch_id:{}", quote_query_value(batch_id)))
+            .await
+    }
+
+    async fn count_query(&self, query: &str) -> anyhow::Result<u64> {
+        let url = format!("{}/api/v1/{}/search", self.base_url, self.index_id);
+        let response = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({"query": query, "max_hits": 0}))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Quickwit rebuild preflight failed with status {}",
+                response.status()
+            );
+        }
+        let body: serde_json::Value = response.json().await?;
+        body.get("num_hits")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("Quickwit rebuild preflight omitted num_hits"))
     }
 
     pub async fn delete_by_query(&self, query: &str) -> anyhow::Result<()> {

@@ -18,6 +18,14 @@ use crate::trace;
 
 pub type AppState = Arc<RetrievalPipeline>;
 
+fn pin_request_org(
+    auth: Option<&axum::extract::Extension<crate::authz::AuthContext>>,
+    org_id: &mut String,
+) -> Result<(), AppError> {
+    crate::authz::pin_org_from_ctx(auth.map(|extension| &extension.0), org_id)
+        .map_err(|_| AppError::forbidden("authenticated tenant does not match requested tenant"))
+}
+
 /// Resolve the viewer identity + their explicit document grants for the by-id
 /// retrieval endpoints (chunks/sources/freshness). The viewer comes only from the
 /// authenticated `AuthContext` — never a request body — and grants come from the
@@ -44,7 +52,16 @@ async fn resolve_viewer_grants(
     }
     let viewer = auth.and_then(|ext| ext.user_id.clone());
     let granted = match &viewer {
-        Some(uid) => pipeline.visibility.visible_documents(org_id, uid).await,
+        Some(uid) => {
+            pipeline
+                .visibility
+                .visible_documents(
+                    org_id,
+                    uid,
+                    auth.and_then(|ext| ext.verified_bearer.as_deref()),
+                )
+                .await
+        }
         None => Vec::new(),
     };
     (viewer, granted)
@@ -53,8 +70,7 @@ async fn resolve_viewer_grants(
 /// Wave 3 §15 — full auth + AuthContext + policy + audit-log middleware.
 ///
 /// Flow:
-///  1. Identify the caller: API key (no user) OR JWT (decode `sub` + `org_id`
-///     claims).
+///  1. Identify the caller from a verified JWT (`sub` + `org_id` claims).
 ///  2. Build `AuthContext` with `request_id` and `org_id`.
 ///  3. JWT path only — verify `X-Org-ID` header matches `claims.org_id`
 ///     (rejects org-claim spoofing).
@@ -83,66 +99,15 @@ async fn auth_middleware(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // ── Step 1: identify caller ────────────────────────────────────────
-    let api_key_ok = match &state.config.internal_api_key {
-        Some(expected) if !expected.is_empty() => {
-            let provided = req
-                .headers()
-                .get("x-api-key")
-                .or_else(|| req.headers().get("x-internal-api-key"))
-                .or_else(|| req.headers().get("x-internal-key"))
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            provided == expected
-        }
-        // Fail closed: a missing/empty configured key no longer auto-accepts
-        // (that was a fail-open hole). The Bearer-JWT branch below still runs,
-        // so a valid JWT is accepted even when no API key is configured.
-        _ => false,
-    };
-
     let header_org_id = req
         .headers()
         .get("x-org-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    // The AuthContext we'll build varies by which path admits the request.
-    let auth_ctx: AuthContext = if api_key_ok {
-        // API-key path. org_id from header (trusted internal caller). When the
-        // gateway forwards x-user-id alongside the internal key, thread the
-        // viewer identity so retrieval grounds AS that user — per-user OWNERSHIP
-        // enforcement is ALWAYS-ON when a user_id is present, decoupled from
-        // CONTROL_PLANE_ENFORCEMENT. Without x-user-id, fall back to org-scoped.
-        let org_id = header_org_id.clone().unwrap_or_default();
-        let header_user_id = req
-            .headers()
-            .get("x-user-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        match header_user_id {
-            Some(uid) => {
-                let mut ctx = AuthContext {
-                    user_id: Some(uid.clone()),
-                    org_id: org_id.clone(),
-                    auth_method: AuthMethod::ApiKey,
-                    scopes: vec![],
-                    acl: crate::authz::EffectiveAcl::allow_all(),
-                    request_id: request_id.clone(),
-                };
-                // Coarse org-axis ACL stays gated by CONTROL_PLANE_ENFORCEMENT via
-                // the policy client; resolve it when membership is known. We do
-                // NOT deny on the api-key path (trusted internal caller) — per-user
-                // ownership is enforced at the step-6 post-filter regardless.
-                let decision = state.policy.resolve(&uid, &org_id).await;
-                if decision.is_member {
-                    ctx.acl = decision.acl;
-                }
-                ctx
-            }
-            None => AuthContext::org_scoped(org_id, AuthMethod::ApiKey, request_id.clone()),
-        }
-    } else if let Some(token) = bearer_token(req.headers()) {
+    // A fleet-shared API key is not an identity and can no longer authorize a
+    // tenant. User and service callers both use audience-scoped signed tokens.
+    let auth_ctx: AuthContext = if let Some(token) = bearer_token(req.headers()) {
         match verify_jwt(&token).await {
             Ok(claims) => {
                 let claims_org = claims.org_id.clone().unwrap_or_default();
@@ -172,6 +137,7 @@ async fn auth_middleware(
                     scopes: claims.scopes.clone(),
                     acl: crate::authz::EffectiveAcl::allow_all(),
                     request_id: request_id.clone(),
+                    verified_bearer: Some(token.clone()),
                 };
 
                 // §15-B + §15-C: PolicyClient lookup.
@@ -260,6 +226,7 @@ async fn audit_unauthorized(
         scopes: vec![],
         acl: crate::authz::EffectiveAcl::default(),
         request_id: request_id.to_string(),
+        verified_bearer: None,
     };
     crate::audit::record_access(
         &state.pool,
@@ -429,9 +396,15 @@ async fn retrieve(
 
 async fn get_trace(
     State(pipeline): State<AppState>,
+    auth: axum::extract::Extension<crate::authz::AuthContext>,
     Path(trace_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let detail = trace::get_trace(&pipeline.pool, &trace_id, "").await?;
+    let actor = if auth.scopes.iter().any(|scope| scope == "org:data:read_all") {
+        None
+    } else {
+        auth.user_id.as_deref()
+    };
+    let detail = trace::get_trace(&pipeline.pool, &trace_id, &auth.org_id, actor).await?;
     match detail {
         Some(d) => Ok(Json(serde_json::to_value(d).unwrap()).into_response()),
         None => Ok((
@@ -454,7 +427,7 @@ struct SemanticCacheSearchRequest {
     /// is ZDR content and its embedding must not egress to a retaining provider;
     /// the embed layer's egress guard enforces it. Defaults to non-ZDR.
     #[serde(default)]
-    zdr_mode: Option<String>,
+    zdr_mode: Option<ZdrMode>,
     /// Authorization scope that partitions the cache (PR-A). The Model Plane
     /// gateway MUST pass the caller's per-user visible-document-set hash, or the
     /// literal `"org-shared"` when grounding used only org-public docs. Absent
@@ -471,7 +444,7 @@ struct SemanticCacheStoreRequest {
     prompt: String,
     response: String,
     #[serde(default)]
-    zdr_mode: Option<String>,
+    zdr_mode: Option<ZdrMode>,
     /// See `SemanticCacheSearchRequest::scope_key`. For `store`, the gateway
     /// should pass the hash of the visible-document set the response was grounded
     /// on (or `"org-shared"`); it must match the scope used at search time.
@@ -479,8 +452,8 @@ struct SemanticCacheStoreRequest {
     scope_key: Option<String>,
 }
 
-fn is_ephemeral_zdr(zdr_mode: &Option<String>) -> bool {
-    zdr_mode.as_deref() == Some("ephemeral")
+fn is_restrictive_zdr(zdr_mode: Option<ZdrMode>) -> bool {
+    zdr_mode.unwrap_or_default().restricts_egress()
 }
 
 async fn semantic_cache_search(
@@ -489,7 +462,7 @@ async fn semantic_cache_search(
     Json(mut req): Json<SemanticCacheSearchRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
-    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     let hit = crate::cache::semantic::search(
         &pipeline.qdrant,
         &pipeline.embedder,
@@ -497,7 +470,7 @@ async fn semantic_cache_search(
         &req.org_id,
         &req.model,
         &req.prompt,
-        is_ephemeral_zdr(&req.zdr_mode),
+        is_restrictive_zdr(req.zdr_mode),
         req.scope_key.as_deref(),
     )
     .await?;
@@ -517,7 +490,7 @@ async fn semantic_cache_store(
     Json(mut req): Json<SemanticCacheStoreRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
-    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     crate::cache::semantic::store(
         &pipeline.qdrant,
         &pipeline.embedder,
@@ -526,7 +499,7 @@ async fn semantic_cache_store(
         &req.model,
         &req.prompt,
         &req.response,
-        is_ephemeral_zdr(&req.zdr_mode),
+        is_restrictive_zdr(req.zdr_mode),
         req.scope_key.as_deref(),
     )
     .await?;
@@ -539,22 +512,132 @@ struct SemanticCachePruneRequest {
     /// `SEMANTIC_CACHE_TTL_SECS`. A cron can POST this on a schedule.
     #[serde(default)]
     older_than_secs: Option<i64>,
+    #[serde(default)]
+    org_id: Option<String>,
+    #[serde(default = "default_true")]
+    dry_run: bool,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 async fn semantic_cache_prune(
     State(pipeline): State<AppState>,
+    auth: axum::extract::Extension<crate::authz::AuthContext>,
     body: Option<Json<SemanticCachePruneRequest>>,
 ) -> Result<impl IntoResponse, AppError> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
+    let admin = authorize_admin_mutation(
+        &auth,
+        req.org_id.as_deref(),
+        "data:admin:cache-prune",
+        req.dry_run,
+        &req.reason,
+        req.idempotency_key.as_deref(),
+    )?;
     let older_than = req
         .older_than_secs
         .unwrap_or(pipeline.config.semantic_cache_ttl_secs as i64)
         .max(0);
-    let pruned =
-        crate::cache::semantic::prune(&pipeline.qdrant, &pipeline.config, older_than).await?;
-    Ok(Json(
-        serde_json::json!({ "pruned": pruned, "older_than_secs": older_than }),
-    ))
+    let mut tx = if admin.dry_run {
+        None
+    } else {
+        let mut tx = pipeline.pool.begin().await?;
+        let lock_key = format!("semantic_cache_prune:{}", admin.org_id);
+        let locked: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(&lock_key)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !locked {
+            return Err(AppError::conflict(
+                "another cache prune is already running for this tenant",
+            ));
+        }
+        let key = admin
+            .idempotency_key
+            .as_deref()
+            .expect("mutation validation requires idempotency key");
+        let previous: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT payload FROM admin_audit_log
+             WHERE org_id = $1 AND actor = $2 AND action = 'semantic_cache_prune'
+               AND outcome = 'ok' AND payload->>'idempotency_key' = $3
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&admin.org_id)
+        .bind(&admin.actor)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(payload) = previous {
+            tx.rollback().await?;
+            return Ok(Json(serde_json::json!({
+                "org_id": admin.org_id,
+                "idempotent_replay": true,
+                "result": payload,
+            })));
+        }
+        Some(tx)
+    };
+
+    let pruned = crate::cache::semantic::prune(
+        &pipeline.qdrant,
+        &pipeline.config,
+        &admin.org_id,
+        older_than,
+        admin.dry_run,
+    )
+    .await?;
+    let payload = serde_json::json!({
+        "reason": admin.reason,
+        "idempotency_key": admin.idempotency_key,
+        "dry_run": admin.dry_run,
+        "older_than_secs": older_than,
+        "matched": pruned,
+        "pruned": if admin.dry_run { 0 } else { pruned },
+    });
+    if let Some(mut tx) = tx.take() {
+        sqlx::query(
+            "INSERT INTO admin_audit_log
+             (org_id, actor, action, target_kind, target_id, request_id, payload, outcome)
+             VALUES ($1, $2, 'semantic_cache_prune', 'org', $1, $3, $4, 'ok')",
+        )
+        .bind(&admin.org_id)
+        .bind(&admin.actor)
+        .bind(&admin.request_id)
+        .bind(&payload)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    } else {
+        crate::audit::record_admin(
+            &pipeline.pool,
+            crate::audit::AdminEvent {
+                org_id: Some(&admin.org_id),
+                actor: &admin.actor,
+                action: "semantic_cache_prune",
+                target_kind: Some("org"),
+                target_id: Some(&admin.org_id),
+                request_id: Some(&admin.request_id),
+                payload: Some(payload),
+                outcome: "ok",
+                error: None,
+            },
+        )
+        .await;
+    }
+    Ok(Json(serde_json::json!({
+        "org_id": admin.org_id,
+        "matched": pruned,
+        "pruned": if admin.dry_run { 0 } else { pruned },
+        "dry_run": admin.dry_run,
+        "older_than_secs": older_than,
+    })))
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // D5: Graph expansion retrieval
@@ -578,7 +661,7 @@ async fn retrieve_graph(
     Json(mut req): Json<GraphRetrieveRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
-    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     // Per-user ownership gate (mirrors the dense/sparse post-filter): graph nodes
     // are filtered to those derived from documents the viewer can see. No viewer
     // → org-scoped (legacy). Closes the graph-grounding leak (4-path test).
@@ -626,8 +709,28 @@ async fn retrieve_wiki(
     Json(mut req): Json<WikiRetrieveRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
-    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
-    let pages = wiki::wiki_search(&pipeline.pool, &req.query, &req.org_id, req.limit).await?;
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    let allowed_workspaces = auth
+        .as_ref()
+        .map(|extension| {
+            if viewer.is_none() {
+                Vec::new()
+            } else {
+                extension.acl.workspaces.clone()
+            }
+        })
+        .unwrap_or_default();
+    let pages = wiki::wiki_search(
+        &pipeline.pool,
+        &req.query,
+        &req.org_id,
+        req.limit,
+        viewer.as_deref(),
+        &allowed_workspaces,
+        &granted,
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "pages": pages,
         "count": pages.len(),
@@ -653,12 +756,15 @@ async fn retrieve_contradictions(
     Json(mut req): Json<ContradictionsRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
-    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     let results = contradictions::search_contradictions(
         &pipeline.pool,
         &req.org_id,
         req.query.as_deref(),
         req.limit,
+        viewer.as_deref(),
+        &granted,
     )
     .await?;
     Ok(Json(serde_json::json!({
@@ -688,15 +794,29 @@ async fn retrieve_timeline(
     Json(mut req): Json<TimelineRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
-    crate::authz::pin_org_from_ctx(auth.as_ref().map(|e| &e.0), &mut req.org_id);
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     if let Some(tid) = &req.trace_id {
-        let detail = timeline::replay_trace(&pipeline.pool, tid).await?;
+        let actor = auth.as_ref().and_then(|extension| {
+            if extension
+                .scopes
+                .iter()
+                .any(|scope| scope == "org:data:read_all")
+            {
+                None
+            } else {
+                extension.user_id.as_deref()
+            }
+        });
+        let detail = timeline::replay_trace(&pipeline.pool, tid, &req.org_id, actor).await?;
         return Ok(Json(serde_json::json!({"replay": detail})));
     }
 
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     let entries = timeline::temporal_search(
         &pipeline.pool,
         &req.org_id,
+        viewer.as_deref(),
+        &granted,
         req.before.as_deref(),
         req.after.as_deref(),
         req.limit,
@@ -718,6 +838,8 @@ struct PackRequest {
     #[serde(default = "default_pack_format")]
     context_format: String,
     top_n: Option<usize>,
+    #[serde(default)]
+    zdr_mode: Option<ZdrMode>,
 }
 
 fn default_pack_budget() -> usize {
@@ -727,18 +849,14 @@ fn default_pack_format() -> String {
     "json".to_string()
 }
 
-async fn retrieve_pack(
-    State(pipeline): State<AppState>,
-    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
-    Json(req): Json<PackRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    // Thread the authenticated viewer so the step-6 ownership gate applies to the
-    // context-pack path too (it runs through pipeline.retrieve). Without this the
-    // pack endpoint would ground on every org-visible doc regardless of owner.
-    let viewer = auth
-        .as_ref()
-        .and_then(|axum::extract::Extension(ctx)| ctx.user_id.clone());
-    let retrieval_req = RetrievalRequest {
+fn pack_retrieval_request(
+    mut req: PackRequest,
+    auth: &crate::authz::AuthContext,
+) -> Result<RetrievalRequest, AppError> {
+    crate::authz::pin_org_from_ctx(Some(auth), &mut req.org_id)
+        .map_err(|_| AppError::forbidden("authenticated tenant does not match requested tenant"))?;
+
+    let mut retrieval = RetrievalRequest {
         query: req.query,
         org_id: req.org_id,
         top_k: None,
@@ -746,19 +864,27 @@ async fn retrieve_pack(
         filters: RetrievalFiltersInput::default(),
         context_budget_tokens: Some(req.context_budget_tokens),
         context_format: Some(req.context_format),
-        zdr_mode: None,
-        user_id: viewer,
+        zdr_mode: req.zdr_mode,
+        user_id: None,
+        verified_bearer: None,
         query_expansion: None,
         reranker_model: None,
         mode_mix: None,
         agent_id: None,
-        admin_read_all: auth
-            .as_ref()
-            .map(|axum::extract::Extension(ctx)| {
-                ctx.scopes.iter().any(|s| s == "org:data:read_all")
-            })
-            .unwrap_or(false),
+        admin_read_all: false,
     };
+    auth.apply_to_request(&mut retrieval);
+    Ok(retrieval)
+}
+
+async fn retrieve_pack(
+    State(pipeline): State<AppState>,
+    axum::extract::Extension(auth): axum::extract::Extension<crate::authz::AuthContext>,
+    Json(req): Json<PackRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Claim tenant/user, ACL, admin visibility, and ZDR posture all flow through
+    // the same RetrievalRequest consumed by the canonical pipeline.
+    let retrieval_req = pack_retrieval_request(req, &auth)?;
     let resp = pipeline.retrieve(retrieval_req).await?;
     Ok(Json(serde_json::json!({
         "context_pack": resp.context_pack,
@@ -768,6 +894,16 @@ async fn retrieve_pack(
 }
 
 // D7: Source lookup
+const SOURCES_SQL: &str = "SELECT document_id, title, source, type, status, zdr_classification
+     FROM documents
+     WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))";
+
+const FRESHNESS_SQL: &str = "SELECT document_id, title, updated_at::TEXT, status
+     FROM documents
+     WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))";
+
 #[derive(serde::Deserialize)]
 struct SourcesRequest {
     org_id: String,
@@ -777,25 +913,21 @@ struct SourcesRequest {
 async fn retrieve_sources(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
-    Json(req): Json<SourcesRequest>,
+    Json(mut req): Json<SourcesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     if req.document_ids.is_empty() {
         return Ok(Json(serde_json::json!({"sources": []})));
     }
     // Per-user ownership: only return metadata for docs the viewer may see.
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
-        "SELECT document_id, title, source, type, status, zdr_classification
-         FROM documents
-         WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
-           AND ($3::text IS NULL OR owner_id = $3 OR visibility IN ('org','shared') OR document_id = ANY($4))",
-    )
-    .bind(&req.document_ids)
-    .bind(&req.org_id)
-    .bind(&viewer)
-    .bind(&granted)
-    .fetch_all(&pipeline.pool)
-    .await?;
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(SOURCES_SQL)
+        .bind(&req.document_ids)
+        .bind(&req.org_id)
+        .bind(&viewer)
+        .bind(&granted)
+        .fetch_all(&pipeline.pool)
+        .await?;
 
     let sources: Vec<serde_json::Value> = rows
         .into_iter()
@@ -824,21 +956,17 @@ struct FreshnessRequest {
 async fn retrieve_freshness(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
-    Json(req): Json<FreshnessRequest>,
+    Json(mut req): Json<FreshnessRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
-    let rows = sqlx::query_as::<_, (String, String, String, String)>(
-        "SELECT document_id, title, updated_at::TEXT, status
-         FROM documents
-         WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
-           AND ($3::text IS NULL OR owner_id = $3 OR visibility IN ('org','shared') OR document_id = ANY($4))",
-    )
-    .bind(&req.document_ids)
-    .bind(&req.org_id)
-    .bind(&viewer)
-    .bind(&granted)
-    .fetch_all(&pipeline.pool)
-    .await?;
+    let rows = sqlx::query_as::<_, (String, String, String, String)>(FRESHNESS_SQL)
+        .bind(&req.document_ids)
+        .bind(&req.org_id)
+        .bind(&viewer)
+        .bind(&granted)
+        .fetch_all(&pipeline.pool)
+        .await?;
 
     let now = chrono::Utc::now();
     let freshness: Vec<serde_json::Value> = rows
@@ -873,11 +1001,13 @@ async fn retrieve_freshness(
 // D7: Index versions
 async fn list_index_versions(
     State(pipeline): State<AppState>,
+    auth: axum::extract::Extension<crate::authz::AuthContext>,
 ) -> Result<impl IntoResponse, AppError> {
     let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<i32>, Option<i32>, Option<String>, String)>(
         "SELECT version_id, org_id, description, document_count, chunk_count, embedding_model, created_at::TEXT
-         FROM index_versions ORDER BY created_at DESC LIMIT 50"
+         FROM index_versions WHERE org_id = $1 ORDER BY created_at DESC LIMIT 50"
     )
+    .bind(&auth.org_id)
     .fetch_all(&pipeline.pool)
     .await?;
 
@@ -900,6 +1030,30 @@ async fn list_index_versions(
 }
 
 // retrieve.chunks — exact knowledge-unit lookup by ID or document
+const CHUNKS_BY_IDS_SQL: &str =
+    "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index, ku.content_hash, ku.embedding_status
+     FROM knowledge_units ku
+     JOIN documents d ON d.document_id = ku.document_id AND d.org_id = $2
+     WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
+       AND ($3::text IS NULL OR d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
+     ORDER BY ku.chunk_index";
+
+const CHUNKS_BY_DOCUMENT_SQL: &str =
+    "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index, ku.content_hash, ku.embedding_status
+     FROM knowledge_units ku
+     JOIN documents d ON d.document_id = ku.document_id AND d.org_id = $2
+     WHERE ku.document_id = $1 AND ku.org_id = $2 AND d.deleted_at IS NULL
+       AND ($5::text IS NULL OR d.owner_id = $5 OR d.visibility = 'org' OR d.document_id = ANY($6))
+     ORDER BY ku.chunk_index LIMIT $3 OFFSET $4";
+
+fn chunk_by_ids_sql() -> &'static str {
+    CHUNKS_BY_IDS_SQL
+}
+
+fn chunk_by_document_sql() -> &'static str {
+    CHUNKS_BY_DOCUMENT_SQL
+}
+
 #[derive(serde::Deserialize)]
 struct ChunksRequest {
     org_id: String,
@@ -918,20 +1072,16 @@ fn default_chunks_limit() -> i32 {
 async fn retrieve_chunks(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
-    Json(req): Json<ChunksRequest>,
+    Json(mut req): Json<ChunksRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     // Per-user ownership: gate at the SQL level so chunk TEXT for a document the
     // viewer cannot see is never even fetched (this endpoint returns raw content).
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     if let Some(kids) = &req.knowledge_ids {
         if !kids.is_empty() {
             let rows = sqlx::query_as::<_, (String, String, String, i32, String, String)>(
-                "SELECT ku.knowledge_id, ku.document_id, ku.chunk_text, ku.chunk_index, ku.content_hash, ku.embedding_status
-                 FROM knowledge_units ku
-                 JOIN documents d ON d.document_id = ku.document_id
-                 WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
-                   AND ($3::text IS NULL OR d.owner_id = $3 OR d.visibility IN ('org','shared') OR d.document_id = ANY($4))
-                 ORDER BY ku.chunk_index"
+                chunk_by_ids_sql(),
             )
             .bind(kids)
             .bind(&req.org_id)
@@ -957,12 +1107,7 @@ async fn retrieve_chunks(
 
     if let Some(did) = &req.document_id {
         let rows = sqlx::query_as::<_, (String, String, String, i32, String, String)>(
-            "SELECT ku.knowledge_id, ku.document_id, ku.chunk_text, ku.chunk_index, ku.content_hash, ku.embedding_status
-             FROM knowledge_units ku
-             JOIN documents d ON d.document_id = ku.document_id
-             WHERE ku.document_id = $1 AND ku.org_id = $2 AND d.deleted_at IS NULL
-               AND ($5::text IS NULL OR d.owner_id = $5 OR d.visibility IN ('org','shared') OR d.document_id = ANY($6))
-             ORDER BY ku.chunk_index LIMIT $3 OFFSET $4"
+            chunk_by_document_sql(),
         )
         .bind(did)
         .bind(&req.org_id)
@@ -993,6 +1138,84 @@ async fn retrieve_chunks(
 }
 
 // retrieve.compare — compare entities, sources, or document versions
+type EntityCompareRow = (String, String, String, f64, String, serde_json::Value);
+type RelationshipCompareRow = (String, String, String, String, f64);
+type DocumentCompareRow = (String, String, String, String, String, String, String);
+
+const ENTITY_COMPARE_SQL: &str =
+    "SELECT ge.entity_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0),
+            COALESCE(ge.provenance, ''),
+            CASE WHEN $3::text IS NULL THEN COALESCE(ge.source_refs, '[]')
+                 ELSE visible_refs.source_refs END
+     FROM graph_entities ge
+     LEFT JOIN LATERAL (
+         SELECT COALESCE(jsonb_agg(sr.knowledge_id), '[]'::jsonb) AS source_refs
+         FROM jsonb_array_elements_text(COALESCE(ge.source_refs, '[]')) AS sr(knowledge_id)
+         JOIN knowledge_units ku ON ku.knowledge_id = sr.knowledge_id AND ku.org_id = ge.org_id
+         JOIN documents d ON d.document_id = ku.document_id AND d.org_id = ge.org_id
+         WHERE d.deleted_at IS NULL
+           AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
+     ) visible_refs ON TRUE
+     WHERE ge.entity_id = ANY($1) AND ge.org_id = $2
+       AND ($3::text IS NULL OR (
+           jsonb_array_length(COALESCE(ge.source_refs, '[]')) > 0
+           AND jsonb_array_length(COALESCE(ge.source_refs, '[]')) =
+               jsonb_array_length(visible_refs.source_refs)
+       ))";
+
+const RELATIONSHIP_COMPARE_SQL: &str =
+    "SELECT gr.rel_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type,
+            COALESCE(gr.confidence, 0)
+     FROM graph_relationships gr
+     WHERE gr.org_id = $1
+       AND gr.entity_a_id = ANY($2) AND gr.entity_b_id = ANY($2)
+       AND ($3::text IS NULL OR (
+           jsonb_array_length(COALESCE(gr.source_refs, '[]')) > 0
+           AND NOT EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements_text(COALESCE(gr.source_refs, '[]')) AS sr(knowledge_id)
+               LEFT JOIN knowledge_units ku
+                 ON ku.knowledge_id = sr.knowledge_id AND ku.org_id = gr.org_id
+               LEFT JOIN documents d
+                 ON d.document_id = ku.document_id AND d.org_id = gr.org_id
+               WHERE ku.knowledge_id IS NULL OR d.document_id IS NULL
+                  OR d.deleted_at IS NOT NULL
+                  OR NOT COALESCE(
+                      d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4),
+                      FALSE
+                  )
+           )
+       ))";
+
+const DOCUMENT_COMPARE_SQL: &str =
+    "SELECT document_id, title, source, type, status, updated_at::TEXT, zdr_classification
+     FROM documents
+     WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))";
+
+fn entity_compare_sql() -> &'static str {
+    ENTITY_COMPARE_SQL
+}
+
+fn relationship_compare_sql() -> &'static str {
+    RELATIONSHIP_COMPARE_SQL
+}
+
+fn compared_document_ids(rows: &[DocumentCompareRow]) -> Vec<String> {
+    rows.iter().map(|row| row.0.clone()).collect()
+}
+
+#[cfg(test)]
+fn auxiliary_document_visibility_queries() -> [&'static str; 5] {
+    [
+        SOURCES_SQL,
+        FRESHNESS_SQL,
+        CHUNKS_BY_IDS_SQL,
+        CHUNKS_BY_DOCUMENT_SQL,
+        DOCUMENT_COMPARE_SQL,
+    ]
+}
+
 #[derive(serde::Deserialize)]
 struct CompareRequest {
     org_id: String,
@@ -1003,18 +1226,28 @@ struct CompareRequest {
 async fn retrieve_compare(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
-    Json(req): Json<CompareRequest>,
+    Json(mut req): Json<CompareRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
     match req.compare_type.as_str() {
         "entities" => {
-            let rows = sqlx::query_as::<_, (String, String, String, f64, String, serde_json::Value)>(
-                "SELECT entity_id, entity_type, entity_text, COALESCE(confidence, 0), COALESCE(provenance, ''), COALESCE(source_refs, '[]')
-                 FROM graph_entities WHERE entity_id = ANY($1) AND org_id = $2"
-            )
-            .bind(&req.ids)
-            .bind(&req.org_id)
-            .fetch_all(&pipeline.pool)
-            .await?;
+            let (viewer, granted) =
+                resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+            let rows = sqlx::query_as::<_, EntityCompareRow>(entity_compare_sql())
+                .bind(&req.ids)
+                .bind(&req.org_id)
+                .bind(&viewer)
+                .bind(&granted)
+                .fetch_all(&pipeline.pool)
+                .await?;
+
+            // Relationships are constrained to both the visible entity set and
+            // a source document the caller can see. Requested-but-hidden entity
+            // IDs therefore cannot be used as an existence oracle.
+            let visible_entity_ids: Vec<String> = rows
+                .iter()
+                .map(|(entity_id, ..)| entity_id.clone())
+                .collect();
 
             let entities: Vec<serde_json::Value> = rows
                 .into_iter()
@@ -1027,14 +1260,12 @@ async fn retrieve_compare(
                 .collect();
 
             // Cross-compare: find shared relationships
-            let shared_rels = if req.ids.len() >= 2 {
-                sqlx::query_as::<_, (String, String, String, String, f64)>(
-                    "SELECT rel_id, entity_a_id, entity_b_id, relation_type, COALESCE(confidence, 0)
-                     FROM graph_relationships
-                     WHERE org_id = $1 AND entity_a_id = ANY($2) AND entity_b_id = ANY($2)"
-                )
+            let shared_rels = if visible_entity_ids.len() >= 2 {
+                sqlx::query_as::<_, RelationshipCompareRow>(relationship_compare_sql())
                 .bind(&req.org_id)
-                .bind(&req.ids)
+                .bind(&visible_entity_ids)
+                .bind(&viewer)
+                .bind(&granted)
                 .fetch_all(&pipeline.pool)
                 .await?
                 .into_iter()
@@ -1054,17 +1285,18 @@ async fn retrieve_compare(
             // Per-user ownership: only compare docs the viewer may see.
             let (viewer, granted) =
                 resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
-            let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
-                "SELECT document_id, title, source, type, status, updated_at::TEXT, zdr_classification
-                 FROM documents WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
-                   AND ($3::text IS NULL OR owner_id = $3 OR visibility IN ('org','shared') OR document_id = ANY($4))"
-            )
-            .bind(&req.ids)
-            .bind(&req.org_id)
-            .bind(&viewer)
-            .bind(&granted)
-            .fetch_all(&pipeline.pool)
-            .await?;
+            let rows = sqlx::query_as::<_, DocumentCompareRow>(DOCUMENT_COMPARE_SQL)
+                .bind(&req.ids)
+                .bind(&req.org_id)
+                .bind(&viewer)
+                .bind(&granted)
+                .fetch_all(&pipeline.pool)
+                .await?;
+
+            // Count chunks only for rows already admitted by the canonical
+            // document visibility predicate. Binding the caller-supplied IDs
+            // directly would disclose the existence/size of hidden documents.
+            let visible_document_ids = compared_document_ids(&rows);
 
             let docs: Vec<serde_json::Value> = rows.into_iter().map(|(did, title, source, dtype, status, updated, zdr)| {
                 serde_json::json!({
@@ -1078,7 +1310,7 @@ async fn retrieve_compare(
                 "SELECT document_id, COUNT(*) FROM knowledge_units
                  WHERE document_id = ANY($1) AND org_id = $2 GROUP BY document_id",
             )
-            .bind(&req.ids)
+            .bind(&visible_document_ids)
             .bind(&req.org_id)
             .fetch_all(&pipeline.pool)
             .await?;
@@ -1101,89 +1333,129 @@ async fn retrieve_compare(
 // Response: { "orphan_doc_count": N, "orphan_chunk_count": N, "deleted_chunk_count": N, "dry_run": bool }
 #[derive(serde::Deserialize)]
 struct CleanupOrphansRequest {
-    org_id: String,
     #[serde(default)]
+    org_id: Option<String>,
+    #[serde(default = "default_true")]
     dry_run: bool,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+struct AuthorizedAdminMutation {
+    org_id: String,
+    actor: String,
+    request_id: String,
+    dry_run: bool,
+    reason: String,
+    idempotency_key: Option<String>,
+}
+
+fn authorize_admin_mutation(
+    ctx: &crate::authz::AuthContext,
+    requested_org_id: Option<&str>,
+    required_scope: &str,
+    dry_run: bool,
+    reason: &str,
+    idempotency_key: Option<&str>,
+) -> Result<AuthorizedAdminMutation, AppError> {
+    if !ctx.scopes.iter().any(|scope| scope == required_scope) {
+        return Err(AppError::forbidden("dedicated admin scope required"));
+    }
+    if requested_org_id
+        .map(str::trim)
+        .filter(|org| !org.is_empty())
+        .is_some_and(|org| org != ctx.org_id)
+    {
+        return Err(AppError::forbidden(
+            "admin operation tenant does not match verified claims",
+        ));
+    }
+    let reason = reason.trim();
+    if reason.len() < 8 || reason.len() > 500 {
+        return Err(AppError::bad_request(
+            "admin reason must be between 8 and 500 characters",
+        ));
+    }
+    let idempotency_key = idempotency_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned);
+    if !dry_run
+        && idempotency_key
+            .as_deref()
+            .is_none_or(|key| key.len() < 8 || key.len() > 200)
+    {
+        return Err(AppError::bad_request(
+            "idempotency_key of 8-200 characters is required for mutation",
+        ));
+    }
+    let actor = ctx
+        .user_id
+        .clone()
+        .ok_or_else(|| AppError::forbidden("verified admin user identity required"))?;
+    Ok(AuthorizedAdminMutation {
+        org_id: ctx.org_id.clone(),
+        actor,
+        request_id: ctx.request_id.clone(),
+        dry_run,
+        reason: reason.to_owned(),
+        idempotency_key,
+    })
 }
 
 async fn cleanup_orphans(
     State(pipeline): State<AppState>,
-    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    auth: axum::extract::Extension<crate::authz::AuthContext>,
     Json(req): Json<CleanupOrphansRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // §16.5.3 admin audit — resolve actor for the trail. If middleware
-    // attached an AuthContext we use its subject (user_id) or auth_method;
-    // otherwise we record "internal" so the row is still attributable.
-    let actor = auth
-        .as_ref()
-        .map(|axum::extract::Extension(c)| {
-            c.user_id
-                .clone()
-                .unwrap_or_else(|| format!("internal:{}", c.auth_method.as_str()))
-        })
-        .unwrap_or_else(|| "internal:unknown".to_string());
-    let request_id = auth
-        .as_ref()
-        .map(|axum::extract::Extension(c)| c.request_id.clone());
+    let admin = authorize_admin_mutation(
+        &auth,
+        req.org_id.as_deref(),
+        "data:admin:cleanup",
+        req.dry_run,
+        &req.reason,
+        req.idempotency_key.as_deref(),
+    )?;
 
-    if req.org_id.is_empty() {
+    if admin.dry_run {
+        let orphan_docs: Vec<(String,)> = sqlx::query_as(
+            "SELECT document_id FROM documents WHERE org_id = $1 AND deleted_at IS NOT NULL",
+        )
+        .bind(&admin.org_id)
+        .fetch_all(&pipeline.pool)
+        .await?;
+        let orphan_doc_ids: Vec<String> = orphan_docs.into_iter().map(|(id,)| id).collect();
+        let orphan_chunk_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM knowledge_units WHERE document_id = ANY($1) AND org_id = $2",
+        )
+        .bind(&orphan_doc_ids)
+        .bind(&admin.org_id)
+        .fetch_one(&pipeline.pool)
+        .await?;
         crate::audit::record_admin(
             &pipeline.pool,
             crate::audit::AdminEvent {
-                org_id: None,
-                actor: &actor,
+                org_id: Some(&admin.org_id),
+                actor: &admin.actor,
                 action: "cleanup_orphans",
-                target_kind: None,
-                target_id: None,
-                request_id: request_id.as_deref(),
-                payload: Some(serde_json::json!({"dry_run": req.dry_run})),
-                outcome: "error",
-                error: Some("org_id required"),
+                target_kind: Some("org"),
+                target_id: Some(&admin.org_id),
+                request_id: Some(&admin.request_id),
+                payload: Some(serde_json::json!({
+                    "reason": admin.reason,
+                    "dry_run": true,
+                    "orphan_doc_count": orphan_doc_ids.len(),
+                    "orphan_chunk_count": orphan_chunk_count,
+                })),
+                outcome: "ok",
+                error: None,
             },
         )
         .await;
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "org_id required"})),
-        )
-            .into_response());
-    }
-
-    // 1. Find soft-deleted documents in this org
-    let orphan_docs: Vec<(String,)> = sqlx::query_as(
-        "SELECT document_id FROM documents
-         WHERE org_id = $1 AND deleted_at IS NOT NULL",
-    )
-    .bind(&req.org_id)
-    .fetch_all(&pipeline.pool)
-    .await?;
-    let orphan_doc_ids: Vec<String> = orphan_docs.into_iter().map(|(id,)| id).collect();
-
-    if orphan_doc_ids.is_empty() {
         return Ok(Json(serde_json::json!({
-            "org_id": req.org_id,
-            "orphan_doc_count": 0,
-            "orphan_chunk_count": 0,
-            "deleted_chunk_count": 0,
-            "dry_run": req.dry_run,
-        }))
-        .into_response());
-    }
-
-    // 2. Find all knowledge_units belonging to those documents
-    let chunks: Vec<(String,)> = sqlx::query_as(
-        "SELECT knowledge_id FROM knowledge_units
-         WHERE document_id = ANY($1) AND org_id = $2",
-    )
-    .bind(&orphan_doc_ids)
-    .bind(&req.org_id)
-    .fetch_all(&pipeline.pool)
-    .await?;
-    let orphan_chunk_count = chunks.len();
-
-    if req.dry_run {
-        return Ok(Json(serde_json::json!({
-            "org_id": req.org_id,
+            "org_id": admin.org_id,
             "orphan_doc_count": orphan_doc_ids.len(),
             "orphan_chunk_count": orphan_chunk_count,
             "deleted_chunk_count": 0,
@@ -1192,85 +1464,109 @@ async fn cleanup_orphans(
         .into_response());
     }
 
-    // 3. Delete vectors from Qdrant — one filter per document_id to avoid huge OR conditions
-    for doc_id in &orphan_doc_ids {
-        let filter = qdrant_client::qdrant::Filter {
-            must: vec![
-                qdrant_client::qdrant::Condition::from(qdrant_client::qdrant::FieldCondition {
-                    key: "document_id".into(),
-                    r#match: Some(qdrant_client::qdrant::Match {
-                        match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
-                            doc_id.clone(),
-                        )),
-                    }),
-                    ..Default::default()
-                }),
-                qdrant_client::qdrant::Condition::from(qdrant_client::qdrant::FieldCondition {
-                    key: "org_id".into(),
-                    r#match: Some(qdrant_client::qdrant::Match {
-                        match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
-                            req.org_id.clone(),
-                        )),
-                    }),
-                    ..Default::default()
-                }),
-            ],
-            ..Default::default()
-        };
+    let idempotency_key = admin
+        .idempotency_key
+        .as_deref()
+        .expect("mutation validation requires idempotency key");
+    let mut tx = pipeline.pool.begin().await?;
+    let lock_key = format!("cleanup_orphans:{}", admin.org_id);
+    let locked: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !locked {
+        return Err(AppError::conflict(
+            "another cleanup is already running for this tenant",
+        ));
+    }
 
-        let _ = pipeline
+    let previous: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT payload FROM admin_audit_log
+         WHERE org_id = $1 AND actor = $2 AND action = 'cleanup_orphans'
+           AND outcome = 'ok' AND payload->>'idempotency_key' = $3
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&admin.org_id)
+    .bind(&admin.actor)
+    .bind(idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(payload) = previous {
+        tx.rollback().await?;
+        return Ok(Json(serde_json::json!({
+            "org_id": admin.org_id,
+            "idempotent_replay": true,
+            "result": payload,
+        }))
+        .into_response());
+    }
+
+    let orphan_docs: Vec<(String,)> = sqlx::query_as(
+        "SELECT document_id FROM documents WHERE org_id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(&admin.org_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let orphan_doc_ids: Vec<String> = orphan_docs.into_iter().map(|(id,)| id).collect();
+    let orphan_chunk_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM knowledge_units WHERE document_id = ANY($1) AND org_id = $2",
+    )
+    .bind(&orphan_doc_ids)
+    .bind(&admin.org_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    for doc_id in &orphan_doc_ids {
+        let filter = qdrant_client::qdrant::Filter::must([
+            qdrant_client::qdrant::Condition::matches("document_id", doc_id.clone()),
+            qdrant_client::qdrant::Condition::matches("org_id", admin.org_id.clone()),
+        ]);
+        pipeline
             .qdrant
             .delete_points(
                 qdrant_client::qdrant::DeletePointsBuilder::new(&pipeline.config.qdrant_collection)
                     .points(filter)
                     .wait(true),
             )
-            .await;
+            .await?;
     }
 
-    // 4. Delete knowledge_units rows in Postgres
-    let result =
+    let deleted_chunk_count =
         sqlx::query("DELETE FROM knowledge_units WHERE document_id = ANY($1) AND org_id = $2")
             .bind(&orphan_doc_ids)
-            .bind(&req.org_id)
-            .execute(&pipeline.pool)
-            .await?;
-    let deleted_chunk_count = result.rows_affected() as usize;
-
-    tracing::info!(
-        org_id = %req.org_id,
-        docs = orphan_doc_ids.len(),
-        chunks = deleted_chunk_count,
-        "orphan cleanup complete"
-    );
-
-    crate::audit::record_admin(
-        &pipeline.pool,
-        crate::audit::AdminEvent {
-            org_id: Some(&req.org_id),
-            actor: &actor,
-            action: "cleanup_orphans",
-            target_kind: Some("org"),
-            target_id: Some(&req.org_id),
-            request_id: request_id.as_deref(),
-            payload: Some(serde_json::json!({
-                "orphan_doc_count": orphan_doc_ids.len(),
-                "orphan_chunk_count": orphan_chunk_count,
-                "deleted_chunk_count": deleted_chunk_count,
-                "dry_run": req.dry_run,
-            })),
-            outcome: "ok",
-            error: None,
-        },
+            .bind(&admin.org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    let payload = serde_json::json!({
+        "reason": admin.reason,
+        "idempotency_key": idempotency_key,
+        "dry_run": false,
+        "orphan_doc_count": orphan_doc_ids.len(),
+        "orphan_chunk_count": orphan_chunk_count,
+        "deleted_chunk_count": deleted_chunk_count,
+    });
+    sqlx::query(
+        "INSERT INTO admin_audit_log
+         (org_id, actor, action, target_kind, target_id, request_id, payload, outcome)
+         VALUES ($1, $2, 'cleanup_orphans', 'org', $1, $3, $4, 'ok')",
     )
-    .await;
+    .bind(&admin.org_id)
+    .bind(&admin.actor)
+    .bind(&admin.request_id)
+    .bind(&payload)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     Ok(Json(serde_json::json!({
-        "org_id": req.org_id,
+        "org_id": admin.org_id,
         "orphan_doc_count": orphan_doc_ids.len(),
         "orphan_chunk_count": orphan_chunk_count,
         "deleted_chunk_count": deleted_chunk_count,
         "dry_run": false,
+        "idempotent_replay": false,
     }))
     .into_response())
 }
@@ -1310,14 +1606,45 @@ async fn readyz(State(pipeline): State<AppState>) -> impl IntoResponse {
     )
 }
 
-struct AppError(anyhow::Error);
+#[derive(Debug)]
+struct AppError {
+    error: anyhow::Error,
+    status: StatusCode,
+}
+
+impl AppError {
+    fn forbidden(message: &'static str) -> Self {
+        Self {
+            error: anyhow::anyhow!(message),
+            status: StatusCode::FORBIDDEN,
+        }
+    }
+
+    fn bad_request(message: &'static str) -> Self {
+        Self {
+            error: anyhow::anyhow!(message),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
+    fn conflict(message: &'static str) -> Self {
+        Self {
+            error: anyhow::anyhow!(message),
+            status: StatusCode::CONFLICT,
+        }
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        tracing::error!(err = %self.0, "request error");
+        if self.status.is_server_error() {
+            tracing::error!(err = %self.error, "request error");
+        } else {
+            tracing::warn!(err = %self.error, status = %self.status, "request rejected");
+        }
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": self.0.to_string()})),
+            self.status,
+            Json(serde_json::json!({"error": self.error.to_string()})),
         )
             .into_response()
     }
@@ -1328,6 +1655,224 @@ where
     E: Into<anyhow::Error>,
 {
     fn from(err: E) -> Self {
-        Self(err.into())
+        Self {
+            error: err.into(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+#[cfg(test)]
+mod admin_security_tests {
+    use super::*;
+    use crate::authz::{AuthContext, AuthMethod, EffectiveAcl};
+
+    fn ctx(scopes: &[&str]) -> AuthContext {
+        AuthContext {
+            user_id: Some("admin-user".into()),
+            org_id: "org-a".into(),
+            auth_method: AuthMethod::Jwt,
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            acl: EffectiveAcl::allow_all(),
+            request_id: "request-1".into(),
+            verified_bearer: None,
+        }
+    }
+
+    #[test]
+    fn cleanup_requires_dedicated_scope_and_claim_tenant() {
+        assert!(authorize_admin_mutation(
+            &ctx(&[]),
+            Some("org-a"),
+            "data:admin:cleanup",
+            true,
+            "preview orphan cleanup",
+            None,
+        )
+        .is_err());
+
+        assert!(authorize_admin_mutation(
+            &ctx(&["data:admin:cleanup"]),
+            Some("org-b"),
+            "data:admin:cleanup",
+            true,
+            "preview orphan cleanup",
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn destructive_admin_requires_reason_and_idempotency_but_preview_does_not() {
+        let ctx = ctx(&["data:admin:cleanup"]);
+        assert!(authorize_admin_mutation(
+            &ctx,
+            None,
+            "data:admin:cleanup",
+            false,
+            "remove confirmed orphan rows",
+            None,
+        )
+        .is_err());
+        assert!(authorize_admin_mutation(
+            &ctx,
+            None,
+            "data:admin:cleanup",
+            false,
+            "",
+            Some("cleanup-1"),
+        )
+        .is_err());
+
+        let preview = authorize_admin_mutation(
+            &ctx,
+            None,
+            "data:admin:cleanup",
+            true,
+            "preview orphan cleanup",
+            None,
+        )
+        .expect("safe preview");
+        assert_eq!(preview.org_id, "org-a");
+        assert!(preview.dry_run);
+    }
+}
+
+#[cfg(test)]
+mod auxiliary_security_tests {
+    use super::*;
+    use crate::authz::{AuthContext, AuthMethod, EffectiveAcl};
+
+    fn ctx(org_id: &str, user_id: &str, scopes: &[&str]) -> AuthContext {
+        AuthContext {
+            user_id: Some(user_id.to_owned()),
+            org_id: org_id.to_owned(),
+            auth_method: AuthMethod::Jwt,
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            acl: EffectiveAcl::allow_all(),
+            request_id: "aux-security-test".into(),
+            verified_bearer: None,
+        }
+    }
+
+    fn pack_request(value: serde_json::Value) -> PackRequest {
+        serde_json::from_value(value).expect("valid pack request")
+    }
+
+    #[test]
+    fn pack_rejects_conflicting_tenant_before_pipeline_access() {
+        let request = pack_request(serde_json::json!({
+            "org_id": "org-b",
+            "query": "safe synthetic query"
+        }));
+
+        let error = pack_retrieval_request(request, &ctx("org-a", "user-a", &[]))
+            .err()
+            .expect("spoofed body tenant must be rejected");
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn pack_propagates_claim_identity_and_ephemeral_zdr() {
+        let request = pack_request(serde_json::json!({
+            "org_id": "org-a",
+            "query": "safe synthetic query",
+            "zdr_mode": "ephemeral"
+        }));
+
+        let retrieval =
+            pack_retrieval_request(request, &ctx("org-a", "user-a", &["org:data:read_all"]))
+                .expect("matching tenant");
+
+        assert_eq!(retrieval.org_id, "org-a");
+        assert_eq!(retrieval.user_id.as_deref(), Some("user-a"));
+        assert_eq!(retrieval.zdr_mode, Some(ZdrMode::Ephemeral));
+        assert!(retrieval.admin_read_all);
+    }
+
+    #[test]
+    fn invalid_or_case_variant_pack_zdr_modes_fail_deserialization() {
+        for mode in ["Ephemeral", "unknown", ""] {
+            let result = serde_json::from_value::<PackRequest>(serde_json::json!({
+                "org_id": "org-a",
+                "query": "safe synthetic query",
+                "zdr_mode": mode,
+            }));
+            assert!(result.is_err(), "mode {mode:?} must fail closed");
+        }
+    }
+
+    #[test]
+    fn entity_comparison_query_uses_canonical_document_visibility() {
+        let sql = entity_compare_sql();
+
+        assert!(sql.contains("jsonb_array_elements_text"));
+        assert!(sql.contains("JOIN knowledge_units"));
+        assert!(sql.contains("JOIN documents"));
+        assert!(
+            sql.contains("jsonb_agg"),
+            "visible entities must not return source refs from hidden documents"
+        );
+        assert!(
+            sql.contains("jsonb_array_length(COALESCE(ge.source_refs, '[]')) ="),
+            "derived entity content must be hidden unless every source is visible"
+        );
+        assert!(sql.contains("owner_id = $3"));
+        assert!(sql.contains("visibility = 'org'"));
+        assert!(sql.contains("document_id = ANY($4)"));
+        assert!(!sql.contains("visibility IN ('org', 'shared')"));
+
+        let relationship_sql = relationship_compare_sql();
+        assert!(relationship_sql.contains("jsonb_array_elements_text"));
+        assert!(relationship_sql.contains("visibility = 'org'"));
+        assert!(relationship_sql.contains("document_id = ANY($4)"));
+        assert!(relationship_sql.contains("NOT EXISTS"));
+        assert!(!relationship_sql.contains("visibility IN ('org', 'shared')"));
+    }
+
+    #[test]
+    fn every_document_auxiliary_query_uses_grant_only_shared_visibility() {
+        for sql in auxiliary_document_visibility_queries() {
+            assert!(sql.contains("deleted_at IS NULL"), "{sql}");
+            assert!(sql.contains("owner_id ="), "{sql}");
+            assert!(sql.contains("visibility = 'org'"), "{sql}");
+            assert!(sql.contains("document_id = ANY("), "{sql}");
+            assert!(!sql.contains("visibility IN ('org', 'shared')"), "{sql}");
+        }
+
+        assert!(chunk_by_ids_sql().contains("ku.text"));
+        assert!(chunk_by_document_sql().contains("ku.text"));
+        assert!(chunk_by_ids_sql().contains("d.org_id = $2"));
+        assert!(chunk_by_document_sql().contains("d.org_id = $2"));
+    }
+
+    #[test]
+    fn document_chunk_counts_are_limited_to_visible_compare_rows() {
+        let rows: Vec<DocumentCompareRow> = vec![
+            (
+                "visible-a".into(),
+                "A".into(),
+                "source".into(),
+                "type".into(),
+                "ready".into(),
+                "2026-07-10 00:00:00+00".into(),
+                "standard".into(),
+            ),
+            (
+                "visible-b".into(),
+                "B".into(),
+                "source".into(),
+                "type".into(),
+                "ready".into(),
+                "2026-07-10 00:00:00+00".into(),
+                "standard".into(),
+            ),
+        ];
+
+        assert_eq!(
+            compared_document_ids(&rows),
+            vec!["visible-a".to_string(), "visible-b".to_string()]
+        );
     }
 }

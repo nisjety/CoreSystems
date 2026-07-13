@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 
 use crate::context_pack::pack_context;
 use crate::pipeline::orchestrator::RetrievalPipeline;
-use crate::pipeline::types::{RetrievalFiltersInput, RetrievalRequest as PipelineReq};
+use crate::pipeline::types::{RetrievalFiltersInput, RetrievalRequest as PipelineReq, ZdrMode};
 use crate::trace;
 
 use super::pb_retrieval::retrieval_service_server::RetrievalService;
@@ -21,6 +21,33 @@ pub struct RetrievalSvc {
 impl RetrievalSvc {
     pub fn new(pipeline: Arc<RetrievalPipeline>) -> Self {
         Self { pipeline }
+    }
+
+    async fn authorize<T>(
+        &self,
+        request: &Request<T>,
+        org_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<crate::authz::AuthContext, Status> {
+        super::interceptor::authorize_request(
+            self.pipeline.policy.as_ref(),
+            request,
+            org_id,
+            user_id,
+        )
+        .await
+    }
+
+    async fn grants(&self, ctx: &crate::authz::AuthContext) -> Vec<String> {
+        match ctx.user_id.as_deref() {
+            Some(user_id) => {
+                self.pipeline
+                    .visibility
+                    .visible_documents(&ctx.org_id, user_id, ctx.verified_bearer.as_deref())
+                    .await
+            }
+            None => Vec::new(),
+        }
     }
 }
 
@@ -38,28 +65,19 @@ impl RetrievalService for RetrievalSvc {
         request: Request<RetrieveRequest>,
     ) -> Result<Response<Self::RetrieveStreamStream>, Status> {
         let pipeline = self.pipeline.clone();
-        // GAP-2: bind org to the verified JWT principal (no-op on the API-key path).
-        let verified_org = super::interceptor::verified_org_from_metadata(request.metadata());
-        // Per-user ownership: bind the viewer from trusted transport (JWT sub or
-        // gateway-forwarded x-user-id); body user_id is not trusted.
-        let viewer = super::interceptor::user_id_from_metadata(request.metadata());
+        let ctx = self
+            .authorize(
+                &request,
+                &request.get_ref().org_id,
+                request.get_ref().user_id.as_deref(),
+            )
+            .await?;
         let inner = request.into_inner();
-        if let Some(vorg) = verified_org {
-            if vorg != inner.org_id {
-                return Err(Status::permission_denied(
-                    "org_id does not match the authenticated principal",
-                ));
-            }
-        }
-        if let (Some(b), Some(v)) = (inner.user_id.as_deref(), viewer.as_deref()) {
-            if b != v {
-                return Err(Status::permission_denied(
-                    "user_id does not match the authenticated principal",
-                ));
-            }
-        }
-        let mut pipeline_req = grpc_to_pipeline(inner);
-        pipeline_req.user_id = viewer;
+        let mut pipeline_req = grpc_to_pipeline(inner).map_err(Status::invalid_argument)?;
+        pipeline_req.org_id = ctx.org_id;
+        pipeline_req.user_id = ctx.user_id;
+        pipeline_req.verified_bearer = ctx.verified_bearer;
+        pipeline_req.admin_read_all = ctx.scopes.iter().any(|scope| scope == "org:data:read_all");
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<RetrievalChunk, Status>>(32);
         tokio::spawn(async move {
@@ -110,34 +128,19 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<RetrieveRequest>,
     ) -> Result<Response<RetrieveResponse>, Status> {
-        // GAP-2: when a JWT principal is present, its verified org must match the
-        // request body — defense-in-depth so a valid token for org A can't read
-        // org B. The API-key path carries no identity (gateway-trusted) → no-op.
-        let verified_org = super::interceptor::verified_org_from_metadata(request.metadata());
-        // Per-user ownership (agent grounding): bind the viewer from TRUSTED
-        // transport (verified JWT `sub` or gateway-forwarded `x-user-id`). The
-        // body `user_id` is never trusted — reject one that disagrees with the
-        // bound viewer (anti-spoof). No identity → `None` → org-scoped (legacy).
-        let viewer = super::interceptor::user_id_from_metadata(request.metadata());
+        let ctx = self
+            .authorize(
+                &request,
+                &request.get_ref().org_id,
+                request.get_ref().user_id.as_deref(),
+            )
+            .await?;
         let req = request.into_inner();
-        if let Some(vorg) = verified_org {
-            if vorg != req.org_id {
-                return Err(Status::permission_denied(
-                    "org_id does not match the authenticated principal",
-                ));
-            }
-        }
-        if let (Some(b), Some(v)) = (req.user_id.as_deref(), viewer.as_deref()) {
-            if b != v {
-                return Err(Status::permission_denied(
-                    "user_id does not match the authenticated principal",
-                ));
-            }
-        }
 
         let filters = req.filters.clone().unwrap_or_default();
+        let zdr_mode = parse_zdr_mode(req.zdr_mode.clone()).map_err(Status::invalid_argument)?;
         let pipeline_req = PipelineReq {
-            org_id: req.org_id.clone(),
+            org_id: ctx.org_id.clone(),
             query: req.query.clone(),
             top_k: if req.top_k > 0 {
                 Some(req.top_k as usize)
@@ -161,17 +164,18 @@ impl RetrievalService for RetrievalSvc {
                 acl_tags: vec![],
             },
             // Viewer bound from trusted transport (NOT the body) — see above.
-            user_id: viewer.clone(),
+            user_id: ctx.user_id.clone(),
+            verified_bearer: ctx.verified_bearer.clone(),
             query_expansion: req.query_expansion,
             reranker_model: req.reranker_model,
-            zdr_mode: req.zdr_mode,
+            zdr_mode,
             // gRPC clients don't send per-request mode_mix yet — config defaults apply.
             mode_mix: None,
             context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
             context_format: req.context_format,
             // §16.1.4 — agent_id now on the proto contract (field 13).
             agent_id: req.agent_id,
-            admin_read_all: false,
+            admin_read_all: ctx.scopes.iter().any(|scope| scope == "org:data:read_all"),
         };
 
         let resp = self
@@ -267,9 +271,17 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<GetTraceRequest>,
     ) -> Result<Response<GetTraceResponse>, Status> {
+        let ctx = self
+            .authorize(&request, &request.get_ref().org_id, None)
+            .await?;
         let req = request.into_inner();
 
-        let detail = trace::get_trace(&self.pipeline.pool, &req.trace_id, &req.org_id)
+        let actor = if ctx.scopes.iter().any(|scope| scope == "org:data:read_all") {
+            None
+        } else {
+            ctx.user_id.as_deref()
+        };
+        let detail = trace::get_trace(&self.pipeline.pool, &req.trace_id, &ctx.org_id, actor)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -318,17 +330,24 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<GetSourcesRequest>,
     ) -> Result<Response<GetSourcesResponse>, Status> {
+        let ctx = self
+            .authorize(&request, &request.get_ref().org_id, None)
+            .await?;
         let req = request.into_inner();
         if req.document_ids.is_empty() {
             return Ok(Response::new(GetSourcesResponse { sources: vec![] }));
         }
 
+        let grants = self.grants(&ctx).await;
         let rows = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT document_id, title, source, type FROM documents
-             WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL",
+             WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
+               AND (owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))",
         )
         .bind(&req.document_ids)
-        .bind(&req.org_id)
+        .bind(&ctx.org_id)
+        .bind(ctx.user_id.as_deref())
+        .bind(&grants)
         .fetch_all(&self.pipeline.pool)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -351,7 +370,11 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<GetChunksRequest>,
     ) -> Result<Response<GetChunksResponse>, Status> {
+        let ctx = self
+            .authorize(&request, &request.get_ref().org_id, None)
+            .await?;
         let req = request.into_inner();
+        let grants = self.grants(&ctx).await;
 
         let chunks = if !req.knowledge_ids.is_empty() {
             sqlx::query_as::<_, (String, String, String, i32, String, String)>(
@@ -359,10 +382,13 @@ impl RetrievalService for RetrievalSvc {
                  FROM knowledge_units ku
                  JOIN documents d ON d.document_id = ku.document_id
                  WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
+                   AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
                  ORDER BY ku.chunk_index"
             )
             .bind(&req.knowledge_ids)
-            .bind(&req.org_id)
+            .bind(&ctx.org_id)
+            .bind(ctx.user_id.as_deref())
+            .bind(&grants)
             .fetch_all(&self.pipeline.pool)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
@@ -372,10 +398,13 @@ impl RetrievalService for RetrievalSvc {
                  FROM knowledge_units ku
                  JOIN documents d ON d.document_id = ku.document_id
                  WHERE ku.document_id = $1 AND ku.org_id = $2 AND d.deleted_at IS NULL
+                   AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))
                  ORDER BY ku.chunk_index"
             )
             .bind(doc_id)
-            .bind(&req.org_id)
+            .bind(&ctx.org_id)
+            .bind(ctx.user_id.as_deref())
+            .bind(&grants)
             .fetch_all(&self.pipeline.pool)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
@@ -408,16 +437,23 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<PackContextRequest>,
     ) -> Result<Response<PackContextResponse>, Status> {
+        let ctx = self
+            .authorize(&request, &request.get_ref().org_id, None)
+            .await?;
         let req = request.into_inner();
+        let grants = self.grants(&ctx).await;
 
         let rows = sqlx::query_as::<_, (String, String, String, i32)>(
             "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index
              FROM knowledge_units ku
              JOIN documents d ON d.document_id = ku.document_id
-             WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL",
+             WHERE ku.knowledge_id = ANY($1) AND ku.org_id = $2 AND d.deleted_at IS NULL
+               AND (d.owner_id = $3 OR d.visibility = 'org' OR d.document_id = ANY($4))",
         )
         .bind(&req.knowledge_ids)
-        .bind(&req.org_id)
+        .bind(&ctx.org_id)
+        .bind(ctx.user_id.as_deref())
+        .bind(&grants)
         .fetch_all(&self.pipeline.pool)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -478,9 +514,14 @@ impl RetrievalService for RetrievalSvc {
 /// §17.3.2 — shared proto → pipeline mapper. The streaming and unary
 /// handlers both call this so the wire contract stays identical
 /// regardless of frame shape.
-fn grpc_to_pipeline(req: RetrieveRequest) -> PipelineReq {
+fn parse_zdr_mode(mode: Option<String>) -> Result<Option<ZdrMode>, &'static str> {
+    mode.map(|value| value.parse::<ZdrMode>()).transpose()
+}
+
+fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
     let filters = req.filters.unwrap_or_default();
-    PipelineReq {
+    let zdr_mode = parse_zdr_mode(req.zdr_mode)?;
+    Ok(PipelineReq {
         org_id: req.org_id,
         query: req.query,
         top_k: if req.top_k > 0 {
@@ -505,13 +546,41 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> PipelineReq {
             acl_tags: vec![],
         },
         user_id: req.user_id,
+        verified_bearer: None,
         query_expansion: req.query_expansion,
         reranker_model: req.reranker_model,
-        zdr_mode: req.zdr_mode,
+        zdr_mode,
         mode_mix: None,
         context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
         context_format: req.context_format,
         agent_id: req.agent_id,
         admin_read_all: false,
+    })
+}
+
+#[cfg(test)]
+mod zdr_boundary_tests {
+    use super::{parse_zdr_mode, ZdrMode};
+    use tonic::{Code, Status};
+
+    #[test]
+    fn grpc_rejects_unknown_and_case_variant_zdr_modes() {
+        for mode in ["Ephemeral", "unknown", ""] {
+            let message = parse_zdr_mode(Some(mode.to_owned()))
+                .expect_err("free-form mode must fail closed at gRPC boundary");
+            assert_eq!(
+                Status::invalid_argument(message).code(),
+                Code::InvalidArgument
+            );
+        }
+    }
+
+    #[test]
+    fn grpc_accepts_only_exact_supported_zdr_modes() {
+        assert_eq!(
+            parse_zdr_mode(Some("ephemeral".to_owned())).expect("exact mode"),
+            Some(ZdrMode::Ephemeral)
+        );
+        assert_eq!(parse_zdr_mode(None).expect("absent mode"), None);
     }
 }

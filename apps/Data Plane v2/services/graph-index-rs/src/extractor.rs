@@ -281,6 +281,9 @@ mod tests {
             azure_openai_extraction_deployment: "gpt-4o".to_string(),
             max_entities_per_chunk: 20,
             community_min_size: 3,
+            embedding_event_public_key_path: String::new(),
+            index_event_public_key_path: String::new(),
+            event_auth_audience: "dataplane-events".to_string(),
         }
     }
 

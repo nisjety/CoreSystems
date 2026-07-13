@@ -3,7 +3,9 @@ package repo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
 )
+
+var ErrIdempotencyOwnershipConflict = errors.New("idempotency key belongs to another principal")
 
 type DocumentRepo struct {
 	pool *pgxpool.Pool
@@ -30,7 +34,7 @@ const documentColumns = `document_id, org_id, source, type, title, content, stat
 // Get returns a single document, enforcing ownership when a viewer is supplied.
 // The viewer filter is a single static predicate so the tenant-isolation lint
 // still sees org_id in the same literal: when viewerID is empty (no identity —
-// legacy/back-compat) the `$3 = ''` branch short-circuits to the org-scoped
+// legacy/back-compat) the `$3 = ”` branch short-circuits to the org-scoped
 // behaviour; when present, only the owner, ORG-visible docs, or docs explicitly
 // granted to the viewer (grantedIDs from user-core resource_grants) are
 // returned. NOTE: 'shared' docs are NOT org-readable — they reach recipients
@@ -174,6 +178,151 @@ type CreateResult struct {
 	Updated bool
 }
 
+type OutboxEventFactory func(document *model.Document, updated bool) (eventType string, payload []byte, err error)
+
+// CreateWithOutbox is the production mutation path. The document insert or
+// content refresh, cache-version bump, and lifecycle event intent commit in one
+// PostgreSQL transaction. True idempotent reuse emits nothing.
+func (r *DocumentRepo) CreateWithOutbox(
+	ctx context.Context,
+	input model.CreateDocumentInput,
+	eventFactory OutboxEventFactory,
+) (*CreateResult, error) {
+	if eventFactory == nil {
+		return nil, fmt.Errorf("document lifecycle outbox factory required")
+	}
+	meta := input.Metadata
+	if meta == nil {
+		meta = json.RawMessage(`{}`)
+	}
+	zdr := input.ZDRClassification
+	if zdr == "" {
+		zdr = "internal"
+	}
+	trace := input.ExtractionTrace
+	if trace == nil {
+		trace = json.RawMessage(`{}`)
+	}
+	ownerID := input.OwnerID
+	if ownerID == "" {
+		ownerID = input.CreatedBy
+	}
+	if ownerID == "" {
+		ownerID = ownerSystemAccount
+	}
+	visibility := normalizeVisibility(input.Visibility)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin document create: %w", err)
+		}
+		if input.IdempotencyKey != "" {
+			row := tx.QueryRow(ctx, `SELECT `+documentColumns+`
+				FROM documents WHERE org_id=$1 AND idempotency_key=$2 AND deleted_at IS NULL
+				FOR UPDATE`, input.OrgID, input.IdempotencyKey)
+			existing, lookupErr := scanDocument(row)
+			if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+				tx.Rollback(ctx)
+				return nil, fmt.Errorf("lookup document idempotency key: %w", lookupErr)
+			}
+			if lookupErr == nil && existing != nil {
+				if !idempotencyOwnerMatches(existing, ownerID) {
+					tx.Rollback(ctx)
+					return nil, ErrIdempotencyOwnershipConflict
+				}
+				if documentContentUnchanged(existing, input) {
+					if err := tx.Commit(ctx); err != nil {
+						return nil, fmt.Errorf("commit document reuse: %w", err)
+					}
+					return &CreateResult{Document: existing, Reused: true}, nil
+				}
+				updatedRow := tx.QueryRow(ctx, `
+					UPDATE documents SET source=$3,type=$4,title=$5,content=$6,metadata=$7,
+					zdr_classification=$8,extraction_trace=$9,status='pending',error_message=NULL,
+					deleted_at=NULL,updated_at=NOW()
+					WHERE org_id=$1 AND document_id=$2 AND owner_id=$10
+					RETURNING `+documentColumns,
+					input.OrgID, existing.DocumentID, input.Source, input.Type, input.Title,
+					input.Content, meta, zdr, trace, ownerID)
+				updated, updateErr := scanDocument(updatedRow)
+				if updateErr != nil {
+					tx.Rollback(ctx)
+					return nil, fmt.Errorf("update document content: %w", updateErr)
+				}
+				if err := enqueueLifecycleEventTx(ctx, tx, input.OrgID, updated, true, eventFactory); err != nil {
+					return nil, err
+				}
+				if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+					return nil, err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return nil, fmt.Errorf("commit document update: %w", err)
+				}
+				return &CreateResult{Document: updated, Updated: true}, nil
+			}
+		}
+
+		row := tx.QueryRow(ctx, `
+			INSERT INTO documents (org_id,source,type,title,content,metadata,zdr_classification,
+				extraction_trace,created_by,owner_id,visibility,idempotency_key,status)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')
+			RETURNING `+documentColumns,
+			input.OrgID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace,
+			nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey))
+		doc, insertErr := scanDocument(row)
+		if insertErr != nil {
+			tx.Rollback(ctx)
+			if input.IdempotencyKey != "" && isUniqueViolation(insertErr) && attempt == 0 {
+				continue
+			}
+			return nil, insertErr
+		}
+		if err := enqueueLifecycleEventTx(ctx, tx, input.OrgID, doc, false, eventFactory); err != nil {
+			return nil, err
+		}
+		if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit document create: %w", err)
+		}
+		return &CreateResult{Document: doc}, nil
+	}
+	return nil, fmt.Errorf("document idempotency race did not converge")
+}
+
+func enqueueLifecycleEventTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	orgID string,
+	document *model.Document,
+	updated bool,
+	factory OutboxEventFactory,
+) error {
+	eventType, payload, err := factory(document, updated)
+	if err != nil || strings.TrimSpace(eventType) == "" || !json.Valid(payload) {
+		tx.Rollback(ctx)
+		return fmt.Errorf("build document lifecycle event: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO documents_outbox (org_id,event_type,payload)
+		VALUES ($1,$2,$3::jsonb)`, orgID, eventType, string(payload)); err != nil {
+		tx.Rollback(ctx)
+		return fmt.Errorf("enqueue document lifecycle event: %w", err)
+	}
+	return nil
+}
+
+func bumpOrgVersionTx(ctx context.Context, tx pgx.Tx, orgID string) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO org_versions (org_id,version,bumped_at)
+		VALUES ($1,2,NOW()) ON CONFLICT (org_id) DO UPDATE
+		SET version=org_versions.version+1,bumped_at=NOW()`, orgID); err != nil {
+		tx.Rollback(ctx)
+		return fmt.Errorf("bump org version: %w", err)
+	}
+	return nil
+}
+
 func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInput) (*CreateResult, error) {
 	meta := input.Metadata
 	if meta == nil {
@@ -206,13 +355,16 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 	if input.IdempotencyKey != "" {
 		existing, err := r.findByIdempotencyKey(ctx, input.OrgID, input.IdempotencyKey)
 		if err == nil && existing != nil {
+			if !idempotencyOwnerMatches(existing, ownerID) {
+				return nil, ErrIdempotencyOwnershipConflict
+			}
 			if documentContentUnchanged(existing, input) {
 				return &CreateResult{Document: existing, Reused: true}, nil
 			}
 			// Same logical document, new content: refresh in place and signal
 			// an update so chunking/embedding re-run and overwrite the prior
 			// vectors instead of leaving stale content (or a duplicate row).
-			updated, uerr := r.updateContent(ctx, input.OrgID, existing.DocumentID, input)
+			updated, uerr := r.updateContent(ctx, input.OrgID, existing.DocumentID, ownerID, input)
 			if uerr != nil {
 				return nil, fmt.Errorf("update document content: %w", uerr)
 			}
@@ -235,6 +387,9 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 		if input.IdempotencyKey != "" && isUniqueViolation(err) {
 			existing, lookupErr := r.findByIdempotencyKey(ctx, input.OrgID, input.IdempotencyKey)
 			if lookupErr == nil && existing != nil {
+				if !idempotencyOwnerMatches(existing, ownerID) {
+					return nil, ErrIdempotencyOwnershipConflict
+				}
 				return &CreateResult{Document: existing, Reused: true}, nil
 			}
 		}
@@ -245,6 +400,10 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 	// unreachable instantly.
 	r.bumpOrgVersion(ctx, input.OrgID)
 	return &CreateResult{Document: doc, Reused: false}, nil
+}
+
+func idempotencyOwnerMatches(existing *model.Document, requestedOwner string) bool {
+	return existing != nil && existing.OwnerID != "" && existing.OwnerID == requestedOwner
 }
 
 // documentContentUnchanged reports whether an idempotent re-ingest carries the
@@ -261,7 +420,7 @@ func documentContentUnchanged(existing *model.Document, input model.CreateDocume
 // reprocesses it. deleted_at is cleared so a re-ingest also resurrects a
 // previously soft-deleted document. Ownership + visibility are intentionally
 // left untouched — a re-ingest must not silently re-open a privately-scoped doc.
-func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID string, input model.CreateDocumentInput) (*model.Document, error) {
+func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID, ownerID string, input model.CreateDocumentInput) (*model.Document, error) {
 	meta := input.Metadata
 	if meta == nil {
 		meta = json.RawMessage(`{}`)
@@ -280,9 +439,9 @@ func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID stri
 		   SET source = $3, type = $4, title = $5, content = $6, metadata = $7,
 		       zdr_classification = $8, extraction_trace = $9, status = 'pending',
 		       error_message = NULL, deleted_at = NULL, updated_at = NOW()
-		 WHERE org_id = $1 AND document_id = $2
+		 WHERE org_id = $1 AND document_id = $2 AND owner_id = $10
 		RETURNING `+documentColumns+`
-	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace)
+	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace, ownerID)
 
 	return scanDocument(row)
 }
@@ -336,6 +495,53 @@ func (r *DocumentRepo) SoftDelete(ctx context.Context, orgID, documentID, delete
 	// org become unreachable immediately. Best-effort: a failure here logs
 	// but does not propagate; the cache will still age out via TTL.
 	r.bumpOrgVersion(ctx, orgID)
+	return nil
+}
+
+// SoftDeleteWithOutbox atomically commits the tenant-scoped soft delete,
+// retrieval cache-version bump, and signed-event intent. A crash can occur at
+// any later point without losing the deletion notification.
+func (r *DocumentRepo) SoftDeleteWithOutbox(
+	ctx context.Context,
+	orgID, documentID, deletedBy, eventType string,
+	payload []byte,
+) error {
+	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(documentID) == "" ||
+		strings.TrimSpace(eventType) == "" || !json.Valid(payload) {
+		return fmt.Errorf("soft delete outbox requires scoped identity and valid payload")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin soft delete: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
+		UPDATE documents SET deleted_at = NOW(), deleted_by = $3
+		WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL
+	`, documentID, orgID, nilIfEmpty(deletedBy))
+	if err != nil {
+		return fmt.Errorf("soft delete document: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("document not found")
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO documents_outbox (org_id, event_type, payload)
+		VALUES ($1, $2, $3::jsonb)
+	`, orgID, eventType, string(payload)); err != nil {
+		return fmt.Errorf("enqueue deletion outbox: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO org_versions (org_id, version, bumped_at)
+		VALUES ($1, 2, NOW())
+		ON CONFLICT (org_id) DO UPDATE
+		SET version = org_versions.version + 1, bumped_at = NOW()
+	`, orgID); err != nil {
+		return fmt.Errorf("bump org version: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit soft delete and outbox: %w", err)
+	}
 	return nil
 }
 

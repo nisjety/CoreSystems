@@ -18,6 +18,8 @@ struct WikiPublishedEvent {
     title: String,
     path: String,
     content: String,
+    user_id: Option<String>,
+    zdr: bool,
 }
 
 const CANONICAL_PAYLOAD: &str = r#"{
@@ -27,7 +29,9 @@ const CANONICAL_PAYLOAD: &str = r#"{
   "workspace_id": "ws-1",
   "title": "Onboarding",
   "path": "/handbook/onboarding",
-  "content": "Welcome to the team."
+  "content": "Welcome to the team.",
+  "user_id": "user-1",
+  "zdr": false
 }"#;
 
 #[test]
@@ -41,13 +45,15 @@ fn round_trip_canonical_payload() {
     assert_eq!(evt.title, "Onboarding");
     assert_eq!(evt.path, "/handbook/onboarding");
     assert_eq!(evt.content, "Welcome to the team.");
+    assert_eq!(evt.user_id.as_deref(), Some("user-1"));
+    assert!(!evt.zdr);
 }
 
 #[test]
 fn unknown_fields_are_ignored() {
     let with_extra = r#"{
         "page_id": "p", "version_id": "v", "org_id": "o",
-        "workspace_id": "w", "title": "t", "path": "/p", "content": "c",
+        "workspace_id": "w", "title": "t", "path": "/p", "content": "c", "zdr": false,
         "future_field": "ignored"
     }"#;
     let evt: WikiPublishedEvent = serde_json::from_str(with_extra).expect("parse with extra");

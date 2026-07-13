@@ -17,6 +17,13 @@ pub struct Config {
     pub batch_size: usize,
     #[serde(default = "default_max_delivery_attempts")]
     pub max_delivery_attempts: u32,
+
+    #[serde(default)]
+    pub documents_event_public_key_path: String,
+    #[serde(default)]
+    pub index_event_private_key_path: String,
+    #[serde(default = "default_event_auth_audience")]
+    pub event_auth_audience: String,
 }
 
 fn default_admin_port() -> u16 {
@@ -33,6 +40,9 @@ fn default_batch_size() -> usize {
 }
 fn default_max_delivery_attempts() -> u32 {
     5
+}
+fn default_event_auth_audience() -> String {
+    "dataplane-events".into()
 }
 
 impl Config {

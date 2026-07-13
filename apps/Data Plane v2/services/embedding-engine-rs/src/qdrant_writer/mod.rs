@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use qdrant_client::qdrant::{
     value::Kind as QdrantKind, Condition, CreateCollectionBuilder, DeletePointsBuilder, Distance,
-    FieldCondition, Filter, Match, PointStruct, UpsertPointsBuilder, Value as QdrantValue,
-    VectorParamsBuilder,
+    Filter, PointStruct, UpsertPointsBuilder, Value as QdrantValue, VectorParamsBuilder,
 };
 use qdrant_client::Qdrant;
 
@@ -94,23 +93,17 @@ pub async fn upsert_vectors(
     Ok(())
 }
 
-pub async fn delete_vectors_by_document(
+/// Deletes specific points by knowledge_id. Used to purge chunks orphaned by a
+/// content re-chunk (the new chunks have different IDs and are upserted
+/// separately, so these IDs are disjoint and safe to delete at any time).
+pub async fn delete_vectors_by_ids(
     qdrant: &Qdrant,
     collection: &str,
+    org_id: &str,
     document_id: &str,
+    knowledge_ids: &[String],
 ) -> anyhow::Result<()> {
-    let filter = Filter {
-        must: vec![Condition::from(FieldCondition {
-            key: "document_id".to_string(),
-            r#match: Some(Match {
-                match_value: Some(qdrant_client::qdrant::r#match::MatchValue::Keyword(
-                    document_id.to_string(),
-                )),
-            }),
-            ..Default::default()
-        })],
-        ..Default::default()
-    };
+    let filter = tenant_document_delete_filter(org_id, document_id, knowledge_ids)?;
 
     qdrant
         .delete_points(
@@ -120,33 +113,65 @@ pub async fn delete_vectors_by_document(
         )
         .await?;
 
-    tracing::info!(document_id, "qdrant vectors deleted");
+    tracing::info!(count = knowledge_ids.len(), "qdrant vectors deleted by id");
     Ok(())
 }
 
-/// Deletes specific points by knowledge_id. Used to purge chunks orphaned by a
-/// content re-chunk (the new chunks have different IDs and are upserted
-/// separately, so these IDs are disjoint and safe to delete at any time).
-pub async fn delete_vectors_by_ids(
+/// Legacy visual-vector cleanup. The page-image contract currently carries
+/// only a document id; the signed text deletion path below uses the stricter
+/// tenant/document/chunk filter and must not call this helper.
+pub async fn delete_vectors_by_document(
     qdrant: &Qdrant,
     collection: &str,
-    knowledge_ids: &[String],
+    document_id: &str,
 ) -> anyhow::Result<()> {
-    if knowledge_ids.is_empty() {
-        return Ok(());
+    if document_id.trim().is_empty() {
+        anyhow::bail!("document id required for vector deletion");
     }
-
-    let point_ids: Vec<qdrant_client::qdrant::PointId> =
-        knowledge_ids.iter().map(|id| id.clone().into()).collect();
-
+    let filter = Filter::must([Condition::matches("document_id", document_id.to_owned())]);
     qdrant
         .delete_points(
             DeletePointsBuilder::new(collection)
-                .points(qdrant_client::qdrant::PointsIdsList { ids: point_ids })
+                .points(filter)
                 .wait(true),
         )
         .await?;
-
-    tracing::info!(count = knowledge_ids.len(), "qdrant vectors deleted by id");
     Ok(())
+}
+
+fn tenant_document_delete_filter(
+    org_id: &str,
+    document_id: &str,
+    knowledge_ids: &[String],
+) -> anyhow::Result<Filter> {
+    if org_id.trim().is_empty()
+        || document_id.trim().is_empty()
+        || knowledge_ids.is_empty()
+        || knowledge_ids.iter().any(|id| id.trim().is_empty())
+    {
+        anyhow::bail!("tenant-bound vector deletion requires org, document, and chunk ids");
+    }
+    Ok(Filter::must([
+        Condition::matches("org_id", org_id.to_owned()),
+        Condition::matches("document_id", document_id.to_owned()),
+        Condition::matches("knowledge_id", knowledge_ids.to_vec()),
+    ]))
+}
+
+#[cfg(test)]
+mod deletion_scope_tests {
+    use super::tenant_document_delete_filter;
+
+    #[test]
+    fn deletion_filter_requires_tenant_document_and_exact_chunk_ids() {
+        let filter = tenant_document_delete_filter(
+            "org-a",
+            "doc-a",
+            &["kid-a".to_owned(), "kid-b".to_owned()],
+        )
+        .expect("bounded filter");
+        assert_eq!(filter.must.len(), 3);
+        assert!(tenant_document_delete_filter("", "doc-a", &["kid-a".to_owned()]).is_err());
+        assert!(tenant_document_delete_filter("org-a", "doc-a", &[]).is_err());
+    }
 }

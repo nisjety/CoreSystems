@@ -13,18 +13,20 @@ pub const SUBJECT_DOCUMENT_DELETED: &str = "dataplane.documents.deleted";
 pub const SUBJECT_WIKI_PUBLISHED: &str = "dataplane.wiki.version.published";
 pub const SUBJECT_SOURCE_OBJECT_CHANGED: &str = "dataplane.source_objects.changed";
 pub const SUBJECT_SOURCE_OBJECT_DELETED: &str = "dataplane.source_objects.deleted";
-pub const SUBJECT_SEARCH_REBUILD_REQUESTED: &str = "dataplane.search.rebuild.requested";
 
-pub async fn spawn(nats: async_nats::Client, ctx: Arc<RebuildContext>) -> anyhow::Result<()> {
-    for subject in [
+fn subscribed_subjects() -> [&'static str; 6] {
+    [
         SUBJECT_KNOWLEDGE_CREATED,
         SUBJECT_DOCUMENT_INDEXED,
         SUBJECT_DOCUMENT_DELETED,
         SUBJECT_WIKI_PUBLISHED,
         SUBJECT_SOURCE_OBJECT_CHANGED,
         SUBJECT_SOURCE_OBJECT_DELETED,
-        SUBJECT_SEARCH_REBUILD_REQUESTED,
-    ] {
+    ]
+}
+
+pub async fn spawn(nats: async_nats::Client, ctx: Arc<RebuildContext>) -> anyhow::Result<()> {
+    for subject in subscribed_subjects() {
         let mut sub = nats
             .subscribe(subject.to_string())
             .await
@@ -107,22 +109,18 @@ async fn handle_message(
                     .await?;
             }
         }
-        SUBJECT_SEARCH_REBUILD_REQUESTED => {
-            let org_id = value
-                .get("org_id")
-                .and_then(Value::as_str)
-                .filter(|org| !org.is_empty())
-                .map(ToString::to_string);
-            let clear = value.get("clear").and_then(Value::as_bool).unwrap_or(false);
-            let ctx = ctx.clone();
-            tokio::spawn(async move {
-                if let Err(err) = rebuild::rebuild_all(ctx, org_id, clear).await {
-                    tracing::error!(error = %err, "event-driven Quickwit rebuild failed");
-                }
-            });
-        }
         _ => tracing::debug!(subject, "ignoring unknown subject"),
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn destructive_rebuild_subject_is_not_subscribed() {
+        assert!(!subscribed_subjects().contains(&"dataplane.search.rebuild.requested"));
+    }
 }

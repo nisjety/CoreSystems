@@ -1,0 +1,12 @@
+[package]
+name = "nats-connection-rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "nats_connection"
+path = "src/lib.rs"
+
+[dependencies]
+async-nats.workspace = true
+

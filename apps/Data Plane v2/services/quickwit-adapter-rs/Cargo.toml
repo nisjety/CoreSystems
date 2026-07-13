@@ -19,5 +19,14 @@ chrono.workspace = true
 reqwest.workspace = true
 axum.workspace = true
 futures.workspace = true
+jsonwebtoken.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+blake3.workspace = true
 envy = "0.4"
-async-nats = "0.38"
+async-nats.workspace = true
+nats-connection-rs = { path = "../nats-connection-rs" }
+
+[dev-dependencies]
+rsa = { version = "0.9", features = ["pem"] }
+tower = { workspace = true, features = ["util"] }

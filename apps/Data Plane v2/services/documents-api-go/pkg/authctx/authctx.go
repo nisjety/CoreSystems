@@ -1,10 +1,10 @@
-// Package authctx is the Phase A · A1.2 stub that prepares Data Plane
-// services to switch from "trust the X-Org-ID header" to "derive org_id
-// from a verified auth-core JWT".
+// Package authctx verifies Control Plane-issued, audience-scoped JWTs and
+// derives tenant/user identity from their signed claims.
 //
 // Two modes:
 //
-//   - **Observe** (default, `AUTHCTX_ENFORCE` unset or 0): the middleware
+//   - **Observe** (local development only, `AUTHCTX_ENFORCE=0` together with
+//     `ALLOW_INSECURE_DEV_DEFAULTS=1`): the middleware
 //     decodes the `Authorization: Bearer <jwt>` header if present, parses
 //     unverified claims, stuffs them into the request context, and logs
 //     a structured event when the JWT org_id disagrees with the
@@ -12,20 +12,16 @@
 //     the existing `handler.OrgIDMiddleware` still extracts the org id
 //     from the header.
 //
-//   - **Enforce** (`AUTHCTX_ENFORCE=1`): every request to a guarded route
+//   - **Enforce** (the default): every request to a guarded route
 //     must carry a JWT that verifies against auth-core's JWKS, with the
 //     correct audience, a non-empty `org_id` claim, and a non-expired
 //     timestamp. Missing or invalid token → 401; verified JWT whose
 //     `org_id` disagrees with `X-Org-ID` → 403. Header-only callers stop
 //     working — by design, that's how the multi-tenant trust gap closes.
 //
-// The Verify path is intentionally stubbed in this commit (returns
-// ErrNotImplemented). It will be filled in alongside the rest of A1.2 by
-// integrating `github.com/golang-jwt/jwt/v5` + `keyfunc/v3` once we've
-// confirmed every upstream caller mints an audience-scoped token. Until
-// then, setting `AUTHCTX_ENFORCE=1` is a deliberate fail-closed kill
-// switch — the route returns 503 so a misconfigured rollout fails loudly
-// instead of silently letting unauthenticated traffic through.
+// Verification is implemented with RS256, issuer, audience, expiry, and
+// JWKS/static-key checks. Production startup must call Validate before
+// serving so missing verification material fails the process closed.
 //
 // Usage:
 //
@@ -65,21 +61,41 @@ import (
 // `apps/Control Plane/auth-core/src/auth/convex-token.service.ts`
 // (`issuePlaneToken`).
 type Claims struct {
-	UserID    string   `json:"user_id"`
-	OrgID     string   `json:"org_id"`
-	Email     string   `json:"email,omitempty"`
-	Scopes    []string `json:"scopes,omitempty"`
-	Issuer    string   `json:"iss"`
-	Audience  string   `json:"aud"`
-	Subject   string   `json:"sub"`
-	IssuedAt  int64    `json:"iat"`
-	NotBefore int64    `json:"nbf,omitempty"`
-	ExpiresAt int64    `json:"exp"`
+	UserID        string   `json:"user_id"`
+	ServiceID     string   `json:"service_id"`
+	PrincipalType string   `json:"principal_type"`
+	OrgID         string   `json:"org_id"`
+	Email         string   `json:"email,omitempty"`
+	Scopes        []string `json:"scopes,omitempty"`
+	Issuer        string   `json:"iss"`
+	Audience      string   `json:"aud"`
+	Subject       string   `json:"sub"`
+	IssuedAt      int64    `json:"iat"`
+	NotBefore     int64    `json:"nbf,omitempty"`
+	ExpiresAt     int64    `json:"exp"`
 	// Verified is true when the signature + standard claims have been
 	// checked against the JWKS. Observe-mode middleware reads + parses
 	// JWTs without verifying — never trust an unverified Claims struct
 	// for authorisation decisions.
 	Verified bool `json:"-"`
+}
+
+func (c *Claims) IsService() bool {
+	return c != nil && c.Verified && c.PrincipalType == "service"
+}
+
+func (c *Claims) PrincipalID() string {
+	if c == nil || !c.Verified {
+		return ""
+	}
+	switch c.PrincipalType {
+	case "user":
+		return c.UserID
+	case "service":
+		return c.ServiceID
+	default:
+		return ""
+	}
 }
 
 // HasScope reports whether the verified claims grant the supplied scope.
@@ -97,12 +113,13 @@ func (c *Claims) HasScope(scope string) bool {
 // `REFRESH_SAFETY_MS` so the two sides treat the boundary consistently.
 func (c *Claims) IsExpired(now time.Time) bool {
 	if c == nil || c.ExpiresAt == 0 {
-		return false
+		return true
 	}
 	return now.Unix() > c.ExpiresAt+30
 }
 
 type contextKey struct{}
+type authorizationContextKey struct{}
 
 // Config controls Middleware behaviour. Audience + JWKSURL +
 // ExpectedIssuer must be set; everything else has sane defaults.
@@ -132,11 +149,25 @@ func (c *Config) resolveEnforce() bool {
 		return *c.Enforce
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AUTHCTX_ENFORCE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return true
 	}
+}
+
+// Validate checks the production auth posture before the HTTP server starts.
+// Observe mode is available only behind the explicit insecure-development flag;
+// enforce mode requires a usable static key or configured JWKS endpoint.
+func Validate(cfg Config) error {
+	if !cfg.resolveEnforce() {
+		if os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") != "1" {
+			return errors.New("authctx: disabling JWT enforcement requires ALLOW_INSECURE_DEV_DEFAULTS=1")
+		}
+		return nil
+	}
+	_, err := newVerifier(cfg)
+	return err
 }
 
 // Middleware returns a chi-compatible middleware. In observe mode it
@@ -198,6 +229,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				// OrgIDMiddleware + handlers scope to the trusted tenant.
 				r.Header.Set("X-Org-ID", claims.OrgID)
 				ctx := IntoContext(r.Context(), claims)
+				ctx = context.WithValue(ctx, authorizationContextKey{}, "Bearer "+token)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -244,6 +276,29 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireServiceScope preserves ordinary verified user access while ensuring a
+// service-principal token cannot be replayed across unrelated Data services.
+func RequireServiceScope(scope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claims, ok := FromContext(r.Context())
+			if !ok || claims.PrincipalID() == "" {
+				http.Error(w, `{"error":"invalid principal"}`, http.StatusUnauthorized)
+				return
+			}
+			if claims.PrincipalType == "user" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if claims.IsService() && claims.HasScope(scope) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			http.Error(w, `{"error":"insufficient service scope"}`, http.StatusForbidden)
+		})
+	}
+}
+
 // IntoContext stores Claims in the request context. Exported so tests
 // (and future helpers) can bypass the middleware when building fake
 // request contexts.
@@ -257,6 +312,14 @@ func IntoContext(ctx context.Context, claims *Claims) context.Context {
 func FromContext(ctx context.Context) (*Claims, bool) {
 	v, ok := ctx.Value(contextKey{}).(*Claims)
 	return v, ok && v != nil
+}
+
+// AuthorizationHeader returns the original bearer only after Middleware has
+// cryptographically verified it. Callers may forward this proof to an
+// authorization authority, but must never log or persist it.
+func AuthorizationHeader(ctx context.Context) (string, bool) {
+	value, ok := ctx.Value(authorizationContextKey{}).(string)
+	return value, ok && strings.HasPrefix(value, "Bearer ") && len(value) > len("Bearer ")
 }
 
 // extractBearer pulls the JWT out of `Authorization: Bearer <token>`.

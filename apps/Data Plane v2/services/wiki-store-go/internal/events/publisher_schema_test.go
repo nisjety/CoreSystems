@@ -18,7 +18,9 @@ const canonicalPayload = `{
   "workspace_id": "ws-1",
   "title": "Onboarding",
   "path": "/handbook/onboarding",
-  "content": "Welcome to the team."
+  "content": "Welcome to the team.",
+  "user_id": "user-1",
+  "zdr": false
 }`
 
 func TestWikiVersionPublishedRoundTrip(t *testing.T) {
@@ -38,6 +40,9 @@ func TestWikiVersionPublishedRoundTrip(t *testing.T) {
 	if evt.Content != "Welcome to the team." {
 		t.Fatalf("content mismatch: %q", evt.Content)
 	}
+	if evt.UserID != "user-1" || evt.ZDR {
+		t.Fatalf("security posture mismatch: %+v", evt)
+	}
 
 	// Producer round-trip: marshaling and re-parsing must be lossless.
 	bytes, err := json.Marshal(evt)
@@ -56,7 +61,7 @@ func TestWikiVersionPublishedRoundTrip(t *testing.T) {
 func TestWikiVersionPublishedUnknownFieldsIgnored(t *testing.T) {
 	withExtra := `{
         "page_id": "p", "version_id": "v", "org_id": "o",
-        "workspace_id": "w", "title": "t", "path": "/p", "content": "c",
+        "workspace_id": "w", "title": "t", "path": "/p", "content": "c", "zdr": false,
         "future_field": "ignored"
     }`
 	var evt WikiVersionPublishedEvent

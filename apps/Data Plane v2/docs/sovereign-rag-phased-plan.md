@@ -1,9 +1,37 @@
 # Phased Plan: Data Plane v2 → Sovereign EU RAG (v3.0)
 
-> Planning artifact (no code yet — per `/plan`, awaiting confirmation). Builds on
-> `visual-rag-integration-plan.md` (what's built+verified) and
+> Planning artifact. Builds on `visual-rag-integration-plan.md` (what's built+verified) and
 > `sovereign-rag-blueprint-reconciliation.md` (blueprint↔reality map + the
 > code-level isolation audit).
+
+> **Verified 2026-07-10** (re-check of a 2026-07-10 audit pass; live containers +
+> source read, not re-typed from the earlier pass): the "no code yet" framing above
+> is stale — Phase 1 (GAP-1/GAP-2) and part of Phase 2 have shipped and were
+> re-confirmed live today. Two corrections of substance vs. what's written below:
+> 1. **Phase 2 "Remaining" list is out of date.** The `BrowserDriver` render hook
+>    (`quarry-runtime/src/page_renderer.rs`), the `image/png` serve route
+>    (`quarry-edge/src/resource_routes.rs`), and the `page_images.created` emission
+>    (`quarry-runtime/src/page_image.rs`) all exist in Ingestion Plane source today.
+>    Still genuinely open, confirmed by grep: no `page_images.deleted` **producer**
+>    exists in DP2's document-erasure cascade (`embedding-engine-rs/src/stream/mod.rs`'s
+>    `documents.deleted` handler only purges Qdrant vectors — it does not touch the CAS
+>    or emit `page_images.deleted`), so the GDPR/CAS-erasure gap called out in Phase 2
+>    is real and still open. `W_VISUAL` also still defaults to `0` (shadow) in
+>    `docker-compose.yml` — the arm is wired but not live in fusion.
+> 2. **Phase 3 shipped differently than planned, not "not started."** There is no
+>    ColQwen2 multivector Qdrant collection and no swap of `provider/visual.rs` /
+>    `embed/visual.rs` off Embed v4 — both still call Cohere Embed v4 for visual
+>    embeddings exactly as before. Instead, a separate, additive
+>    **`services/colqwen-reranker`** Python service and a
+>    `retrieval-engine-rs/src/search/colqwen.rs` client were built: ColQwen reranks
+>    Embed v4's visual top-K via MaxSim (`colqwen_endpoint_url` / `COLQWEN_ENDPOINT_URL`,
+>    off by default, non-fatal on failure). This is a materially lighter architecture
+>    than the "replace the visual embedder" plan below — treat Phase 3's steps as
+>    superseded by this reranker-only shape unless/until the full multivector swap is
+>    separately decided.
+> Phase 1's own gRPC caveat also re-confirmed live: `get_sources`/`get_chunks`/
+> `pack_context` in `retrieval_svc.rs` still bind `req.org_id` straight into SQL with no
+> verified-context check, and no RLS migration (`ENABLE ROW LEVEL SECURITY`) exists yet.
 
 ## Requirements (restated)
 
@@ -129,6 +157,10 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
   migration, compose env (`QUARRY_EDGE__DATAPLANE_NATS_URL`/`CAS_BUCKET`/AWS_*), the
   `dataplane-cas` bucket, and the cross-plane NATS/serve/MinIO reachability (all runtime-
   unverified per the critique). These are the live-stack finish line for PR-F.
+  **(Verified 2026-07-10: the render hook, serve route, and `page_images.created` emission
+  now exist in source — `page_renderer.rs`, `resource_routes.rs`, `page_image.rs`. Still
+  open: no `page_images.deleted` producer in DP2's erasure cascade, so CAS objects are not
+  purged on document delete/DSAR. See the verified note at the top of this file.)**
 - **(b) live-stack progress (2026-06-22):** DP2 infra up; **compose fixed** — `dpv2-minio`
   joined `inter-plane-bus` + `minio-init` now creates `dataplane-cas` (verified created).
   **Cross-plane reachability PROVEN live** (the critique's #1 unverified risk): from
@@ -140,6 +172,12 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
   chain is embedder-independent and provable first.
 
 ### Phase 3 — Swap visual embedder: Embed-v4-images → **ColQwen2 multivector**
+> **Verified 2026-07-10: superseded by a lighter shape.** What actually shipped is an
+> additive `services/colqwen-reranker` + `search/colqwen.rs` MaxSim **reranker** over
+> Embed v4's visual top-K (off by default via `COLQWEN_ENDPOINT_URL`) — NOT the full
+> multivector-Qdrant swap this section describes. `provider/visual.rs` and
+> `embed/visual.rs` still call Cohere Embed v4 unchanged. Read the steps below as the
+> not-yet-decided "full swap" option, distinct from the reranker that already exists.
 - **Goal:** the decided architecture — ColQwen2 (self-hosted) for visual, Embed v4 for text.
 - **Steps:**
   1. Stand up **ColQwen2 serving** (vLLM/TGI on EU GPU) — infra/Model-Plane.

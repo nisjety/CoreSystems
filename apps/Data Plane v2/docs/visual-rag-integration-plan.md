@@ -3,6 +3,18 @@
 > Status: in implementation (PR-A landed 2026-06-22). Grounded in a code-level map
 > of the live DP2 stack + 2026 research on Azure AI Foundry embeddings, ColPali,
 > GraphRAG, and chunking. This doc is the single source of truth for the build.
+>
+> **Verified 2026-07-10** (re-audit, live checks against running containers + `cargo test`):
+> PR-F (CAS + page-image renderer/producer) is done and live end-to-end — it landed in
+> **Ingestion Plane's `Quarry-v2`** (`quarry-runtime/src/page_renderer.rs` + `page_image.rs`),
+> not `documents-api-go` as this doc originally said; `dataplane_page_images` is a real Qdrant
+> collection (1536-dim cosine, confirmed live with indexed points), fed via the
+> `dataplane.page_images.created`/`.deleted` JetStream subjects exactly as specified below.
+> A **ColQwen visual reranker** (`retrieval-engine-rs/src/search/colqwen.rs` +
+> `services/colqwen-reranker` Python/GPU service) has also been built since this doc was
+> written — it is real code, gated off by default (`VISUAL_RERANK_ENABLED=false`,
+> `W_VISUAL=0`), and is not otherwise described here. See the corrected sections below;
+> the rest of this doc's architecture, weights, and contracts still match the live code.
 
 ## TL;DR (revised after the Azure-Foundry research)
 
@@ -184,38 +196,57 @@ text — the page lives in both collections, recall comes from RRF.
   faked.)*
 
   **Verification (real `cargo test`, exit-code-checked — NOT `--lib` on a binary crate,
-  which silently no-ops):** retrieval-engine 41/41 lib tests; embedding-engine 15+2 (Embed v4
-  provider + page-image consumer + ZDR guards); index-engine 7/7 chunker; semantic-cache
-  authz incl. fail-closed scope tests. PR-F (page-image producer + CAS) needs the live stack
-  to verify end-to-end.
+  which silently no-ops):** retrieval-engine 41/41 lib tests (re-verified 2026-07-10: now
+  44/44 — the +3 are ColQwen-reranker tests added after this PR); embedding-engine 15+2
+  (re-verified: now 16 lib + 2 integration, +1 from a later test) (Embed v4 provider +
+  page-image consumer + ZDR guards); index-engine 7/7 chunker (re-verified: still 7/7);
+  semantic-cache authz incl. fail-closed scope tests. PR-F (page-image producer + CAS) needs
+  the live stack to verify end-to-end — **done as of 2026-07-10, see PR-F below.**
 - **PR-E ✅ Chunking — structural pass** — `index-engine-rs/chunker`: recursive splitter
   now keeps markdown **tables and fenced code atomic** (never scattered across chunks),
   recursively sentence-splits oversized prose, greedy-packs with token overlap. API
   unchanged (zero caller churn); 7/7 chunker tests pass. Tuning via existing `CHUNK_SIZE`/
   `CHUNK_OVERLAP`. DI-layout + Contextual Retrieval remain the next flagged additions
   (deferred per the phased decision until a DI resource + per-chunk LLM budget are approved).
-- **PR-F** Infra (non-Rust / Ingestion Plane): CAS raw+image store, page-image renderer +
-  `dataplane.page_images.created` producer, migrations.
+- **PR-F ✅ Infra (Ingestion Plane, not `documents-api-go` as originally planned)** — CAS
+  raw+image store, page-image renderer, and the `dataplane.page_images.created`/`.deleted`
+  producer landed in **`Quarry-v2`** (`crates/quarry-runtime/src/page_renderer.rs` +
+  `page_image.rs`), publishing on the `DATAPLANE_PAGE_IMAGES` JetStream stream to the same
+  broker `embedding-engine-rs/image_consumer.rs` binds. Verified 2026-07-10 end-to-end: the
+  live `dataplane_page_images` Qdrant collection (1536-dim cosine) holds real indexed points,
+  not just an empty schema. No dedicated Postgres migration was needed for image-ref rows.
 
 ## Infra gaps to close, in order
 
-1. **Canonical raw/object store** (reuse Quickwit MinIO) + page-image renderer/producer in
-   Ingestion Plane / `documents-api-go`. Biggest lift; everything visual depends on it.
+1. ~~**Canonical raw/object store** (reuse Quickwit MinIO) + page-image renderer/producer in
+   Ingestion Plane / `documents-api-go`. Biggest lift; everything visual depends on it.~~
+   **Closed as of 2026-07-10** — landed in Ingestion Plane's `Quarry-v2` (not
+   `documents-api-go`), not DP2 at all; see the PR-F note above.
 2. **Embed v4 provider** in `embedding-engine-rs/src/provider/mod.rs` (current providers are
-   text-only) + the retrieval-side query embedder.
-3. **Document Intelligence layout** integration for chunking (`index-engine-rs`).
+   text-only) + the retrieval-side query embedder. ✅ Done (`provider/visual.rs`,
+   `embed/visual.rs`).
+3. **Document Intelligence layout** integration for chunking (`index-engine-rs`). Still open
+   as of 2026-07-10 — `CHUNK_STRATEGY`/`DOCINTEL_ENDPOINT` flags are not implemented; only the
+   recursive/structural chunker (PR-E) exists.
 4. *(No multivector Qdrant generalization needed — Embed v4 is single-vector. This removes the
    biggest code risk from the original ColPali plan.)*
+5. **Not in the original plan, built since:** a ColQwen visual reranker
+   (`retrieval-engine-rs/src/search/colqwen.rs` + a new `services/colqwen-reranker` Python/GPU
+   service) reorders Embed v4's visual top-K by late-interaction MaxSim score. Off by default
+   (`VISUAL_RERANK_ENABLED=false`); not deployed as a compose service today.
 
 ## Files to change
 
 - `embedding-engine-rs`: `provider/mod.rs` (Embed v4 image+text), `config.rs`, `main.rs`
   (ensure `dataplane_page_images`), new `image_consumer.rs` (+ `stream/mod.rs`),
   `qdrant_writer/mod.rs`.
-- `retrieval-engine-rs`: new `search/visual.rs`, `config.rs` (visual fields — `embed/mod.rs`
+- `retrieval-engine-rs`: `embed/visual.rs` (corrected 2026-07-10 — the actual landed path;
+  this section originally said `search/visual.rs`), `config.rs` (visual fields — `embed/mod.rs`
   query path for Embed v4), `pipeline/types.rs` (`ModeMixWeights`, `EngineRoute`, metrics),
-  `pipeline/orchestrator.rs` (visual route + extra RRF pass + fold graph in). `cache/semantic.rs`
-  + `api/mod.rs` ✅ (PR-A).
+  `pipeline/orchestrator.rs` (visual route + extra RRF pass + fold graph in — graph fold-in is
+  still not done, confirmed 2026-07-10: graph stays a dedicated `/v1/retrieve/graph` endpoint).
+  `cache/semantic.rs` + `api/mod.rs` ✅ (PR-A). Also `search/colqwen.rs` (reranker, not in the
+  original plan — see PR-F infra-gaps note above).
 - `index-engine-rs`: `chunker/mod.rs`, `builder/mod.rs` (DI layout + Contextual Retrieval).
 - Ingestion Plane / `documents-api-go`: page-image renderer + CAS write + producer.
 - `infra/postgres/migrations/`: image-ref/metadata rows (additive, nullable, expand-contract).

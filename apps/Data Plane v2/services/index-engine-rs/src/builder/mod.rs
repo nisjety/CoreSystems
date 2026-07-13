@@ -8,10 +8,12 @@ use crate::normalizer::normalize;
 pub struct DocumentEvent {
     pub document_id: String,
     pub org_id: String,
-    pub content: String,
     pub title: String,
     pub source: String,
     pub doc_type: String,
+    pub user_id: Option<String>,
+    pub idempotency_key: String,
+    pub zdr: bool,
 }
 
 #[derive(Debug)]
@@ -24,6 +26,7 @@ pub struct BuildResult {
     // Knowledge IDs that existed before this (re)build but no longer do —
     // their vectors must be purged from Qdrant to avoid stale retrieval hits
     // after a content update. Empty on first build.
+    #[allow(dead_code)] // persisted atomically to index_deletion_outbox
     pub orphaned_knowledge_ids: Vec<String>,
 }
 
@@ -39,30 +42,63 @@ fn orphaned_ids(old_kids: &[String], new_kids: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn canonical_document_is_indexable(deleted: bool, zdr_classification: &str) -> bool {
+    if deleted {
+        return false;
+    }
+    matches!(
+        zdr_classification.trim().to_ascii_lowercase().as_str(),
+        "internal" | "public" | "sensitive"
+    )
+}
+
 pub async fn process_document(
     pool: &PgPool,
     event: &DocumentEvent,
     chunk_config: &ChunkConfig,
 ) -> anyhow::Result<BuildResult> {
-    // Lifecycle events (documents.created / documents.updated) are notifications
-    // and carry no body, so the canonical content lives in Postgres. Fetch it by
-    // document_id; fall back to any inline content for publishers that include it.
-    let content = if event.content.trim().is_empty() {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT content FROM documents WHERE document_id = $1")
-                .bind(&event.document_id)
-                .fetch_optional(pool)
-                .await?;
-        match row {
-            Some((c,)) => c,
-            None => {
-                tracing::warn!(document_id = %event.document_id, "document row not found; no content to index");
-                String::new()
-            }
-        }
-    } else {
-        event.content.clone()
+    if event.zdr {
+        anyhow::bail!("restrictive-ZDR document cannot enter durable indexing");
+    }
+    let mut tx = pool.begin().await?;
+
+    // The event is only a notification. Re-authorize the current canonical row
+    // while holding its row lock, then keep every chunk/outbox read and write in
+    // this transaction. A delayed event therefore cannot resurrect content after
+    // a concurrent delete or restrictive-ZDR transition.
+    let canonical: Option<(String, bool, String)> = sqlx::query_as(
+        r#"
+        SELECT content, deleted_at IS NOT NULL, zdr_classification
+        FROM documents
+        WHERE document_id = $1 AND org_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(&event.document_id)
+    .bind(&event.org_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some((content, deleted, zdr_classification)) = canonical else {
+        tracing::warn!(document_id = %event.document_id, "canonical document missing; stale indexing event ignored");
+        tx.rollback().await?;
+        return Ok(BuildResult {
+            document_id: event.document_id.clone(),
+            chunks_created: 0,
+            knowledge_ids: vec![],
+            orphaned_knowledge_ids: vec![],
+        });
     };
+    if !canonical_document_is_indexable(deleted, &zdr_classification) {
+        tracing::info!(document_id = %event.document_id, "deleted or restrictive canonical document; stale indexing event ignored");
+        tx.rollback().await?;
+        return Ok(BuildResult {
+            document_id: event.document_id.clone(),
+            chunks_created: 0,
+            knowledge_ids: vec![],
+            orphaned_knowledge_ids: vec![],
+        });
+    }
 
     let normalized = normalize(&content);
     let chunks = chunk_text(&normalized, chunk_config);
@@ -70,10 +106,11 @@ pub async fn process_document(
     // Capture old chunk IDs up front so an update that produces zero chunks
     // (e.g. content cleared) still purges the prior vectors.
     let old_kids: Vec<(String, i32, String)> = sqlx::query_as(
-        "SELECT knowledge_id, chunk_index, content_hash FROM knowledge_units WHERE document_id = $1",
+        "SELECT knowledge_id, chunk_index, content_hash FROM knowledge_units WHERE document_id = $1 AND org_id = $2 FOR UPDATE",
     )
     .bind(&event.document_id)
-    .fetch_all(pool)
+    .bind(&event.org_id)
+    .fetch_all(&mut *tx)
     .await
     .unwrap_or_default();
     let old_kid_ids: Vec<String> = old_kids.iter().map(|(kid, _, _)| kid.clone()).collect();
@@ -81,11 +118,23 @@ pub async fn process_document(
     if chunks.is_empty() {
         tracing::warn!(document_id = %event.document_id, "no chunks produced");
         if !old_kids.is_empty() {
-            sqlx::query("DELETE FROM knowledge_units WHERE document_id = $1")
+            crate::outbox::enqueue_intent(
+                &mut tx,
+                &event.org_id,
+                &event.document_id,
+                &old_kid_ids,
+                event.user_id.as_deref(),
+                &event.idempotency_key,
+                event.zdr,
+            )
+            .await?;
+            sqlx::query("DELETE FROM knowledge_units WHERE document_id = $1 AND org_id = $2")
                 .bind(&event.document_id)
-                .execute(pool)
+                .bind(&event.org_id)
+                .execute(&mut *tx)
                 .await?;
         }
+        tx.commit().await?;
         return Ok(BuildResult {
             document_id: event.document_id.clone(),
             chunks_created: 0,
@@ -97,9 +146,10 @@ pub async fn process_document(
 
     let reindex = !old_kids.is_empty();
 
-    sqlx::query("DELETE FROM knowledge_units WHERE document_id = $1")
+    sqlx::query("DELETE FROM knowledge_units WHERE document_id = $1 AND org_id = $2")
         .bind(&event.document_id)
-        .execute(pool)
+        .bind(&event.org_id)
+        .execute(&mut *tx)
         .await?;
 
     let mut knowledge_ids = Vec::with_capacity(chunks.len());
@@ -110,8 +160,16 @@ pub async fn process_document(
     // paying to embed a trivially-different one.
     fn near_duplicate(a: &str, b: &str) -> bool {
         use std::collections::HashSet;
-        let ta: HashSet<String> = a.to_lowercase().split_whitespace().map(str::to_string).collect();
-        let tb: HashSet<String> = b.to_lowercase().split_whitespace().map(str::to_string).collect();
+        let ta: HashSet<String> = a
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let tb: HashSet<String> = b
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         if ta.is_empty() && tb.is_empty() {
             return true;
         }
@@ -131,7 +189,7 @@ pub async fn process_document(
             "SELECT COUNT(*) FROM knowledge_units WHERE knowledge_id = $1",
         )
         .bind(&kid)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         if existing > 0 {
@@ -150,7 +208,7 @@ pub async fn process_document(
         )
         .bind(&event.document_id)
         .bind(chunk.index as i32)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
         {
             if near_duplicate(&prior_text, &chunk.text) {
@@ -187,7 +245,7 @@ pub async fn process_document(
         .bind(&chunk.text)
         .bind(&hash)
         .bind(&metadata)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         knowledge_ids.push(kid);
@@ -213,7 +271,7 @@ pub async fn process_document(
             .bind(new_kid)
             .bind(old_idx)
             .bind(old_hash)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         }
         tracing::info!(
@@ -225,10 +283,13 @@ pub async fn process_document(
     }
 
     // Update document status to processing
-    sqlx::query("UPDATE documents SET status = 'processing' WHERE document_id = $1")
-        .bind(&event.document_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE documents SET status = 'processing' WHERE document_id = $1 AND org_id = $2",
+    )
+    .bind(&event.document_id)
+    .bind(&event.org_id)
+    .execute(&mut *tx)
+    .await?;
 
     tracing::info!(
         document_id = %event.document_id,
@@ -237,6 +298,19 @@ pub async fn process_document(
     );
 
     let orphaned_knowledge_ids = orphaned_ids(&old_kid_ids, &knowledge_ids);
+    if !orphaned_knowledge_ids.is_empty() {
+        crate::outbox::enqueue_intent(
+            &mut tx,
+            &event.org_id,
+            &event.document_id,
+            &orphaned_knowledge_ids,
+            event.user_id.as_deref(),
+            &event.idempotency_key,
+            event.zdr,
+        )
+        .await?;
+    }
+    tx.commit().await?;
 
     Ok(BuildResult {
         document_id: event.document_id.clone(),
@@ -250,7 +324,86 @@ pub async fn process_document(
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
-    use super::orphaned_ids;
+    use super::{canonical_document_is_indexable, orphaned_ids, process_document, DocumentEvent};
+    use crate::chunker::ChunkConfig;
+
+    #[test]
+    fn canonical_document_gate_fails_closed_for_deleted_restricted_and_unknown_rows() {
+        for classification in ["internal", "public", "sensitive"] {
+            assert!(canonical_document_is_indexable(false, classification));
+        }
+        for classification in ["restricted", "", "future-policy", " RESTRICTED "] {
+            assert!(!canonical_document_is_indexable(false, classification));
+        }
+        assert!(!canonical_document_is_indexable(true, "internal"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
+    async fn delayed_events_for_deleted_or_restricted_documents_do_zero_durable_work() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL must point to disposable PostgreSQL");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("disposable postgres");
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE documents (
+              document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, content TEXT NOT NULL,
+              deleted_at TIMESTAMPTZ, zdr_classification TEXT NOT NULL
+            );
+            CREATE TABLE knowledge_units (
+              knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL
+            );
+            CREATE TABLE index_deletion_outbox (outbox_id BIGSERIAL PRIMARY KEY);
+            INSERT INTO documents VALUES
+              ('fixture-restricted','fixture-org','canonical restricted content',NULL,'restricted'),
+              ('fixture-unknown','fixture-org','canonical unknown content',NULL,'future-policy'),
+              ('fixture-deleted','fixture-org','canonical deleted content',NOW(),'internal');
+            INSERT INTO knowledge_units VALUES
+              ('existing-restricted','fixture-restricted','fixture-org'),
+              ('existing-unknown','fixture-unknown','fixture-org'),
+              ('existing-deleted','fixture-deleted','fixture-org');
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("minimal disposable schema");
+
+        for document_id in ["fixture-restricted", "fixture-unknown", "fixture-deleted"] {
+            let result = process_document(
+                &pool,
+                &DocumentEvent {
+                    document_id: document_id.into(),
+                    org_id: "fixture-org".into(),
+                    title: "stale event title".into(),
+                    source: "fixture".into(),
+                    doc_type: "text".into(),
+                    user_id: Some("fixture-user".into()),
+                    idempotency_key: format!("stale-{document_id}"),
+                    zdr: false,
+                },
+                &ChunkConfig::default(),
+            )
+            .await
+            .expect("stale event is acknowledged as a no-op");
+            assert_eq!(result.chunks_created, 0);
+            assert!(result.knowledge_ids.is_empty());
+            assert!(result.orphaned_knowledge_ids.is_empty());
+        }
+
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+               (SELECT COUNT(*) FROM knowledge_units),
+               (SELECT COUNT(*) FROM index_deletion_outbox)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("durable counts");
+        assert_eq!(counts, (3, 0));
+    }
 
     #[test]
     fn orphaned_ids_returns_removed_chunks() {
@@ -282,18 +435,4 @@ mod tests {
         let new = vec!["a".to_string()];
         assert!(orphaned_ids(&old, &new).is_empty());
     }
-}
-
-pub async fn handle_document_deleted(pool: &PgPool, document_id: &str) -> anyhow::Result<()> {
-    let deleted = sqlx::query("DELETE FROM knowledge_units WHERE document_id = $1")
-        .bind(document_id)
-        .execute(pool)
-        .await?;
-
-    tracing::info!(
-        document_id,
-        rows = deleted.rows_affected(),
-        "knowledge units deleted"
-    );
-    Ok(())
 }

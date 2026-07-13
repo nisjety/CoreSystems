@@ -31,7 +31,7 @@ use tower::timeout::TimeoutLayer;
 use crate::cache::CacheLayer;
 use crate::config::Config;
 use crate::embed::EmbeddingClient;
-use crate::grpc::interceptor::ApiKeyInterceptor;
+use crate::grpc::interceptor::{JwtInterceptor, JwtVerifier};
 use crate::grpc::pb_documents::document_service_server::DocumentServiceServer;
 use crate::grpc::pb_knowledge::knowledge_service_server::KnowledgeServiceServer;
 use crate::grpc::pb_retrieval::retrieval_service_server::RetrievalServiceServer;
@@ -68,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = Config::from_env()?;
+    let grpc_jwt_verifier = Arc::new(JwtVerifier::from_env()?);
     tracing::info!(
         http_port = cfg.http_port,
         grpc_port = cfg.grpc_port,
@@ -126,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| std::env::var("NATS_URL"))
         .or_else(|_| std::env::var("NATS_LOCAL_URL"))
     {
-        Ok(nats_url) => match async_nats::connect(&nats_url).await {
+        Ok(nats_url) => match nats_connection::connect(&nats_url).await {
             Ok(nats) => {
                 if let Some(cache) = cache_layer.as_ref() {
                     cache::invalidator::spawn_invalidator(nats.clone(), cache.clone());
@@ -134,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(nats)
             }
             Err(e) => {
-                tracing::warn!(error = %e, url = %nats_url, "NATS connect failed; cache invalidator + cost ledger disabled");
+                tracing::warn!(error = %e, "NATS connect failed; cache invalidator + cost ledger disabled");
                 None
             }
         },
@@ -148,21 +149,43 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("JWKS cache initialized; kid-based key lookup enabled");
     }
 
-    // Wave 3 §15-B/C — build the policy client based on enforcement mode.
-    // `off` → NoopPolicyClient (default for v2.3 back-compat).
-    // `strict`/`permissive` → HttpPolicyClient hitting user-service + org-core.
+    // Control membership authorization defaults strict. The no-op client exists
+    // only for an explicit insecure local-development posture.
     let policy: std::sync::Arc<dyn authz::PolicyClient> = match authz::EnforcementMode::from_env() {
         authz::EnforcementMode::Off => {
-            tracing::info!("control-plane enforcement: off (NoopPolicyClient)");
+            anyhow::ensure!(
+                std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").as_deref() == Ok("1"),
+                "CONTROL_PLANE_ENFORCEMENT=off requires ALLOW_INSECURE_DEV_DEFAULTS=1"
+            );
+            tracing::warn!("control-plane enforcement disabled for insecure local development");
             std::sync::Arc::new(authz::NoopPolicyClient)
         }
         mode => {
-            let user_url = std::env::var("USER_SERVICE_HTTP_URL")
-                .unwrap_or_else(|_| "http://user-service:3012".into());
-            let org_url = std::env::var("ORG_CORE_HTTP_URL")
-                .unwrap_or_else(|_| "http://org-core-service:8080".into());
-            tracing::info!(?mode, %user_url, %org_url, "control-plane enforcement: on");
-            std::sync::Arc::new(authz::HttpPolicyClient::new(user_url, org_url))
+            let token_url = std::env::var("CONTROL_POLICY_TOKEN_URL").unwrap_or_else(|_| {
+                "http://auth-core:3011/api/control-policy/internal-token".into()
+            });
+            let decision_url = std::env::var("CONTROL_PLANE_DECISION_URL").unwrap_or_else(|_| {
+                "http://auth-core:3011/api/v1/internal/authorization/data-plane/decision".into()
+            });
+            let service_id = std::env::var("CONTROL_POLICY_SERVICE_ID")
+                .map_err(|_| anyhow::anyhow!("CONTROL_POLICY_SERVICE_ID is required"))?;
+            let service_api_key = std::env::var("CONTROL_POLICY_SERVICE_API_KEY")
+                .map_err(|_| anyhow::anyhow!("CONTROL_POLICY_SERVICE_API_KEY is required"))?;
+            anyhow::ensure!(
+                !service_id.trim().is_empty(),
+                "CONTROL_POLICY_SERVICE_ID is empty"
+            );
+            anyhow::ensure!(
+                !service_api_key.trim().is_empty(),
+                "CONTROL_POLICY_SERVICE_API_KEY is empty"
+            );
+            tracing::info!(?mode, %token_url, %decision_url, "control-plane enforcement: strict");
+            std::sync::Arc::new(authz::HttpPolicyClient::new(
+                token_url,
+                decision_url,
+                service_id,
+                service_api_key,
+            ))
         }
     };
 
@@ -205,13 +228,11 @@ async fn main() -> anyhow::Result<()> {
     let user_core_url =
         std::env::var("USER_CORE_HTTP_URL").unwrap_or_else(|_| "http://user-core:3012".into());
     let visibility: std::sync::Arc<dyn authz::VisibilityClient> = std::sync::Arc::new(
-        authz::HttpVisibilityClient::new(user_core_url, cfg.internal_api_key.clone()),
+        authz::HttpVisibilityClient::new(user_core_url, cfg.user_core_service_token.clone()),
     );
-    // Evict the visibility cache on grant revoke so a revoke takes effect within
-    // one query (5-min TTL is the backstop). Subscribes to the shared bus.
-    if let Some(ref nats) = nats_client {
-        authz::visibility::spawn_grant_invalidator(nats.clone(), visibility.clone());
-    }
+    // Grant reads are intentionally uncached in the secure MVP. This keeps
+    // revocations effective on the next request even when the cross-plane
+    // shared event bus is unavailable or misrouted.
 
     // Visual RAG arm query embedder (Cohere Embed v4). Online only when
     // COHERE_EMBED_V4_ENDPOINT is set; otherwise the visual arm stays dark and
@@ -275,11 +296,19 @@ async fn main() -> anyhow::Result<()> {
 
     // gRPC server (Tonic) with Tower middleware stack
     let grpc_addr = format!("0.0.0.0:{}", cfg.grpc_port).parse()?;
-    let interceptor = ApiKeyInterceptor::new(cfg.internal_api_key.clone());
+    let interceptor = JwtInterceptor::new(grpc_jwt_verifier);
 
     let retrieval_svc = grpc::retrieval_svc::RetrievalSvc::new(pipeline.clone());
-    let document_svc = grpc::document_svc::DocumentSvc::new(Arc::new(pool.clone()));
-    let knowledge_svc = grpc::knowledge_svc::KnowledgeSvc::new(Arc::new(pool));
+    let document_svc = grpc::document_svc::DocumentSvc::new(
+        Arc::new(pool.clone()),
+        pipeline.policy.clone(),
+        pipeline.visibility.clone(),
+    );
+    let knowledge_svc = grpc::knowledge_svc::KnowledgeSvc::new(
+        Arc::new(pool),
+        pipeline.policy.clone(),
+        pipeline.visibility.clone(),
+    );
 
     let grpc_timeout = Duration::from_secs(cfg.grpc_timeout_secs.into());
 

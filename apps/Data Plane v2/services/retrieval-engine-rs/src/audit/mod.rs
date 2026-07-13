@@ -12,7 +12,7 @@ use sqlx::PgPool;
 
 use crate::authz::AuthContext;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AccessEvent<'a> {
     pub ctx: &'a AuthContext,
     pub endpoint: &'a str,

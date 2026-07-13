@@ -17,10 +17,12 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Server};
-use tonic::Request;
+use tonic::{Request, Status};
 
+use retrieval_engine::authz::{
+    AuthContext, AuthMethod, EffectiveAcl, NoopPolicyClient, NoopVisibilityClient,
+};
 use retrieval_engine::grpc::document_svc::DocumentSvc;
-use retrieval_engine::grpc::interceptor::ApiKeyInterceptor;
 use retrieval_engine::grpc::knowledge_svc::KnowledgeSvc;
 use retrieval_engine::grpc::pb_documents;
 use retrieval_engine::grpc::pb_documents::document_service_client::DocumentServiceClient;
@@ -29,7 +31,6 @@ use retrieval_engine::grpc::pb_knowledge;
 use retrieval_engine::grpc::pb_knowledge::knowledge_service_client::KnowledgeServiceClient;
 use retrieval_engine::grpc::pb_knowledge::knowledge_service_server::KnowledgeServiceServer;
 
-const TEST_API_KEY: &str = "test-cross-org-key";
 const ORG_A: &str = "org-isolation-A";
 const ORG_B: &str = "org-isolation-B";
 
@@ -42,6 +43,8 @@ async fn setup_schema(pool: &PgPool) {
         "CREATE TABLE IF NOT EXISTS documents (
             document_id  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
             org_id       TEXT NOT NULL,
+            owner_id     TEXT NOT NULL DEFAULT 'test-user',
+            visibility   TEXT NOT NULL DEFAULT 'org',
             source       TEXT NOT NULL DEFAULT '',
             type         TEXT NOT NULL DEFAULT '',
             title        TEXT NOT NULL DEFAULT '',
@@ -97,20 +100,21 @@ async fn cleanup(pool: &PgPool) {
 async fn start_server(pool: PgPool) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let interceptor = ApiKeyInterceptor::new(Some(TEST_API_KEY.into()));
-    let doc_svc = DocumentSvc::new(Arc::new(pool.clone()));
-    let know_svc = KnowledgeSvc::new(Arc::new(pool));
+    let policy = Arc::new(NoopPolicyClient);
+    let visibility = Arc::new(NoopVisibilityClient);
+    let doc_svc = DocumentSvc::new(Arc::new(pool.clone()), policy.clone(), visibility.clone());
+    let know_svc = KnowledgeSvc::new(Arc::new(pool), policy, visibility);
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     tokio::spawn(async move {
         Server::builder()
             .add_service(DocumentServiceServer::with_interceptor(
                 doc_svc,
-                interceptor.clone(),
+                test_principal,
             ))
             .add_service(KnowledgeServiceServer::with_interceptor(
                 know_svc,
-                interceptor,
+                test_principal,
             ))
             .serve_with_incoming(incoming)
             .await
@@ -128,45 +132,57 @@ async fn connect(addr: SocketAddr) -> Channel {
         .unwrap()
 }
 
-fn authed<T>(inner: T) -> Request<T> {
+#[allow(clippy::result_large_err)]
+fn test_principal(mut request: Request<()>) -> Result<Request<()>, Status> {
+    let org_id = request
+        .metadata()
+        .get("x-test-org")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Status::unauthenticated("missing test principal"))?
+        .to_owned();
+    request.extensions_mut().insert(AuthContext {
+        user_id: Some("test-user".into()),
+        org_id,
+        auth_method: AuthMethod::Jwt,
+        scopes: vec!["org:data:write_all".into()],
+        acl: EffectiveAcl::allow_all(),
+        request_id: "cross-org-isolation-test".into(),
+        verified_bearer: None,
+    });
+    Ok(request)
+}
+
+fn authed<T>(inner: T, org_id: &str) -> Request<T> {
     let mut req = Request::new(inner);
     req.metadata_mut()
-        .insert("x-api-key", MetadataValue::try_from(TEST_API_KEY).unwrap());
+        .insert("x-test-org", MetadataValue::try_from(org_id).unwrap());
     req
 }
 
-async fn create_doc_in(
-    client: &mut DocumentServiceClient<Channel>,
-    org: &str,
-    title: &str,
-) -> String {
-    client
-        .create_document(authed(pb_documents::CreateDocumentRequest {
-            org_id: org.into(),
-            source: "test".into(),
-            r#type: "article".into(),
-            title: title.into(),
-            content: format!("content of {title} owned by {org}"),
-            zdr_classification: "internal".into(),
-            metadata: None,
-            ingest_policy: None,
-        }))
-        .await
-        .unwrap()
-        .into_inner()
-        .document
-        .unwrap()
-        .document_id
+/// Test-fixture setup only. Production document writes must use
+/// documents-api-go; direct SQL here isolates read authorization tests from
+/// the permanently disabled legacy gRPC mutations.
+async fn insert_test_document(pool: &PgPool, org: &str, title: &str) -> String {
+    sqlx::query_as::<_, (String,)>(
+        "INSERT INTO documents (org_id, source, type, title, content, zdr_classification)
+         VALUES ($1, 'test-fixture', 'article', $2, $3, 'internal') RETURNING document_id",
+    )
+    .bind(org)
+    .bind(title)
+    .bind(format!("isolated fixture content for {title}"))
+    .fetch_one(pool)
+    .await
+    .expect("insert isolated test document")
+    .0
 }
 
 // ─── Test 1: GetDocument cannot see other org's docs by ID ──────────────────
 
 #[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
 async fn test_get_document_isolated_across_orgs() {
-    let Some(url) = test_db_url() else {
-        eprintln!("TEST_DATABASE_URL not set, skipping");
-        return;
-    };
+    let url = test_db_url().expect("TEST_DATABASE_URL is required for this ignored test");
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
     cleanup(&pool).await;
@@ -175,44 +191,56 @@ async fn test_get_document_isolated_across_orgs() {
     let ch = connect(addr).await;
     let mut client = DocumentServiceClient::new(ch);
 
-    let doc_a = create_doc_in(&mut client, ORG_A, "Org A Doc").await;
-    let doc_b = create_doc_in(&mut client, ORG_B, "Org B Doc").await;
+    let doc_a = insert_test_document(&pool, ORG_A, "Org A Doc").await;
+    let doc_b = insert_test_document(&pool, ORG_B, "Org B Doc").await;
 
     // Org A asks for org B's doc by ID — must NOT find it
     let err = client
-        .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc_b.clone(),
-            org_id: ORG_A.into(),
-        }))
+        .get_document(authed(
+            pb_documents::GetDocumentRequest {
+                document_id: doc_b.clone(),
+                org_id: ORG_A.into(),
+            },
+            ORG_A,
+        ))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     // Org B asks for org A's doc — must NOT find it
     let err = client
-        .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc_a.clone(),
-            org_id: ORG_B.into(),
-        }))
+        .get_document(authed(
+            pb_documents::GetDocumentRequest {
+                document_id: doc_a.clone(),
+                org_id: ORG_B.into(),
+            },
+            ORG_B,
+        ))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::NotFound);
 
     // Sanity: each org CAN get its own
     let resp_a = client
-        .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc_a,
-            org_id: ORG_A.into(),
-        }))
+        .get_document(authed(
+            pb_documents::GetDocumentRequest {
+                document_id: doc_a,
+                org_id: ORG_A.into(),
+            },
+            ORG_A,
+        ))
         .await
         .unwrap();
     assert_eq!(resp_a.into_inner().document.unwrap().org_id, ORG_A);
 
     let resp_b = client
-        .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc_b,
-            org_id: ORG_B.into(),
-        }))
+        .get_document(authed(
+            pb_documents::GetDocumentRequest {
+                document_id: doc_b,
+                org_id: ORG_B.into(),
+            },
+            ORG_B,
+        ))
         .await
         .unwrap();
     assert_eq!(resp_b.into_inner().document.unwrap().org_id, ORG_B);
@@ -235,19 +263,22 @@ async fn test_list_documents_org_scoped() {
 
     // 3 docs in A, 2 docs in B
     for i in 0..3 {
-        create_doc_in(&mut client, ORG_A, &format!("A doc {i}")).await;
+        insert_test_document(&pool, ORG_A, &format!("A doc {i}")).await;
     }
     for i in 0..2 {
-        create_doc_in(&mut client, ORG_B, &format!("B doc {i}")).await;
+        insert_test_document(&pool, ORG_B, &format!("B doc {i}")).await;
     }
 
     let list_a = client
-        .list_documents(authed(pb_documents::ListDocumentsRequest {
-            org_id: ORG_A.into(),
-            limit: 100,
-            offset: 0,
-            r#type: String::new(),
-        }))
+        .list_documents(authed(
+            pb_documents::ListDocumentsRequest {
+                org_id: ORG_A.into(),
+                limit: 100,
+                offset: 0,
+                r#type: String::new(),
+            },
+            ORG_A,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -260,12 +291,15 @@ async fn test_list_documents_org_scoped() {
     assert_eq!(list_a.total, 3);
 
     let list_b = client
-        .list_documents(authed(pb_documents::ListDocumentsRequest {
-            org_id: ORG_B.into(),
-            limit: 100,
-            offset: 0,
-            r#type: String::new(),
-        }))
+        .list_documents(authed(
+            pb_documents::ListDocumentsRequest {
+                org_id: ORG_B.into(),
+                limit: 100,
+                offset: 0,
+                r#type: String::new(),
+            },
+            ORG_B,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -282,7 +316,7 @@ async fn test_list_documents_org_scoped() {
 // ─── Test 3: Soft delete is org-scoped (cannot delete another org's doc) ────
 
 #[tokio::test]
-async fn test_delete_does_not_cross_orgs() {
+async fn test_deprecated_delete_is_contained_without_cross_org_mutation() {
     let Some(url) = test_db_url() else { return };
     let pool = PgPool::connect(&url).await.unwrap();
     setup_schema(&pool).await;
@@ -292,28 +326,30 @@ async fn test_delete_does_not_cross_orgs() {
     let ch = connect(addr).await;
     let mut client = DocumentServiceClient::new(ch);
 
-    let doc_b = create_doc_in(&mut client, ORG_B, "B's doc").await;
+    let doc_b = insert_test_document(&pool, ORG_B, "B's doc").await;
 
-    // Org A tries to delete B's doc (passing B's document_id but A's org_id)
-    let resp = client
-        .delete_document(authed(pb_documents::DeleteDocumentRequest {
-            document_id: doc_b.clone(),
-            org_id: ORG_A.into(),
-        }))
+    // Deprecated gRPC delete is contained before any document lookup or write.
+    let error = client
+        .delete_document(authed(
+            pb_documents::DeleteDocumentRequest {
+                document_id: doc_b.clone(),
+                org_id: ORG_A.into(),
+            },
+            ORG_A,
+        ))
         .await
-        .unwrap()
-        .into_inner();
-    assert!(
-        !resp.success,
-        "delete should report no rows affected when org doesn't match"
-    );
+        .expect_err("legacy gRPC delete must remain disabled");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
     // Verify B's doc is still alive
     let still_there = client
-        .get_document(authed(pb_documents::GetDocumentRequest {
-            document_id: doc_b,
-            org_id: ORG_B.into(),
-        }))
+        .get_document(authed(
+            pb_documents::GetDocumentRequest {
+                document_id: doc_b,
+                org_id: ORG_B.into(),
+            },
+            ORG_B,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -334,10 +370,9 @@ async fn test_knowledge_units_org_scoped() {
     let addr = start_server(pool.clone()).await;
     let ch = connect(addr).await;
 
-    let mut doc_client = DocumentServiceClient::new(ch.clone());
     let mut know_client = KnowledgeServiceClient::new(ch);
 
-    let doc_b = create_doc_in(&mut doc_client, ORG_B, "B doc with chunks").await;
+    let doc_b = insert_test_document(&pool, ORG_B, "B doc with chunks").await;
 
     // Insert chunks for B's doc
     for i in 0..3 {
@@ -357,10 +392,13 @@ async fn test_knowledge_units_org_scoped() {
 
     // Org A asks for B's chunks (passing B's document_id but A's org_id) — empty
     let resp = know_client
-        .get_knowledge_units(authed(pb_knowledge::GetKnowledgeUnitsRequest {
-            document_id: doc_b.clone(),
-            org_id: ORG_A.into(),
-        }))
+        .get_knowledge_units(authed(
+            pb_knowledge::GetKnowledgeUnitsRequest {
+                document_id: doc_b.clone(),
+                org_id: ORG_A.into(),
+            },
+            ORG_A,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -372,10 +410,13 @@ async fn test_knowledge_units_org_scoped() {
 
     // Sanity: org B can see its own chunks
     let resp = know_client
-        .get_knowledge_units(authed(pb_knowledge::GetKnowledgeUnitsRequest {
-            document_id: doc_b,
-            org_id: ORG_B.into(),
-        }))
+        .get_knowledge_units(authed(
+            pb_knowledge::GetKnowledgeUnitsRequest {
+                document_id: doc_b,
+                org_id: ORG_B.into(),
+            },
+            ORG_B,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -396,19 +437,21 @@ async fn test_check_permissions_org_scoped() {
     let addr = start_server(pool.clone()).await;
     let ch = connect(addr).await;
 
-    let mut doc_client = DocumentServiceClient::new(ch.clone());
     let mut know_client = KnowledgeServiceClient::new(ch);
 
-    let doc_b = create_doc_in(&mut doc_client, ORG_B, "B's doc").await;
+    let doc_b = insert_test_document(&pool, ORG_B, "B's doc").await;
 
     // Org A asks about B's document — should be NotFound, NOT Allowed/Denied,
     // because returning Denied would confirm the document exists, leaking info.
     let err = know_client
-        .check_permissions(authed(pb_knowledge::CheckPermissionsRequest {
-            org_id: ORG_A.into(),
-            document_id: doc_b,
-            user_id: "attacker".into(),
-        }))
+        .check_permissions(authed(
+            pb_knowledge::CheckPermissionsRequest {
+                org_id: ORG_A.into(),
+                document_id: doc_b,
+                user_id: "attacker".into(),
+            },
+            ORG_A,
+        ))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::NotFound);

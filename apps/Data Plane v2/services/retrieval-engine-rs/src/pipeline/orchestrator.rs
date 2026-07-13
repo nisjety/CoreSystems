@@ -19,13 +19,19 @@ use crate::trace::persist_trace;
 /// Must match `embedding_engine_rs::wiki_consumer::WIKI_COLLECTION`.
 const WIKI_COLLECTION: &str = "wiki_block_embeddings";
 
-/// Map the ZDR session mode to the embed-path egress flag. `ephemeral` is the
-/// zero-data-retention session mode: the query is ZDR content, so its embedding
-/// must not egress to a retaining provider. Every other mode (`reject`,
-/// `disabled`, unset) is non-ZDR for the embed hop — `reject` filters restricted
-/// *documents* from results but the *query* itself is not ZDR content.
-fn embed_zdr_for_mode(zdr_mode: &str) -> bool {
-    zdr_mode == "ephemeral"
+/// Any restrictive posture blocks retaining egress. This covers both the
+/// ephemeral no-persistence posture and reject mode: neither may silently send
+/// query text or candidates to Cohere/Azure/text rerank providers.
+fn embed_zdr_for_mode(zdr_mode: ZdrMode) -> bool {
+    zdr_mode.restricts_egress()
+}
+
+fn embedding_cache_allowed(zdr: bool) -> bool {
+    !zdr
+}
+
+fn text_rerank_allowed(zdr_mode: ZdrMode, requested: bool) -> bool {
+    requested && !zdr_mode.restricts_egress()
 }
 
 pub struct RetrievalPipeline {
@@ -55,6 +61,7 @@ pub struct RetrievalPipeline {
     /// Visual RAG arm query embedder (Cohere Embed v4). `None` when the visual
     /// arm is not configured (text-only deployment); when present and `w_visual`
     /// > 0 the orchestrator embeds the query into Embed v4's multimodal space and
+    ///
     /// fuses page-image hits from `qdrant_visual_collection`.
     pub visual_embedder: Option<crate::embed::visual::VisualQueryEmbedder>,
     /// ColQwen visual reranker client. `Some` only when `VISUAL_RERANK_ENABLED`
@@ -148,11 +155,11 @@ impl RetrievalPipeline {
 
     #[tracing::instrument(
         name = "retrieval.pipeline",
-        skip(self),
+        skip(self, req),
         fields(
             org_id = req.org_id.as_str(),
             query_len = req.query.len(),
-            zdr_mode = req.zdr_mode.as_deref().unwrap_or("disabled"),
+            zdr_mode = req.zdr_mode.unwrap_or_default().as_str(),
         ),
     )]
     pub async fn retrieve(&self, req: RetrievalRequest) -> anyhow::Result<RetrievalResponse> {
@@ -174,15 +181,12 @@ impl RetrievalPipeline {
         let pipeline_start = Instant::now();
         let top_k = req.top_k.unwrap_or(self.config.retrieval_top_k);
         let top_n = req.top_n.unwrap_or(self.config.retrieval_top_n);
-        let zdr_mode = req
-            .zdr_mode
-            .clone()
-            .unwrap_or_else(|| "disabled".to_string());
+        let zdr_mode = req.zdr_mode.unwrap_or_default();
         // ephemeral = the zero-data-retention session mode. The query text is
         // ZDR content, so its embedding must not egress to a retaining provider:
         // this drives the embed-path egress guard (the direct-Azure backend
         // fails closed when true).
-        let embed_zdr = embed_zdr_for_mode(&zdr_mode);
+        let embed_zdr = embed_zdr_for_mode(zdr_mode);
 
         // Resolve the mode-mix weights FIRST so they can drive engine routing
         // (D4+D5 spec §7) and so captured-on-trace == used-for-scoring.
@@ -236,21 +240,31 @@ impl RetrievalPipeline {
         let query_vector = if route.dense {
             let query_hash = crate::cache::hash_text(&req.query);
             let model_ver = self.embedder.cache_namespace();
-            let vec = if let Some(ref cache) = self.cache {
-                if let Some(cached) = cache.get_embedding(&model_ver, &query_hash).await {
-                    tracing::debug!("embed cache hit");
-                    crate::metrics::record_embed_cache_hit();
-                    cached
+            let vec = if embedding_cache_allowed(embed_zdr) {
+                if let Some(ref cache) = self.cache {
+                    if let Some(cached) = cache.get_embedding(&model_ver, &query_hash).await {
+                        tracing::debug!("embed cache hit");
+                        crate::metrics::record_embed_cache_hit();
+                        cached
+                    } else {
+                        crate::metrics::record_embed_request();
+                        let vec = self
+                            .embedder
+                            .embed_query(&req.org_id, &req.query, embed_zdr)
+                            .await?;
+                        cache.set_embedding(&model_ver, &query_hash, &vec).await;
+                        vec
+                    }
                 } else {
                     crate::metrics::record_embed_request();
-                    let vec = self
-                        .embedder
+                    self.embedder
                         .embed_query(&req.org_id, &req.query, embed_zdr)
-                        .await?;
-                    cache.set_embedding(&model_ver, &query_hash, &vec).await;
-                    vec
+                        .await?
                 }
             } else {
+                // ZDR is a cache-admission decision, not just an embedding-provider
+                // flag. Skip both reads and writes so an ephemeral request never
+                // touches durable Dragonfly state (including a pre-existing key).
                 crate::metrics::record_embed_request();
                 self.embedder
                     .embed_query(&req.org_id, &req.query, embed_zdr)
@@ -476,11 +490,10 @@ impl RetrievalPipeline {
         // whole retrieve when the rerank provider is unavailable or
         // misconfigured. Reranking refines ordering; it must never be able to
         // sink an otherwise-successful retrieval.
-        let rerank_requested = req
-            .mode_mix
-            .as_ref()
-            .and_then(|m| m.rerank)
-            .unwrap_or(true);
+        let rerank_requested = text_rerank_allowed(
+            zdr_mode,
+            req.mode_mix.as_ref().and_then(|m| m.rerank).unwrap_or(true),
+        );
         let rerank_start = Instant::now();
         let (reranked, rerank_used_count) = match self.reranker {
             Some(ref reranker) if rerank_requested => {
@@ -549,7 +562,11 @@ impl RetrievalPipeline {
             (None, Vec::new())
         } else {
             let granted = match req.user_id.as_deref() {
-                Some(uid) => self.visibility.visible_documents(&req.org_id, uid).await,
+                Some(uid) => {
+                    self.visibility
+                        .visible_documents(&req.org_id, uid, req.verified_bearer.as_deref())
+                        .await
+                }
                 None => Vec::new(),
             };
             (req.user_id.as_deref(), granted)
@@ -564,7 +581,7 @@ impl RetrievalPipeline {
         // distinguish "mode=reject but nothing to reject" from "mode=disabled"
         // from "mode=reject and 4 docs filtered".
         let mut zdr_actions_applied: Vec<&'static str> = Vec::new();
-        let reranked = if zdr_mode == "reject" {
+        let reranked = if zdr_mode == ZdrMode::Reject {
             let candidate_doc_ids: Vec<String> =
                 reranked.iter().map(|c| c.document_id.clone()).collect();
             if !candidate_doc_ids.is_empty() {
@@ -591,7 +608,7 @@ impl RetrievalPipeline {
             } else {
                 reranked
             }
-        } else if zdr_mode == "ephemeral" {
+        } else if zdr_mode == ZdrMode::Ephemeral {
             zdr_actions_applied.push("ephemeral_no_trace_persist");
             reranked
         } else {
@@ -645,7 +662,7 @@ impl RetrievalPipeline {
         // the user gets candidates, we log the trace error and synthesize a
         // fallback trace_id so downstream "/retrieval/{trace_id}" gracefully
         // returns NotFound rather than the user's query failing entirely.
-        let trace_id = if zdr_mode == "ephemeral" {
+        let trace_id = if zdr_mode.is_ephemeral() {
             format!("ephemeral-{}", uuid::Uuid::new_v4())
         } else {
             match persist_trace(
@@ -654,7 +671,7 @@ impl RetrievalPipeline {
                 &reranked,
                 &timings,
                 self.reranker.as_ref().map(|r| r.model_name()),
-                &zdr_mode,
+                zdr_mode.as_str(),
                 Some(&resolved_mix),
                 &zdr_actions_applied,
             )
@@ -715,7 +732,7 @@ impl RetrievalPipeline {
             org_id: req.org_id,
             trace_id,
             index_version,
-            zdr_mode,
+            zdr_mode: zdr_mode.as_str().to_owned(),
             // Surface the SAME enforcement actions already persisted on the
             // trace (§16.1.3) — the real computed value, not a synthesized one.
             zdr_actions_applied: zdr_actions_applied
@@ -915,20 +932,31 @@ struct SourceRow {
 
 #[cfg(test)]
 mod tests {
-    use super::embed_zdr_for_mode;
+    use super::{embed_zdr_for_mode, embedding_cache_allowed, text_rerank_allowed, ZdrMode};
 
     #[test]
     fn ephemeral_mode_drives_embed_zdr_true() {
-        assert!(embed_zdr_for_mode("ephemeral"));
+        assert!(embed_zdr_for_mode(ZdrMode::Ephemeral));
     }
 
     #[test]
-    fn non_ephemeral_modes_are_non_zdr_for_embed() {
-        // `reject` filters restricted documents from results, but the *query*
-        // text is not ZDR content — only `ephemeral` makes the embed hop ZDR.
-        assert!(!embed_zdr_for_mode("reject"));
-        assert!(!embed_zdr_for_mode("disabled"));
-        assert!(!embed_zdr_for_mode(""));
-        assert!(!embed_zdr_for_mode("Ephemeral")); // case-sensitive on purpose
+    fn restrictive_modes_drive_retaining_egress_guard() {
+        assert!(embed_zdr_for_mode(ZdrMode::Reject));
+        assert!(embed_zdr_for_mode(ZdrMode::Ephemeral));
+        assert!(!embed_zdr_for_mode(ZdrMode::Disabled));
+    }
+
+    #[test]
+    fn restrictive_modes_never_invoke_text_reranker() {
+        assert!(!text_rerank_allowed(ZdrMode::Reject, true));
+        assert!(!text_rerank_allowed(ZdrMode::Ephemeral, true));
+        assert!(text_rerank_allowed(ZdrMode::Disabled, true));
+        assert!(!text_rerank_allowed(ZdrMode::Disabled, false));
+    }
+
+    #[test]
+    fn ephemeral_queries_bypass_embedding_cache_reads_and_writes() {
+        assert!(!embedding_cache_allowed(true));
+        assert!(embedding_cache_allowed(false));
     }
 }

@@ -11,6 +11,8 @@ func TestIngestPolicy_IsZeroRetention(t *testing.T) {
 		{"nil policy is non-ZDR", nil, false},
 		{"default off-mode is non-ZDR", &IngestPolicy{ZDRMode: "off"}, false},
 		{"explicit on mode is ZDR", &IngestPolicy{ZDRMode: "on"}, true},
+		{"normalized on mode is ZDR", &IngestPolicy{ZDRMode: " ON "}, true},
+		{"unknown mode fails closed as ZDR", &IngestPolicy{ZDRMode: "ambiguous"}, true},
 		{"ephemeral_only flag is ZDR", &IngestPolicy{EphemeralOnly: true}, true},
 		{"both flags is ZDR", &IngestPolicy{ZDRMode: "on", EphemeralOnly: true}, true},
 		{"empty struct is non-ZDR", &IngestPolicy{}, false},

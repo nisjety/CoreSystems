@@ -4,16 +4,19 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
-	DatabaseURL    string
-	NatsURL        string
-	HTTPPort       int
-	GRPCPort       int
-	SharedNatsURL  string
-	SharedNatsToken string
-	InternalAPIKey string
+	DatabaseURL                string
+	NatsURL                    string
+	NatsToken                  string
+	HTTPPort                   int
+	GRPCPort                   int
+	SharedNatsURL              string
+	SharedNatsToken            string
+	UserCoreServiceToken       string
+	EventSigningPrivateKeyPath string
 	// UserCoreURL is the user-core base URL used to resolve a viewer's explicit
 	// resource grants (the per-user authz facade). Per-user ownership filtering.
 	UserCoreURL string
@@ -21,17 +24,22 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:     envOr("DATABASE_URL", "postgres://dataplane:dataplane@localhost:5442/dataplane?sslmode=disable"),
-		NatsURL:         envOr("NATS_URL", "nats://localhost:4232"),
-		HTTPPort:        envIntOr("HTTP_PORT", 8010),
-		GRPCPort:        envIntOr("GRPC_PORT", 50060),
-		SharedNatsURL:   envOr("NATS_SHARED_URL", ""),
-		SharedNatsToken: envOr("VELION_NATS_TOKEN", ""),
-		InternalAPIKey:  envOr("INTERNAL_API_KEY", ""),
-		UserCoreURL:     envOr("USER_CORE_URL", "http://user-core:8080"),
+		DatabaseURL:                envOr("DATABASE_URL", "postgres://dataplane:dataplane@localhost:5442/dataplane?sslmode=disable"),
+		NatsURL:                    envOr("NATS_URL", "nats://localhost:4232"),
+		NatsToken:                  strings.TrimSpace(os.Getenv("DATAPLANE_NATS_TOKEN")),
+		HTTPPort:                   envIntOr("HTTP_PORT", 8010),
+		GRPCPort:                   envIntOr("GRPC_PORT", 50060),
+		SharedNatsURL:              envOr("NATS_SHARED_URL", ""),
+		SharedNatsToken:            envOr("VELION_NATS_TOKEN", ""),
+		UserCoreServiceToken:       envOr("USER_CORE_SERVICE_TOKEN", ""),
+		EventSigningPrivateKeyPath: envOr("EVENT_SIGNING_PRIVATE_KEY_PATH", ""),
+		UserCoreURL:                envOr("USER_CORE_URL", "http://user-core:8080"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL required")
+	}
+	if cfg.EventSigningPrivateKeyPath == "" {
+		return nil, fmt.Errorf("EVENT_SIGNING_PRIVATE_KEY_PATH required")
 	}
 	return cfg, nil
 }

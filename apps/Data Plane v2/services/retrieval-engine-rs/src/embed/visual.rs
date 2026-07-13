@@ -96,7 +96,10 @@ impl VisualQueryEmbedder {
         if zdr {
             anyhow::bail!("ZDR query must not egress to the Cohere Embed v4 visual path");
         }
-        let url = format!("{}/embeddings?api-version={}", self.endpoint, self.api_version);
+        let url = format!(
+            "{}/embeddings?api-version={}",
+            self.endpoint, self.api_version
+        );
         let body = QueryEmbedRequest {
             model: &self.model,
             input: vec![text],

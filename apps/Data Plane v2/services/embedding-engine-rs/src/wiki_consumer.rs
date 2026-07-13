@@ -16,10 +16,12 @@
 //! Success → ack. Transient failure → no ack → JetStream redelivers (up to
 //! max_deliver). Poison payload → ack (don't redeliver forever).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use async_nats::jetstream::{self, Context as JsContext};
+use event_envelope_rs::EventVerifier;
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -39,12 +41,16 @@ struct WikiPublishedEvent {
     title: String,
     path: String,
     content: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    zdr: bool,
 }
 
 pub async fn spawn(
     js: JsContext,
     qdrant: qdrant_client::Qdrant,
     provider: EmbeddingProvider,
+    verifier: Arc<EventVerifier>,
 ) -> anyhow::Result<()> {
     // Disjoint subject → its own stream (JetStream requires a subject belong
     // to exactly one stream). WorkQueue: a message is removed once acked.
@@ -99,10 +105,11 @@ pub async fn spawn(
                         continue;
                     }
                 };
-                let evt: WikiPublishedEvent = match serde_json::from_slice(&msg.payload) {
+                let redelivery = msg.info().is_ok_and(|info| info.delivered > 1);
+                let evt = match decode_verified_wiki_event(&verifier, &msg.payload, redelivery) {
                     Ok(e) => e,
                     Err(e) => {
-                        tracing::warn!(error = %e, "invalid wiki.published payload; acking poison");
+                        tracing::warn!(error = %e, "unverified wiki.published event; acking poison");
                         let _ = msg.ack().await;
                         continue;
                     }
@@ -126,6 +133,36 @@ pub async fn spawn(
     Ok(())
 }
 
+fn decode_verified_wiki_event(
+    verifier: &EventVerifier,
+    envelope: &[u8],
+    redelivery: bool,
+) -> anyhow::Result<WikiPublishedEvent> {
+    let verified = if redelivery {
+        verifier.verify_redelivery(SUBJECT_WIKI_PUBLISHED, envelope)?
+    } else {
+        verifier.verify(SUBJECT_WIKI_PUBLISHED, envelope)?
+    };
+    let event: WikiPublishedEvent = serde_json::from_slice(&verified.payload)?;
+    anyhow::ensure!(
+        !event.page_id.trim().is_empty()
+            && !event.version_id.trim().is_empty()
+            && !event.org_id.trim().is_empty()
+            && !event.content.trim().is_empty(),
+        "wiki event required fields are empty"
+    );
+    anyhow::ensure!(event.org_id == verified.claims.org_id, "tenant mismatch");
+    anyhow::ensure!(
+        event.user_id.as_deref() == verified.claims.user_id.as_deref(),
+        "user mismatch"
+    );
+    anyhow::ensure!(
+        event.zdr == verified.claims.zdr && !event.zdr,
+        "invalid ZDR posture"
+    );
+    Ok(event)
+}
+
 async fn handle(
     evt: &WikiPublishedEvent,
     qdrant: &qdrant_client::Qdrant,
@@ -133,11 +170,8 @@ async fn handle(
 ) -> anyhow::Result<()> {
     use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder, Value as QdrantValue};
 
-    // Wiki pages carry no `zdr_classification` (the ZDR doc path is the
-    // `documents` table). No ZDR signal exists on this subject, so the egress
-    // guard does not apply here.
     let vecs = provider
-        .embed_batch(&evt.org_id, std::slice::from_ref(&evt.content), false)
+        .embed_batch(&evt.org_id, std::slice::from_ref(&evt.content), evt.zdr)
         .await
         .context("embed wiki content")?;
     let vec = vecs.into_iter().next().context("empty embed result")?;
@@ -177,4 +211,81 @@ async fn handle(
         .await
         .context("qdrant upsert wiki point")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use event_envelope_rs::{EventSigner, EventVerifier};
+    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    fn contract() -> (EventSigner, EventVerifier) {
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("test key");
+        let public = RsaPublicKey::from(&private);
+        let private_pem = private
+            .to_pkcs1_pem(Default::default())
+            .expect("private pem");
+        let public_pem = public.to_pkcs1_pem(Default::default()).expect("public pem");
+        (
+            EventSigner::from_rsa_pem(
+                private_pem.as_bytes(),
+                "service:wiki-store-go",
+                "wiki-events-v1",
+                "dataplane-events",
+                "events:wiki:publish",
+            )
+            .expect("signer"),
+            EventVerifier::from_rsa_pem(
+                public_pem.as_bytes(),
+                "service:wiki-store-go",
+                "wiki-events-v1",
+                "dataplane-events",
+                "events:wiki:publish",
+                10,
+            )
+            .expect("verifier"),
+        )
+    }
+
+    #[test]
+    fn signed_wiki_decoder_pins_tenant_user_and_non_zdr_posture() {
+        let (signer, verifier) = contract();
+        let payload = br#"{"page_id":"page-test","version_id":"version-test","org_id":"org-test","workspace_id":"workspace-test","title":"title","path":"/path","content":"content","user_id":"user-test","zdr":false}"#;
+        let envelope = signer
+            .sign(
+                SUBJECT_WIKI_PUBLISHED,
+                "org-test",
+                Some("user-test"),
+                false,
+                payload,
+            )
+            .expect("sign");
+        let event = decode_verified_wiki_event(&verifier, &envelope, false).expect("verify");
+        assert_eq!(event.org_id, "org-test");
+        assert_eq!(event.user_id.as_deref(), Some("user-test"));
+        assert!(!event.zdr);
+    }
+
+    #[test]
+    fn signed_wiki_decoder_rejects_plain_json_tampering_and_replay() {
+        let (signer, verifier) = contract();
+        let payload = br#"{"page_id":"page-test","version_id":"version-test","org_id":"org-test","workspace_id":"workspace-test","title":"title","path":"/path","content":"content","zdr":false}"#;
+        assert!(decode_verified_wiki_event(&verifier, payload, false).is_err());
+        let envelope = signer
+            .sign(SUBJECT_WIKI_PUBLISHED, "org-test", None, false, payload)
+            .expect("sign");
+        assert!(decode_verified_wiki_event(&verifier, &envelope, false).is_ok());
+        assert!(decode_verified_wiki_event(&verifier, &envelope, false).is_err());
+        assert!(decode_verified_wiki_event(&verifier, &envelope, true).is_ok());
+
+        let mut tampered: serde_json::Value = serde_json::from_slice(&envelope).expect("json");
+        tampered["data"] = serde_json::Value::String("e30".into());
+        assert!(decode_verified_wiki_event(
+            &verifier,
+            &serde_json::to_vec(&tampered).expect("json"),
+            false,
+        )
+        .is_err());
+    }
 }

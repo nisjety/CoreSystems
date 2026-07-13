@@ -58,6 +58,15 @@ pub struct Config {
     pub batch_size: usize,
     #[serde(default = "default_max_delivery")]
     pub max_delivery_attempts: u32,
+
+    #[serde(default)]
+    pub index_event_public_key_path: String,
+    #[serde(default)]
+    pub wiki_event_public_key_path: String,
+    #[serde(default)]
+    pub embedding_event_private_key_path: String,
+    #[serde(default = "default_event_auth_audience")]
+    pub event_auth_audience: String,
 }
 
 fn default_deployment() -> String {
@@ -107,6 +116,9 @@ fn default_batch_size() -> usize {
 }
 fn default_max_delivery() -> u32 {
     5
+}
+fn default_event_auth_audience() -> String {
+    "dataplane-events".into()
 }
 
 impl Config {
