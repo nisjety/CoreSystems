@@ -2,9 +2,11 @@ package subscribers
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -14,6 +16,14 @@ import (
 // the real Novu adapter or a stub in tests.
 type IdentifyClient interface {
 	IdentifySubscriber(ctx context.Context, params IdentifyParams) error
+}
+
+type Repository interface {
+	Upsert(ctx context.Context, params UpsertParams) (*Subscriber, error)
+	Get(ctx context.Context, userID string) (*Subscriber, error)
+	GetActiveForOrganization(ctx context.Context, organizationID, userID string) (*Subscriber, error)
+	UpsertMembership(ctx context.Context, params MembershipParams) (*Membership, error)
+	ListActiveMembershipsForUser(ctx context.Context, userID string) ([]Membership, error)
 }
 
 // IdentifyParams is the input shape we pass to the runtime. Mirrors Novu's
@@ -33,13 +43,13 @@ type IdentifyParams struct {
 }
 
 type Service struct {
-	repo     *PGRepository
+	repo     Repository
 	runtime  IdentifyClient
 	now      func() time.Time
 	notifier func(error) // optional async error sink; nil = log.Printf
 }
 
-func NewService(repo *PGRepository, runtime IdentifyClient) *Service {
+func NewService(repo Repository, runtime IdentifyClient) *Service {
 	return &Service{
 		repo:    repo,
 		runtime: runtime,
@@ -60,10 +70,17 @@ func (s *Service) Upsert(ctx context.Context, params UpsertParams) (*Subscriber,
 		return nil, fmt.Errorf("upsert subscriber: %w", err)
 	}
 
-	// Best-effort Novu sync. We don't fail the local upsert if Novu is
-	// down — the next event for this subscriber will retry the sync.
+	// Sync every active org-scoped provider identity. Delivery never targets
+	// the legacy global subscriber id because preferences and payloads belong
+	// to one organization.
 	if s.runtime != nil {
-		go s.syncToNovu(*sub)
+		memberships, listErr := s.repo.ListActiveMembershipsForUser(ctx, sub.UserID)
+		if listErr != nil {
+			return nil, fmt.Errorf("list subscriber memberships: %w", listErr)
+		}
+		for _, membership := range memberships {
+			go s.syncToNovu(*sub, membership)
+		}
 	}
 
 	return sub, nil
@@ -77,34 +94,62 @@ func (s *Service) Get(ctx context.Context, userID string) (*Subscriber, error) {
 	return s.repo.Get(ctx, userID)
 }
 
-// EnsureForRecipient guarantees a row exists for a recipient_id used in
-// triggers. It does not enrich identity — callers responsible for richer
-// data should call Upsert. Used by the feed-write path: every delivered
-// notification implies its recipient must have a subscriber row.
-func (s *Service) EnsureForRecipient(ctx context.Context, recipientID string) (*Subscriber, error) {
+// ResolveUser returns the provider subscriber ID only when Control-derived
+// local state says the user is an active member of the requested organization.
+// A signed gateway session proves who made the request, but is not a durable
+// membership grant: stale active-organization session state must not preserve
+// access after Control removes a member.
+func (s *Service) ResolveUser(ctx context.Context, organizationID, userID string) (string, error) {
+	if s == nil {
+		return "", errors.New("subscribers service not configured")
+	}
+	organizationID = strings.TrimSpace(organizationID)
+	userID = strings.TrimSpace(userID)
+	subscriber, err := s.repo.GetActiveForOrganization(ctx, organizationID, userID)
+	if err != nil {
+		return "", err
+	}
+	if subscriber.NovuSubscriberID == "" {
+		return "", ErrNotFound
+	}
+	return subscriber.NovuSubscriberID, nil
+}
+
+func (s *Service) UpsertMembership(ctx context.Context, params MembershipParams) (*Membership, error) {
 	if s == nil {
 		return nil, errors.New("subscribers service not configured")
 	}
-
-	sub, err := s.repo.Get(ctx, recipientID)
-	if err == nil {
-		return sub, nil
-	}
-	if !errors.Is(err, ErrNotFound) {
+	providerSubscriberID := providerSubscriberID(params.OrganizationID, params.UserID)
+	membership, err := s.repo.UpsertMembership(ctx, MembershipParams{
+		OrganizationID:       params.OrganizationID,
+		UserID:               params.UserID,
+		ProviderSubscriberID: providerSubscriberID,
+		Role:                 params.Role,
+		Status:               params.Status,
+		AuthorityRevision:    params.AuthorityRevision,
+		SourceEventID:        params.SourceEventID,
+		OccurredAt:           params.OccurredAt,
+	})
+	if err != nil {
 		return nil, err
 	}
-
-	// Insert a stub row. Later events with richer identity will merge.
-	return s.repo.Upsert(ctx, UpsertParams{UserID: recipientID})
+	if membership.Status == MembershipStatusActive && s.runtime != nil {
+		subscriber, getErr := s.repo.Get(ctx, membership.UserID)
+		if getErr != nil {
+			return nil, fmt.Errorf("resolve membership identity: %w", getErr)
+		}
+		go s.syncToNovu(*subscriber, *membership)
+	}
+	return membership, nil
 }
 
-func (s *Service) syncToNovu(sub Subscriber) {
+func (s *Service) syncToNovu(sub Subscriber, membership Membership) {
 	// Detached context — the goroutine outlives the original caller.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	err := s.runtime.IdentifySubscriber(ctx, IdentifyParams{
-		SubscriberID: sub.NovuSubscriberID,
+		SubscriberID: membership.ProviderSubscriberID,
 		Email:        sub.Email,
 		Phone:        sub.Phone,
 		FirstName:    sub.FirstName,
@@ -114,8 +159,8 @@ func (s *Service) syncToNovu(sub Subscriber) {
 		Timezone:     sub.Timezone,
 		Data: map[string]any{
 			"velion_user_id": sub.UserID,
-			"velion_org_id":  sub.OrgID,
-			"velion_role":    sub.Role,
+			"velion_org_id":  membership.OrganizationID,
+			"velion_role":    membership.Role,
 		},
 	})
 	if err != nil {
@@ -127,7 +172,10 @@ func (s *Service) syncToNovu(sub Subscriber) {
 		return
 	}
 
-	if err := s.repo.MarkSynced(ctx, sub.UserID, s.now()); err != nil {
-		log.Printf("[notification-core/subscribers] mark synced failed for %s: %v", sub.UserID, err)
-	}
+}
+
+func providerSubscriberID(organizationID, userID string) string {
+	canonical := strings.TrimSpace(organizationID) + "\x00" + strings.TrimSpace(userID)
+	digest := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("velion:%x", digest)
 }

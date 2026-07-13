@@ -1,0 +1,240 @@
+package delegation
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"net/http"
+	"testing"
+	"time"
+)
+
+const testAudience = "conversation-core"
+
+func TestVerifierAcceptsBoundDelegationAndRejectsReplay(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	verifier, err := NewVerifier(Config{
+		Audience: testAudience,
+		Keys: map[string]string{
+			"velion-gateway": "gateway-test-secret-at-least-32-bytes",
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+
+	body := []byte(`{"body_text":"hello"}`)
+	request := signedRequest(t, http.MethodPost, "http://conversation-core:3160/api/v1/conversations/conversation-1/messages", body, signedFields{
+		serviceID:      "velion-gateway",
+		secret:         "gateway-test-secret-at-least-32-bytes",
+		timestamp:      now,
+		nonce:          "nonce-1234567890",
+		userID:         "user-1",
+		organizationID: "org-1",
+		role:           "member",
+	})
+
+	principal, err := verifier.Verify(request, body)
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if principal.ServiceID != "velion-gateway" || principal.UserID != "user-1" || principal.OrganizationID != "org-1" || principal.Role != "member" {
+		t.Fatalf("principal = %#v", principal)
+	}
+	if _, err := verifier.Verify(request, body); !IsReplay(err) {
+		t.Fatalf("replayed Verify() error = %v, want replay error", err)
+	}
+}
+
+func TestVerifierRejectsBodyScopeRoleMethodAndQueryTampering(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	verifier, err := NewVerifier(Config{
+		Audience: testAudience,
+		Keys:     map[string]string{"velion-gateway": "gateway-test-secret-at-least-32-bytes"},
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+
+	body := []byte(`{"status":"open"}`)
+	base := signedFields{
+		serviceID:      "velion-gateway",
+		secret:         "gateway-test-secret-at-least-32-bytes",
+		timestamp:      now,
+		nonce:          "nonce-original-123",
+		userID:         "user-1",
+		organizationID: "org-1",
+		role:           "member",
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*http.Request, *[]byte)
+	}{
+		{name: "body", mutate: func(_ *http.Request, body *[]byte) { *body = []byte(`{"status":"closed"}`) }},
+		{name: "organization", mutate: func(req *http.Request, _ *[]byte) { req.Header.Set(HeaderOrganizationID, "org-2") }},
+		{name: "user", mutate: func(req *http.Request, _ *[]byte) { req.Header.Set(HeaderUserID, "user-2") }},
+		{name: "role", mutate: func(req *http.Request, _ *[]byte) { req.Header.Set(HeaderRole, "owner") }},
+		{name: "method", mutate: func(req *http.Request, _ *[]byte) { req.Method = http.MethodDelete }},
+		{name: "query", mutate: func(req *http.Request, _ *[]byte) { req.URL.RawQuery = "limit=500" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := signedRequest(t, http.MethodPatch, "http://conversation-core:3160/api/v1/conversations/conversation-1/status?limit=50", body, base)
+			verifiedBody := bytes.Clone(body)
+			test.mutate(request, &verifiedBody)
+			if _, err := verifier.Verify(request, verifiedBody); err == nil {
+				t.Fatal("Verify() error = nil, want tampering rejection")
+			}
+		})
+	}
+}
+
+func TestVerifierSeparatesGatewayAndIngestPrincipals(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	verifier, err := NewVerifier(Config{
+		Audience: testAudience,
+		Keys: map[string]string{
+			"velion-gateway":      "gateway-test-secret-at-least-32-bytes",
+			"conversation-ingest": "ingest-test-secret-at-least-32-bytes-1",
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+
+	body := []byte(`{"org_id":"org-1"}`)
+	wrongSecret := signedRequest(t, http.MethodPost, "http://conversation-core:3160/internal/conversation-events", body, signedFields{
+		serviceID:      "conversation-ingest",
+		secret:         "gateway-test-secret-at-least-32-bytes",
+		timestamp:      now,
+		nonce:          "nonce-wrong-secret-123",
+		organizationID: "org-1",
+	})
+	if _, err := verifier.Verify(wrongSecret, body); err == nil {
+		t.Fatal("Verify() error = nil, want per-service key separation")
+	}
+}
+
+func TestVerifierAcceptsGatewayCrossLanguageFixture(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	verifier, err := NewVerifier(Config{
+		Audience: testAudience,
+		Keys:     map[string]string{"velion-gateway": "0123456789abcdef0123456789abcdef"},
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+	body := []byte(`{"body_text":"hello"}`)
+	request, err := http.NewRequest(http.MethodPost, "http://conversation-core:3160/api/v1/conversations/conversation-1/messages?source=inbox", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	// These fixed values are generated by the Rust gateway implementation. Keep
+	// them literal so this test detects canonicalization drift between languages.
+	request.Header.Set(HeaderServiceID, "velion-gateway")
+	request.Header.Set(HeaderTimestamp, "2026-07-13T12:00:00+00:00")
+	request.Header.Set(HeaderNonce, "fixed-nonce-1234567890")
+	request.Header.Set(HeaderUserID, "user-1")
+	request.Header.Set(HeaderOrganizationID, "org-1")
+	request.Header.Set(HeaderRole, "admin")
+	request.Header.Set(HeaderBodySHA256, "zIWXrcFcB2V6qcMYvMSL9BWhHM37zJ5N96fr8I-wyRI")
+	request.Header.Set(HeaderSignature, "0BVt97NOdBwX5Yo-YuEw5RkrWT4imcuTCaNMXWokB28")
+
+	principal, err := verifier.Verify(request, body)
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if principal.ServiceID != "velion-gateway" || principal.OrganizationID != "org-1" || principal.Role != "admin" {
+		t.Fatalf("principal = %#v", principal)
+	}
+}
+
+func TestVerifierConfigurationAndContextFailClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{name: "missing audience", config: Config{Keys: map[string]string{"service": "0123456789abcdef0123456789abcdef"}}},
+		{name: "missing principals", config: Config{Audience: testAudience}},
+		{name: "blank principal", config: Config{Audience: testAudience, Keys: map[string]string{" ": "0123456789abcdef0123456789abcdef"}}},
+		{name: "short secret", config: Config{Audience: testAudience, Keys: map[string]string{"service": "too-short"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewVerifier(test.config); err == nil {
+				t.Fatal("NewVerifier() error = nil, want fail-closed configuration error")
+			}
+		})
+	}
+
+	if _, ok := PrincipalFromContext(nil); ok {
+		t.Fatal("PrincipalFromContext(nil) returned a principal")
+	}
+	principal := Principal{ServiceID: "velion-gateway", OrganizationID: "org-1"}
+	got, ok := PrincipalFromContext(WithPrincipal(t.Context(), principal))
+	if !ok || got != principal {
+		t.Fatalf("PrincipalFromContext() = %#v, %v; want %#v, true", got, ok, principal)
+	}
+	if IsReplay(errors.New("other")) {
+		t.Fatal("IsReplay(other) = true")
+	}
+}
+
+type signedFields struct {
+	serviceID      string
+	secret         string
+	timestamp      time.Time
+	nonce          string
+	userID         string
+	organizationID string
+	role           string
+}
+
+func signedRequest(t *testing.T, method, rawURL string, body []byte, fields signedFields) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(method, rawURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	timestamp := fields.timestamp.UTC().Format(time.RFC3339)
+	digestBytes := sha256.Sum256(body)
+	digest := base64.RawURLEncoding.EncodeToString(digestBytes[:])
+	canonical := Canonical(CanonicalFields{
+		ServiceID:      fields.serviceID,
+		Audience:       testAudience,
+		Timestamp:      timestamp,
+		Nonce:          fields.nonce,
+		Method:         method,
+		URI:            request.URL.RequestURI(),
+		UserID:         fields.userID,
+		OrganizationID: fields.organizationID,
+		Role:           fields.role,
+		BodySHA256:     digest,
+	})
+	mac := hmac.New(sha256.New, []byte(fields.secret))
+	_, _ = mac.Write([]byte(canonical))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	request.Header.Set(HeaderServiceID, fields.serviceID)
+	request.Header.Set(HeaderTimestamp, timestamp)
+	request.Header.Set(HeaderNonce, fields.nonce)
+	request.Header.Set(HeaderBodySHA256, digest)
+	request.Header.Set(HeaderSignature, signature)
+	if fields.userID != "" {
+		request.Header.Set(HeaderUserID, fields.userID)
+	}
+	if fields.organizationID != "" {
+		request.Header.Set(HeaderOrganizationID, fields.organizationID)
+	}
+	if fields.role != "" {
+		request.Header.Set(HeaderRole, fields.role)
+	}
+	return request
+}

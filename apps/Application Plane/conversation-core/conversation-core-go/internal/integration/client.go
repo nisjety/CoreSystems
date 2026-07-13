@@ -11,6 +11,8 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,12 +20,21 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/attestation"
 )
 
 // defaultTimeout bounds every send so a hung provider call surfaces as a
 // transient failure (retryable) rather than blocking the consumer forever.
-const defaultTimeout = 20 * time.Second
+const (
+	defaultTimeout          = 20 * time.Second
+	authResponseMaxBytes    = 64 << 10
+	actionResponseMaxBytes  = 1 << 20
+	serviceTokenMaxBytes    = 16 << 10
+	serviceTokenRefreshSkew = 30 * time.Second
+)
 
 // ErrUnsupportedProvider is returned (as a terminal error) when a conversation's
 // channel provider has no known send operation. It is permanent — retrying will
@@ -34,11 +45,12 @@ var ErrUnsupportedProvider = errors.New("integration: unsupported send provider"
 // send_failed) or transient (retry via JetStream redelivery). 4xx + unsupported
 // provider are terminal; timeouts + 5xx + transport errors are transient.
 type SendError struct {
-	Terminal bool
-	Status   int
-	Code     string
-	Message  string
-	err      error
+	Terminal    bool
+	SafeToRetry bool
+	Status      int
+	Code        string
+	Message     string
+	err         error
 }
 
 func (e *SendError) Error() string {
@@ -71,6 +83,23 @@ func IsTerminal(err error) bool {
 	return false
 }
 
+// IsSafeToRetry is true only for failures proven to occur before the action
+// route, receipt ledger, provider adapter, or provider could be reached.
+func IsSafeToRetry(err error) bool {
+	var sendErr *SendError
+	return errors.As(err, &sendErr) && sendErr.SafeToRetry
+}
+
+// ErrorCode returns a bounded, non-sensitive code safe for lifecycle events and
+// logs. Upstream/provider response text must never cross that boundary.
+func ErrorCode(err error) string {
+	var sendErr *SendError
+	if errors.As(err, &sendErr) {
+		return sanitizeErrorCode(sendErr.Code)
+	}
+	return "send_failed"
+}
+
 // SendRequest is one outbound reply addressed by a resolved channel thread ref.
 type SendRequest struct {
 	OrgID            string
@@ -81,6 +110,15 @@ type SendRequest struct {
 	BodyText         string
 	BodyHTML         string
 	Subject          string
+	// The authorization fields are copied from the content-free outbound intent
+	// claimed before this call. Send recomputes PayloadSHA256 and refuses to sign
+	// if any effect differs from the durable binding.
+	AuthorizationKind string
+	AuthorizationID   string
+	ApprovalID        string
+	ActionID          string
+	PayloadSHA256     string
+	IdempotencyKey    string
 	// To is an optional list of recipient addresses (email providers).
 	To []string
 }
@@ -94,22 +132,61 @@ type SendResult struct {
 
 // Client speaks the integration-corev2 connections-actions contract.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	apiKeyHdr  string
-	httpClient *http.Client
+	baseURL           string
+	apiKey            string
+	apiKeyHdr         string
+	authCoreURL       string
+	serviceID         string
+	serviceCredential string
+	httpClient        *http.Client
+	now               func() time.Time
+	tokenMu           sync.Mutex
+	tokens            map[string]cachedServiceToken
+	tokenFlights      map[string]*tokenFlight
+	writeAttestor     WriteAttestor
+}
+
+type cachedServiceToken struct {
+	value     string
+	expiresAt time.Time
+}
+
+type tokenFlight struct {
+	done      chan struct{}
+	token     string
+	expiresAt time.Time
+	err       *SendError
 }
 
 // Option configures the Client.
 type Option func(*Client)
 
+// WriteAttestor signs a short-lived, effect-bound proof. *attestation.Signer
+// satisfies it; keeping the interface narrow makes fail-closed tests pure.
+type WriteAttestor interface {
+	Sign(attestation.Authorization) (string, error)
+}
+
+// WithWriteAttestor configures the conversation-core provider-write signer.
+func WithWriteAttestor(signer WriteAttestor) Option {
+	return func(cl *Client) { cl.writeAttestor = signer }
+}
+
 // WithHTTPClient injects a custom *http.Client (used by tests / for tuning).
 func WithHTTPClient(c *http.Client) Option {
 	return func(cl *Client) {
 		if c != nil {
-			cl.httpClient = c
+			cl.httpClient = clientWithoutRedirects(c)
 		}
 	}
+}
+
+func clientWithoutRedirects(client *http.Client) *http.Client {
+	clone := *client
+	clone.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &clone
 }
 
 // WithAPIKeyHeader overrides the internal-api-key header name (default
@@ -122,15 +199,38 @@ func WithAPIKeyHeader(name string) Option {
 	}
 }
 
-// NewClient builds the outbound client. baseURL + apiKey are required for the
-// client to be usable; callers gate construction on their presence (see config),
-// so there is no false "send claim" without configuration.
+// WithServicePrincipal configures the durable conversation-core identity used
+// only to mint short-lived, tenant-bound Auth Core tokens. The credential is
+// never forwarded to integration-corev2.
+func WithServicePrincipal(authCoreURL, serviceID, credential string) Option {
+	return func(cl *Client) {
+		cl.authCoreURL = strings.TrimRight(strings.TrimSpace(authCoreURL), "/")
+		cl.serviceID = strings.TrimSpace(serviceID)
+		cl.serviceCredential = strings.TrimSpace(credential)
+	}
+}
+
+// WithClock supplies a deterministic clock for token-expiry tests.
+func WithClock(now func() time.Time) Option {
+	return func(cl *Client) {
+		if now != nil {
+			cl.now = now
+		}
+	}
+}
+
+// NewClient builds the integration client. The durable apiKey is restricted to
+// internal webhook-event reads. Tenant routes additionally require
+// WithServicePrincipal; Send never falls back to the durable key.
 func NewClient(baseURL, apiKey string, opts ...Option) *Client {
 	cl := &Client{
-		baseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		apiKey:     strings.TrimSpace(apiKey),
-		apiKeyHdr:  "x-internal-api-key",
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		baseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		apiKey:       strings.TrimSpace(apiKey),
+		apiKeyHdr:    "x-internal-api-key",
+		httpClient:   clientWithoutRedirects(&http.Client{Timeout: defaultTimeout}),
+		now:          time.Now,
+		tokens:       make(map[string]cachedServiceToken),
+		tokenFlights: make(map[string]*tokenFlight),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -142,9 +242,11 @@ func NewClient(baseURL, apiKey string, opts ...Option) *Client {
 
 // actionRequestBody mirrors integration-corev2's actionBody: {operation, params, body}.
 type actionRequestBody struct {
-	Operation string         `json:"operation"`
-	Params    map[string]any `json:"params,omitempty"`
-	Body      map[string]any `json:"body,omitempty"`
+	Operation        string         `json:"operation"`
+	Params           map[string]any `json:"params,omitempty"`
+	Body             map[string]any `json:"body,omitempty"`
+	IdempotencyKey   string         `json:"idempotencyKey,omitempty"`
+	WriteAttestation string         `json:"writeAttestation"`
 }
 
 // actionResponse mirrors integration-corev2's success envelope:
@@ -168,21 +270,53 @@ type actionResponse struct {
 // connection. It returns a *SendError (Terminal flag set) on failure so the
 // executor can decide ack-with-send_failed vs retry.
 func (c *Client) Send(ctx context.Context, req SendRequest) (*SendResult, error) {
-	if c == nil || c.baseURL == "" || c.apiKey == "" {
-		// Misconfiguration is terminal: without a base URL or key we can never
-		// send, so retrying forever is dishonest. Surface send_failed instead.
+	if c == nil || c.baseURL == "" || c.authCoreURL == "" || c.serviceID == "" || c.serviceCredential == "" {
+		// Misconfiguration is terminal: provider writes cannot fall back to the
+		// legacy shared key or caller-supplied tenant headers.
 		return nil, &SendError{Terminal: true, Code: "not_configured", Message: "integration client is not configured"}
+	}
+	if strings.TrimSpace(req.OrgID) == "" {
+		return nil, &SendError{Terminal: true, Code: "missing_organization", Message: "org_id is required to mint a tenant-bound integration token"}
 	}
 	if strings.TrimSpace(req.ConnectionID) == "" {
 		return nil, &SendError{Terminal: true, Code: "missing_connection", Message: "connection_id is required to send"}
 	}
+	if c.writeAttestor == nil {
+		return nil, &SendError{Terminal: true, Code: "attestation_not_configured", Message: "provider-write attestation signer is not configured"}
+	}
 
-	operation, params, body, err := buildSendOperation(req)
+	prepared, err := PrepareSend(req)
 	if err != nil {
 		return nil, &SendError{Terminal: true, Code: "unsupported_provider", Message: err.Error(), err: err}
 	}
+	providedDigest := strings.TrimSpace(req.PayloadSHA256)
+	if len(providedDigest) != len(prepared.PayloadSHA256) || subtle.ConstantTimeCompare([]byte(providedDigest), []byte(prepared.PayloadSHA256)) != 1 {
+		return nil, &SendError{Terminal: true, Code: "payload_binding_mismatch", Message: "provider-write effect does not match the durable outbound intent"}
+	}
+	writeAttestation, err := c.writeAttestor.Sign(attestation.Authorization{
+		AuthorizationKind: req.AuthorizationKind,
+		AuthorizationID:   req.AuthorizationID,
+		ApprovalID:        req.ApprovalID,
+		ActionID:          req.ActionID,
+		OrgID:             strings.TrimSpace(req.OrgID),
+		ConnectionID:      strings.TrimSpace(req.ConnectionID),
+		ProviderKey:       strings.TrimSpace(req.Provider),
+		Operation:         prepared.Operation,
+		ActorID:           strings.TrimSpace(req.ActorUserID),
+		PayloadSHA256:     prepared.PayloadSHA256,
+		IdempotencyKey:    strings.TrimSpace(req.IdempotencyKey),
+	})
+	if err != nil || strings.TrimSpace(writeAttestation) == "" {
+		return nil, &SendError{Terminal: true, Code: "attestation_invalid", Message: "provider-write authorization could not be signed", err: err}
+	}
 
-	payload, err := json.Marshal(actionRequestBody{Operation: operation, Params: params, Body: body})
+	payload, err := json.Marshal(actionRequestBody{
+		Operation:        prepared.Operation,
+		Params:           prepared.Params,
+		Body:             prepared.Body,
+		IdempotencyKey:   strings.TrimSpace(req.IdempotencyKey),
+		WriteAttestation: writeAttestation,
+	})
 	if err != nil {
 		return nil, &SendError{Terminal: true, Code: "marshal", Message: err.Error(), err: err}
 	}
@@ -193,15 +327,11 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (*SendResult, error)
 		return nil, &SendError{Terminal: true, Code: "build_request", Message: err.Error(), err: err}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set(c.apiKeyHdr, c.apiKey)
-	// Org/user headers so integration-corev2 can scope + audit the action to the
-	// approving tenant and actor (AssertOrgAccess uses the request org context).
-	if req.OrgID != "" {
-		httpReq.Header.Set("x-org-id", req.OrgID)
+	token, tokenErr := c.serviceToken(ctx, req.OrgID)
+	if tokenErr != nil {
+		return nil, tokenErr
 	}
-	if req.ActorUserID != "" {
-		httpReq.Header.Set("x-user-id", req.ActorUserID)
-	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -209,16 +339,36 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (*SendResult, error)
 		return nil, &SendError{Terminal: false, Code: "transport", Message: err.Error(), err: err}
 	}
 	defer resp.Body.Close()
-	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBytes, overflow, readErr := readBounded(resp.Body, actionResponseMaxBytes)
+	if readErr != nil {
+		return nil, &SendError{Terminal: false, Status: resp.StatusCode, Code: "response_read", Message: "integration outcome requires reconciliation", err: readErr}
+	}
+	if overflow {
+		return nil, invalidSendResponse(resp.StatusCode)
+	}
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		trimmed := bytes.TrimSpace(respBytes)
+		if len(trimmed) == 0 {
+			// Microsoft Graph and Gmail may acknowledge mail submission with an
+			// empty 202. This is the only empty-success shape permitted by the
+			// integration contract; arbitrary empty/malformed 2xx must not create
+			// a false sent row.
+			if resp.StatusCode == http.StatusAccepted && (prepared.Operation == "mail.send" || prepared.Operation == "gmail.send") {
+				return &SendResult{Operation: prepared.Operation}, nil
+			}
+			return nil, invalidSendResponse(resp.StatusCode)
+		}
 		var decoded actionResponse
-		_ = json.Unmarshal(respBytes, &decoded)
-		return &SendResult{
-			ProviderMessageID: extractProviderMessageID(decoded.Data.Action.Result),
-			Operation:         operation,
-		}, nil
+		if err := json.Unmarshal(trimmed, &decoded); err != nil || !decoded.Success {
+			return nil, invalidSendResponse(resp.StatusCode)
+		}
+		providerMessageID := extractProviderMessageID(decoded.Data.Action.Result)
+		if providerMessageID == "" && prepared.Operation != "mail.send" && prepared.Operation != "gmail.send" {
+			return nil, invalidSendResponse(resp.StatusCode)
+		}
+		return &SendResult{ProviderMessageID: providerMessageID, Operation: prepared.Operation}, nil
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// Client error: bad request, unauthorized, connection not found, capability
 		// denied — none fixable by a blind retry. Terminal.
@@ -285,8 +435,12 @@ func (c *Client) FetchWebhookEvent(ctx context.Context, orgID, webhookEventID st
 // candidate has an active connection, letting the caller store the inbound
 // event without a reply target rather than fail ingestion over it.
 func (c *Client) FetchActiveConnectionID(ctx context.Context, orgID string, providerKeys ...string) (string, error) {
-	if c == nil || c.baseURL == "" || c.apiKey == "" {
+	if c == nil || c.baseURL == "" || c.authCoreURL == "" || c.serviceID == "" || c.serviceCredential == "" {
 		return "", fmt.Errorf("integration client is not configured")
+	}
+	token, tokenErr := c.serviceToken(ctx, orgID)
+	if tokenErr != nil {
+		return "", tokenErr
 	}
 	for _, providerKey := range providerKeys {
 		providerKey = strings.TrimSpace(providerKey)
@@ -299,15 +453,21 @@ func (c *Client) FetchActiveConnectionID(ctx context.Context, orgID string, prov
 		if err != nil {
 			return "", fmt.Errorf("build connections list request: %w", err)
 		}
-		req.Header.Set(c.apiKeyHdr, c.apiKey)
+		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			return "", fmt.Errorf("call connections list: %w", err)
 		}
-		respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		respBytes, overflow, readErr := readBounded(resp.Body, actionResponseMaxBytes)
 		resp.Body.Close()
+		if readErr != nil {
+			return "", fmt.Errorf("read connections list response: %w", readErr)
+		}
+		if overflow {
+			return "", fmt.Errorf("connections list response exceeded the configured limit")
+		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return "", fmt.Errorf("connections list returned status %d: %s", resp.StatusCode, string(respBytes))
+			return "", fmt.Errorf("connections list returned status %d", resp.StatusCode)
 		}
 		var decoded struct {
 			Data struct {
@@ -332,12 +492,200 @@ func (c *Client) FetchActiveConnectionID(ctx context.Context, orgID string, prov
 func classifyError(terminal bool, status int, respBytes []byte) *SendError {
 	var decoded actionResponse
 	_ = json.Unmarshal(respBytes, &decoded)
-	return &SendError{
-		Terminal: terminal,
-		Status:   status,
-		Code:     decoded.Error.Code,
-		Message:  decoded.Error.Message,
+	code := sanitizeErrorCode(decoded.Error.Code)
+	// integration-corev2 has already durably claimed this provider write and
+	// cannot prove whether the provider accepted it. A 409 with this exact code
+	// is ambiguous, not a definite client rejection, and must never be retried
+	// automatically with a fresh request.
+	if code == "action_outcome_unknown" {
+		terminal = false
 	}
+	safeToRetry := code == "action_pre_provider_retryable"
+	if safeToRetry {
+		terminal = false
+	}
+	message := "integration request failed"
+	if safeToRetry {
+		message = "integration rejected request before provider dispatch"
+	} else if !terminal {
+		message = "integration outcome requires reconciliation"
+	}
+	return &SendError{
+		Terminal:    terminal,
+		SafeToRetry: safeToRetry,
+		Status:      status,
+		Code:        code,
+		Message:     message,
+	}
+}
+
+func invalidSendResponse(status int) *SendError {
+	return &SendError{
+		Terminal: false,
+		Status:   status,
+		Code:     "invalid_response",
+		Message:  "integration response did not prove provider submission",
+	}
+}
+
+type serviceTokenRequest struct {
+	OrgID  string   `json:"orgId"`
+	Scopes []string `json:"scopes"`
+	Reason string   `json:"reason"`
+}
+
+type serviceTokenResponse struct {
+	Token     string `json:"token"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+func (c *Client) serviceToken(ctx context.Context, orgID string) (string, *SendError) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return "", &SendError{Terminal: true, Code: "missing_organization", Message: "organization is required for integration authorization"}
+	}
+	now := c.now().UTC()
+	c.tokenMu.Lock()
+	if cached, ok := c.tokens[orgID]; ok && now.Add(serviceTokenRefreshSkew).Before(cached.expiresAt) {
+		c.tokenMu.Unlock()
+		return cached.value, nil
+	}
+	if flight := c.tokenFlights[orgID]; flight != nil {
+		c.tokenMu.Unlock()
+		select {
+		case <-flight.done:
+			return flight.token, flight.err
+		case <-ctx.Done():
+			return "", &SendError{SafeToRetry: true, Code: "auth_token_unavailable", Message: "service-token wait was canceled before provider dispatch", err: ctx.Err()}
+		}
+	}
+	flight := &tokenFlight{done: make(chan struct{})}
+	c.tokenFlights[orgID] = flight
+	c.tokenMu.Unlock()
+
+	flight.token, flight.expiresAt, flight.err = c.fetchServiceToken(ctx, orgID, now)
+	c.tokenMu.Lock()
+	if flight.err == nil {
+		c.tokens[orgID] = cachedServiceToken{value: flight.token, expiresAt: flight.expiresAt}
+	}
+	delete(c.tokenFlights, orgID)
+	close(flight.done)
+	c.tokenMu.Unlock()
+	return flight.token, flight.err
+}
+
+func (c *Client) fetchServiceToken(ctx context.Context, orgID string, now time.Time) (string, time.Time, *SendError) {
+	payload, err := json.Marshal(serviceTokenRequest{
+		OrgID:  orgID,
+		Scopes: []string{"integration:read", "integration:write"},
+		Reason: "execute approved conversation provider action",
+	})
+	if err != nil {
+		return "", time.Time{}, &SendError{Terminal: true, Code: "auth_token_invalid", Message: "service-token request is invalid", err: err}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.authCoreURL+"/api/ingestion/internal-token", bytes.NewReader(payload))
+	if err != nil {
+		return "", time.Time{}, &SendError{Terminal: true, Code: "auth_token_invalid", Message: "service-token request is invalid", err: err}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("x-service-id", c.serviceID)
+	request.Header.Set("x-service-api-key", c.serviceCredential)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return "", time.Time{}, &SendError{SafeToRetry: true, Code: "auth_token_unavailable", Message: "service-token authority is unavailable before provider dispatch", err: err}
+	}
+	defer response.Body.Close()
+	body, overflow, err := readBounded(response.Body, authResponseMaxBytes)
+	if err != nil || overflow {
+		return "", time.Time{}, &SendError{SafeToRetry: true, Status: response.StatusCode, Code: "auth_token_invalid", Message: "service-token authority returned an invalid pre-provider response", err: err}
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return "", time.Time{}, &SendError{Terminal: true, Status: response.StatusCode, Code: "auth_token_rejected", Message: "service principal was rejected"}
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		retryable := response.StatusCode >= http.StatusInternalServerError ||
+			response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusTooEarly ||
+			response.StatusCode == http.StatusTooManyRequests ||
+			(response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest)
+		return "", time.Time{}, &SendError{Terminal: !retryable, SafeToRetry: retryable, Status: response.StatusCode, Code: "auth_token_unavailable", Message: "service-token authority is unavailable before provider dispatch"}
+	}
+	var decoded serviceTokenResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return "", time.Time{}, &SendError{SafeToRetry: true, Status: response.StatusCode, Code: "auth_token_invalid", Message: "service-token authority returned malformed pre-provider JSON", err: err}
+	}
+	decoded.Token = strings.TrimSpace(decoded.Token)
+	expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(decoded.ExpiresAt))
+	if err != nil || decoded.Token == "" || len(decoded.Token) > serviceTokenMaxBytes || !now.Add(serviceTokenRefreshSkew).Before(expiresAt) {
+		return "", time.Time{}, &SendError{SafeToRetry: true, Status: response.StatusCode, Code: "auth_token_invalid", Message: "service-token authority returned an unusable pre-provider token", err: err}
+	}
+	return decoded.Token, expiresAt.UTC(), nil
+}
+
+func readBounded(reader io.Reader, maximum int64) ([]byte, bool, error) {
+	limited := &io.LimitedReader{R: reader, N: maximum + 1}
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(body)) > maximum {
+		return body[:maximum], true, nil
+	}
+	return body, false, nil
+}
+
+func sanitizeErrorCode(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return "integration_error"
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '_' && char != '-' && char != '.' {
+			return "integration_error"
+		}
+	}
+	return value
+}
+
+// PreparedSend is the exact integration-corev2 action effect produced from a
+// channel reply. PayloadSHA256 binds the tenant, connection, provider,
+// operation, params, and body using a deterministic encoding/json struct.
+type PreparedSend struct {
+	Operation     string
+	Params        map[string]any
+	Body          map[string]any
+	PayloadSHA256 string
+}
+
+// PrepareSend maps and hashes a provider action before a durable intent is
+// claimed. encoding/json sorts map keys, while the struct fixes field order and
+// names; both signer and verifier therefore hash the same canonical bytes.
+func PrepareSend(req SendRequest) (PreparedSend, error) {
+	operation, params, body, err := buildSendOperation(req)
+	if err != nil {
+		return PreparedSend{}, err
+	}
+	canonical := struct {
+		OrgID        string         `json:"org_id"`
+		ConnectionID string         `json:"connection_id"`
+		ProviderKey  string         `json:"provider_key"`
+		Operation    string         `json:"operation"`
+		Params       map[string]any `json:"params"`
+		Body         map[string]any `json:"body"`
+	}{
+		OrgID: strings.TrimSpace(req.OrgID), ConnectionID: strings.TrimSpace(req.ConnectionID),
+		ProviderKey: strings.TrimSpace(req.Provider), Operation: strings.TrimSpace(operation),
+		Params: params, Body: body,
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return PreparedSend{}, fmt.Errorf("canonicalize provider-write effect: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return PreparedSend{
+		Operation: strings.TrimSpace(operation), Params: params, Body: body,
+		PayloadSHA256: fmt.Sprintf("%x", digest[:]),
+	}, nil
 }
 
 // SupportsSend reports whether buildSendOperation has a real send mapping for

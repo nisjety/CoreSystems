@@ -1,21 +1,43 @@
 use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    body::{to_bytes, Body},
+    extract::{Extension, State},
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct AppState {
     pub conversation_core_url: String,
-    pub internal_api_key: String,
+    pub ingest_service_token: String,
+    pub conversation_core_service_token: String,
+    pub delegation_replays: ReplayCache,
     pub client: reqwest::Client,
+}
+
+pub type ReplayCache = Arc<Mutex<HashMap<String, DateTime<Utc>>>>;
+
+pub fn new_replay_cache() -> ReplayCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedIngestPrincipal {
+    organization_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -105,10 +127,12 @@ pub enum NormalizeError {
     MissingSender,
     #[error("body_text or body_html is required")]
     MissingBody,
+    #[error("email ingress accepts inbound direction only")]
+    InvalidDirection,
 }
 
 pub fn build_router(state: AppState) -> Router {
-    // Internal auth runs as MIDDLEWARE (not in the handler) so it precedes
+    // Delegation auth runs as MIDDLEWARE (not in the handler) so it precedes
     // body deserialization: an unauthenticated caller gets 401 even for
     // malformed payloads, and never exercises the parse path.
     let ingest = Router::new()
@@ -116,7 +140,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/internal/ingest/normalized-email", post(ingest_email))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            require_internal_key,
+            require_ingest_delegation,
         ));
     Router::new()
         .route("/health", get(health))
@@ -125,21 +149,35 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn require_internal_key(
+async fn require_ingest_delegation(
     State(state): State<AppState>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if !internal_key_matches(&state.internal_api_key, request.headers()) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(
-                serde_json::json!({"error": {"code": "unauthorized", "message": "missing or invalid x-internal-api-key"}}),
-            ),
-        )
-            .into_response();
-    }
-    next.run(request).await
+    let (mut parts, body) = request.into_parts();
+    let body = match to_bytes(body, 2 << 20).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({"error": {"code": "payload_too_large"}})),
+            )
+                .into_response()
+        }
+    };
+    let principal = match verify_ingest_delegation(&state, &parts, &body).await {
+        Ok(principal) => principal,
+        Err(()) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": {"code": "unauthorized"}})),
+            )
+                .into_response()
+        }
+    };
+    parts.extensions.insert(principal);
+    next.run(axum::http::Request::from_parts(parts, Body::from(body)))
+        .await
 }
 
 async fn health() -> impl IntoResponse {
@@ -148,8 +186,15 @@ async fn health() -> impl IntoResponse {
 
 async fn ingest_email(
     State(state): State<AppState>,
+    Extension(principal): Extension<VerifiedIngestPrincipal>,
     Json(raw): Json<RawEmailEvent>,
 ) -> impl IntoResponse {
+    if raw.org_id.trim() != principal.organization_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": {"code": "organization_scope_mismatch"}})),
+        );
+    }
     let canonical = match normalize_email_event(raw) {
         Ok(canonical) => canonical,
         Err(error) => {
@@ -162,73 +207,246 @@ async fn ingest_email(
         }
     };
 
-    let response = state
+    let url = format!(
+        "{}/internal/conversation-events",
+        state.conversation_core_url
+    );
+    if !conversation_target_is_configured_origin(&url, &state.conversation_core_url) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": {"code": "conversation_core_target_rejected"}})),
+        );
+    }
+    let body = match serde_json::to_vec(&canonical) {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": {"code": "event_serialization_failed"}})),
+            )
+        }
+    };
+    let timestamp = Utc::now();
+    let nonce = delegation_nonce(timestamp);
+    let headers = conversation_delegation_headers(
+        &state.conversation_core_service_token,
+        "POST",
+        &url,
+        &body,
+        &canonical.org_id,
+        timestamp,
+        &nonce,
+    );
+    let mut request = state
         .client
-        .post(format!(
-            "{}/internal/conversation-events",
-            state.conversation_core_url
-        ))
-        .header("x-internal-api-key", state.internal_api_key)
-        .header("x-org-id", canonical.org_id.clone())
-        .json(&canonical)
-        .timeout(Duration::from_secs(8))
-        .send()
-        .await;
+        .post(url)
+        .header("content-type", "application/json")
+        .body(body)
+        .timeout(Duration::from_secs(8));
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().await;
 
     match response {
-        Ok(response) if response.status().is_success() => {
-            let payload = response
-                .json::<serde_json::Value>()
-                .await
-                .unwrap_or_else(|_| serde_json::json!({"data": {"ok": true}}));
-            (StatusCode::ACCEPTED, Json(payload))
-        }
         Ok(response) => {
             let status =
                 StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let payload = response.json::<serde_json::Value>().await.unwrap_or_else(
-                |_| serde_json::json!({"error": {"code": "conversation_core_failed"}}),
-            );
+            let response_body = response.bytes().await.unwrap_or_default();
+            if status == StatusCode::ACCEPTED {
+                if let Some(payload) = parse_conversation_core_ack(status.as_u16(), &response_body)
+                {
+                    return (StatusCode::ACCEPTED, Json(payload));
+                }
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": {"code": "invalid_conversation_core_ack"}})),
+                );
+            }
+            let payload = serde_json::from_slice::<serde_json::Value>(&response_body)
+                .unwrap_or_else(
+                    |_| serde_json::json!({"error": {"code": "conversation_core_failed"}}),
+                );
             (status, Json(payload))
         }
-        Err(error) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(
-                serde_json::json!({"error": {"code": "conversation_core_unavailable", "message": error.to_string()}}),
-            ),
+            Json(serde_json::json!({"error": {"code": "conversation_core_unavailable"}})),
         ),
     }
 }
 
-/// Constant-time-ish comparison of the inbound `x-internal-api-key` header
-/// against the configured key. An EMPTY configured key rejects everything —
-/// the binary refuses to boot without a key unless the operator explicitly
-/// sets `ALLOW_INSECURE_DEV_DEFAULTS=1` (see main.rs), and that dev override
-/// keeps auth open rather than silently disabling it here.
-pub fn internal_key_matches(expected: &str, headers: &HeaderMap) -> bool {
-    if expected.is_empty() {
-        // Dev-override mode (boot allowed the empty key): accept, matching
-        // the pre-hardening behavior only when explicitly opted into.
-        return std::env::var("ALLOW_INSECURE_DEV_DEFAULTS").as_deref() == Ok("1");
+fn parse_conversation_core_ack(status: u16, body: &[u8]) -> Option<serde_json::Value> {
+    if status != StatusCode::ACCEPTED.as_u16() || body.is_empty() || body.len() > (1 << 20) {
+        return None;
     }
-    let Some(provided) = headers
-        .get("x-internal-api-key")
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    constant_time_eq(provided.as_bytes(), expected.as_bytes())
+    let payload = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let data = payload.get("data")?;
+    let conversation_id = data.get("detail")?.get("id")?.as_str()?.trim();
+    let message_id = data.get("message")?.get("id")?.as_str()?.trim();
+    data.get("created")?.as_bool()?;
+    if conversation_id.is_empty() || message_id.is_empty() {
+        return None;
+    }
+    Some(payload)
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
+static DELEGATION_NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn delegation_nonce(now: DateTime<Utc>) -> String {
+    let counter = DELEGATION_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seed = format!(
+        "{}:{}:{}",
+        now.timestamp_nanos_opt().unwrap_or_default(),
+        std::process::id(),
+        counter
+    );
+    URL_SAFE_NO_PAD.encode(Sha256::digest(seed.as_bytes()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conversation_delegation_headers(
+    service_token: &str,
+    method: &str,
+    url: &str,
+    body: &[u8],
+    organization_id: &str,
+    timestamp: DateTime<Utc>,
+    nonce: &str,
+) -> BTreeMap<String, String> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let timestamp = timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let uri = reqwest::Url::parse(url)
+        .map(|parsed| match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        })
+        .unwrap_or_default();
+    let organization_id = organization_id.trim();
+    let body_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(body));
+    let canonical = [
+        "v2",
+        "conversation-ingest",
+        "conversation-core",
+        timestamp.as_str(),
+        nonce,
+        method,
+        uri.as_str(),
+        "",
+        organization_id,
+        "",
+        body_digest.as_str(),
+    ]
+    .join("\n");
+    let mut mac = HmacSha256::new_from_slice(service_token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(canonical.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+
+    BTreeMap::from([
+        ("x-service-id".to_owned(), "conversation-ingest".to_owned()),
+        ("x-org-id".to_owned(), organization_id.to_owned()),
+        ("x-delegation-timestamp".to_owned(), timestamp),
+        ("x-delegation-nonce".to_owned(), nonce.to_owned()),
+        ("x-delegation-body-sha256".to_owned(), body_digest),
+        ("x-delegation-signature".to_owned(), signature),
+    ])
+}
+
+fn conversation_target_is_configured_origin(target: &str, configured_base: &str) -> bool {
+    let (Ok(target), Ok(base)) = (
+        reqwest::Url::parse(target),
+        reqwest::Url::parse(configured_base),
+    ) else {
         return false;
+    };
+    target.scheme() == base.scheme()
+        && target.host_str() == base.host_str()
+        && target.port_or_known_default() == base.port_or_known_default()
+}
+
+async fn verify_ingest_delegation(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    body: &[u8],
+) -> Result<VerifiedIngestPrincipal, ()> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .unwrap_or_default()
+    };
+    if header("x-service-id") != "integration-email-worker" {
+        return Err(());
     }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    let organization_id = header("x-org-id");
+    if organization_id.is_empty() {
+        return Err(());
     }
-    diff == 0
+    let timestamp_text = header("x-delegation-timestamp");
+    let timestamp = DateTime::parse_from_rfc3339(timestamp_text)
+        .map_err(|_| ())?
+        .with_timezone(&Utc);
+    let now = Utc::now();
+    if timestamp < now - chrono::Duration::minutes(2)
+        || timestamp > now + chrono::Duration::minutes(2)
+    {
+        return Err(());
+    }
+    let nonce = header("x-delegation-nonce");
+    if !(16..=128).contains(&nonce.len())
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(());
+    }
+    let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(body));
+    if header("x-delegation-body-sha256") != digest {
+        return Err(());
+    }
+    let request_uri = parts
+        .uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or(parts.uri.path());
+    let canonical = [
+        "v2",
+        "integration-email-worker",
+        "conversation-ingest",
+        timestamp_text,
+        nonce,
+        parts.method.as_str(),
+        request_uri,
+        "",
+        organization_id,
+        "",
+        digest.as_str(),
+    ]
+    .join("\n");
+    let provided_signature = URL_SAFE_NO_PAD
+        .decode(header("x-delegation-signature"))
+        .map_err(|_| ())?;
+    let mut mac =
+        HmacSha256::new_from_slice(state.ingest_service_token.as_bytes()).map_err(|_| ())?;
+    mac.update(canonical.as_bytes());
+    mac.verify_slice(&provided_signature).map_err(|_| ())?;
+
+    let replay_key = format!("integration-email-worker\0{nonce}");
+    let mut replays = state.delegation_replays.lock().await;
+    replays.retain(|_, expires_at| *expires_at > now);
+    if replays.contains_key(&replay_key) {
+        return Err(());
+    }
+    replays.insert(replay_key, timestamp + chrono::Duration::minutes(2));
+    Ok(VerifiedIngestPrincipal {
+        organization_id: organization_id.to_owned(),
+    })
 }
 
 pub fn normalize_email_event(mut raw: RawEmailEvent) -> Result<CanonicalEvent, NormalizeError> {
@@ -245,7 +463,7 @@ pub fn normalize_email_event(mut raw: RawEmailEvent) -> Result<CanonicalEvent, N
     raw.message_id_header = raw.message_id_header.trim().to_owned();
     raw.references_header = raw.references_header.trim().to_owned();
     raw.in_reply_to_header = raw.in_reply_to_header.trim().to_owned();
-    raw.direction = normalize_direction(&raw.direction);
+    raw.direction = normalize_direction(&raw.direction)?;
     raw.subject = normalize_subject(&raw.subject);
     raw.from.name = raw.from.name.trim().to_owned();
     raw.from.email = raw.from.email.trim().to_lowercase();
@@ -329,10 +547,10 @@ fn normalize_token(value: &str) -> String {
     }
 }
 
-fn normalize_direction(value: &str) -> String {
+fn normalize_direction(value: &str) -> Result<String, NormalizeError> {
     match value.trim().to_lowercase().as_str() {
-        "outbound" => "outbound".into(),
-        _ => "inbound".into(),
+        "" | "inbound" => Ok("inbound".into()),
+        _ => Err(NormalizeError::InvalidDirection),
     }
 }
 
@@ -446,63 +664,187 @@ mod tests {
     }
 
     #[test]
+    fn normalize_email_event_rejects_outbound_direction() {
+        let mut raw = raw_event();
+        raw.direction = "outbound".into();
+        let error =
+            normalize_email_event(raw).expect_err("outbound email must not enter inbound contract");
+        assert!(matches!(error, NormalizeError::InvalidDirection));
+    }
+
+    #[test]
     fn normalize_email_event_is_deterministic_for_same_refs() {
         let left = normalize_email_event(raw_event()).expect("left");
         let right = normalize_email_event(raw_event()).expect("right");
         assert_eq!(left.idempotency_key, right.idempotency_key);
     }
 
+    #[test]
+    fn conversation_delegation_matches_go_cross_language_contract() {
+        let body = br#"{"org_id":"org-1"}"#;
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-13T12:00:00+00:00")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let headers = conversation_delegation_headers(
+            "0123456789abcdef0123456789abcdef",
+            "POST",
+            "http://conversation-core:3160/internal/conversation-events",
+            body,
+            "org-1",
+            timestamp,
+            "fixed-nonce-1234567890",
+        );
+
+        assert_eq!(
+            headers.get("x-delegation-body-sha256").map(String::as_str),
+            Some("YqOazKjaPktfdxVznPrrhX7qEbel9X3ciCClxMerpjg")
+        );
+        assert_eq!(
+            headers.get("x-delegation-signature").map(String::as_str),
+            Some("MnM-PPg7tt5ZMVu_SDZkUagwlheYeCoiZw7GHv035ok")
+        );
+        assert_eq!(
+            headers.get("x-service-id").map(String::as_str),
+            Some("conversation-ingest")
+        );
+        assert!(!headers.contains_key("x-internal-api-key"));
+    }
+
+    #[test]
+    fn conversation_signing_rejects_origin_mismatch() {
+        assert!(conversation_target_is_configured_origin(
+            "http://conversation-core:3160/internal/conversation-events",
+            "http://conversation-core:3160"
+        ));
+        assert!(!conversation_target_is_configured_origin(
+            "http://conversation-core.attacker:3160/internal/conversation-events",
+            "http://conversation-core:3160"
+        ));
+    }
+
+    #[test]
+    fn conversation_core_ack_requires_exact_persisted_result_contract() {
+        let valid =
+            br#"{"data":{"detail":{"id":"conv-1"},"message":{"id":"msg-1"},"created":true}}"#;
+        assert!(parse_conversation_core_ack(202, valid).is_some());
+        assert!(parse_conversation_core_ack(200, valid).is_none());
+        assert!(parse_conversation_core_ack(202, b"").is_none());
+        assert!(parse_conversation_core_ack(202, br#"{"data":{"ok":true}}"#).is_none());
+    }
+
     fn test_state() -> AppState {
         AppState {
             conversation_core_url: "http://conversation-core-go.invalid".into(),
-            internal_api_key: "fleet-key".into(),
+            ingest_service_token: "integration-email-worker-test-secret-at-least-32-bytes".into(),
+            conversation_core_service_token: "ingest-test-secret-at-least-32-bytes-1".into(),
+            delegation_replays: new_replay_cache(),
             client: reqwest::Client::new(),
         }
     }
 
-    async fn post_ingest(router: Router, key: Option<&str>, body: serde_json::Value) -> StatusCode {
+    enum IngestAuth<'a> {
+        None,
+        Legacy,
+        Signed(&'a str),
+    }
+
+    async fn post_ingest(
+        router: &Router,
+        auth: IngestAuth<'_>,
+        body: serde_json::Value,
+    ) -> StatusCode {
         use tower::util::ServiceExt;
+        let body = body.to_string();
         let mut request = axum::http::Request::builder()
             .method("POST")
             .uri("/internal/ingest/email")
             .header("content-type", "application/json");
-        if let Some(key) = key {
-            request = request.header("x-internal-api-key", key);
+        match auth {
+            IngestAuth::None => {}
+            IngestAuth::Legacy => {
+                request = request.header("x-internal-api-key", "fleet-key");
+            }
+            IngestAuth::Signed(nonce) => {
+                let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let organization_id = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("org_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default();
+                let digest = URL_SAFE_NO_PAD.encode(Sha256::digest(body.as_bytes()));
+                let canonical = [
+                    "v2",
+                    "integration-email-worker",
+                    "conversation-ingest",
+                    timestamp.as_str(),
+                    nonce,
+                    "POST",
+                    "/internal/ingest/email",
+                    "",
+                    organization_id.as_str(),
+                    "",
+                    digest.as_str(),
+                ]
+                .join("\n");
+                let mut mac = Hmac::<Sha256>::new_from_slice(
+                    b"integration-email-worker-test-secret-at-least-32-bytes",
+                )
+                .expect("test hmac");
+                mac.update(canonical.as_bytes());
+                request = request
+                    .header("x-service-id", "integration-email-worker")
+                    .header("x-org-id", organization_id)
+                    .header("x-delegation-timestamp", timestamp)
+                    .header("x-delegation-nonce", nonce)
+                    .header("x-delegation-body-sha256", digest)
+                    .header(
+                        "x-delegation-signature",
+                        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()),
+                    );
+            }
         }
-        let request = request
-            .body(axum::body::Body::from(body.to_string()))
-            .expect("request");
-        router.oneshot(request).await.expect("response").status()
+        let request = request.body(axum::body::Body::from(body)).expect("request");
+        router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("response")
+            .status()
     }
 
     #[tokio::test]
-    async fn ingest_email_rejects_missing_internal_key() {
-        let status = post_ingest(build_router(test_state()), None, serde_json::json!({})).await;
+    async fn ingest_email_rejects_missing_and_legacy_shared_key_auth() {
+        let router = build_router(test_state());
+        let status = post_ingest(&router, IngestAuth::None, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let status = post_ingest(&router, IngestAuth::Legacy, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn ingest_email_rejects_wrong_internal_key() {
-        let status = post_ingest(
-            build_router(test_state()),
-            Some("wrong-key"),
-            serde_json::json!({}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn ingest_email_with_valid_key_reaches_validation() {
-        // Correct key + invalid payload → the request passes auth and fails
+    async fn ingest_email_with_valid_delegation_reaches_validation_and_replay_fails() {
+        let router = build_router(test_state());
+        // Correct delegation + invalid payload → the request passes auth and fails
         // VALIDATION (422), proving auth no longer blocks legitimate callers
         // without needing a live conversation-core.
         let status = post_ingest(
-            build_router(test_state()),
-            Some("fleet-key"),
-            serde_json::json!({"org_id": "", "from": {"name": "", "email": ""}}),
+            &router,
+            IngestAuth::Signed("fixed-nonce-1234567890"),
+            serde_json::json!({"org_id": "org-1", "from": {"name": "", "email": ""}}),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let replay = post_ingest(
+            &router,
+            IngestAuth::Signed("fixed-nonce-1234567890"),
+            serde_json::json!({"org_id": "org-1", "from": {"name": "", "email": ""}}),
+        )
+        .await;
+        assert_eq!(replay, StatusCode::UNAUTHORIZED);
     }
 }

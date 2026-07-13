@@ -4,6 +4,15 @@
 **Status**: ✅ Ready for Deployment  
 **Replaces**: Custom Go Gateway Service (from STRATEGIC_IMPROVEMENTS.md)
 
+> **Verified 2026-07-11 (Application Plane audit) — historical snapshot, several claims now stale.**
+> The Convex-over-custom-gateway decision held: `convex-backend` is **live** (`http://localhost:3210` → HTTP 200). But this Feb-1 completion snapshot predates most of the real build and no longer matches runtime. Corrections (source-of-truth: `apps/Application Plane/docs/core-research/convex-core.md` and `APPLICATION_PLANE_DEEP_DIVE.md`):
+> - **Location/inventory wrong.** Files live at `apps/Application Plane/convex-core/`, not `backend/convex-gateway/`. The tree now has ~18 `convex/` modules (agentRuns, agents, ai, authz, controlSessions, conversationProjection, conversations, http, ingest, knowledgeQnA, messages, nats, organizations, plannerDocuments, projects, schema, searches, users), not the 5 listed under "Files Created".
+> - **Some webhooks are broken.** `http.ragComplete` and `http.jobProgress` call `api.jobs.getByExternalId` / `api.jobs.updateStatus` / `api.jobs.updateProgress`, but there is **no `convex/jobs.ts` (or `rag.ts`) module** — those `/webhooks/rag/complete` and `/webhooks/job/progress` paths do not work as documented. Signature verification is also a stub (`verifyWebhookSignature` returns `true` when `WEBHOOK_SECRET` is unset and otherwise only checks a `sha256=` prefix).
+> - **HTTP surface understated.** The load-bearing live routes are the session/projection ones this doc omits: `/ingest/session`, `/ingest/session/message`, `/ingest/control-session`, and the NATS dispatcher `/api/webhook/nats/*`. Health is `GET /webhooks/health`.
+> - **Integration naming stale.** Deployed compose points Convex at `model-gateway:8080` (`AI_CORE_URL`/`MODEL_GATEWAY_URL` in `docker-compose.yml`), not "AI Core (Python)" at `ai-core:8000`. Only the local `.env.local` still carries the old `ai-core:8000` default. There is no per-org "Org Core"; retrieval is Data Plane v2.
+> - **Frontend framing stale.** The real client is Velion v3 (SolidJS/Vite via the Rust gateway), not a Next.js `ConvexProvider` app.
+> - The "What's Next" 4-week plan and "Success Metrics" below are the original Feb-1 forecast, not a status report — treat as historical.
+
 ## What Was Built
 
 ### 1. Service Architecture

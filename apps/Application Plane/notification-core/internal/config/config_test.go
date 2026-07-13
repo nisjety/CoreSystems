@@ -2,104 +2,94 @@ package config
 
 import "testing"
 
-func TestLoadSuccess(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://appuser:secret@localhost:5432/application_plane?sslmode=disable")
-	t.Setenv("INTERNAL_API_KEY", "internal-secret")
-	t.Setenv("PORT", "")
-	t.Setenv("SERVICE_NAME", "")
+func baseEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("DATABASE_URL", "postgres://test")
+	t.Setenv("INTERNAL_API_KEY", "test-key")
+	t.Setenv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "gateway-test-secret-at-least-32-bytes")
+	t.Setenv("NOVU_SECRET_KEY", "")
+}
 
+func TestLoadRequiresGatewayDelegationToken(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want missing gateway delegation token error")
+	}
+}
+
+func TestLoadRejectsShortGatewayDelegationToken(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "too-short")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want short gateway delegation token error")
+	}
+}
+
+func TestLoadRejectsPublishedPlaceholderDelegationTokens(t *testing.T) {
+	for _, placeholder := range []string{
+		"replace-with-dedicated-random-32-byte-minimum-key",
+		"change-me-notification-gateway-secret-32-bytes",
+	} {
+		t.Run(placeholder[:9], func(t *testing.T) {
+			baseEnvironment(t)
+			t.Setenv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", placeholder)
+			if _, err := Load(); err == nil {
+				t.Fatal("Load() error = nil, want placeholder token rejection")
+			}
+		})
+	}
+}
+
+func TestLoadRequiresNovuSecretInNovuMode(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "novu")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want missing NOVU_SECRET_KEY error")
+	}
+}
+
+func TestLoadAllowsExplicitDisabledMode(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "disabled")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-
-	if cfg.InternalAPIKey != "internal-secret" {
-		t.Fatalf("InternalAPIKey = %q, want %q", cfg.InternalAPIKey, "internal-secret")
-	}
-	if cfg.HTTPPort != 3140 {
-		t.Fatalf("HTTPPort = %d, want %d", cfg.HTTPPort, 3140)
-	}
-	if cfg.ServiceName != "notification-core" {
-		t.Fatalf("ServiceName = %q, want %q", cfg.ServiceName, "notification-core")
-	}
-	if cfg.DatabaseURL == "" {
-		t.Fatal("DatabaseURL = empty, want non-empty")
+	if cfg.DeliveryMode != "disabled" {
+		t.Fatalf("DeliveryMode = %q", cfg.DeliveryMode)
 	}
 }
 
-func TestLoadCustomValues(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://appuser:secret@localhost:5432/custom_notifications?sslmode=disable")
-	t.Setenv("INTERNAL_API_KEY", "internal-secret")
-	t.Setenv("PORT", "8080")
-	t.Setenv("SERVICE_NAME", "custom-notification-core")
-	t.Setenv("VELION_NATS_URL", "nats://custom-velion-nats:4222")
-	t.Setenv("VELION_NATS_TOKEN", "nats-token")
-
+func TestLoadDefaultsToDisabledMode(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-
-	if cfg.HTTPPort != 8080 {
-		t.Fatalf("HTTPPort = %d, want %d", cfg.HTTPPort, 8080)
-	}
-	if cfg.ServiceName != "custom-notification-core" {
-		t.Fatalf("ServiceName = %q, want %q", cfg.ServiceName, "custom-notification-core")
-	}
-	if cfg.DatabaseURL != "postgres://appuser:secret@localhost:5432/custom_notifications?sslmode=disable" {
-		t.Fatalf("DatabaseURL = %q, want custom value", cfg.DatabaseURL)
-	}
-	if cfg.NATSURL != "nats://custom-velion-nats:4222" {
-		t.Fatalf("NATSURL = %q, want %q", cfg.NATSURL, "nats://custom-velion-nats:4222")
-	}
-	if cfg.NATSToken != "nats-token" {
-		t.Fatalf("NATSToken = %q, want %q", cfg.NATSToken, "nats-token")
+	if cfg.DeliveryMode != "disabled" {
+		t.Fatalf("DeliveryMode = %q, want disabled", cfg.DeliveryMode)
 	}
 }
 
-
-
-func TestLoadMissingDatabaseURL(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("INTERNAL_API_KEY", "internal-secret")
-
+func TestLoadAcceptsConfiguredNovuMode(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "novu")
+	t.Setenv("NOVU_SECRET_KEY", "test-provider-key")
 	cfg, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want error")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg != nil {
-		t.Fatalf("Load() config = %#v, want nil", cfg)
-	}
-	if err.Error() != "DATABASE_URL is required" {
-		t.Fatalf("Load() error = %q, want %q", err.Error(), "DATABASE_URL is required")
+	if cfg.DeliveryMode != "novu" {
+		t.Fatalf("DeliveryMode = %q, want novu", cfg.DeliveryMode)
 	}
 }
 
-func TestLoadMissingInternalKey(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://appuser:secret@localhost:5432/application_plane?sslmode=disable")
-	t.Setenv("INTERNAL_API_KEY", "")
-
-	cfg, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want error")
-	}
-	if cfg != nil {
-		t.Fatalf("Load() config = %#v, want nil", cfg)
-	}
-	if err.Error() != "INTERNAL_API_KEY is required" {
-		t.Fatalf("Load() error = %q, want %q", err.Error(), "INTERNAL_API_KEY is required")
-	}
-}
-
-func TestLoadWhitespaceInternalKey(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://appuser:secret@localhost:5432/application_plane?sslmode=disable")
-	t.Setenv("INTERNAL_API_KEY", "   ")
-
-	cfg, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want error")
-	}
-	if cfg != nil {
-		t.Fatalf("Load() config = %#v, want nil", cfg)
+func TestLoadRejectsUnknownDeliveryMode(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "stub")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid delivery mode error")
 	}
 }

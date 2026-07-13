@@ -10,10 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/attestation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/database"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/delegation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/eventing"
 	apphttp "github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/http"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
@@ -76,11 +78,30 @@ func main() {
 	var sender consumers.OutboundSender
 	var integrationClient *integration.Client
 	if cfg.DraftReplySendEnabled() {
-		integrationClient = integration.NewClient(cfg.IntegrationBaseURL, cfg.IntegrationInternalKey)
+		writeAttestor, signerErr := attestation.NewSigner(attestation.Config{
+			PrivateKey: cfg.AttestationPrivateKey,
+			KeyID:      cfg.AttestationKeyID,
+			Issuer:     attestation.IssuerConversationCore,
+			Audience:   attestation.AudienceIntegrationCore,
+			Presenter:  attestation.PresenterConversationCore,
+		})
+		if signerErr != nil {
+			log.Fatalf("conversation-core-go: provider-write attestation signer: %v", signerErr)
+		}
+		integrationClient = integration.NewClient(
+			cfg.IntegrationBaseURL,
+			cfg.IntegrationInternalKey,
+			integration.WithServicePrincipal(
+				cfg.AuthCoreURL,
+				cfg.IntegrationServiceID,
+				cfg.IntegrationServiceCredential,
+			),
+			integration.WithWriteAttestor(writeAttestor),
+		)
 		sender = integrationClient
 		log.Printf("conversation-core-go: outbound-send enabled via %s", cfg.IntegrationBaseURL)
 	} else {
-		log.Printf("conversation-core-go: outbound-send disabled (INTEGRATION_BASE_URL / key unset)")
+		log.Printf("conversation-core-go: outbound-send disabled (integration or Auth Core service-principal configuration unset)")
 	}
 
 	// The Service delivers human agent replies to channel-backed conversations
@@ -131,7 +152,14 @@ func main() {
 	}
 
 	handler := apphttp.NewHandler(cfg, service)
-	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
+	delegationVerifier, err := delegation.NewVerifier(delegation.Config{
+		Audience: "conversation-core",
+		Keys:     cfg.DelegationKeys,
+	})
+	if err != nil {
+		log.Fatalf("conversation-core-go: delegation verifier: %v", err)
+	}
+	server := apphttp.NewServer(cfg.HTTPPort, handler, delegationVerifier)
 
 	errCh := make(chan error, 1)
 	go func() {

@@ -2,9 +2,8 @@
 //
 // NovuAdapter wires the official novu-go/v3 SDK.
 //
-// Stub mode (NOVU_SECRET_KEY unset):
-//   - Dispatch returns a fake transaction ID and logs a warning at startup.
-//   - Safe for local development; no real notifications are sent.
+// Disabled mode is explicit and fail-closed: Dispatch returns
+// ErrDeliveryDisabled and never fabricates a provider transaction.
 //
 // Production mode (NOVU_SECRET_KEY set):
 //   - Dispatch calls s.Novu.Trigger using req.Type as the Novu workflow
@@ -12,19 +11,16 @@
 //   - req.RecipientID must match an existing Novu subscriber ID (or be upserted
 //     before the trigger — see Novu docs on subscriber identification).
 //   - req.Payload is forwarded verbatim plus two correlation fields:
-//       _velion_request_id  — our internal request ID
-//       _velion_source      — source service (when non-empty)
+//     _velion_request_id  — our internal request ID
+//     _velion_source      — source service (when non-empty)
 //
 // EU region: set NOVU_BASE_URL=https://eu.api.novu.co
 package runtime
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -39,26 +35,41 @@ import (
 // Config carries the Novu SDK credentials.
 // Both fields are optional: leave SecretKey empty for local stub mode.
 type Config struct {
+	Mode      string // NOTIFICATION_DELIVERY_MODE: "novu" or "disabled"
 	SecretKey string // NOVU_SECRET_KEY — required for real delivery
 	BaseURL   string // NOVU_BASE_URL   — optional (EU: https://eu.api.novu.co)
 }
 
-type idGenerator func() string
+const (
+	DeliveryModeNovu     = "novu"
+	DeliveryModeDisabled = "disabled"
+)
+
+var ErrDeliveryDisabled = errors.New("external notification delivery is disabled")
 
 // NovuAdapter is the production delivery adapter backed by the Novu v3 API.
 // It satisfies notification.RuntimeClient.
 type NovuAdapter struct {
-	client     *v3.Novu // nil in stub mode
-	generateID idGenerator
+	client *v3.Novu // nil in stub mode
+	mode   string
 }
 
 // NewNovuAdapter constructs the adapter.
 // When cfg.SecretKey is empty the adapter starts in stub mode — a one-time
 // warning is logged and Dispatch returns synthetic IDs without calling Novu.
-func NewNovuAdapter(cfg Config) *NovuAdapter {
+func NewNovuAdapter(cfg Config) (*NovuAdapter, error) {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
+	if mode == "" {
+		mode = DeliveryModeDisabled
+	}
+	if mode == DeliveryModeDisabled {
+		return &NovuAdapter{mode: mode}, nil
+	}
+	if mode != DeliveryModeNovu {
+		return nil, fmt.Errorf("unsupported notification delivery mode %q", mode)
+	}
 	if strings.TrimSpace(cfg.SecretKey) == "" {
-		log.Println("[notification-core/runtime] NOVU_SECRET_KEY is not set; using local stub delivery mode")
-		return &NovuAdapter{generateID: defaultIDGenerator}
+		return nil, errors.New("NOVU_SECRET_KEY is required in novu delivery mode")
 	}
 
 	httpClient := &http.Client{Timeout: 15 * time.Second}
@@ -78,31 +89,32 @@ func NewNovuAdapter(cfg Config) *NovuAdapter {
 		)
 	}
 
-	return &NovuAdapter{client: client, generateID: defaultIDGenerator}
+	return &NovuAdapter{client: client, mode: mode}, nil
 }
 
 // Dispatch triggers a Novu workflow.
 //
 // Field mapping:
-//   req.Type        → Novu WorkflowID  (must match a workflow in your dashboard)
-//   req.RecipientID → Novu SubscriberID
-//   req.RequestID   → Novu idempotency key  (Novu deduplicates on this)
-//   req.Payload     → Novu trigger payload  (+ _velion_* correlation fields)
+//
+//	req.Type        → Novu WorkflowID  (must match a workflow in your dashboard)
+//	req.ProviderRecipientID → Novu SubscriberID resolved from an active org membership
+//	req.RequestID   → Novu idempotency key  (Novu deduplicates on this)
+//	req.Payload     → Novu trigger payload  (+ _velion_* correlation fields)
 func (a *NovuAdapter) Dispatch(ctx context.Context, req notification.DeliveryRequest) (*notification.DispatchResult, error) {
-	// Stub mode: no SDK client configured.
+	if a == nil || a.mode == DeliveryModeDisabled {
+		return nil, ErrDeliveryDisabled
+	}
 	if a.client == nil {
-		return &notification.DispatchResult{
-			Provider:          notification.ProviderNovu,
-			ProviderRequestID: a.generateID(),
-		}, nil
+		return nil, errors.New("novu client is not configured")
 	}
 
 	// Build payload — copy first so we never mutate the caller's map.
-	payload := make(map[string]any, len(req.Payload)+2)
+	payload := make(map[string]any, len(req.Payload)+3)
 	for k, v := range req.Payload {
 		payload[k] = v
 	}
 	payload["_velion_request_id"] = req.RequestID
+	payload["_velion_organization_id"] = req.OrganizationID
 	if req.Source != "" {
 		payload["_velion_source"] = req.Source
 	}
@@ -113,7 +125,7 @@ func (a *NovuAdapter) Dispatch(ctx context.Context, req notification.DeliveryReq
 
 	res, err := a.client.Trigger(ctx, components.TriggerEventRequestDto{
 		WorkflowID: req.Type,
-		To:         components.CreateToStr(req.RecipientID),
+		To:         components.CreateToStr(req.ProviderRecipientID),
 		Payload:    payload,
 	}, &idempotencyKey)
 	if err != nil {
@@ -128,22 +140,13 @@ func (a *NovuAdapter) Dispatch(ctx context.Context, req notification.DeliveryReq
 		transactionID = *res.TriggerEventResponseDto.TransactionID
 	}
 	if transactionID == "" {
-		// Defensive fallback — Novu docs guarantee a transactionId on 201.
-		transactionID = a.generateID()
+		return nil, errors.New("novu trigger: response missing transaction id")
 	}
 
 	return &notification.DispatchResult{
 		Provider:          notification.ProviderNovu,
 		ProviderRequestID: transactionID,
 	}, nil
-}
-
-func defaultIDGenerator() string {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("novu_req_%x", b)
-	}
-	return "novu_req_" + hex.EncodeToString(b)
 }
 
 // ===========================================================================
@@ -167,7 +170,7 @@ func defaultIDGenerator() string {
 // payload mapping lives next to the SDK call.
 func (a *NovuAdapter) IdentifySubscriber(ctx context.Context, p subscribers.IdentifyParams) error {
 	if a == nil || a.client == nil {
-		return nil // stub mode
+		return ErrDeliveryDisabled
 	}
 	if strings.TrimSpace(p.SubscriberID) == "" {
 		return errors.New("IdentifySubscriber: subscriber_id required")
@@ -198,7 +201,7 @@ func (a *NovuAdapter) IdentifySubscriber(ctx context.Context, p subscribers.Iden
 // must match Novu's vocabulary: `in_app`, `email`, `sms`, `push`, `chat`.
 func (a *NovuAdapter) UpdateSubscriberPreference(ctx context.Context, subscriberID, workflowID, channel string, enabled bool) error {
 	if a == nil || a.client == nil {
-		return nil // stub mode
+		return ErrDeliveryDisabled
 	}
 	if strings.TrimSpace(subscriberID) == "" || strings.TrimSpace(workflowID) == "" || strings.TrimSpace(channel) == "" {
 		return errors.New("UpdateSubscriberPreference: subscriber_id, workflow_id, channel required")

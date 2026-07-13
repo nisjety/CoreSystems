@@ -1,8 +1,7 @@
-// Package briefs assembles a daily brief from insight-core's own real per-org
-// metric rollups and delivers it through the EXISTING notification-core Novu
-// adapter (this package does NOT talk to Novu directly — it POSTs a
-// `daily_brief` notification request and notification-core triggers the Novu
-// workflow). The brief carries the SAME Preview gate the gateway briefs surface
+// Package briefs assembles a daily brief from insight-core's real per-org metric
+// rollups. Production delivery is intentionally disabled until Control provides
+// an authoritative tenant-scoped user/subscription mapping. The brief carries
+// the SAME Preview gate the gateway briefs surface
 // uses (apps/.../gateway/src/domains/briefs.rs): below a minimum number of real
 // recorded events the brief is labelled `preview` with an honest disclosure and
 // shows only the real counts collected so far — never a fabricated trend.
@@ -30,11 +29,8 @@ const (
 	// StatePreview labels a brief below the gate — real counts only, no trends.
 	StatePreview = "preview"
 
-	// WorkflowDailyBrief is the notification-core request `type`, which is also
-	// the Novu WorkflowID the adapter triggers (runtime/client.go: req.Type →
-	// Novu WorkflowID). Registering the brief = using this canonical identifier
-	// and the in_app+email channel set below; Novu workflow templates live in the
-	// Novu dashboard, not in code (do NOT build Novu).
+	// WorkflowDailyBrief is reserved for a future, explicitly authorized
+	// notification workflow. No production caller is wired today.
 	WorkflowDailyBrief = "daily_brief"
 )
 

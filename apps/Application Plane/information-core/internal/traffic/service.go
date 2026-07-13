@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"math"
 	"net/http"
 	"strconv"
@@ -24,20 +23,51 @@ type Service struct {
 }
 
 type Station struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	LocationName  string  `json:"locationName"`
-	County        string  `json:"county"`
-	RoadRef       string  `json:"roadReference"`
-	TrafficVolume int     `json:"trafficVolume"`
-	AverageSpeed  int     `json:"averageSpeed"`
-	Status        string  `json:"status"`
-	DistanceKm    float64 `json:"distanceKm,omitempty"`
-	LastUpdated   string  `json:"lastUpdated"`
-	Coordinates   struct {
+	ID                      string                 `json:"id"`
+	Name                    string                 `json:"name"`
+	LocationName            string                 `json:"locationName"`
+	County                  string                 `json:"county,omitempty"`
+	CountyProvenance        DerivedFieldProvenance `json:"countyProvenance"`
+	RoadRef                 string                 `json:"roadReference,omitempty"`
+	RoadReferenceProvenance DerivedFieldProvenance `json:"roadReferenceProvenance"`
+	TrafficVolume           Observation            `json:"trafficVolume"`
+	AverageSpeed            Observation            `json:"averageSpeed"`
+	Status                  string                 `json:"status"`
+	DistanceKm              float64                `json:"distanceKm,omitempty"`
+	LastUpdated             string                 `json:"lastUpdated"`
+	Coordinates             struct {
 		Lat float64 `json:"lat"`
 		Lon float64 `json:"lon"`
 	} `json:"coordinates"`
+}
+
+type DerivedFieldProvenance struct {
+	ObservationType ObservationType `json:"observationType"`
+	Source          string          `json:"source"`
+	Quality         string          `json:"quality"`
+}
+
+type ObservationType string
+
+const (
+	ObservationMeasured    ObservationType = "measured"
+	ObservationEstimated   ObservationType = "estimated"
+	ObservationSynthetic   ObservationType = "synthetic"
+	ObservationUnavailable ObservationType = "unavailable"
+)
+
+type Observation struct {
+	Value             *float64        `json:"value"`
+	Unit              string          `json:"unit"`
+	ObservationType   ObservationType `json:"observationType"`
+	Provider          string          `json:"provider"`
+	Source            string          `json:"source"`
+	ObservedAt        *string         `json:"observedAt"`
+	FetchedAt         string          `json:"fetchedAt"`
+	Confidence        *float64        `json:"confidence"`
+	Quality           string          `json:"quality"`
+	Freshness         string          `json:"freshness"`
+	UnavailableReason string          `json:"unavailableReason,omitempty"`
 }
 
 type Response struct {
@@ -47,6 +77,9 @@ type Response struct {
 }
 
 type atlasResponse struct {
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
 	Data struct {
 		Points []struct {
 			ID       string `json:"id"`
@@ -68,6 +101,15 @@ func NewService(client *http.Client, cacheStore *cache.Store) *Service {
 }
 
 func (s *Service) Latest(ctx context.Context, lat, lon, radius float64, search string) (Response, error) {
+	if !isFinite(lat) || !isFinite(lon) || !isFinite(radius) || lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return Response{}, fmt.Errorf("traffic coordinates are invalid")
+	}
+	if radius < 0 || radius > 1000 {
+		return Response{}, fmt.Errorf("traffic radius must be between 0 and 1000 km")
+	}
+	if len([]rune(strings.TrimSpace(search))) > 100 {
+		return Response{}, fmt.Errorf("traffic search must be at most 100 characters")
+	}
 	key := fmt.Sprintf("traffic:%0.4f:%0.4f:%0.1f:%s", lat, lon, radius, strings.ToLower(strings.TrimSpace(search)))
 	if cached, ok := s.cache.Get(key); ok {
 		if payload, ok := cached.(Response); ok {
@@ -88,26 +130,44 @@ func (s *Service) Latest(ctx context.Context, lat, lon, radius float64, search s
 		return Response{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return Response{}, fmt.Errorf("atlas traffic API returned HTTP %d", resp.StatusCode)
+	}
 
 	var atlas atlasResponse
 	if err := json.NewDecoder(resp.Body).Decode(&atlas); err != nil {
 		return Response{}, err
 	}
+	if len(atlas.Errors) > 0 {
+		return Response{}, fmt.Errorf("atlas traffic API returned a GraphQL error")
+	}
 
+	fetchedAt := time.Now().UTC().Format(time.RFC3339)
 	stations := make([]Station, 0, len(atlas.Data.Points))
 	for _, point := range atlas.Data.Points {
 		station := Station{
-			ID:           point.ID,
-			Name:         point.Name,
-			LocationName: point.Name,
-			County:       countyNameFor(point.Location.Coordinates.LatLon.Lat, point.Location.Coordinates.LatLon.Lon),
-			RoadRef:      roadRefFromName(point.Name),
-			Status:       "operational",
-			LastUpdated:  time.Now().UTC().Format(time.RFC3339),
+			ID:            point.ID,
+			Name:          point.Name,
+			LocationName:  point.Name,
+			County:        countyNameFor(point.Location.Coordinates.LatLon.Lat, point.Location.Coordinates.LatLon.Lon),
+			RoadRef:       roadRefFromName(point.Name),
+			TrafficVolume: unavailableObservation("vehicles_per_hour", fetchedAt),
+			AverageSpeed:  unavailableObservation("km/h", fetchedAt),
+			Status:        "metadata_only",
+			LastUpdated:   fetchedAt,
+			CountyProvenance: DerivedFieldProvenance{
+				ObservationType: ObservationEstimated,
+				Source:          "application_geographic_bounding_box",
+				Quality:         "low",
+			},
+			RoadReferenceProvenance: DerivedFieldProvenance{
+				ObservationType: ObservationEstimated,
+				Source:          "station_name_prefix",
+				Quality:         "low",
+			},
 		}
 		station.Coordinates.Lat = point.Location.Coordinates.LatLon.Lat
 		station.Coordinates.Lon = point.Location.Coordinates.LatLon.Lon
-		station.TrafficVolume, station.AverageSpeed = stableTrafficMetrics(point.ID)
 
 		if lat != 0 && lon != 0 {
 			station.DistanceKm = round2(distanceKm(lat, lon, station.Coordinates.Lat, station.Coordinates.Lon))
@@ -163,23 +223,32 @@ func buildGraphQLQuery(lat, lon float64, search string) string {
 	`, strings.Join(conditions, ", "))
 }
 
-func stableTrafficMetrics(id string) (volume int, speed int) {
-	hasher := fnv.New32a()
-	_, _ = hasher.Write([]byte(id))
-	sum := hasher.Sum32()
-	return 550 + int(sum%950), 55 + int((sum/7)%35)
+func unavailableObservation(unit, fetchedAt string) Observation {
+	return Observation{
+		Value:             nil,
+		Unit:              unit,
+		ObservationType:   ObservationUnavailable,
+		Provider:          "statens_vegvesen_atlas",
+		Source:            atlasURL,
+		ObservedAt:        nil,
+		FetchedAt:         fetchedAt,
+		Confidence:        nil,
+		Quality:           "provider_metadata_only",
+		Freshness:         "unavailable",
+		UnavailableReason: "provider_response_has_no_measurement",
+	}
 }
 
 func roadRefFromName(name string) string {
 	fields := strings.Fields(name)
 	if len(fields) == 0 {
-		return "Ukjent strekning"
+		return ""
 	}
 	prefix := fields[0]
 	if strings.HasPrefix(prefix, "E") || strings.HasPrefix(prefix, "Rv") || strings.HasPrefix(prefix, "Fv") {
 		return prefix
 	}
-	return "Riksvei"
+	return ""
 }
 
 func countyNameFor(lat, lon float64) string {
@@ -191,8 +260,12 @@ func countyNameFor(lat, lon float64) string {
 	case lat > 60.2 && lat < 61.0 && lon > 10.0 && lon < 11.5:
 		return "Innlandet"
 	default:
-		return "Norge"
+		return ""
 	}
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func distanceKm(lat1, lon1, lat2, lon2 float64) float64 {

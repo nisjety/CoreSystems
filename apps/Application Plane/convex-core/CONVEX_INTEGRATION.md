@@ -1,5 +1,7 @@
 # Convex Integration: The Real-time Application State Plane
 
+> **Verified 2026-07-11 (Application Plane audit, Phase 5).** The conceptual guidance below (the Golden Rule, allowed/forbidden domains, event-flow mental model) is still accurate and authoritative. Several concrete operational specifics are stale — corrections are inlined and consolidated in the *2026-07-11 Verification addendum* at the end. Highlights: the `onOrganizationMemberRemoved` handler is **referenced but not defined** (would throw); the real host ports are `convex-backend :3210/:3211`, `convex-gateway :3006`, `convex-dashboard :6791` (there is **no** `localhost:3000` listener); and the `aquatiq-*` / `AI_CORE_URL=ai-core:8000` names in the examples are legacy.
+
 ## Overview & The Golden Rule
 
 > **Convex stores INTERACTION, not KNOWLEDGE.**
@@ -135,6 +137,8 @@ organization.member.added → onOrganizationMemberAdded(orgId, userId, email, ro
 organization.member.removed → onOrganizationMemberRemoved(orgId, userId)
 ```
 
+> **Stale (verified 2026-07-11):** `onOrganizationMemberRemoved` is dispatched from `convex/http.ts` (`internal.nats.onOrganizationMemberRemoved`) but **has no matching export in `convex/nats.ts`** (only `onOrganizationCreated`, `onOrganizationUpdated`, `onOrganizationDeleted`, and `onOrganizationMemberAdded` exist). An `organization.member.removed` event would throw at runtime. Treat this topic as unimplemented until the handler is added.
+
 ### Subscription Durability
 
 Each topic has a durable subscriber named `convex-<topic>`. This ensures:
@@ -189,12 +193,15 @@ CONVEX_API_KEY=dev-key
 # Build and start all services
 docker compose up -d
 
-# Check Convex is running
-curl http://localhost:3000
+# Check Convex is running (verified 2026-07-11 — real host ports, NOT :3000)
+curl http://localhost:3210/version   # convex-backend API
+# convex-gateway is published on host :3006 (→ container :3000)
 
 # View Convex dashboard
-# Open http://localhost:3000 in browser
+# Open http://localhost:6791 in browser
 ```
+
+> **Stale (verified 2026-07-11):** the `3000:3000` / `curl http://localhost:3000` guidance above and in the compose snippet does not match the live stack. Real published host ports: `convex-backend :3210` (API) + `:3211` (HTTP actions), `convex-gateway :3006`, `convex-dashboard :6791`, `convex-subscriber` (no published port). The example service/network names (`aquatiq-nats-local`, network `aquatiq-local`) are legacy; the live compose uses network `app-net`.
 
 ## Data Isolation
 
@@ -417,4 +424,17 @@ Source: `apps/Application Plane/docker-compose.yml` + `build-velion-services.sh`
 1. Fix the env defaults inside `convex-backend` in `apps/Application Plane/docker-compose.yml` (rename `auth-service` → `auth-core`, `org-core-service` → `org-core`).
 2. Add `convex-dashboard` and `convex-gateway` to `inter-plane-bus` if velion server-side routes need to talk to them.
 3. Address Model Plane network isolation so `AI_CORE_URL` resolves.
+
+---
+
+## 2026-07-11 — Verification addendum (Application Plane audit, Phase 5)
+
+Re-verified against current `convex/` source, `apps/Application Plane/convex-core/docker-compose.yml`, live host curl, and `docker ps`/`docker inspect`. Docker exec/build/logs were unavailable this pass (containerd content store corrupted), so container internals are graded `[inspect]`/`[source-only]`; published-port reachability is `[live-curl]`.
+
+- **Cross-plane env defaults — partially remediated.** Remediation #1 from the 2026-05-20 section is **done**: `ORG_CORE_URL` now defaults to `http://org-core:8080` and `AUTH_SERVER_URL` to `http://auth-core:3011`. **Still stale:** `AI_CORE_URL` defaults to `http://ai-core:8000`; the live Model Plane reasoning entry is `model-gateway:8080` (on `model-plane-network`, not the Application bus), so the "AI-Core → Thinking" mental model and any `ai-core` reference should read `model-gateway`. [source-only]
+- **Gateway host port drift.** The 2026-05-20 table said `convex-gateway 3005 → 3000`; live `docker ps` shows **`3006 → 3000`**. `convex-backend` publishes `3210`/`3211`, `convex-dashboard` `6791`. All four containers show `(unhealthy)` due to exec-based healthchecks failing under the corrupted Docker runtime, not because the services are down — `:3210/version` returns 200 live. [live-curl] [inspect]
+- **`onOrganizationMemberRemoved` undefined.** Confirmed: `convex/http.ts` dispatches it but `convex/nats.ts` never exports it. The `organization.member.removed` NATS subscription is effectively non-functional (throws). [source-only]
+- **Internal service-key hardcoded default — removed.** A prior note claimed the `X-Service-Key` validator fell back to a hardcoded `"change-me-internal-service-secret"`. That is **no longer true**: `convex/authz.ts`, `convex/ingest.ts`, and `convex/controlSessions.ts` validate against `CONVEX_INTERNAL_SERVICE_KEY || INTERNAL_API_KEY` and **throw if unset** (fail-closed). Outbound callers (`convex/ai.ts`, `convex/nats.ts`) fall back to `""`, which the receiving validator rejects. [source-only]
+- **Broken `api.jobs.*` webhooks (out of scope for this doc, noted for accuracy).** `convex/http.ts` `ragComplete`/`jobProgress` call `api.jobs.getByExternalId/updateStatus/updateProgress`, but no `convex/jobs.ts` module exists — those webhook paths are dead. `verifyWebhookSignature()` also returns `true` when `WEBHOOK_SECRET` is unset and only checks a `sha256=` prefix. See `apps/Application Plane/docs/core-research/convex-core.md`. [source-only]
+- **Source of truth.** For current runtime shape, prefer `apps/Application Plane/docs/core-research/convex-core.md` and `apps/Application Plane/APPLICATION_PLANE_DEEP_DIVE.md` over this integration guide's operational specifics.
 

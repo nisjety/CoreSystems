@@ -1,28 +1,39 @@
 name: application-plane
 
+x-service-hardening: &service-hardening
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
 services:
   # ============================================================================
   # 1) Convex Backend - runtime + sqlite storage
   # ============================================================================
 
   convex-backend:
-    image: ghcr.io/get-convex/convex-backend:latest
+    image: ghcr.io/get-convex/convex-backend@sha256:104b8bc70e29b31fa4a57551596090bfc9eedc3d1f27fd4b8cd8d0e782b9b070
     container_name: convex-backend
     restart: unless-stopped
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 20s
     ports:
-      - "3210:3210"  # Backend API
-      - "3211:3211"  # HTTP Actions
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3210:3210"  # Backend API
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3211:3211"  # HTTP Actions
     volumes:
       - convex-data:/data
       - ./convex-core/convex:/app/convex:ro
     environment:
       # Instance configuration
       CONVEX_INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
-      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
-      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
+      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
       INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
 
       # Database configuration
@@ -36,20 +47,16 @@ services:
       AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-core:3011}
 
       # Auth configuration
-      JWT_SECRET: ${JWT_SECRET:-a2db5549b35903f6d9210f0eb2578fec95fc3802e2b7947bb8e5711bc7ae4a55}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
 
       # Logging
       RUST_LOG: ${RUST_LOG:-info}
       CONVEX_LOG_FORMAT: json
       CONVEX_DISABLE_BEACON: "true"
-      NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
     networks:
       - app-net
       - inter-plane-bus
-    depends_on:
-      nats:
-        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -74,14 +81,14 @@ services:
   # ============================================================================
 
   convex-dashboard:
-    image: ghcr.io/get-convex/convex-dashboard:latest
+    image: ghcr.io/get-convex/convex-dashboard@sha256:60b04b339d6cd6623057b03e5275329a20011051907ec5e689a38a401cfdc409
     container_name: convex-dashboard
     restart: unless-stopped
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 15s
     ports:
-      - "6791:6791"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6791:6791"
     environment:
       CONVEX_BACKEND_URL: http://convex-backend:3210
       NODE_ENV: ${NODE_ENV:-development}
@@ -104,13 +111,14 @@ services:
         condition: service_healthy
 
   # ============================================================================
-  # 3) Convex Gateway - dev gateway / schema push
+  # 3) Convex schema deployer/watcher
   # ============================================================================
 
   convex-gateway:
     build:
       context: ./convex-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: convex-gateway
     restart: unless-stopped
     init: true
@@ -120,12 +128,10 @@ services:
       - ./convex-core/.env.local
     environment:
       CONVEX_BACKEND_URL: http://convex-backend:3210
-    ports:
-      - "${CONVEX_GATEWAY_HOST_PORT:-3006}:3000"
     networks:
       - app-net
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'npx convex dev' || pgrep -f 'node' || exit 1"]
+      test: ["CMD-SHELL", "pgrep -f 'convex dev' >/dev/null && wget --quiet --tries=1 -O /dev/null http://convex-backend:3210/version || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -154,6 +160,7 @@ services:
     build:
       context: ./convex-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: convex-subscriber
     restart: unless-stopped
     init: true
@@ -173,16 +180,14 @@ services:
       CONVEX_BACKEND_URL: http://convex-backend:3210
       CONVEX_API_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}}
       NATS_URL: nats://velion-nats:4222    # inter-plane-bus shared bus — all ingestion/org events publish here
+      NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
       # W4-2 (ui-ux-velion-gap.md §13): Model Plane orchestrator-core
       # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
-      # (model-plane-nats-1). The subscriber dual-connects here so the
+      # (model-nats). The subscriber dual-connects here so the
       # agent run lifecycle mirror actually receives events in prod.
-      # `model-plane-nats-1` is reachable via the `inter-plane-bus`
-      # network as the compose-generated hostname.
-      MODEL_PLANE_NATS_URL: nats://model-plane-nats-1:4222
-      # Token defaults to NATS_TOKEN (above) when MODEL_PLANE_NATS_TOKEN
-      # is unset, which works in dev because both clusters share the
-      # same dev token. Production should set both explicitly.
+      # `model-nats` is the stable alias on `inter-plane-bus`.
+      MODEL_PLANE_NATS_URL: nats://model-nats:4222
+      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:?MODEL_PLANE_NATS_TOKEN must match Model Plane MODEL_NATS_TOKEN}
     networks:
       - app-net
       - inter-plane-bus
@@ -211,50 +216,11 @@ services:
   # 6) AFFiNE Core — First-party planner workspace boundary
   # ============================================================================
 
-  affine-core:
-    build:
-      context: ./affine-core
-      dockerfile: Dockerfile
-    container_name: affine-core
-    profiles: ["affine"]
-    restart: unless-stopped
-    env_file:
-      - ./affine-core/.env
-    depends_on:
-      application-postgres:
-        condition: service_healthy
-      affine-runtime:
-        condition: service_healthy
-    ports:
-      - "3180:3180"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3180/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # ============================================================================
   # 7) AFFiNE Runtime — internal vendor runtime
   # ============================================================================
 
   affine-runtime:
-    image: ghcr.io/toeverything/affine:stable
+    image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
     container_name: affine-runtime
     profiles: ["affine"]
     restart: unless-stopped
@@ -269,14 +235,14 @@ services:
       affine-runtime-migration:
         condition: service_completed_successfully
     ports:
-      - "47810:3010"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:47810:3010"
     environment:
       NODE_ENV: production
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
-      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@application-postgres:5432/affine
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@application-postgres:5432/affine
       REDIS_SERVER_HOST: application-dragonfly
-      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}
+      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
       - affine-uploads:/root/.affine/storage
@@ -308,7 +274,7 @@ services:
       start_period: 20s
 
   affine-runtime-migration:
-    image: ghcr.io/toeverything/affine:stable
+    image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
     container_name: affine-runtime-migration
     profiles: ["affine"]
     command: ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
@@ -321,9 +287,9 @@ services:
       NODE_ENV: production
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
-      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@application-postgres:5432/affine
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@application-postgres:5432/affine
       REDIS_SERVER_HOST: application-dragonfly
-      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}
+      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
       - affine-uploads:/root/.affine/storage
@@ -339,16 +305,16 @@ services:
   # ============================================================================
 
   application-postgres:
-    image: postgres:16-alpine
+    image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     container_name: application-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}
-      POSTGRES_PASSWORD: ${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}
+      POSTGRES_PASSWORD: ${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}
       POSTGRES_DB: ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c max_connections=200"
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=200"]
     ports:
-      - "9540:5432"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:9540:5432"
     volumes:
       - application-postgres-data:/var/lib/postgresql/data
     networks:
@@ -373,17 +339,17 @@ services:
       start_period: 10s
 
   application-dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0@sha256:84b1009aee0b68327758bce8e99ed514f782d713353acc46caf5738feaa481d6
     container_name: application-dragonfly
     restart: unless-stopped
     command:
-      - "--requirepass=${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}"
+      - "--requirepass=${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}"
       - "--cache_mode=true"
       - "--maxmemory=256mb"
       - "--proactor_threads=1"
       - "--dir=/data"
     ports:
-      - "6480:6379"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6480:6379"
     volumes:
       - application-dragonfly-data:/data
     networks:
@@ -401,38 +367,48 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${APPLICATION_PLANE_DRAGONFLY_PASSWORD:-notif-dragonfly-secret}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   conversation-core-go:
+    <<: *service-hardening
     build:
       context: ./conversation-core/conversation-core-go
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: conversation-core-go
     restart: unless-stopped
     environment:
       PORT: "3160"
       SERVICE_NAME: conversation-core-go
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-      NATS_URL: nats://nats:4222
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      CONVERSATION_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
+      CONVERSATION_CORE_INGEST_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must be set for signed ingest delegation}
       VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
       # Ingestion Plane outbound client: draft.reply sends (task #22) and the
       # webhook_received inbound consumer (task #24) both need this to reach
       # integration-corev2 across the shared inter-plane-bus network. The
-      # internal key falls back to INTERNAL_API_KEY above (same shared value
-      # every plane already uses for cross-plane calls).
+      # durable key is restricted to the internal webhook-event lookup.
       INTEGRATION_BASE_URL: ${INTEGRATION_BASE_URL:-http://integration-api:3026}
+      INTEGRATION_INTERNAL_API_KEY: ${INTEGRATION_INTERNAL_API_KEY:?INTEGRATION_INTERNAL_API_KEY must be explicitly provisioned for integration-corev2}
+      # Tenant action/list routes reject the legacy key above. conversation-core
+      # exchanges this distinct durable identity for an org-bound, short-lived
+      # aud=ingestion token and sends only Authorization: Bearer downstream.
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      CONVERSATION_INTEGRATION_SERVICE_ID: ${CONVERSATION_INTEGRATION_SERVICE_ID:-conversation-core}
+      CONVERSATION_INTEGRATION_SERVICE_API_KEY: ${CONVERSATION_INTEGRATION_SERVICE_API_KEY:?CONVERSATION_INTEGRATION_SERVICE_API_KEY must be provisioned in the Auth Core service-principal registry}
+      # Effect-bound Ed25519 proof required by integration-corev2 for every
+      # provider mutation. Only the matching public key leaves this service.
+      CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
+      CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID must match the integration-corev2 verifier key ring}
     depends_on:
       application-postgres:
         condition: service_healthy
-      nats:
-        condition: service_healthy
     ports:
-      - "${CONVERSATION_CORE_GO_HOST_PORT:-3160}:3160"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${CONVERSATION_CORE_GO_HOST_PORT:-3160}:3160"
     networks:
       - app-net
       - inter-plane-bus
@@ -456,21 +432,27 @@ services:
       start_period: 20s
 
   conversation-ingest-rs:
+    <<: *service-hardening
     build:
       context: ./conversation-core/conversation-ingest-rs
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: conversation-ingest-rs
     restart: unless-stopped
     environment:
       PORT: "3161"
       CONVERSATION_CORE_URL: http://conversation-core-go:3160
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+      # Dedicated caller credentials. The inbound token is shared only with the
+      # integration email worker; the outbound token maps to conversation-core's
+      # conversation-ingest principal.
+      CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN: ${CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN:?CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must be set for email-worker delegation}
+      CONVERSATION_CORE_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must match conversation-core}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       conversation-core-go:
         condition: service_healthy
     ports:
-      - "${CONVERSATION_INGEST_RS_HOST_PORT:-3161}:3161"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${CONVERSATION_INGEST_RS_HOST_PORT:-3161}:3161"
     networks:
       - app-net
       - inter-plane-bus
@@ -494,20 +476,21 @@ services:
       start_period: 20s
 
   social-core:
+    <<: *service-hardening
     build:
       context: ./social-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: social-core
     restart: unless-stopped
     environment:
       PORT: "3162"
       SERVICE_NAME: social-core
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-      NATS_URL: nats://nats:4222
       VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
       SOCIAL_PUBLISH_WORKER_ENABLED: ${SOCIAL_PUBLISH_WORKER_ENABLED:-true}
       SOCIAL_PUBLISH_WORKER_POLL_INTERVAL: ${SOCIAL_PUBLISH_WORKER_POLL_INTERVAL:-5s}
       SOCIAL_PUBLISH_WORKER_BATCH_SIZE: ${SOCIAL_PUBLISH_WORKER_BATCH_SIZE:-10}
@@ -521,10 +504,8 @@ services:
     depends_on:
       application-postgres:
         condition: service_healthy
-      nats:
-        condition: service_healthy
     ports:
-      - "${SOCIAL_CORE_HOST_PORT:-3162}:3162"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${SOCIAL_CORE_HOST_PORT:-3162}:3162"
     networks:
       - app-net
       - inter-plane-bus
@@ -548,9 +529,11 @@ services:
       start_period: 20s
 
   insight-core:
+    <<: *service-hardening
     build:
       context: ./insight-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: insight-core
     restart: unless-stopped
     # W3 Market-Intelligence service. Durable metric store on application-postgres
@@ -575,25 +558,25 @@ services:
       # initialized under the legacy NOTIFICATION_* creds; reconcile
       # APPLICATION_PLANE_DB_USER/PASSWORD/NAME with the volume before this
       # DATABASE_URL authenticates (Postgres honors POSTGRES_* only at first init).
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       # Subscribe to the SAME bus conversation-core publishes velion.application.> to
       # (its config resolves VELION_NATS_URL first), so the metric subscriber binds
       # the existing JetStream stream rather than a divergent one.
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
       # Phase 7 B12 — the model-plane-agents producer leg. The Model Plane runs
       # on its own isolated NATS cluster; the agent subscriber dual-connects via
       # the inter-plane-bus alias and records run/tool/approval lifecycle events
       # (mp.v1.run.*.event) as surface=agents metrics. Without this the agents
       # surface stays empty even when agent runs are executing.
-      MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-plane-nats-1:4222}
-      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:-}
+      MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-nats:4222}
+      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:?MODEL_PLANE_NATS_TOKEN must match Model Plane MODEL_NATS_TOKEN}
       # Task #28: metrics.snapshotted carries only a summary count; the metric
       # subscriber fetches the real per-metric values from social-core's
       # GET /api/v1/social/metrics using this URL + the shared internal key.
       SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
     ports:
-      - "${INSIGHT_CORE_HOST_PORT:-3163}:3163"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INSIGHT_CORE_HOST_PORT:-3163}:3163"
     depends_on:
       application-postgres:
         condition: service_healthy
@@ -620,9 +603,11 @@ services:
       start_period: 20s
 
   leads-core:
+    <<: *service-hardening
     build:
       context: ./leads-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: leads-core
     restart: unless-stopped
     # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
@@ -636,15 +621,15 @@ services:
     environment:
       PORT: "3164"
       SERVICE_NAME: leads-core
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:-${NOTIFICATION_DB_PASSWORD:-notif-postgres-secret}}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       PROVIDER_LEAD_SYNC_ENABLED: ${PROVIDER_LEAD_SYNC_ENABLED:-true}
       PROVIDER_LEAD_SYNC_INTERVAL: ${PROVIDER_LEAD_SYNC_INTERVAL:-1h}
     ports:
-      - "${LEADS_CORE_HOST_PORT:-3164}:3164"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
     depends_on:
       application-postgres:
         condition: service_healthy
@@ -671,9 +656,11 @@ services:
       start_period: 20s
 
   information-core:
+    <<: *service-hardening
     build:
       context: ./information-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: information-core
     restart: unless-stopped
     environment:
@@ -682,7 +669,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       INFORMATION_CORE_USER_AGENT: ${INFORMATION_CORE_USER_AGENT:-VelionInformationCore/1.0 (ops@velion.local)}
     ports:
-      - "${INFORMATION_CORE_HOST_PORT:-3190}:3190"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INFORMATION_CORE_HOST_PORT:-3190}:3190"
     networks:
       - app-net
       - inter-plane-bus
@@ -706,22 +693,31 @@ services:
       start_period: 20s
 
   notification-core:
+    <<: *service-hardening
     build:
       context: ./notification-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: notification-core
     restart: unless-stopped
     env_file:
       - ./notification-core/.env
     environment:
+      # Override the service-local env file so a persisted Application Plane
+      # database and every first-party service use the same runtime credential.
+      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       NATS_URL: nats://nats:4222          # override env_file — local app-nats for own publisher
       NATS_SHARED_URL: nats://nats:4222   # priority 2 in Go config chain
       VELION_NATS_URL: nats://nats:4222   # priority 1 in Go config chain — must override env_file
+      VELION_NATS_TOKEN: ${APPLICATION_NATS_TOKEN:?APPLICATION_NATS_TOKEN must be set}
       # G14: subscribe to cross-plane events (app.session.*) on the shared
       # velion-nats bus. Without this, the in-app subscriber falls back to the
       # local NATS connection, which doesn't carry those subjects.
       SHARED_NATS_URL: nats://velion-nats:4222
-      SHARED_NATS_TOKEN: ${VELION_NATS_TOKEN:-b0111381f6d429388a7e3e22cdc80abeb79fa8606470d3b727318b9f0d8510a7}
+      SHARED_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      NOTIFICATION_DELIVERY_MODE: ${NOTIFICATION_DELIVERY_MODE:-disabled}
+      NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
+      NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
     depends_on:
       nats:
         condition: service_healthy
@@ -730,7 +726,7 @@ services:
       application-dragonfly:
         condition: service_healthy
     ports:
-      - "3140:3140"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3140:3140"
     networks:
       - app-net
       - inter-plane-bus
@@ -747,7 +743,7 @@ services:
         max-size: "20m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "wget --header='X-Internal-Api-Key: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}' --no-verbose --tries=1 -O /dev/null http://localhost:3140/health || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O /dev/null http://localhost:3140/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -759,10 +755,10 @@ services:
   # NATS — plane-level message bus (required)
   # ─────────────────────────────────────────────────────────────
   nats:
-    image: nats:2-alpine
+    image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
     container_name: app-nats
     restart: unless-stopped
-    command: ["-js", "-m", "8222", "-sd", "/data"]
+    command: ["-js", "-m", "8222", "-sd", "/data", "--auth", "${APPLICATION_NATS_TOKEN:?APPLICATION_NATS_TOKEN must be set}"]
     networks:
       - app-net
     volumes:
@@ -789,7 +785,7 @@ services:
   # ==============================================
 
   application-prometheus:
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
     container_name: application-prometheus
     restart: unless-stopped
     command:
@@ -800,7 +796,7 @@ services:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - application-prometheus-data:/prometheus
     ports:
-      - "19096:9090" # host 19096 avoids Model Plane letta-bridge on host 9096
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:19096:9090" # host 19096 avoids Model Plane letta-bridge on host 9096
     networks:
       - app-net
       - inter-plane-bus
@@ -817,20 +813,20 @@ services:
       start_period: 10s
 
   application-grafana:
-    image: grafana/grafana:11.2.0
+    image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
     container_name: application-grafana
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
       - application-grafana-data:/var/lib/grafana
     ports:
-      - "3010:3000" # host 3010 for the Application-Plane Grafana UI
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3010:3000" # host 3010 for the Application-Plane Grafana UI
     networks:
       - app-net
     depends_on:

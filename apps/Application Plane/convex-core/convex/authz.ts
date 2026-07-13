@@ -15,7 +15,7 @@ export function assertServiceKey(serviceKey: string) {
   }
 }
 
-async function requireIdentity(ctx: any) {
+export async function requireIdentity(ctx: any) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     throw new Error('Not authenticated');
@@ -30,6 +30,17 @@ async function requireIdentity(ctx: any) {
     identity,
     externalAuthId,
   };
+}
+
+export async function requireIdentityForExternalUser(
+  ctx: any,
+  requestedExternalAuthId: string,
+) {
+  const viewer = await requireIdentity(ctx);
+  if (viewer.externalAuthId !== requestedExternalAuthId) {
+    throw new Error('Unauthorized');
+  }
+  return viewer;
 }
 
 export async function requireViewerMembership(ctx: any, externalOrgId: string) {
@@ -69,6 +80,41 @@ export async function requireViewerMembership(ctx: any, externalOrgId: string) {
     organization,
     membership,
   };
+}
+
+export async function requireViewerMembershipByOrgId(ctx: any, orgId: string) {
+  const { identity, externalAuthId } = await requireIdentity(ctx);
+  const organization = await ctx.db.get(orgId);
+  if (!organization || organization.syncStatus === 'deleted') {
+    throw new Error('Unauthorized');
+  }
+  const memberships = await ctx.db
+    .query('users')
+    .withIndex('by_external_and_org', (q: any) =>
+      q.eq('externalAuthId', externalAuthId).eq('orgId', organization._id),
+    )
+    .collect();
+  const membership = memberships.find(
+    (candidate: any) => candidate.syncStatus !== 'deleted',
+  );
+  if (!membership) throw new Error('Unauthorized');
+  return { identity, externalAuthId, organization, membership };
+}
+
+export async function requireEditorMembership(ctx: any, externalOrgId: string) {
+  const viewer = await requireViewerMembership(ctx, externalOrgId);
+  if (!['admin', 'member'].includes(viewer.membership.role)) {
+    throw new Error('Unauthorized');
+  }
+  return viewer;
+}
+
+export async function requireEditorMembershipByOrgId(ctx: any, orgId: string) {
+  const viewer = await requireViewerMembershipByOrgId(ctx, orgId);
+  if (!['admin', 'member'].includes(viewer.membership.role)) {
+    throw new Error('Unauthorized');
+  }
+  return viewer;
 }
 
 export async function requireConversationViewer(

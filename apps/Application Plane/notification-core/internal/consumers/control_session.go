@@ -109,17 +109,21 @@ func (cs *ControlSessionSubscriber) handleEntitlementsChanged(ctx context.Contex
 			return
 		}
 
-		if event.UserID == "" {
-			log.Printf("subscribers/control-session: event missing user_id, terminating")
+		if event.UserID == "" || event.OrgID == "" {
+			log.Printf("subscribers/control-session: event missing user_id or org_id, terminating")
 			_ = msg.Term()
 			return
 		}
 
 		req := notification.Request{
-			IdempotencyKey: fmt.Sprintf("control-session-entitlements:%s:%s", event.UserID, event.Timestamp),
-			RecipientID:    event.UserID,
-			Type:           NotificationTypeEntitlementsChanged,
-			Source:         "control-session",
+			OrganizationID: event.OrgID,
+			IdempotencyKey: fmt.Sprintf("control-session-entitlements:%s:%s:%s", event.OrgID, event.UserID, event.Timestamp),
+			Recipient: notification.Recipient{
+				Kind: notification.RecipientKindUser,
+				ID:   event.UserID,
+			},
+			Type:   NotificationTypeEntitlementsChanged,
+			Source: "control-session",
 			Payload: map[string]any{
 				"user_id":   event.UserID,
 				"org_id":    event.OrgID,

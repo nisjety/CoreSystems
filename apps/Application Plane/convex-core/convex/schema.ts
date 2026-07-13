@@ -46,6 +46,7 @@ export default defineSchema({
     // Sync tracking
     syncStatus: v.union(v.literal("syncing"), v.literal("synced"), v.literal("deleted")),
     lastSyncedAt: v.number(),
+    sourceUpdatedAt: v.optional(v.number()),
     
     createdAt: v.number(),
     lastSeenAt: v.number(),
@@ -55,6 +56,27 @@ export default defineSchema({
     .index("by_org", ["orgId"])
     .index("by_email", ["email"])
     .index("by_external_and_org", ["externalAuthId", "orgId"]),
+
+  // Authority tombstones prevent a delayed member-added event from
+  // resurrecting access after Control Plane has removed the membership.
+  membershipTombstones: defineTable({
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    sourceUpdatedAt: v.number(),
+    removedAt: v.number(),
+  })
+    .index("by_external_org_and_user", ["externalOrgId", "externalAuthId"])
+    .index("by_external_org", ["externalOrgId"]),
+
+  reconciliationNonces: defineTable({
+    nonce: v.string(),
+    externalOrgId: v.string(),
+    requestTimestamp: v.number(),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+  })
+    .index("by_nonce", ["nonce"])
+    .index("by_expires_at", ["expiresAt"]),
 
   // Conversations - Chat sessions
   conversations: defineTable({
@@ -445,6 +467,8 @@ export default defineSchema({
     progress: v.number(),
     progressMessage: v.optional(v.string()),
     pageCount: v.optional(v.number()),
+    documentCount: v.optional(v.number()),
+    sourceType: v.optional(v.string()),
     error: v.optional(v.string()),
     startedAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),

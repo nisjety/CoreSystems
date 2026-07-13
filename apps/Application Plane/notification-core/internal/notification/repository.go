@@ -15,7 +15,11 @@ import (
 
 const notificationRequestColumns = `
 	id,
+	organization_id,
 	COALESCE(idempotency_key, ''),
+	COALESCE(request_sha256, ''),
+	retention_mode,
+	recipient_kind,
 	recipient_id,
 	type,
 	payload,
@@ -41,7 +45,7 @@ func NewRepository(pool *pgxpool.Pool) *PGRepository {
 	return &PGRepository{pool: pool}
 }
 
-func (r *PGRepository) FindByIdempotencyKey(ctx context.Context, idempotencyKey string) (*StoredRequest, error) {
+func (r *PGRepository) FindByIdempotencyKey(ctx context.Context, organizationID, idempotencyKey string) (*StoredRequest, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("notification repository is not configured")
 	}
@@ -54,7 +58,7 @@ func (r *PGRepository) FindByIdempotencyKey(ctx context.Context, idempotencyKey 
 	row := r.pool.QueryRow(ctx, `
 SELECT `+notificationRequestColumns+`
 FROM notification_requests
-WHERE idempotency_key = $1`, cleanKey)
+WHERE organization_id = $1 AND idempotency_key = $2`, strings.TrimSpace(organizationID), cleanKey)
 
 	return scanStoredRequest(row)
 }
@@ -70,10 +74,14 @@ func (r *PGRepository) Create(ctx context.Context, params CreateRequestParams) (
 	}
 
 	row := r.pool.QueryRow(ctx, `
-INSERT INTO notification_requests (
-	id,
-	idempotency_key,
-	recipient_id,
+	INSERT INTO notification_requests (
+		id,
+		organization_id,
+		idempotency_key,
+		request_sha256,
+		retention_mode,
+		recipient_kind,
+		recipient_id,
 	type,
 	payload,
 	source,
@@ -81,21 +89,29 @@ INSERT INTO notification_requests (
 	provider,
 	created_at,
 	updated_at
-) VALUES (
-	$1,
-	NULLIF($2, ''),
-	$3,
-	$4,
-	$5::jsonb,
-	$6,
-	$7,
-	$8,
-	$9,
-	$9
-)
+	) VALUES (
+		$1,
+		$2,
+		NULLIF($3, ''),
+		NULLIF($4, ''),
+		$5,
+		$6,
+		$7,
+		$8,
+		$9::jsonb,
+		$10,
+		$11,
+		$12,
+		$13,
+		$13
+	)
 RETURNING `+notificationRequestColumns,
 		params.ID,
+		params.OrganizationID,
 		strings.TrimSpace(params.IdempotencyKey),
+		strings.TrimSpace(params.RequestSHA256),
+		params.RetentionMode,
+		params.RecipientKind,
 		params.RecipientID,
 		params.Type,
 		payload,
@@ -168,7 +184,11 @@ func scanStoredRequest(scanner rowScanner) (*StoredRequest, error) {
 	var payload []byte
 	if err := scanner.Scan(
 		&storedRequest.ID,
+		&storedRequest.OrganizationID,
 		&storedRequest.IdempotencyKey,
+		&storedRequest.RequestSHA256,
+		&storedRequest.RetentionMode,
+		&storedRequest.RecipientKind,
 		&storedRequest.RecipientID,
 		&storedRequest.Type,
 		&payload,

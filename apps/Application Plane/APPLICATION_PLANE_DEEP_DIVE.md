@@ -9,13 +9,25 @@ The Application Plane is the app-layer coordination and projection boundary that
 3. `conversation-ingest-rs` as a thin ingest shim into conversation-core.
 4. `information-core` as an internal information API for weather/traffic/news.
 5. `notification-core` as a notification and inbox/feed service.
-6. Optional or partial AFFiNE surfaces in compose.
-7. `zammad-foundation` as a support-stack foundation package with its own separate compose/runtime path.
+6. `social-core` (`:3162`) as a social account/publish/metrics/catalog service via integration-corev2.
+7. `insight-core` (`:3163`) as an analytics/briefs (market-intelligence) service.
+8. `leads-core` (`:3164`) as a non-PII company-leads service backed by real Brreg/Enhetsregisteret.
+9. Optional or partial AFFiNE surfaces in compose.
+10. `zammad-foundation` as a support-stack foundation package with its own separate compose/runtime path.
 
 This plane currently has two notable characteristics:
 
 - It is more service-rich than the main architecture doc admits.
 - Several docs and optional runtime paths still reflect older assumptions, incomplete migrations, or partial integrations.
+
+> **Verified 2026-07-11.** All Application Plane services returned `/health=200` on a host-curl pass, including `social-core` (`:3162`), `insight-core` (`:3163`), and `leads-core` (`:3164`) — three active first-party services that earlier revisions of this doc omitted (now added to the topology table below). Docker exec/build/logs were unavailable this pass (containerd content-store corruption), so container internals were read from compose/source on disk. Spot-checks confirmed: `convex/http.ts` still calls a missing `api.jobs.*` module and `internal.nats.onOrganizationMemberRemoved` (called in `http.ts`, never defined in `nats.ts`); `verifyWebhookSignature` is still a placeholder; `convex/ai.ts` still uses `AI_CORE_URL` + `/stream/chat`/`/chat`; `./affine-core` build context is still absent; `notification-core` route surface below is accurate; `application-postgres` is shared by conversation/social/insight/leads/affine services.
+
+> **Source update 2026-07-12:** Docker cleanup removed the unusable
+> `affine-core` service declaration because its build context is absent. The
+> digest-pinned vendor `affine-runtime` remains opt-in, while
+> `AFFINE_CORE_URL` now defaults empty instead of advertising nonexistent DNS.
+
+> **Production-readiness refresh 2026-07-13:** `docs/core-research/plane-audit-2026-07-13.md` supersedes the July 11 current-state conclusions. Postgres is healthy; the exact native-arm64 leads container reached real Brreg with HTTP 200. Convex member removal/import/authz/reconciliation, notification organization/recipient signing and ZDR containment, information provenance, exact Auth Core membership, User Core denial-driven projection revocation, gateway-wide live membership enforcement, signed conversation delegation, per-org conversation→integration service bearer, effect-bound Ed25519 provider-write attestations, and content-free conversation/integration outbound ledgers are complete in changed source but not deployed. Final review forced the stronger Integration receipt relationship out of the immutable 0008 baseline into forward-only migration 0009, which aggregate-count audits an already-applied 0008 database before replacing and validating the constraint; it also serialized bootstrap and every version with one transaction-scoped advisory lock so API/worker startups cannot both apply the same version. The plane is not a secure MVP: the new authority chain, keys, migrations, and workloads must be provisioned/deployed/live-tested; ZDR is incomplete plane-wide, stale/ambiguous delivery has no reconciler or provider callback, cross-plane membership fan-out is not issuer-verifiable, notification lacks an authority writer/outbox/callback path, and coverage remains incomplete.
 
 ## Current Runtime Topology
 
@@ -35,13 +47,15 @@ Primary compose file: `apps/Application Plane/docker-compose.yml`
 | `conversation-ingest-rs` | `3161` | Conversation ingest adapter |
 | `information-core` | `3190` | Internal weather/traffic/news API |
 | `notification-core` | `3140` | Notification boundary service |
+| `social-core` | `3162` | Social account/publish/metrics/catalog via integration-corev2 |
+| `insight-core` | `3163` | Analytics/briefs (W3 market-intelligence) |
+| `leads-core` | `3164` | Non-PII company leads vs real Brreg (W1 lead-builder) |
 | `nats` / `app-nats` | internal | Plane-local NATS bus |
 
 ### Optional/profile-gated compose surfaces
 
 | Service | Status |
 |---|---|
-| `affine-core` | compose profile `affine`, but build context directory is missing on disk |
 | `affine-runtime` | compose profile `affine`, image-based runtime |
 | `affine-runtime-migration` | compose profile `affine`, one-shot migration helper |
 
@@ -101,6 +115,12 @@ flowchart TD
 ```
 
 ## Current Service-by-Service Understanding
+
+## Control membership authority and gateway boundary
+
+Application Plane does not own membership. Changed source adds an exact Auth Core decision for `(user_id, organization_id)`, called through User Core with a dedicated credential and redirect refusal. It accepts only canonical owner/admin/member/viewer roles, rejects ambiguous duplicates, and ships migration 016 with an operator-visible duplicate preflight before the unique index is created. Velion gateway uses the decision before signing tenant/user/role-bound conversation requests; the same fail-closed result must cover every notification/social/leads/knowledge/privacy/action caller rather than trusting a stale `active_org_id`.
+
+This is source-only. Auth Core, User Core, gateway, migration 016, and new credentials are not deployed. A successful denial must also remove User Core's stale local projection; authority outages must remain 503 and must never mutate authority state.
 
 ## convex-core
 
@@ -169,6 +189,11 @@ This is a real first-party support/conversation API, not just an auxiliary libra
 
 - This service is active in compose.
 - It is missing from the main architecture doc, which makes that doc incomplete.
+- Changed source requires HMAC-v2 delegation bound to service, audience, method, URI, body, user, organization, role, timestamp, and nonce; gateway and ingest are separate principals.
+- External replies require a stable idempotency key. A content-free `conversation_outbound_intents` row is claimed before the provider call; `submitted`, `failed`, and `unknown` outcomes prevent a blind duplicate, and message/audit/AI execution finalize atomically.
+- Integration-corev2 has a second durable provider receipt keyed by tenant/idempotency. This is defense in depth, not a delivery callback.
+- `/messages` cannot select `internal:true`; `/notes` is the only store-only route. Inbox ambiguous retry reuses one key and says `Reply submitted`, never `Reply sent`.
+- Open MVP gaps are real Postgres migration execution, provisioning/deployment of the implemented Auth Core service principal and Ed25519 attestation key pair, stale-state reconciliation, submitted/sent/delivered callbacks, durable approval-event outbox, multi-replica replay protection, and authoritative ZDR/retention.
 
 ## conversation-ingest-rs
 
@@ -221,9 +246,9 @@ This is the first-party notification boundary.
 - Feed/inbox surface.
 - Preferences API.
 - Channel configuration API.
-- Recipient/subscriber upsert surface.
+- Organization-scoped subscriber membership projection.
 - Novu adapter.
-- NATS publication and shared-bus consumers.
+- NATS publication; prior unsigned shared-bus consumers are intentionally disabled in changed source.
 
 ### Exposed surface
 
@@ -239,25 +264,26 @@ This is the first-party notification boundary.
 - `/notifications/:id`
 - `/preferences`
 - `/channels/config`
-- `/internal/recipients/upsert`
 
 ### Current position
 
 - Much broader than the README's V0 summary.
-- Subscribes to shared-bus control-session and identity sync events.
-- Uses a real Novu adapter when configured and local stub mode when not.
+- Changed source does not start unsigned shared-bus control-session/identity/social consumers.
+- Changed source requires explicit `novu` or `disabled` delivery mode. Disabled mode reports readiness 503 and cannot fabricate a provider transaction; the running July 13 image is older and still has the unsafe synthetic-success behavior.
+- Intake/feed/preferences now require signed organization/user scope, active membership, typed user recipients, and caller workflow allowlists. Support requests are ZDR and the worker defaults disabled.
+- No trustworthy Control membership writer/backfill exists, so the secure source denies legitimate access. Delivery/feed outbox, callback reconciliation, durable preference sync, and HA replay protection remain open.
 
 ## AFFiNE surfaces
 
-`affine-core`, `affine-runtime`, `affine-runtime-migration`
+`affine-runtime`, `affine-runtime-migration`
 
 ### Current position
 
-- Compose still contains an AFFiNE profile.
+- Compose retains optional vendor AFFiNE runtime/migration paths.
 - `affine-runtime` and migration image paths exist in compose.
-- `./affine-core` build context is missing from disk in the current workspace.
+- The removed first-party `affine-core` build context is historical and is not a default runtime blocker.
 
-That makes the AFFiNE story partial or stale today. The runtime image path may still be usable, but the first-party `affine-core` build surface is absent.
+The AFFiNE story is opt-in vendor runtime only unless a future owner explicitly restores a first-party application service.
 
 ## zammad-foundation
 
@@ -302,14 +328,12 @@ This section excludes normal test-only mocks and focuses on runtime-relevant or 
 ## convex-core
 
 1. `convex/http.ts`
-   - `verifyWebhookSignature` is explicitly placeholder-grade.
-   - When `WEBHOOK_SECRET` is unset it skips verification.
-   - Even when set, current logic is just a prefix/equality placeholder instead of real HMAC verification.
+   - The dead legacy jobs webhooks and their placeholder signature verifier were removed in changed source.
+   - Generic internal projection webhooks fail closed on a configured internal credential but are still bearer/shared-key boundaries; they are not replay-bound issuer proof.
 
 2. `convex/http.ts`
-   - Webhook handlers call `api.jobs.getByExternalId`, `api.jobs.updateStatus`, and `api.jobs.updateProgress`.
-   - There is no `convex/jobs.ts` source module in the current tree.
-   - That makes those webhook paths a stale or broken surface unless generated artifacts are masking removed source.
+   - `api.jobs.*` callers were removed rather than masked with no-op functions.
+   - `imports.recordCompleted` and member removal now have real source implementations and called-function contract tests.
 
 3. `convex/nats.ts`
    - `startSubscriber` is explicitly a placeholder.
@@ -323,13 +347,13 @@ This section excludes normal test-only mocks and focuses on runtime-relevant or 
    - Assistant placeholder message creation for streaming is intentional and not itself a problem.
 
 6. Compose defaults
-   - Several `change-me` or dev-secret defaults remain in Convex-related envs.
+   - The predictable Convex `change-me` fallback is removed. Changed source requires generic internal, subscriber, NATS, and dedicated reconciliation credentials; runtime deployment remains unverified.
 
 ## notification-core
 
 1. `internal/runtime/client.go`
-   - Stub mode is active whenever `NOVU_SECRET_KEY` is unset.
-   - In stub mode dispatch returns synthetic transaction IDs and no real notifications are sent.
+   - Historical runtime behavior fabricated transaction IDs when `NOVU_SECRET_KEY` was unset.
+   - Changed source removes that behavior and fails closed in explicit `disabled` mode; it is not deployed as of 2026-07-13.
 
 2. `internal/subscribers/service.go`
    - Explicitly inserts stub subscriber rows for sparse identity states that will later be merged.
@@ -337,8 +361,7 @@ This section excludes normal test-only mocks and focuses on runtime-relevant or 
 ## AFFiNE
 
 1. `docker-compose.yml`
-   - `affine-core` is declared, but the `./affine-core` directory is missing.
-   - This is a concrete stale/broken runtime surface.
+   - Optional digest-pinned vendor runtime/migration paths remain; the invalid first-party `affine-core` declaration was removed on 2026-07-12.
 
 ## Documentation/runtime mismatch
 
@@ -362,16 +385,16 @@ The main relationships are mapped well enough for broader system analysis:
 
 What remains partially converged:
 
-- AFFiNE runtime story.
-- Convex webhook/job integration correctness.
-- Whether `information-core` is still strategically used or just present.
-- How tightly `zammad-foundation` is actually wired into `conversation-core` and `notification-core`.
+- Optional AFFiNE vendor-runtime ownership.
+- Convex's dependence on unsigned/unrevisioned Control events and a shared NATS publish boundary.
+- Notification organization/recipient identity and support-worker enablement.
+- ZDR/retention propagation across conversation, social, notification, cache/log, analytics, and event paths.
 
 ## Likely Legacy, Unused, or Transitional Surfaces
 
 ### AFFiNE first-party core
 
-Because `./affine-core` is missing, the first-party AFFiNE integration path looks transitional or partially removed.
+The invalid first-party service declaration was removed. Only the opt-in vendor runtime remains; restoring a first-party core would be a new ownership decision.
 
 ### Old Convex integration assumptions
 
@@ -399,7 +422,7 @@ These are candidates only. Do not delete until the cross-plane stale-doc registe
    - Candidate for consolidation or deletion if it no longer adds meaningful separation.
 
 5. AFFiNE-related doc sections in runtime docs
-   - Need review because the first-party `affine-core` build context is absent.
+   - Need review so they describe the vendor runtime as opt-in and the removed first-party service as historical.
 
 ## Operational Notes
 
@@ -411,8 +434,10 @@ These are candidates only. Do not delete until the cross-plane stale-doc registe
 
 ## Recommended Follow-Up Checks
 
-1. Verify whether any current clients still depend on AFFiNE paths before removing or rewriting those docs.
-2. Verify whether `convex/ai.ts` still works against current `model-gateway` endpoints or is now dead/stale code.
-3. Verify whether missing `jobs.ts` means Convex webhook job paths are broken or generated from an untracked source.
-4. Trace real consumers of `information-core` before classifying it as keep/update/delete.
-5. During the stale-doc register pass, treat `APPLICATION_PLANE_ARCHITECTURE.md` as a likely update target, not an immediate delete candidate.
+1. Replace shared internal-key/forwarded-header authority with tenant/audience/role-bound workload identity.
+2. Propagate and prove ZDR/retention across every content-persisting boundary.
+3. Add a durable provider-bound conversation outbound ledger and crash reconciliation.
+4. Give Control membership events transactional delivery, signed issuer identity, event IDs, revisions, and subject ACLs before deploying Convex reconciliation.
+5. Supply a signed/revisioned notification membership writer and scoped removal-first backfill; add delivery/feed outbox, callbacks/reconciliation, and HA replay state. Keep support automation disabled until workflows carry authoritative mappings.
+6. Deploy information-core, Model formatter, and Velion v3 provenance changes together; migrate or retire legacy Velion v2.
+7. Follow the dated deployment/reconciliation/native-build runbooks under `docs/runbooks/` and preserve immutable rollback evidence.

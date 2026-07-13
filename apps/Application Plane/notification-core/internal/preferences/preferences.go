@@ -26,20 +26,22 @@ var ErrNotFound = errors.New("preference not found")
 // Preference is one row in `notification_preferences`. JSON tags match
 // velion's `Preference` type in src/lib/notifications/types.ts.
 type Preference struct {
-	UserID    string    `json:"user_id"`
-	EventType string    `json:"event_type"`
-	Channel   string    `json:"channel"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	OrganizationID string    `json:"organization_id"`
+	UserID         string    `json:"user_id"`
+	EventType      string    `json:"event_type"`
+	Channel        string    `json:"channel"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // PutParams is the input to Service.Put.
 type PutParams struct {
-	UserID    string
-	EventType string
-	Channel   string
-	Enabled   bool
+	OrganizationID string
+	UserID         string
+	EventType      string
+	Channel        string
+	Enabled        bool
 }
 
 // NovuPreferenceClient is the runtime hook for syncing user preferences
@@ -57,22 +59,33 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 }
 
 type Service struct {
-	repo    *Repository
-	runtime NovuPreferenceClient
+	repo     *Repository
+	runtime  NovuPreferenceClient
+	resolver RecipientResolver
 }
 
-func NewService(repo *Repository, runtime NovuPreferenceClient) *Service {
-	return &Service{repo: repo, runtime: runtime}
+type RecipientResolver interface {
+	ResolveUser(ctx context.Context, organizationID, userID string) (string, error)
+}
+
+func NewService(repo *Repository, runtime NovuPreferenceClient, resolver RecipientResolver) *Service {
+	return &Service{repo: repo, runtime: runtime, resolver: resolver}
 }
 
 // ListForUser returns every explicit preference row for one user. Combined
 // with `channels.Config` defaults in the HTTP handler this becomes the
 // effective matrix shown in the UI.
-func (s *Service) ListForUser(ctx context.Context, userID string) ([]Preference, error) {
+func (s *Service) ListForUser(ctx context.Context, organizationID, userID string) ([]Preference, error) {
 	if s == nil {
 		return nil, errors.New("preferences service not configured")
 	}
-	return s.repo.ListForUser(ctx, userID)
+	if s.resolver == nil {
+		return nil, errors.New("preferences recipient resolver not configured")
+	}
+	if _, err := s.resolver.ResolveUser(ctx, organizationID, userID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListForUser(ctx, organizationID, userID)
 }
 
 // Put upserts a single (user, event_type, channel) preference. Best-effort
@@ -82,6 +95,13 @@ func (s *Service) Put(ctx context.Context, params PutParams) (*Preference, error
 	if s == nil {
 		return nil, errors.New("preferences service not configured")
 	}
+	if s.resolver == nil {
+		return nil, errors.New("preferences recipient resolver not configured")
+	}
+	providerSubscriberID, err := s.resolver.ResolveUser(ctx, params.OrganizationID, params.UserID)
+	if err != nil {
+		return nil, err
+	}
 
 	pref, err := s.repo.Upsert(ctx, params)
 	if err != nil {
@@ -89,13 +109,13 @@ func (s *Service) Put(ctx context.Context, params PutParams) (*Preference, error
 	}
 
 	if s.runtime != nil {
-		go func(p Preference) {
+		go func(p Preference, subscriberID string) {
 			rctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.runtime.UpdateSubscriberPreference(rctx, p.UserID, p.EventType, p.Channel, p.Enabled); err != nil {
+			if err := s.runtime.UpdateSubscriberPreference(rctx, subscriberID, p.EventType, p.Channel, p.Enabled); err != nil {
 				log.Printf("[notification-core/preferences] Novu sync failed for %s/%s/%s: %v", p.UserID, p.EventType, p.Channel, err)
 			}
-		}(*pref)
+		}(*pref, providerSubscriberID)
 	}
 
 	return pref, nil
@@ -104,11 +124,11 @@ func (s *Service) Put(ctx context.Context, params PutParams) (*Preference, error
 // IsEnabled returns the effective enabled state for one (user, event_type,
 // channel). If no preference row exists, returns the fallback value
 // supplied by the caller (typically the org-level default).
-func (s *Service) IsEnabled(ctx context.Context, userID, eventType, channel string, fallback bool) (bool, error) {
+func (s *Service) IsEnabled(ctx context.Context, organizationID, userID, eventType, channel string, fallback bool) (bool, error) {
 	if s == nil {
 		return fallback, errors.New("preferences service not configured")
 	}
-	pref, err := s.repo.Get(ctx, userID, eventType, channel)
+	pref, err := s.repo.Get(ctx, organizationID, userID, eventType, channel)
 	if errors.Is(err, ErrNotFound) {
 		return fallback, nil
 	}
@@ -118,15 +138,31 @@ func (s *Service) IsEnabled(ctx context.Context, userID, eventType, channel stri
 	return pref.Enabled, nil
 }
 
-func (r *Repository) ListForUser(ctx context.Context, userID string) ([]Preference, error) {
-	if strings.TrimSpace(userID) == "" {
-		return nil, errors.New("user_id required")
+// IsNotificationEnabled is a conservative local dispatch gate. Any explicit
+// opt-out for the workflow suppresses provider delivery. Local state remains
+// authoritative even when asynchronous Novu preference synchronization fails.
+func (s *Service) IsNotificationEnabled(ctx context.Context, organizationID, userID, eventType string) (bool, error) {
+	preferences, err := s.ListForUser(ctx, organizationID, userID)
+	if err != nil {
+		return false, err
+	}
+	for _, preference := range preferences {
+		if preference.EventType == eventType && !preference.Enabled {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (r *Repository) ListForUser(ctx context.Context, organizationID, userID string) ([]Preference, error) {
+	if strings.TrimSpace(organizationID) == "" || strings.TrimSpace(userID) == "" {
+		return nil, errors.New("organization_id and user_id required")
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT user_id, event_type, channel, enabled, created_at, updated_at
+SELECT organization_id, user_id, event_type, channel, enabled, created_at, updated_at
 FROM notification_preferences
-WHERE user_id = $1
-ORDER BY event_type, channel`, userID)
+WHERE organization_id = $1 AND user_id = $2
+ORDER BY event_type, channel`, organizationID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list preferences: %w", err)
 	}
@@ -135,7 +171,7 @@ ORDER BY event_type, channel`, userID)
 	out := make([]Preference, 0)
 	for rows.Next() {
 		var p Preference
-		if err := rows.Scan(&p.UserID, &p.EventType, &p.Channel, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.OrganizationID, &p.UserID, &p.EventType, &p.Channel, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan preference: %w", err)
 		}
 		out = append(out, p)
@@ -143,13 +179,13 @@ ORDER BY event_type, channel`, userID)
 	return out, rows.Err()
 }
 
-func (r *Repository) Get(ctx context.Context, userID, eventType, channel string) (*Preference, error) {
+func (r *Repository) Get(ctx context.Context, organizationID, userID, eventType, channel string) (*Preference, error) {
 	row := r.pool.QueryRow(ctx, `
-SELECT user_id, event_type, channel, enabled, created_at, updated_at
+SELECT organization_id, user_id, event_type, channel, enabled, created_at, updated_at
 FROM notification_preferences
-WHERE user_id = $1 AND event_type = $2 AND channel = $3`, userID, eventType, channel)
+WHERE organization_id = $1 AND user_id = $2 AND event_type = $3 AND channel = $4`, organizationID, userID, eventType, channel)
 	var p Preference
-	if err := row.Scan(&p.UserID, &p.EventType, &p.Channel, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.OrganizationID, &p.UserID, &p.EventType, &p.Channel, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -160,23 +196,24 @@ WHERE user_id = $1 AND event_type = $2 AND channel = $3`, userID, eventType, cha
 
 func (r *Repository) Upsert(ctx context.Context, params PutParams) (*Preference, error) {
 	userID := strings.TrimSpace(params.UserID)
+	organizationID := strings.TrimSpace(params.OrganizationID)
 	eventType := strings.TrimSpace(params.EventType)
 	channel := strings.TrimSpace(params.Channel)
-	if userID == "" || eventType == "" || channel == "" {
-		return nil, errors.New("user_id, event_type and channel are required")
+	if organizationID == "" || userID == "" || eventType == "" || channel == "" {
+		return nil, errors.New("organization_id, user_id, event_type and channel are required")
 	}
 
 	row := r.pool.QueryRow(ctx, `
-INSERT INTO notification_preferences (user_id, event_type, channel, enabled, created_at, updated_at)
-VALUES ($1, $2, $3, $4, NOW(), NOW())
-ON CONFLICT (user_id, event_type, channel) DO UPDATE SET
+INSERT INTO notification_preferences (organization_id, user_id, event_type, channel, enabled, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+ON CONFLICT (organization_id, user_id, event_type, channel) WHERE organization_id IS NOT NULL DO UPDATE SET
 	enabled    = EXCLUDED.enabled,
 	updated_at = NOW()
-RETURNING user_id, event_type, channel, enabled, created_at, updated_at`,
-		userID, eventType, channel, params.Enabled)
+RETURNING organization_id, user_id, event_type, channel, enabled, created_at, updated_at`,
+		organizationID, userID, eventType, channel, params.Enabled)
 
 	var p Preference
-	if err := row.Scan(&p.UserID, &p.EventType, &p.Channel, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.OrganizationID, &p.UserID, &p.EventType, &p.Channel, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("upsert preference: %w", err)
 	}
 	return &p, nil

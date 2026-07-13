@@ -2,6 +2,9 @@ package conversation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,10 +15,9 @@ import (
 )
 
 // OutboundSender delivers a human agent's reply to the customer through
-// integration-corev2. *integration.Client satisfies it. A nil sender disables
-// outbound delivery: replies are stored but not sent (used in tests and when no
-// integration client is configured), so the Service never claims a send it
-// cannot perform.
+// integration-corev2. *integration.Client satisfies it. A nil sender makes
+// external replies unavailable; the service fails before persistence so it can
+// never claim that an unsent reply was sent.
 type OutboundSender interface {
 	Send(ctx context.Context, req integration.SendRequest) (*integration.SendResult, error)
 }
@@ -117,6 +119,7 @@ func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Messa
 	input.ActorEmail = strings.TrimSpace(input.ActorEmail)
 	input.BodyText = strings.TrimSpace(input.BodyText)
 	input.BodyHTML = strings.TrimSpace(input.BodyHTML)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	if strings.TrimSpace(input.Direction) == "" {
 		input.Direction = DirectionOutbound
 	}
@@ -126,19 +129,105 @@ func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Messa
 	if input.OrgID == "" || input.ConversationID == "" || input.BodyText == "" {
 		return nil, fmt.Errorf("%w: org_id, conversation_id, and body_text are required", ErrInvalidInput)
 	}
-	// Human replies (outbound, non-internal) to a conversation backed by a
-	// channel with a real send operation must actually reach the customer. Send
-	// FIRST, then persist — so a send failure surfaces a real error and no
-	// phantom "sent" row is stored, instead of the previous false success where
-	// the row was written but nothing was delivered. Internal notes, store-only
-	// conversations (no channel ref) and channels with no send op are unaffected.
-	if !input.Internal && input.Direction == DirectionOutbound && s.sender != nil {
-		provider, providerMessageID, err := s.deliverReply(ctx, input)
+	if !input.Internal && input.Direction == DirectionOutbound && !validOutboundIdempotencyKey(input.IdempotencyKey) {
+		return nil, fmt.Errorf("%w: a valid idempotency_key is required for external replies", ErrInvalidInput)
+	}
+	// Human outbound replies must have a configured sender and a supported,
+	// tenant-scoped channel reference. Internal notes are the only store-only
+	// path. Send first, then persist, so absent routing cannot become a false
+	// customer-send success.
+	if !input.Internal && input.Direction == DirectionOutbound {
+		if s.sender == nil {
+			return nil, ErrDeliveryUnavailable
+		}
+		ref, err := s.resolveReplyTarget(ctx, input.OrgID, input.ConversationID)
 		if err != nil {
 			return nil, err
 		}
-		input.Provider = provider
-		input.ProviderMessageID = providerMessageID
+		intentID := OutboundIntentID(input.OrgID, input.IdempotencyKey)
+		sendRequest := integration.SendRequest{
+			OrgID: input.OrgID, ActorUserID: input.ActorUserID,
+			Provider: ref.Provider, ConnectionID: ref.ConnectionID, ProviderThreadID: ref.ProviderThreadID,
+			BodyText: input.BodyText, BodyHTML: input.BodyHTML,
+			AuthorizationKind: "human_intent", AuthorizationID: intentID, ActionID: intentID,
+			IdempotencyKey: "conversation:" + input.IdempotencyKey,
+		}
+		prepared, err := integration.PrepareSend(sendRequest)
+		if err != nil {
+			return nil, fmt.Errorf("%w: provider action could not be prepared", ErrDeliveryUnavailable)
+		}
+		sendRequest.PayloadSHA256 = prepared.PayloadSHA256
+		fingerprint := OutboundRequestFingerprint(input.OrgID, input.ConversationID, input.IdempotencyKey, input.ActorUserID, ref, input.BodyText, input.BodyHTML)
+		claim, err := s.repository.ClaimOutboundIntent(ctx, OutboundIntentClaimInput{
+			IntentID:           intentID,
+			OrgID:              input.OrgID,
+			IdempotencyKey:     input.IdempotencyKey,
+			ConversationID:     input.ConversationID,
+			RequestFingerprint: fingerprint,
+			Provider:           ref.Provider,
+			ConnectionID:       ref.ConnectionID,
+			ProviderThreadID:   ref.ProviderThreadID,
+			AuthorizationKind:  "human_intent",
+			ActorUserID:        input.ActorUserID,
+			ActionID:           intentID,
+			Operation:          prepared.Operation,
+			PayloadSHA256:      prepared.PayloadSHA256,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if !claim.Claimed {
+			return s.replayOutboundIntent(ctx, claim.Intent)
+		}
+
+		result, sendErr := s.sender.Send(ctx, sendRequest)
+		if sendErr != nil {
+			if integration.IsSafeToRetry(sendErr) {
+				if markErr := s.repository.MarkOutboundIntentOutcome(ctx, OutboundIntentOutcomeInput{
+					OrgID: input.OrgID, IdempotencyKey: input.IdempotencyKey,
+					Status: OutboundIntentRetryable, ErrorCode: integration.ErrorCode(sendErr),
+				}); markErr != nil {
+					log.Printf("[cc-go] record pre-provider retryable outcome org=%s conversation=%s: %v", input.OrgID, input.ConversationID, markErr)
+					return nil, ErrDeliveryUnknown
+				}
+				return nil, fmt.Errorf("%w: %s", ErrSendFailed, integration.ErrorCode(sendErr))
+			}
+			status := OutboundIntentUnknown
+			resultErr := ErrDeliveryUnknown
+			if integration.IsTerminal(sendErr) {
+				status = OutboundIntentFailed
+				resultErr = ErrSendFailed
+			}
+			if markErr := s.repository.MarkOutboundIntentOutcome(ctx, OutboundIntentOutcomeInput{
+				OrgID: input.OrgID, IdempotencyKey: input.IdempotencyKey,
+				Status: status, ErrorCode: integration.ErrorCode(sendErr),
+			}); markErr != nil {
+				log.Printf("[cc-go] record outbound outcome org=%s conversation=%s code=%s: %v", input.OrgID, input.ConversationID, integration.ErrorCode(sendErr), markErr)
+			}
+			return nil, fmt.Errorf("%w: %s", resultErr, integration.ErrorCode(sendErr))
+		}
+		providerMessageID := ""
+		if result != nil {
+			providerMessageID = result.ProviderMessageID
+		}
+		message, finalizeErr := s.repository.FinalizeOutboundIntent(ctx, OutboundIntentFinalizeInput{
+			OrgID:              input.OrgID,
+			IdempotencyKey:     input.IdempotencyKey,
+			RequestFingerprint: fingerprint,
+			Message:            input,
+			ProviderMessageID:  providerMessageID,
+		})
+		if finalizeErr != nil {
+			if markErr := s.repository.MarkOutboundIntentOutcome(ctx, OutboundIntentOutcomeInput{
+				OrgID: input.OrgID, IdempotencyKey: input.IdempotencyKey,
+				Status: OutboundIntentUnknown, ErrorCode: "local_finalize_failed",
+			}); markErr != nil {
+				log.Printf("[cc-go] mark outbound finalization unknown org=%s conversation=%s: %v", input.OrgID, input.ConversationID, markErr)
+			}
+			return nil, ErrDeliveryUnknown
+		}
+		s.publish(ctx, SubjectMessageSent, &ConversationDetail{ConversationSummary: ConversationSummary{ID: input.ConversationID, OrgID: input.OrgID}}, message, input.ActorUserID, map[string]any{"outbound_status": OutboundIntentSubmitted})
+		return message, nil
 	}
 	message, err := s.repository.AddMessage(ctx, input)
 	if err != nil {
@@ -152,47 +241,70 @@ func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Messa
 	return message, nil
 }
 
-// deliverReply sends a human agent's outbound reply to the customer through
-// integration-corev2 when the conversation is backed by a channel with a real
-// send operation. It returns the provider + provider message id to record on
-// the stored message. It is deliberately conservative about NOT sending:
-//   - a conversation with no channel thread ref (ErrNotFound) is store-only
-//     (returns "", "", nil) — preserving prior behavior for internal-only or
-//     unbound conversations;
-//   - a channel whose provider has no send mapping (e.g. a plain email inbox)
-//     is also store-only, so we never turn an undeliverable channel into a hard
-//     error for the agent.
-//
-// A send that IS attempted but fails returns ErrSendFailed (wrapping the
-// underlying cause) so the caller never persists a message the customer never
-// received and the Inbox never shows a phantom "Reply sent".
-func (s *Service) deliverReply(ctx context.Context, input AddMessageInput) (provider, providerMessageID string, err error) {
-	ref, refErr := s.repository.GetChannelThreadRefByConversation(ctx, input.OrgID, input.ConversationID)
+func (s *Service) resolveReplyTarget(ctx context.Context, orgID, conversationID string) (*ChannelThreadRef, error) {
+	ref, refErr := s.repository.GetChannelThreadRefByConversation(ctx, orgID, conversationID)
 	if errors.Is(refErr, ErrNotFound) {
-		return "", "", nil
+		return nil, ErrDeliveryUnavailable
 	}
 	if refErr != nil {
-		return "", "", refErr
+		return nil, refErr
 	}
 	if !integration.SupportsSend(ref.Provider) {
-		return "", "", nil
+		return nil, fmt.Errorf("%w: unsupported provider %q", ErrDeliveryUnavailable, ref.Provider)
 	}
-	result, sendErr := s.sender.Send(ctx, integration.SendRequest{
-		OrgID:            input.OrgID,
-		ActorUserID:      input.ActorUserID,
-		Provider:         ref.Provider,
-		ConnectionID:     ref.ConnectionID,
-		ProviderThreadID: ref.ProviderThreadID,
-		BodyText:         input.BodyText,
-		BodyHTML:         input.BodyHTML,
-	})
-	if sendErr != nil {
-		return "", "", fmt.Errorf("%w: %v", ErrSendFailed, sendErr)
+	return ref, nil
+}
+
+func (s *Service) replayOutboundIntent(ctx context.Context, intent OutboundIntent) (*Message, error) {
+	switch intent.Status {
+	case OutboundIntentSubmitted:
+		if intent.MessageID == "" {
+			return nil, ErrDeliveryUnknown
+		}
+		message, err := s.repository.GetMessage(ctx, intent.OrgID, intent.MessageID)
+		if err != nil {
+			return nil, ErrDeliveryUnknown
+		}
+		return message, nil
+	case OutboundIntentFailed:
+		return nil, fmt.Errorf("%w: %s", ErrSendFailed, intent.ErrorCode)
+	case OutboundIntentSending, OutboundIntentUnknown:
+		return nil, ErrDeliveryUnknown
+	default:
+		return nil, ErrDeliveryUnknown
 	}
-	if result != nil {
-		providerMessageID = result.ProviderMessageID
+}
+
+// OutboundRequestFingerprint binds a durable intent to its exact tenant,
+// conversation, approval, actor, route, and content without persisting a second
+// copy of message content in the ledger.
+func OutboundRequestFingerprint(orgID, conversationID, approvalID, actorUserID string, ref *ChannelThreadRef, bodyText, bodyHTML string) string {
+	canonical := struct {
+		OrgID, ConversationID, ApprovalID, ActorUserID string
+		Provider, ConnectionID, ProviderThreadID       string
+		BodyText, BodyHTML                             string
+	}{
+		OrgID: strings.TrimSpace(orgID), ConversationID: strings.TrimSpace(conversationID),
+		ApprovalID: strings.TrimSpace(approvalID), ActorUserID: strings.TrimSpace(actorUserID),
+		Provider: strings.TrimSpace(ref.Provider), ConnectionID: strings.TrimSpace(ref.ConnectionID),
+		ProviderThreadID: strings.TrimSpace(ref.ProviderThreadID), BodyText: strings.TrimSpace(bodyText), BodyHTML: strings.TrimSpace(bodyHTML),
 	}
-	return ref.Provider, providerMessageID, nil
+	payload, _ := json.Marshal(canonical)
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func validOutboundIdempotencyKey(value string) bool {
+	if len(value) < 16 || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '-' && char != '_' && char != ':' && char != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) UpdateStatus(ctx context.Context, input StatusUpdate) (*ConversationDetail, error) {
@@ -858,8 +970,8 @@ func validateInboundEvent(event InboundEvent) error {
 	if event.IDempotencyKey == "" || event.IDempotencyKey == ":::" {
 		return fmt.Errorf("%w: idempotency_key or provider refs are required", ErrInvalidInput)
 	}
-	if event.Direction != DirectionInbound && event.Direction != DirectionOutbound {
-		return fmt.Errorf("%w: direction must be inbound or outbound", ErrInvalidInput)
+	if event.Direction != DirectionInbound {
+		return fmt.Errorf("%w: inbound event direction must be inbound", ErrInvalidInput)
 	}
 	if event.Subject == "" {
 		event.Subject = "(no subject)"

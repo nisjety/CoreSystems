@@ -1,7 +1,7 @@
 // Package feed manages the per-user in-app notification feed backed by
-// the `notification_feed_items` table. We mirror Novu-delivered events
+// the `notification_feed_items` table. We mirror provider-submitted events
 // locally so velion's /notifications page can list, count, mark-read, and
-// archive without round-tripping Novu on every request.
+// archive. Delivery is confirmed only by a callback or reconciliation.
 //
 // Wire contract: matches `Notification` + `NotificationFeed` types in
 // velion/src/lib/notifications/types.ts. Field names must stay snake_case.
@@ -19,10 +19,10 @@ const (
 	ChannelPush  = "push"
 )
 
-// DeliveryStatus constants — currently just `delivered`, but the column
-// exists so we can model failures later (e.g. Novu webhook reports an
-// SMS bounce).
+// DeliveryStatus distinguishes provider acceptance from callback-confirmed
+// delivery. A successful trigger is submitted, never delivered by inference.
 const (
+	DeliverySubmitted = "submitted"
 	DeliveryDelivered = "delivered"
 	DeliveryPending   = "pending"
 	DeliveryFailed    = "failed"
@@ -32,6 +32,7 @@ const (
 // names match `Notification` in `velion/src/lib/notifications/types.ts`.
 type Notification struct {
 	ID                    string         `json:"id"`
+	OrganizationID        string         `json:"organization_id"`
 	RecipientID           string         `json:"recipient_id"`
 	EventType             string         `json:"event_type"`
 	Channel               string         `json:"channel"`
@@ -48,7 +49,8 @@ type Notification struct {
 	Read                  bool           `json:"read"`
 	Archived              bool           `json:"archived"`
 	DeliveryStatus        string         `json:"delivery_status"`
-	DeliveredAt           time.Time      `json:"delivered_at"`
+	SubmittedAt           time.Time      `json:"submitted_at"`
+	DeliveredAt           *time.Time     `json:"delivered_at,omitempty"`
 	SeenAt                *time.Time     `json:"seen_at,omitempty"`
 	ReadAt                *time.Time     `json:"read_at,omitempty"`
 	ArchivedAt            *time.Time     `json:"archived_at,omitempty"`
@@ -67,16 +69,18 @@ type Feed struct {
 
 // ListParams scopes the feed query.
 type ListParams struct {
-	RecipientID string
-	Page        int  // zero-indexed
-	Limit       int  // capped at 100
-	Read        *bool // nil = all, ptr = filter
-	Archived    *bool // defaults to false (hide archived)
+	OrganizationID string
+	RecipientID    string
+	Page           int   // zero-indexed
+	Limit          int   // capped at 100
+	Read           *bool // nil = all, ptr = filter
+	Archived       *bool // defaults to false (hide archived)
 }
 
 // CreateParams is what we insert when a notification is dispatched.
 type CreateParams struct {
 	ID                    string
+	OrganizationID        string
 	RecipientID           string
 	EventType             string
 	Channel               string
@@ -92,4 +96,7 @@ type CreateParams struct {
 	Provider              string
 	ProviderTransactionID string
 	Source                string
+	DeliveryStatus        string
+	SubmittedAt           time.Time
+	DeliveredAt           *time.Time
 }

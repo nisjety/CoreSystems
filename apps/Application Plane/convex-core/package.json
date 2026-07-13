@@ -8,7 +8,8 @@
     "deploy": "convex deploy --prod",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"convex/**/*.ts\"",
-    "generate": "convex codegen"
+    "generate": "convex codegen",
+    "test": "tsx --test test/*.test.cjs"
   },
   "dependencies": {
     "convex": "^1.18.0",
@@ -16,10 +17,11 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.3.0",
-    "eslint": "^8.50.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0"
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.50.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.3.0"
   },
   "keywords": [
     "convex",

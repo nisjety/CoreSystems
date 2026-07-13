@@ -19,6 +19,7 @@
 
 import { v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
+import { requireViewerMembership } from "./authz";
 
 const statusValidator = v.union(
   v.literal("started"),
@@ -100,6 +101,7 @@ export const listForOrg = query({
     status: v.optional(statusValidator),
   },
   handler: async (ctx, args) => {
+    await requireViewerMembership(ctx, args.externalOrgId);
     const limit = Math.max(1, Math.min(args.limit ?? 50, 200));
 
     if (args.status) {
@@ -125,10 +127,13 @@ export const listForOrg = query({
 export const getByRunId = query({
   args: { runId: v.string() },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const run = await ctx.db
       .query("agentRuns")
       .withIndex("by_run", (q) => q.eq("runId", args.runId))
       .unique();
+    if (!run) return null;
+    await requireViewerMembership(ctx, run.externalOrgId);
+    return run;
   },
 });
 
@@ -162,6 +167,7 @@ export const rate = mutation({
     if (!existing) {
       throw new Error("Run not found");
     }
+    await requireViewerMembership(ctx, existing.externalOrgId);
     if (existing.externalOrgId !== args.externalOrgId) {
       throw new Error("Run belongs to a different organization");
     }
@@ -202,6 +208,7 @@ export const statsByAgent = query({
     lookbackDays: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    await requireViewerMembership(ctx, args.externalOrgId);
     const lookbackDays = Math.max(1, Math.min(args.lookbackDays ?? 30, 365));
     const sinceMs = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
 

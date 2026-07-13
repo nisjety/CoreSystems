@@ -1,5 +1,7 @@
 # conversation-ingest-rs
 
+> **2026-07-13 update.** Internal ingest authentication is fail-closed and remains source-tested. This adapter does not by itself prove provider webhook signature/timestamp/replay validation, account-to-tenant routing, attachment limits, ordering, or end-to-end deduplication; those provider and conversation-core boundaries remain MVP gates. The running image revision was not correlated to source.
+
 ## Current State
 
 `conversation-ingest-rs` is a thin but real Rust ingest adapter in front of `conversation-core-go`.

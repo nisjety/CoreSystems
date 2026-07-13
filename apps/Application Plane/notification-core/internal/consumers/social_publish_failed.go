@@ -152,8 +152,8 @@ func (s *SocialPublishFailedSubscriber) process(ctx context.Context, event socia
 	// The job's requester is the only person with standing to be told their
 	// publish failed. Without one there is no honest recipient — terminate
 	// rather than guess (e.g. broadcasting to the whole org).
-	if event.ActorUserID == "" {
-		log.Printf("consumers/social-publish-failed: event %s has no actor_user_id, terminating", event.ID)
+	if event.ActorUserID == "" || event.OrgID == "" {
+		log.Printf("consumers/social-publish-failed: event %s has no actor_user_id or org_id, terminating", event.ID)
 		return socialPublishTerminate
 	}
 
@@ -164,10 +164,14 @@ func (s *SocialPublishFailedSubscriber) process(ctx context.Context, event socia
 	}
 
 	req := notification.Request{
+		OrganizationID: event.OrgID,
 		IdempotencyKey: idempotencyKey,
-		RecipientID:    event.ActorUserID,
-		Type:           NotificationTypeSocialPublishJobFailed,
-		Source:         "social-core",
+		Recipient: notification.Recipient{
+			Kind: notification.RecipientKindUser,
+			ID:   event.ActorUserID,
+		},
+		Type:   NotificationTypeSocialPublishJobFailed,
+		Source: "social-core",
 		Payload: map[string]any{
 			"org_id":      event.OrgID,
 			"job_id":      event.JobID,

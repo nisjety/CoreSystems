@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/briefs"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/database"
@@ -103,22 +102,10 @@ func main() {
 		}
 	}
 
-	// W3 (PR-5): scheduled brief DELIVERY. When notification-core is reachable and
-	// a durable metric store is enabled, run the daily-brief scheduler. It discovers
-	// active orgs server-side from the recorded metric store (IDOR-clean — never
-	// from client input) and POSTs a `daily_brief` notification carrying the Preview
-	// gate to notification-core's existing Novu adapter (in_app + email). No-op when
-	// NOTIFICATION_CORE_URL is empty or the store is in-memory.
-	if cfg.NotificationCoreURL != "" && cfg.DatabaseURL != "" {
-		notifier := briefs.NewHTTPNotificationClient(cfg.NotificationCoreURL, cfg.InternalAPIKey)
-		scheduler := briefs.NewScheduler(service, notifier)
-		schedCtx, cancelSched := context.WithCancel(context.Background())
-		defer cancelSched()
-		go scheduler.Run(schedCtx)
-		log.Printf("insight-core: daily_brief scheduler enabled (delivery via notification-core)")
-	} else {
-		log.Printf("insight-core: daily_brief scheduler disabled (set NOTIFICATION_CORE_URL + DATABASE_URL to enable)")
-	}
+	// Daily-brief delivery is intentionally disabled. An organization is not a
+	// notification recipient, and no authoritative per-org subscriber resolver
+	// is deployed. Metrics and brief assembly remain available without dispatch.
+	log.Printf("insight-core: daily_brief delivery disabled (authoritative user subscription mapping unavailable)")
 
 	handler := apphttp.NewHandler(cfg, service)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)

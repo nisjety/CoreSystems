@@ -7,6 +7,12 @@ set -e
 
 echo "[Convex] Starting gateway service..."
 
+# Never deploy a predictable shared key into Convex. Compose injects this at
+# runtime from the ignored environment file; it is intentionally not baked into
+# the image.
+: "${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}"
+: "${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}"
+
 # Force Convex self-hosted bypass using official env vars
 export CONVEX_SELF_HOSTED_URL="http://convex-backend:3210"
 # Use the generated admin key if present in .env.local
@@ -69,7 +75,8 @@ set_convex_env() {
 set_convex_env "CONVEX_AUTH_ISSUER" "${CONVEX_AUTH_ISSUER:-http://localhost:3011/api/convex-auth}"
 set_convex_env "CONVEX_AUTH_JWKS_URL" "${CONVEX_AUTH_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}"
 set_convex_env "CONVEX_AUTH_AUDIENCE" "${CONVEX_AUTH_AUDIENCE:-coresystem-convex}"
-set_convex_env "CONVEX_INTERNAL_SERVICE_KEY" "${CONVEX_INTERNAL_SERVICE_KEY:-change-me-internal-service-secret}"
+set_convex_env "CONVEX_INTERNAL_SERVICE_KEY" "$CONVEX_INTERNAL_SERVICE_KEY"
+set_convex_env "CONVEX_RECONCILIATION_KEY" "$CONVEX_RECONCILIATION_KEY"
 set_convex_env "AI_CORE_URL" "${AI_CORE_URL:-http://ai-core:8000}"
 # Canonical Control Plane service names are `org-core` + `auth-core`
 # (velion-gap.md G7). The legacy `org-core-service` / `auth-service`

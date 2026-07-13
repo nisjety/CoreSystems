@@ -1,5 +1,6 @@
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { requireEditorMembership, requireViewerMembership } from "./authz";
 
 const plannerDocumentSpace = v.union(
   v.literal("private"),
@@ -117,6 +118,7 @@ export const listByWorkspace = query({
     includeArchived: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    await requireViewerMembership(ctx, args.workspaceId);
     const includeArchived = args.includeArchived ?? false;
 
     const documents = await ctx.db
@@ -136,6 +138,7 @@ export const getDocument = query({
     documentId: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireViewerMembership(ctx, args.workspaceId);
     return await getExistingDocument(ctx, args.workspaceId, args.documentId);
   },
 });
@@ -150,6 +153,10 @@ export const create = mutation({
     space: v.optional(plannerDocumentSpace),
   },
   handler: async (ctx, args) => {
+    const viewer = await requireEditorMembership(ctx, args.workspaceId);
+    if (args.ownerExternalAuthId && args.ownerExternalAuthId !== viewer.externalAuthId) {
+      throw new Error("Unauthorized");
+    }
     const now = Date.now();
     const existing = await getExistingDocument(ctx, args.workspaceId, args.documentId);
     const parentDocumentId = normalizeParentDocumentId(args.parentDocumentId, args.documentId);
@@ -163,7 +170,7 @@ export const create = mutation({
         updatedAt: now,
         lastViewedAt: now,
         archivedAt: undefined,
-        ownerExternalAuthId: args.ownerExternalAuthId ?? existing.ownerExternalAuthId,
+        ownerExternalAuthId: viewer.externalAuthId,
       });
       return await ctx.db.get(existing._id);
     }
@@ -172,7 +179,7 @@ export const create = mutation({
       workspaceId: args.workspaceId,
       documentId: args.documentId,
       title: normalizeTitle(args.title),
-      ownerExternalAuthId: args.ownerExternalAuthId,
+      ownerExternalAuthId: viewer.externalAuthId,
       parentDocumentId,
       isFavorite: false,
       lastViewedAt: now,
@@ -185,7 +192,7 @@ export const create = mutation({
   },
 });
 
-export const backfillMetadata = mutation({
+export const backfillMetadata = internalMutation({
   args: {
     workspaceId: v.optional(v.string()),
     dryRun: v.optional(v.boolean()),
@@ -241,6 +248,7 @@ export const update = mutation({
     space: v.optional(plannerDocumentSpace),
   },
   handler: async (ctx, args) => {
+    await requireEditorMembership(ctx, args.workspaceId);
     const existing = await getExistingDocument(ctx, args.workspaceId, args.documentId);
     if (!existing || existing.archivedAt) {
       throw new Error("Planner document not found");
@@ -292,6 +300,7 @@ export const rename = mutation({
     title: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireEditorMembership(ctx, args.workspaceId);
     const existing = await getExistingDocument(ctx, args.workspaceId, args.documentId);
     if (!existing || existing.archivedAt) {
       throw new Error("Planner document not found");
@@ -312,6 +321,7 @@ export const archive = mutation({
     documentId: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireEditorMembership(ctx, args.workspaceId);
     const existing = await getExistingDocument(ctx, args.workspaceId, args.documentId);
     if (!existing || existing.archivedAt) {
       return null;
@@ -346,6 +356,7 @@ export const restore = mutation({
     documentId: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireEditorMembership(ctx, args.workspaceId);
     const existing = await getExistingDocument(ctx, args.workspaceId, args.documentId);
     if (!existing) {
       return null;
@@ -377,6 +388,7 @@ export const touch = mutation({
     documentId: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireEditorMembership(ctx, args.workspaceId);
     const existing = await getExistingDocument(ctx, args.workspaceId, args.documentId);
     if (!existing || existing.archivedAt) {
       return null;
@@ -396,6 +408,7 @@ export const getState = query({
     documentId: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireViewerMembership(ctx, args.workspaceId);
     const matches = await ctx.db
       .query("plannerDocumentStates")
       .withIndex("by_workspace_and_document", (q) =>
@@ -414,7 +427,17 @@ export const saveState = mutation({
     stateBase64: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireEditorMembership(ctx, args.workspaceId);
     const now = Date.now();
+
+    const plannerDocument = await getExistingDocument(
+      ctx,
+      args.workspaceId,
+      args.documentId,
+    );
+    if (!plannerDocument || plannerDocument.archivedAt) {
+      throw new Error("Planner document not found");
+    }
 
     const existingState = await ctx.db
       .query("plannerDocumentStates")
@@ -437,17 +460,7 @@ export const saveState = mutation({
       });
     }
 
-    const plannerDocument = await getExistingDocument(
-      ctx,
-      args.workspaceId,
-      args.documentId,
-    );
-
-    if (plannerDocument && !plannerDocument.archivedAt) {
-      await ctx.db.patch(plannerDocument._id, {
-        updatedAt: now,
-      });
-    }
+    await ctx.db.patch(plannerDocument._id, { updatedAt: now });
 
     return { updatedAt: now };
   },

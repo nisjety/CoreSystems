@@ -1,14 +1,17 @@
 package http
 
 import (
+	"bytes"
 	"context"
-	"crypto/subtle"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/delegation"
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,8 +20,8 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func NewServer(port int, handler *Handler, internalKey string) *Server {
-	router := newRouter(handler, strings.TrimSpace(internalKey))
+func NewServer(port int, handler *Handler, verifier *delegation.Verifier) *Server {
+	router := newRouter(handler, verifier)
 	return &Server{
 		router: router,
 		httpServer: &http.Server{
@@ -41,7 +44,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-func newRouter(handler *Handler, internalKey string) *gin.Engine {
+func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -50,72 +53,144 @@ func newRouter(handler *Handler, internalKey string) *gin.Engine {
 	router.GET("/health", handler.Health)
 	router.GET("/ready", handler.Health)
 
-	gated := router.Group("/", requireInternalKey(internalKey))
-	{
-		api := gated.Group("/api/v1")
-		api.GET("/inboxes", handler.ListInboxes)
-		api.GET("/inboxes/:id/queue", handler.ListInboxQueue)
-		api.GET("/conversations", handler.ListConversations)
-		api.GET("/conversations/:id", handler.GetConversation)
-		api.POST("/conversations/search", handler.SearchConversations)
-		api.POST("/conversations/:id/ticket-classifications", handler.ClassifyConversationForTicket)
-		api.POST("/conversations/:id/messages", handler.AddMessage)
-		api.POST("/conversations/:id/notes", handler.AddNote)
-		api.PATCH("/conversations/:id/status", handler.UpdateStatus)
-		api.PATCH("/conversations/:id/assignment", handler.UpdateAssignment)
-		api.POST("/conversations/:id/tags", handler.AddTag)
-		api.DELETE("/conversations/:id/tags/:tag", handler.RemoveTag)
-		api.GET("/tickets", handler.ListTickets)
-		api.POST("/tickets", handler.CreateTicket)
-		api.GET("/tickets/:id", handler.GetTicket)
-		api.PATCH("/tickets/:id", handler.PatchTicket)
-		api.POST("/tickets/:id/links", handler.LinkTicketResource)
-		api.POST("/tickets/:id/macros/:macro_id/run", handler.RunTicketMacro)
-		api.POST("/tickets/:id/checklists", handler.CreateTicketChecklist)
-		api.PATCH("/tickets/:id/checklists/:checklist_id/items/:item_id", handler.PatchTicketChecklistItem)
-		api.GET("/ticket-views", handler.ListTicketViews)
-		api.POST("/ticket-views", handler.CreateTicketView)
-		api.PATCH("/ticket-views/:id", handler.PatchTicketView)
-		api.GET("/ticket-macros", handler.ListTicketMacros)
-		api.POST("/ticket-macros", handler.CreateTicketMacro)
-		api.PATCH("/ticket-macros/:id", handler.PatchTicketMacro)
-		api.GET("/ticket-automation-rules", handler.ListTicketAutomationRules)
-		api.POST("/ticket-automation-rules", handler.CreateTicketAutomationRule)
-		api.PATCH("/ticket-automation-rules/:id", handler.PatchTicketAutomationRule)
-		api.GET("/sla-policies", handler.ListSLAPolicies)
-		api.POST("/sla-policies", handler.CreateSLAPolicy)
-		api.PATCH("/sla-policies/:id", handler.PatchSLAPolicy)
-		api.GET("/ai-actions", handler.ListAIActions)
-		api.POST("/ai-actions", handler.CreateAIAction)
-		api.POST("/ai-actions/:id/review", handler.ReviewAIAction)
-		api.POST("/ai-actions/:id/approve", handler.ApproveAIAction)
-		api.POST("/ai-actions/:id/reject", handler.RejectAIAction)
+	delegated := requireDelegation(verifier)
+	gateway := router.Group("/api/v1", delegated, requireServicePrincipal("velion-gateway"), requireScopedPrincipal())
+	readers := gateway.Group("/", requireAnyRole("owner", "admin", "member", "viewer"))
+	agents := gateway.Group("/", requireAnyRole("owner", "admin", "member"))
+	admins := gateway.Group("/", requireAnyRole("owner", "admin"))
 
-		gated.POST("/internal/conversation-events", handler.IngestEvent)
-		gated.GET("/internal/conversations/:id/projection", handler.GetConversation)
-		gated.GET("/internal/ai-actions", handler.ListAIActions)
-		gated.POST("/internal/ai-actions", handler.CreateAIAction)
-		gated.POST("/internal/ai-actions/:id/review", handler.ReviewAIAction)
-		gated.POST("/internal/ai-actions/:id/approve", handler.ApproveAIAction)
-		gated.POST("/internal/ai-actions/:id/reject", handler.RejectAIAction)
-	}
+	readers.GET("/inboxes", handler.ListInboxes)
+	readers.GET("/inboxes/:id/queue", handler.ListInboxQueue)
+	readers.GET("/conversations", handler.ListConversations)
+	readers.GET("/conversations/:id", handler.GetConversation)
+	readers.POST("/conversations/search", handler.SearchConversations)
+	readers.GET("/tickets", handler.ListTickets)
+	readers.GET("/tickets/:id", handler.GetTicket)
+	readers.GET("/ticket-views", handler.ListTicketViews)
+	readers.GET("/ticket-macros", handler.ListTicketMacros)
+	readers.GET("/ticket-automation-rules", handler.ListTicketAutomationRules)
+	readers.GET("/sla-policies", handler.ListSLAPolicies)
+	readers.GET("/ai-actions", handler.ListAIActions)
+
+	agents.POST("/conversations/:id/ticket-classifications", handler.ClassifyConversationForTicket)
+	agents.POST("/conversations/:id/messages", handler.AddMessage)
+	agents.POST("/conversations/:id/notes", handler.AddNote)
+	agents.PATCH("/conversations/:id/status", handler.UpdateStatus)
+	agents.PATCH("/conversations/:id/assignment", handler.UpdateAssignment)
+	agents.POST("/conversations/:id/tags", handler.AddTag)
+	agents.DELETE("/conversations/:id/tags/:tag", handler.RemoveTag)
+	agents.POST("/tickets", handler.CreateTicket)
+	agents.PATCH("/tickets/:id", handler.PatchTicket)
+	agents.POST("/tickets/:id/links", handler.LinkTicketResource)
+	agents.POST("/tickets/:id/macros/:macro_id/run", handler.RunTicketMacro)
+	agents.POST("/tickets/:id/checklists", handler.CreateTicketChecklist)
+	agents.PATCH("/tickets/:id/checklists/:checklist_id/items/:item_id", handler.PatchTicketChecklistItem)
+	agents.POST("/ai-actions/:id/approve", handler.ApproveAIAction)
+	agents.POST("/ai-actions/:id/reject", handler.RejectAIAction)
+
+	admins.POST("/ticket-views", handler.CreateTicketView)
+	admins.PATCH("/ticket-views/:id", handler.PatchTicketView)
+	admins.POST("/ticket-macros", handler.CreateTicketMacro)
+	admins.PATCH("/ticket-macros/:id", handler.PatchTicketMacro)
+	admins.POST("/ticket-automation-rules", handler.CreateTicketAutomationRule)
+	admins.PATCH("/ticket-automation-rules/:id", handler.PatchTicketAutomationRule)
+	admins.POST("/sla-policies", handler.CreateSLAPolicy)
+	admins.PATCH("/sla-policies/:id", handler.PatchSLAPolicy)
+
+	ingest := router.Group("/internal", delegated, requireServicePrincipal("conversation-ingest"), requireOrganizationPrincipal())
+	ingest.POST("/conversation-events", handler.IngestEvent)
 
 	return router
 }
 
-func requireInternalKey(internalKey string) gin.HandlerFunc {
+func requireDelegation(verifier *delegation.Verifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		providedKey := strings.TrimSpace(c.GetHeader("x-internal-api-key"))
-		if internalKey == "" || providedKey == "" {
+		if verifier == nil {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, errorPayload("delegation_unavailable", "delegation verification unavailable"))
+			return
+		}
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, errorPayload("payload_too_large", "request body is too large"))
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusBadRequest, errorPayload("invalid_body", "request body is invalid"))
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		principal, err := verifier.Verify(c.Request, body)
+		if err != nil {
+			log.Printf("conversation-core-go: rejected delegated request from %s to %s", c.ClientIP(), c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, errorPayload("unauthorized", "authentication required"))
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(internalKey)) != 1 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, errorPayload("unauthorized", "invalid API key"))
+		c.Set("delegation_principal", principal)
+		c.Request = c.Request.WithContext(delegation.WithPrincipal(c.Request.Context(), principal))
+		c.Next()
+	}
+}
+
+func requireServicePrincipal(serviceID string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := delegatedPrincipal(c)
+		if !ok || principal.ServiceID != serviceID {
+			c.AbortWithStatusJSON(http.StatusForbidden, errorPayload("forbidden", "caller is not authorized for this route"))
 			return
 		}
 		c.Next()
 	}
+}
+
+func requireScopedPrincipal() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := delegatedPrincipal(c)
+		if !ok || principal.UserID == "" || principal.OrganizationID == "" || principal.Role == "" {
+			c.AbortWithStatusJSON(http.StatusBadRequest, errorPayload("missing_scope", "verified user, organization, and role are required"))
+			return
+		}
+		c.Next()
+	}
+}
+
+func requireOrganizationPrincipal() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := delegatedPrincipal(c)
+		if !ok || principal.OrganizationID == "" {
+			c.AbortWithStatusJSON(http.StatusBadRequest, errorPayload("missing_scope", "verified organization is required"))
+			return
+		}
+		c.Next()
+	}
+}
+
+func requireAnyRole(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		allowed[strings.ToLower(strings.TrimSpace(role))] = struct{}{}
+	}
+	return func(c *gin.Context) {
+		principal, ok := delegatedPrincipal(c)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, errorPayload("forbidden", "verified role is required"))
+			return
+		}
+		if _, exists := allowed[principal.Role]; !exists {
+			c.AbortWithStatusJSON(http.StatusForbidden, errorPayload("forbidden", "role is not authorized for this route"))
+			return
+		}
+		c.Next()
+	}
+}
+
+func delegatedPrincipal(c *gin.Context) (delegation.Principal, bool) {
+	value, ok := c.Get("delegation_principal")
+	if !ok {
+		return delegation.Principal{}, false
+	}
+	principal, ok := value.(delegation.Principal)
+	return principal, ok
 }
 
 func limitRequestBody(maxBytes int64) gin.HandlerFunc {

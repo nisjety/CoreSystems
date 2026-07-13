@@ -1,6 +1,13 @@
 .git
 .DS_Store
+.env
+.env.*
+!.env.example
 tmp
 dist
 bin
-
+coverage
+*.test
+*.out
+*.log
+Dockerfile*

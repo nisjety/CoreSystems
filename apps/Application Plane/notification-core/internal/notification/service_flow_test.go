@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -27,7 +28,7 @@ func newFakeRepository() *fakeRepository {
 	}
 }
 
-func (f *fakeRepository) FindByIdempotencyKey(_ context.Context, idempotencyKey string) (*StoredRequest, error) {
+func (f *fakeRepository) FindByIdempotencyKey(_ context.Context, organizationID, idempotencyKey string) (*StoredRequest, error) {
 	if len(f.lookupSequence) > 0 {
 		err := f.lookupSequence[0]
 		f.lookupSequence = f.lookupSequence[1:]
@@ -40,7 +41,7 @@ func (f *fakeRepository) FindByIdempotencyKey(_ context.Context, idempotencyKey 
 		return nil, f.lookupErr
 	}
 
-	requestID, ok := f.byIdempotencyKey[idempotencyKey]
+	requestID, ok := f.byIdempotencyKey[idempotencyLookupKey(organizationID, idempotencyKey)]
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -61,7 +62,11 @@ func (f *fakeRepository) Create(_ context.Context, params CreateRequestParams) (
 	f.createCalls++
 	storedRequest := &StoredRequest{
 		ID:             params.ID,
+		OrganizationID: params.OrganizationID,
 		IdempotencyKey: params.IdempotencyKey,
+		RequestSHA256:  params.RequestSHA256,
+		RetentionMode:  params.RetentionMode,
+		RecipientKind:  params.RecipientKind,
 		RecipientID:    params.RecipientID,
 		Type:           params.Type,
 		Payload:        cloneMap(params.Payload),
@@ -73,7 +78,7 @@ func (f *fakeRepository) Create(_ context.Context, params CreateRequestParams) (
 	}
 	f.stored[storedRequest.ID] = storedRequest
 	if params.IdempotencyKey != "" {
-		f.byIdempotencyKey[params.IdempotencyKey] = params.ID
+		f.byIdempotencyKey[idempotencyLookupKey(params.OrganizationID, params.IdempotencyKey)] = params.ID
 	}
 
 	return cloneStoredRequest(storedRequest), nil
@@ -142,6 +147,41 @@ type fakePublisher struct {
 	events []publishedEvent
 }
 
+type fakeRecipientResolver struct{}
+
+func (fakeRecipientResolver) ResolveRecipient(_ context.Context, organizationID string, recipient Recipient) (*ResolvedRecipient, error) {
+	return &ResolvedRecipient{
+		Kind:                 recipient.Kind,
+		ID:                   recipient.ID,
+		ProviderSubscriberID: "provider:" + organizationID + ":" + recipient.ID,
+	}, nil
+}
+
+func newLegacyTestService(repository Repository, runtime RuntimeClient, publisher EventPublisher, generateID IDGenerator, now TimeSource) *Service {
+	return NewService(
+		repository,
+		runtime,
+		publisher,
+		WithIDGenerator(generateID),
+		WithNow(now),
+		WithRecipientResolver(fakeRecipientResolver{}),
+	)
+}
+
+func scopedRequest(userID string) Request {
+	return Request{
+		OrganizationID: "org_123",
+		Recipient: Recipient{
+			Kind: RecipientKindUser,
+			ID:   userID,
+		},
+	}
+}
+
+func idempotencyLookupKey(organizationID, idempotencyKey string) string {
+	return organizationID + "\x00" + idempotencyKey
+}
+
 func (f *fakePublisher) Publish(_ context.Context, subject string, payload any) error {
 	f.events = append(f.events, publishedEvent{subject: subject, payload: payload})
 	return nil
@@ -153,11 +193,12 @@ func TestAcceptPersistsAndSubmitsRequest(t *testing.T) {
 	publisher := &fakePublisher{}
 	now := time.Date(2026, time.March, 31, 12, 0, 0, 0, time.UTC)
 
-	service := NewServiceLegacy(repository, runtimeClient, publisher, func() string { return "req_123" }, func() time.Time { return now })
+	service := newLegacyTestService(repository, runtimeClient, publisher, func() string { return "req_123" }, func() time.Time { return now })
 
 	response, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
 		IdempotencyKey: "idem_123",
-		RecipientID:    "user_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_123"},
 		Type:           "notification.created",
 		Payload:        map[string]any{"title": "Hello"},
 		Source:         "planner-sync-core",
@@ -205,18 +246,98 @@ func TestAcceptPersistsAndSubmitsRequest(t *testing.T) {
 	}
 }
 
+func TestAcceptFeedProjectionRecordsProviderSubmissionNotDelivery(t *testing.T) {
+	repository := newFakeRepository()
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "provider-tx-1"}}
+	now := time.Date(2026, time.July, 13, 13, 0, 0, 0, time.UTC)
+	var projected FeedSinkParams
+	service := NewService(
+		repository,
+		runtimeClient,
+		&fakePublisher{},
+		WithIDGenerator(func() string { return "req_feed" }),
+		WithNow(func() time.Time { return now }),
+		WithRecipientResolver(fakeRecipientResolver{}),
+		WithFeedSink(func(_ context.Context, params FeedSinkParams) { projected = params }),
+	)
+	request := scopedRequest("user-1")
+	request.Type = "notification.created"
+	if _, err := service.Accept(context.Background(), request); err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if projected.DeliveryStatus != StatusSubmitted {
+		t.Fatalf("feed delivery status = %q, want %q", projected.DeliveryStatus, StatusSubmitted)
+	}
+	if !projected.SubmittedAt.Equal(now) {
+		t.Fatalf("feed submitted_at = %v, want %v", projected.SubmittedAt, now)
+	}
+	if projected.DeliveredAt != nil {
+		t.Fatalf("feed delivered_at = %v, want nil without provider callback", projected.DeliveredAt)
+	}
+}
+
+func TestAcceptZDRDispatchesWithoutPersistingOrProjectingContent(t *testing.T) {
+	repository := newFakeRepository()
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "provider-zdr-1"}}
+	publisher := &fakePublisher{}
+	feedCalls := 0
+	service := NewService(
+		repository,
+		runtimeClient,
+		publisher,
+		WithIDGenerator(func() string { return "req_zdr" }),
+		WithRecipientResolver(fakeRecipientResolver{}),
+		WithFeedSink(func(context.Context, FeedSinkParams) { feedCalls++ }),
+	)
+	request := scopedRequest("user-zdr")
+	request.Type = "ticket.triaged"
+	request.RetentionMode = RetentionModeZDR
+	request.Payload = map[string]any{"message": "sensitive ticket summary"}
+
+	result, err := service.Accept(context.Background(), request)
+	if err != nil || result == nil || result.Status != StatusSubmitted {
+		t.Fatalf("Accept() = (%#v, %v), want submitted", result, err)
+	}
+	stored := repository.stored["req_zdr"]
+	if stored == nil {
+		t.Fatal("stored request = nil")
+	}
+	if stored.RetentionMode != RetentionModeZDR {
+		t.Fatalf("stored retention mode = %q, want %q", stored.RetentionMode, RetentionModeZDR)
+	}
+	if len(stored.Payload) != 0 {
+		t.Fatalf("stored ZDR payload = %#v, want empty", stored.Payload)
+	}
+	if len(runtimeClient.requests) != 1 || runtimeClient.requests[0].Payload["message"] != "sensitive ticket summary" {
+		t.Fatalf("runtime requests = %#v, want transient delivery payload", runtimeClient.requests)
+	}
+	if feedCalls != 0 {
+		t.Fatalf("feed calls = %d, want 0 for ZDR", feedCalls)
+	}
+	for _, published := range publisher.events {
+		event, ok := published.payload.(LifecycleEvent)
+		if !ok {
+			continue
+		}
+		if event.RecipientID != "" {
+			t.Fatalf("ZDR lifecycle recipient_id = %q, want redacted", event.RecipientID)
+		}
+	}
+}
+
 func TestAcceptMarksRequestFailedWhenRuntimeDispatchFails(t *testing.T) {
 	repository := newFakeRepository()
 	runtimeClient := &fakeRuntimeClient{err: errors.New("novu runtime unavailable")}
 	publisher := &fakePublisher{}
 	now := time.Date(2026, time.March, 31, 12, 30, 0, 0, time.UTC)
 
-	service := NewServiceLegacy(repository, runtimeClient, publisher, func() string { return "req_456" }, func() time.Time { return now })
+	service := newLegacyTestService(repository, runtimeClient, publisher, func() string { return "req_456" }, func() time.Time { return now })
 
 	response, err := service.Accept(context.Background(), Request{
-		RecipientID: "user_456",
-		Type:        "notification.created",
-		Payload:     map[string]any{"title": "Hello"},
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_456"},
+		Type:           "notification.created",
+		Payload:        map[string]any{"title": "Hello"},
 	})
 	if err == nil {
 		t.Fatal("Accept() error = nil, want error")
@@ -247,8 +368,8 @@ func TestAcceptMarksRequestFailedWhenRuntimeDispatchFails(t *testing.T) {
 	if storedRequest == nil {
 		t.Fatal("stored request = nil, want non-nil")
 	}
-	if storedRequest.ErrorMessage != "novu runtime unavailable" {
-		t.Fatalf("ErrorMessage = %q, want %q", storedRequest.ErrorMessage, "novu runtime unavailable")
+	if storedRequest.ErrorMessage != "delivery failed" {
+		t.Fatalf("ErrorMessage = %q, want redacted delivery failure", storedRequest.ErrorMessage)
 	}
 	if storedRequest.FailedAt == nil || !storedRequest.FailedAt.Equal(now) {
 		t.Fatalf("FailedAt = %v, want %v", storedRequest.FailedAt, now)
@@ -259,21 +380,24 @@ func TestAcceptReturnsExistingRequestForIdempotencyKey(t *testing.T) {
 	repository := newFakeRepository()
 	repository.stored["req_existing"] = &StoredRequest{
 		ID:             "req_existing",
+		OrganizationID: "org_123",
 		IdempotencyKey: "idem_existing",
+		RecipientKind:  RecipientKindUser,
 		RecipientID:    "user_789",
 		Type:           "notification.created",
 		Status:         StatusSubmitted,
 		Provider:       "novu",
 	}
-	repository.byIdempotencyKey["idem_existing"] = "req_existing"
+	repository.byIdempotencyKey[idempotencyLookupKey("org_123", "idem_existing")] = "req_existing"
 	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "novu_req_existing"}}
 	publisher := &fakePublisher{}
 
-	service := NewServiceLegacy(repository, runtimeClient, publisher, func() string { return "req_new" }, time.Now)
+	service := newLegacyTestService(repository, runtimeClient, publisher, func() string { return "req_new" }, time.Now)
 
 	response, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
 		IdempotencyKey: "idem_existing",
-		RecipientID:    "user_789",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_789"},
 		Type:           "notification.created",
 	})
 	if err != nil {
@@ -299,27 +423,144 @@ func TestAcceptReturnsExistingRequestForIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestAcceptRejectsSameTenantIdempotencyKeyWithDifferentPayload(t *testing.T) {
+	repository := newFakeRepository()
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "novu_req_1"}}
+	service := newLegacyTestService(repository, runtimeClient, &fakePublisher{}, func() string { return "req_1" }, time.Now)
+
+	first := scopedRequest("user_789")
+	first.IdempotencyKey = "idem_conflict"
+	first.Type = "notification.created"
+	first.Payload = map[string]any{"title": "First"}
+	if _, err := service.Accept(context.Background(), first); err != nil {
+		t.Fatalf("first Accept() error = %v", err)
+	}
+
+	second := scopedRequest("user_789")
+	second.IdempotencyKey = "idem_conflict"
+	second.Type = "notification.created"
+	second.Payload = map[string]any{"title": "Different"}
+	result, err := service.Accept(context.Background(), second)
+	if result != nil || !IsValidationError(err) {
+		t.Fatalf("second Accept() = (%#v, %v), want nil validation conflict", result, err)
+	}
+	if runtimeClient.callCount != 1 {
+		t.Fatalf("runtime calls = %d, want 1", runtimeClient.callCount)
+	}
+}
+
+func TestAcceptScopesIdempotencyKeyByOrganization(t *testing.T) {
+	repository := newFakeRepository()
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "novu_req"}}
+	nextID := 0
+	service := newLegacyTestService(repository, runtimeClient, &fakePublisher{}, func() string {
+		nextID++
+		return fmt.Sprintf("req_%d", nextID)
+	}, time.Now)
+
+	first := scopedRequest("user_789")
+	first.IdempotencyKey = "shared_key"
+	first.Type = "notification.created"
+	second := first
+	second.OrganizationID = "org_456"
+
+	firstResult, firstErr := service.Accept(context.Background(), first)
+	secondResult, secondErr := service.Accept(context.Background(), second)
+	if firstErr != nil || secondErr != nil {
+		t.Fatalf("Accept errors = (%v, %v), want nil", firstErr, secondErr)
+	}
+	if firstResult.RequestID == secondResult.RequestID {
+		t.Fatalf("request IDs = %q and %q, want distinct tenant-scoped records", firstResult.RequestID, secondResult.RequestID)
+	}
+	if runtimeClient.callCount != 2 {
+		t.Fatalf("runtime calls = %d, want 2", runtimeClient.callCount)
+	}
+}
+
+func TestAcceptRetriesExistingFailedRequestWithTheSameProviderRequestID(t *testing.T) {
+	repository := newFakeRepository()
+	repository.stored["req_failed"] = &StoredRequest{
+		ID:             "req_failed",
+		OrganizationID: "org_123",
+		IdempotencyKey: "idem_failed",
+		RecipientKind:  RecipientKindUser,
+		RecipientID:    "user_789",
+		Type:           "notification.created",
+		Status:         StatusFailed,
+		Provider:       ProviderNovu,
+	}
+	repository.byIdempotencyKey[idempotencyLookupKey("org_123", "idem_failed")] = "req_failed"
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "must-not-send"}}
+	service := newLegacyTestService(repository, runtimeClient, &fakePublisher{}, func() string { return "req_new" }, time.Now)
+
+	response, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		IdempotencyKey: "idem_failed",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_789"},
+		Type:           "notification.created",
+	})
+	if err != nil || response == nil || response.Status != StatusSubmitted {
+		t.Fatalf("Accept() = (%#v, %v), want submitted recovery", response, err)
+	}
+	if runtimeClient.callCount != 1 || runtimeClient.requests[0].RequestID != "req_failed" {
+		t.Fatalf("runtime requests = %#v, want one retry for req_failed", runtimeClient.requests)
+	}
+}
+
+func TestAcceptRecoversAcceptedRequestAfterFinalizationFailure(t *testing.T) {
+	repository := newFakeRepository()
+	repository.stored["req_accepted"] = &StoredRequest{
+		ID:             "req_accepted",
+		OrganizationID: "org_123",
+		IdempotencyKey: "idem_accepted",
+		RecipientKind:  RecipientKindUser,
+		RecipientID:    "user_789",
+		Type:           "notification.created",
+		Status:         StatusAccepted,
+		Provider:       ProviderNovu,
+	}
+	repository.byIdempotencyKey[idempotencyLookupKey("org_123", "idem_accepted")] = "req_accepted"
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "novu_existing"}}
+	service := newLegacyTestService(repository, runtimeClient, &fakePublisher{}, func() string { return "req_new" }, time.Now)
+
+	response, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		IdempotencyKey: "idem_accepted",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_789"},
+		Type:           "notification.created",
+	})
+	if err != nil || response == nil || response.Status != StatusSubmitted {
+		t.Fatalf("Accept() = (%#v, %v), want submitted recovery", response, err)
+	}
+	if runtimeClient.callCount != 1 || runtimeClient.requests[0].RequestID != "req_accepted" {
+		t.Fatalf("runtime requests = %#v, want one retry for req_accepted", runtimeClient.requests)
+	}
+}
+
 func TestAcceptReturnsExistingRequestWhenCreateConflicts(t *testing.T) {
 	repository := newFakeRepository()
 	repository.stored["req_existing"] = &StoredRequest{
 		ID:             "req_existing",
+		OrganizationID: "org_123",
 		IdempotencyKey: "idem_existing",
+		RecipientKind:  RecipientKindUser,
 		RecipientID:    "user_789",
 		Type:           "notification.created",
 		Status:         StatusSubmitted,
 		Provider:       ProviderNovu,
 	}
-	repository.byIdempotencyKey["idem_existing"] = "req_existing"
+	repository.byIdempotencyKey[idempotencyLookupKey("org_123", "idem_existing")] = "req_existing"
 	repository.lookupSequence = []error{ErrNotFound}
 	repository.createErr = ErrAlreadyExists
 	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "novu_req_existing"}}
 	publisher := &fakePublisher{}
 
-	service := NewServiceLegacy(repository, runtimeClient, publisher, func() string { return "req_new" }, time.Now)
+	service := newLegacyTestService(repository, runtimeClient, publisher, func() string { return "req_new" }, time.Now)
 
 	response, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
 		IdempotencyKey: "idem_existing",
-		RecipientID:    "user_789",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_789"},
 		Type:           "notification.created",
 	})
 	if err != nil {

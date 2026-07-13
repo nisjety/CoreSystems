@@ -13,7 +13,7 @@ services:
       INTERNAL_API_KEY: "${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}"
       INFORMATION_CORE_USER_AGENT: "${INFORMATION_CORE_USER_AGENT:-VelionInformationCore/1.0 (ops@velion.local)}"
     ports:
-      - "${INFORMATION_CORE_HOST_PORT:-3190}:3190"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INFORMATION_CORE_HOST_PORT:-3190}:3190"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3190/health >/dev/null || exit 1"]
       interval: 30s
@@ -22,6 +22,16 @@ services:
       start_period: 20s
     networks:
       - inter-plane-bus
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
 
 networks:
   inter-plane-bus:

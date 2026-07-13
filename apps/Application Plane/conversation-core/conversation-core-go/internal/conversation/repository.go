@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/attestation"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -381,6 +383,338 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
 	return message, nil
 }
 
+func scanOutboundIntent(row scanner) (OutboundIntent, error) {
+	var intent OutboundIntent
+	err := row.Scan(
+		&intent.ID,
+		&intent.OrgID,
+		&intent.IdempotencyKey,
+		&intent.ConversationID,
+		&intent.AIActionID,
+		&intent.RequestFingerprint,
+		&intent.Status,
+		&intent.Provider,
+		&intent.ConnectionID,
+		&intent.ProviderThreadID,
+		&intent.AuthorizationKind,
+		&intent.ActorUserID,
+		&intent.ApprovalID,
+		&intent.ActionID,
+		&intent.Operation,
+		&intent.PayloadSHA256,
+		&intent.ProviderMessageID,
+		&intent.MessageID,
+		&intent.ErrorCode,
+		&intent.CreatedAt,
+		&intent.UpdatedAt,
+	)
+	return intent, err
+}
+
+const outboundIntentColumns = `
+id, org_id, idempotency_key, conversation_id, ai_action_id,
+request_fingerprint, status, provider, connection_id, provider_thread_id,
+authorization_kind, actor_user_id, approval_id, action_id, operation, payload_sha256,
+provider_message_id, message_id, error_code, created_at, updated_at`
+
+// ClaimOutboundIntent is the durable compare-and-set before any provider call.
+// The first claimant owns the attempt. Every replay observes the stored state;
+// a reused key with a different fingerprint fails closed as ErrConflict.
+func (r *PGRepository) ClaimOutboundIntent(ctx context.Context, input OutboundIntentClaimInput) (*OutboundIntentClaim, error) {
+	if err := validateOutboundIntentClaim(input); err != nil {
+		return nil, err
+	}
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	row := r.pool.QueryRow(ctx, `
+	INSERT INTO conversation_outbound_intents (
+	id, org_id, idempotency_key, conversation_id, ai_action_id,
+	request_fingerprint, status, provider, connection_id, provider_thread_id,
+	authorization_kind, actor_user_id, approval_id, action_id, operation, payload_sha256
+) VALUES ($1, $2, $3, $4, $5, $6, 'sending', $7, $8, $9, $10, $11, $12, $13, $14, $15)
+ON CONFLICT (org_id, idempotency_key) DO NOTHING
+RETURNING `+outboundIntentColumns,
+		input.IntentID, input.OrgID, input.IdempotencyKey, input.ConversationID,
+		input.AIActionID, input.RequestFingerprint, input.Provider, input.ConnectionID, input.ProviderThreadID,
+		input.AuthorizationKind, input.ActorUserID, input.ApprovalID, input.ActionID, input.Operation, input.PayloadSHA256)
+	intent, err := scanOutboundIntent(row)
+	if err == nil {
+		return &OutboundIntentClaim{Intent: intent, Claimed: true}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	intent, err = scanOutboundIntent(r.pool.QueryRow(ctx, `
+SELECT `+outboundIntentColumns+`
+FROM conversation_outbound_intents
+WHERE org_id = $1 AND idempotency_key = $2`, input.OrgID, input.IdempotencyKey))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	if !outboundIntentBindingMatches(intent, input) {
+		return nil, fmt.Errorf("%w: idempotency key belongs to a different outbound request", ErrConflict)
+	}
+	if intent.Status == OutboundIntentRetryable {
+		reclaimed, reclaimErr := scanOutboundIntent(r.pool.QueryRow(ctx, `
+UPDATE conversation_outbound_intents
+SET status = 'sending', error_code = '', updated_at = NOW()
+WHERE org_id = $1 AND idempotency_key = $2 AND status = 'retryable'
+RETURNING `+outboundIntentColumns, input.OrgID, input.IdempotencyKey))
+		if reclaimErr == nil {
+			return &OutboundIntentClaim{Intent: reclaimed, Claimed: true}, nil
+		}
+		if !errors.Is(reclaimErr, pgx.ErrNoRows) {
+			return nil, reclaimErr
+		}
+	}
+	return &OutboundIntentClaim{Intent: intent, Claimed: false}, nil
+}
+
+func validateOutboundIntentClaim(input OutboundIntentClaimInput) error {
+	for name, value := range map[string]string{
+		"intent_id": input.IntentID, "org_id": input.OrgID,
+		"idempotency_key": input.IdempotencyKey, "conversation_id": input.ConversationID,
+		"request_fingerprint": input.RequestFingerprint, "provider": input.Provider,
+		"connection_id": input.ConnectionID, "authorization_kind": input.AuthorizationKind,
+		"actor_user_id": input.ActorUserID, "action_id": input.ActionID,
+		"operation": input.Operation, "payload_sha256": input.PayloadSHA256,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%w: outbound intent %s is required", ErrInvalidInput, name)
+		}
+	}
+	if !attestation.IsLowerHexSHA256(input.PayloadSHA256) {
+		return fmt.Errorf("%w: outbound intent payload_sha256 is invalid", ErrInvalidInput)
+	}
+	switch input.AuthorizationKind {
+	case attestation.AuthorizationHumanIntent:
+		if input.ApprovalID != "" || input.AIActionID != "" || input.ActionID != input.IntentID {
+			return fmt.Errorf("%w: human intent authorization binding is invalid", ErrInvalidInput)
+		}
+	case attestation.AuthorizationHumanApprovedAIAction:
+		if input.ApprovalID == "" || input.ApprovalID != input.ActionID || input.AIActionID != input.ActionID {
+			return fmt.Errorf("%w: approved AI authorization binding is invalid", ErrInvalidInput)
+		}
+	default:
+		return fmt.Errorf("%w: outbound intent authorization_kind is invalid", ErrInvalidInput)
+	}
+	return nil
+}
+
+func outboundIntentBindingMatches(intent OutboundIntent, input OutboundIntentClaimInput) bool {
+	return intent.ID == input.IntentID &&
+		intent.RequestFingerprint == input.RequestFingerprint &&
+		intent.ConversationID == input.ConversationID &&
+		intent.AIActionID == input.AIActionID &&
+		intent.Provider == input.Provider && intent.ConnectionID == input.ConnectionID &&
+		intent.ProviderThreadID == input.ProviderThreadID &&
+		intent.AuthorizationKind == input.AuthorizationKind &&
+		intent.ActorUserID == input.ActorUserID && intent.ApprovalID == input.ApprovalID &&
+		intent.ActionID == input.ActionID && intent.Operation == input.Operation &&
+		intent.PayloadSHA256 == input.PayloadSHA256
+}
+
+// FinalizeOutboundIntent atomically persists the submitted message, audit
+// record, optional AI-action execution state, and ledger outcome.
+func (r *PGRepository) FinalizeOutboundIntent(ctx context.Context, input OutboundIntentFinalizeInput) (*Message, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	intent, err := scanOutboundIntent(tx.QueryRow(ctx, `
+SELECT `+outboundIntentColumns+`
+FROM conversation_outbound_intents
+WHERE org_id = $1 AND idempotency_key = $2
+FOR UPDATE`, input.OrgID, input.IdempotencyKey))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if intent.RequestFingerprint != input.RequestFingerprint || intent.AIActionID != input.AIActionID {
+		return nil, fmt.Errorf("%w: outbound finalization does not match claimed request", ErrConflict)
+	}
+	if intent.Status != OutboundIntentSending {
+		return nil, fmt.Errorf("%w: outbound intent is already %s", ErrConflict, intent.Status)
+	}
+
+	messageInput := input.Message
+	if messageInput.OrgID != intent.OrgID || messageInput.ConversationID != intent.ConversationID || messageInput.Internal || messageInput.Direction != DirectionOutbound {
+		return nil, fmt.Errorf("%w: outbound message does not match claimed tenant and conversation", ErrConflict)
+	}
+	messageInput.Provider = intent.Provider
+	messageInput.ProviderMessageID = strings.TrimSpace(input.ProviderMessageID)
+	messageID := newID("msg")
+	message, err := scanMessage(tx.QueryRow(ctx, `
+INSERT INTO conversation_messages (
+	id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
+	body_text, body_html, internal, provider, provider_message_id, occurred_at, created_at
+) VALUES ($1, $2, $3, $4, 'agent', $5, $6, $7, $8, FALSE, $9, $10, $11, $11)
+RETURNING id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
+	body_text, body_html, internal, provider, provider_message_id, provider_event_id, occurred_at, created_at`,
+		messageID, messageInput.OrgID, messageInput.ConversationID, messageInput.Direction,
+		messageInput.ActorName, messageInput.ActorEmail, messageInput.BodyText, messageInput.BodyHTML,
+		messageInput.Provider, messageInput.ProviderMessageID, messageInput.OccurredAt))
+	if err != nil {
+		return nil, err
+	}
+
+	tag, err := tx.Exec(ctx, `
+UPDATE conversations
+SET last_message_preview = $3, last_message_at = $4, updated_at = $4
+WHERE org_id = $1 AND id = $2`, messageInput.OrgID, messageInput.ConversationID, preview(messageInput.BodyText, messageInput.BodyHTML), messageInput.OccurredAt)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, ErrNotFound
+	}
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_audit_events (id, org_id, conversation_id, actor_user_id, action, payload)
+VALUES ($1, $2, $3, $4, 'message.submitted', $5::jsonb)`,
+		newID("audit"), messageInput.OrgID, messageInput.ConversationID, messageInput.ActorUserID,
+		mustJSON(map[string]any{"message_id": message.ID, "idempotency_key": input.IdempotencyKey})); err != nil {
+		return nil, err
+	}
+
+	if input.AIActionID != "" {
+		tag, err = tx.Exec(ctx, `
+UPDATE conversation_ai_actions
+SET status = 'executed', updated_at = NOW()
+WHERE org_id = $1 AND id = $2 AND status = 'approved'`, input.OrgID, input.AIActionID)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() != 1 {
+			return nil, fmt.Errorf("%w: approved AI action cannot be finalized", ErrConflict)
+		}
+	}
+
+	tag, err = tx.Exec(ctx, `
+UPDATE conversation_outbound_intents
+SET status = 'submitted', provider_message_id = $3, message_id = $4,
+	error_code = '', updated_at = NOW()
+WHERE org_id = $1 AND idempotency_key = $2 AND status = 'sending'`,
+		input.OrgID, input.IdempotencyKey, message.ProviderMessageID, message.ID)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("%w: outbound intent was not finalizable", ErrConflict)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	committed = true
+	return message, nil
+}
+
+// MarkOutboundIntentOutcome records only bounded error metadata. Both unknown
+// and failed are terminal for automatic retry; reconciliation or a new human
+// intent is required.
+func (r *PGRepository) MarkOutboundIntentOutcome(ctx context.Context, input OutboundIntentOutcomeInput) error {
+	if input.Status != OutboundIntentFailed && input.Status != OutboundIntentUnknown && input.Status != OutboundIntentRetryable {
+		return fmt.Errorf("%w: invalid outbound intent outcome", ErrInvalidInput)
+	}
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	tag, err := tx.Exec(ctx, `
+UPDATE conversation_outbound_intents
+SET status = $3, error_code = $4, updated_at = NOW()
+WHERE org_id = $1 AND idempotency_key = $2 AND status = 'sending'`,
+		input.OrgID, input.IdempotencyKey, input.Status, boundedOutboundErrorCode(input.ErrorCode))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var current string
+		if err := tx.QueryRow(ctx, `
+SELECT status FROM conversation_outbound_intents
+WHERE org_id = $1 AND idempotency_key = $2`, input.OrgID, input.IdempotencyKey).Scan(&current); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if current != input.Status {
+			return fmt.Errorf("%w: outbound intent is already %s", ErrConflict, current)
+		}
+	}
+	if input.AIActionID != "" && input.Status != OutboundIntentRetryable {
+		if _, err := tx.Exec(ctx, `
+UPDATE conversation_ai_actions
+SET status = $3, updated_at = NOW()
+WHERE org_id = $1 AND id = $2 AND status = 'approved'`, input.OrgID, input.AIActionID, input.Status); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func boundedOutboundErrorCode(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return "outbound_error"
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '_' && char != '-' && char != '.' {
+			return "outbound_error"
+		}
+	}
+	return value
+}
+
+func (r *PGRepository) GetMessage(ctx context.Context, orgID, messageID string) (*Message, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	message, err := scanMessage(r.pool.QueryRow(ctx, `
+SELECT id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
+	body_text, body_html, internal, provider, provider_message_id, provider_event_id, occurred_at, created_at
+FROM conversation_messages
+WHERE org_id = $1 AND id = $2`, orgID, messageID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return message, nil
+}
+
 func (r *PGRepository) UpdateStatus(ctx context.Context, input StatusUpdate) (*ConversationDetail, error) {
 	if _, err := r.pool.Exec(ctx, `
 UPDATE conversations
@@ -464,16 +798,26 @@ func (r *PGRepository) ReviewAIAction(ctx context.Context, input AIActionReview)
 	tag, err := tx.Exec(ctx, `
 UPDATE conversation_ai_actions
 SET status = $3, reviewed_by = $4, reviewed_at = $5, updated_at = $5
-WHERE org_id = $1 AND id = $2`, input.OrgID, input.AIActionID, input.Decision, input.ReviewerID, input.OccurredAt)
+WHERE org_id = $1 AND id = $2 AND status = 'suggested'`, input.OrgID, input.AIActionID, input.Decision, input.ReviewerID, input.OccurredAt)
 	if err != nil {
 		return err
 	}
-	// Zero rows updated ⇒ the action does not exist for this org (missing id or a
-	// foreign-org id). Return ErrNotFound (→404) and let the deferred rollback fire
-	// so we never persist an orphan conversation_ai_reviews row for an action that
-	// was never actually reviewed.
+	// The compare-and-set above is the HITL boundary: only a suggested action may
+	// receive its first decision. Distinguish a missing/foreign-org id from an
+	// existing terminal action without weakening tenant scope.
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		var currentStatus string
+		err := tx.QueryRow(ctx, `
+SELECT status
+FROM conversation_ai_actions
+WHERE org_id = $1 AND id = $2`, input.OrgID, input.AIActionID).Scan(&currentStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: AI action is already %s", ErrConflict, currentStatus)
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO conversation_ai_reviews (id, org_id, ai_action_id, reviewer_user_id, decision, comment, created_at)

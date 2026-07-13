@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("notification feed item not found")
 
 const feedColumns = `
 	id,
+	organization_id,
 	recipient_id,
 	event_type,
 	channel,
@@ -33,6 +34,7 @@ const feedColumns = `
 	read,
 	archived,
 	delivery_status,
+	submitted_at,
 	delivered_at,
 	seen_at,
 	read_at,
@@ -56,8 +58,8 @@ func (r *PGRepository) Create(ctx context.Context, params CreateParams) (*Notifi
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("feed repository not configured")
 	}
-	if strings.TrimSpace(params.ID) == "" || strings.TrimSpace(params.RecipientID) == "" || strings.TrimSpace(params.EventType) == "" {
-		return nil, fmt.Errorf("feed create: id, recipient_id, event_type required")
+	if strings.TrimSpace(params.ID) == "" || strings.TrimSpace(params.OrganizationID) == "" || strings.TrimSpace(params.RecipientID) == "" || strings.TrimSpace(params.EventType) == "" {
+		return nil, fmt.Errorf("feed create: id, organization_id, recipient_id, event_type required")
 	}
 
 	payload := params.Payload
@@ -76,15 +78,23 @@ func (r *PGRepository) Create(ctx context.Context, params CreateParams) (*Notifi
 	if provider == "" {
 		provider = "novu"
 	}
+	deliveryStatus := strings.TrimSpace(params.DeliveryStatus)
+	if deliveryStatus == "" {
+		deliveryStatus = DeliverySubmitted
+	}
+	if params.SubmittedAt.IsZero() {
+		return nil, fmt.Errorf("feed create: submitted_at required")
+	}
 
 	row := r.pool.QueryRow(ctx, `
-INSERT INTO notification_feed_items (
-	id, recipient_id, event_type, channel, title, body, cta_label, cta_href,
-	payload, actor_id, actor_name, actor_email, actor_avatar,
-	provider, provider_transaction_id, source
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16)
-ON CONFLICT (recipient_id, channel, provider_transaction_id) WHERE provider_transaction_id <> ''
+	INSERT INTO notification_feed_items (
+		id, organization_id, recipient_id, event_type, channel, title, body, cta_label, cta_href,
+		payload, actor_id, actor_name, actor_email, actor_avatar,
+		provider, provider_transaction_id, source, delivery_status, submitted_at, delivered_at
+	)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+	ON CONFLICT (organization_id, recipient_id, channel, provider_transaction_id)
+	WHERE organization_id IS NOT NULL AND provider_transaction_id <> ''
 DO UPDATE SET
 	-- The upsert keeps the latest dispatch metadata. We don't reset
 	-- read/seen — once a user has interacted, a webhook retry shouldn't
@@ -99,25 +109,26 @@ DO UPDATE SET
 	actor_email = EXCLUDED.actor_email,
 	actor_avatar = EXCLUDED.actor_avatar
 RETURNING `+feedColumns,
-		params.ID, params.RecipientID, params.EventType, channel,
+		params.ID, params.OrganizationID, params.RecipientID, params.EventType, channel,
 		params.Title, params.Body, params.CtaLabel, params.CtaHref,
 		string(payloadJSON),
 		params.ActorID, params.ActorName, params.ActorEmail, params.ActorAvatar,
 		provider, params.ProviderTransactionID, params.Source,
+		deliveryStatus, params.SubmittedAt.UTC(), params.DeliveredAt,
 	)
 
 	return scanNotification(row)
 }
 
 // Get returns a single item.
-func (r *PGRepository) Get(ctx context.Context, recipientID, id string) (*Notification, error) {
+func (r *PGRepository) Get(ctx context.Context, organizationID, recipientID, id string) (*Notification, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("feed repository not configured")
 	}
 	row := r.pool.QueryRow(ctx, `
 SELECT `+feedColumns+`
 FROM notification_feed_items
-WHERE recipient_id = $1 AND id = $2`, recipientID, id)
+WHERE organization_id = $1 AND recipient_id = $2 AND id = $3`, organizationID, recipientID, id)
 
 	return scanNotification(row)
 }
@@ -127,8 +138,8 @@ func (r *PGRepository) List(ctx context.Context, params ListParams) (*Feed, erro
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("feed repository not configured")
 	}
-	if strings.TrimSpace(params.RecipientID) == "" {
-		return nil, fmt.Errorf("feed list: recipient_id required")
+	if strings.TrimSpace(params.OrganizationID) == "" || strings.TrimSpace(params.RecipientID) == "" {
+		return nil, fmt.Errorf("feed list: organization_id and recipient_id required")
 	}
 
 	limit := params.Limit
@@ -145,8 +156,8 @@ func (r *PGRepository) List(ctx context.Context, params ListParams) (*Feed, erro
 		clauses []string
 		args    []any
 	)
-	clauses = append(clauses, "recipient_id = $1")
-	args = append(args, params.RecipientID)
+	clauses = append(clauses, "organization_id = $1", "recipient_id = $2")
+	args = append(args, params.OrganizationID, params.RecipientID)
 
 	archived := false
 	if params.Archived != nil {
@@ -176,7 +187,7 @@ func (r *PGRepository) List(ctx context.Context, params ListParams) (*Feed, erro
 SELECT `+feedColumns+`
 FROM notification_feed_items
 WHERE `+whereClause+`
-ORDER BY delivered_at DESC
+	ORDER BY submitted_at DESC, id DESC
 LIMIT $`+fmt.Sprintf("%d", len(args)-1)+` OFFSET $`+fmt.Sprintf("%d", len(args)),
 		args...,
 	)
@@ -205,55 +216,55 @@ LIMIT $`+fmt.Sprintf("%d", len(args)-1)+` OFFSET $`+fmt.Sprintf("%d", len(args))
 }
 
 // UnreadCount counts unread, non-archived items for the recipient.
-func (r *PGRepository) UnreadCount(ctx context.Context, recipientID string) (int, error) {
+func (r *PGRepository) UnreadCount(ctx context.Context, organizationID, recipientID string) (int, error) {
 	if r == nil || r.pool == nil {
 		return 0, fmt.Errorf("feed repository not configured")
 	}
 	var n int
 	err := r.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM notification_feed_items
-		 WHERE recipient_id = $1 AND archived = FALSE AND read = FALSE`,
-		recipientID,
+		 WHERE organization_id = $1 AND recipient_id = $2 AND archived = FALSE AND read = FALSE`,
+		organizationID, recipientID,
 	).Scan(&n)
 	return n, err
 }
 
 // UnseenCount counts items the user hasn't yet glanced at.
-func (r *PGRepository) UnseenCount(ctx context.Context, recipientID string) (int, error) {
+func (r *PGRepository) UnseenCount(ctx context.Context, organizationID, recipientID string) (int, error) {
 	if r == nil || r.pool == nil {
 		return 0, fmt.Errorf("feed repository not configured")
 	}
 	var n int
 	err := r.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM notification_feed_items
-		 WHERE recipient_id = $1 AND archived = FALSE AND seen = FALSE`,
-		recipientID,
+		 WHERE organization_id = $1 AND recipient_id = $2 AND archived = FALSE AND seen = FALSE`,
+		organizationID, recipientID,
 	).Scan(&n)
 	return n, err
 }
 
 // MarkRead flips a single item to read=true (idempotent).
-func (r *PGRepository) MarkRead(ctx context.Context, recipientID, id string, at time.Time) (*Notification, error) {
+func (r *PGRepository) MarkRead(ctx context.Context, organizationID, recipientID, id string, at time.Time) (*Notification, error) {
 	row := r.pool.QueryRow(ctx, `
+UPDATE notification_feed_items
+SET read = TRUE,
+    read_at = COALESCE(read_at, $4),
+    seen = TRUE,
+    seen_at = COALESCE(seen_at, $4)
+WHERE organization_id = $1 AND recipient_id = $2 AND id = $3
+RETURNING `+feedColumns, organizationID, recipientID, id, at)
+	return scanNotification(row)
+}
+
+// MarkAllRead flips every unread item for the recipient. Returns the count.
+func (r *PGRepository) MarkAllRead(ctx context.Context, organizationID, recipientID string, at time.Time) (int, error) {
+	tag, err := r.pool.Exec(ctx, `
 UPDATE notification_feed_items
 SET read = TRUE,
     read_at = COALESCE(read_at, $3),
     seen = TRUE,
     seen_at = COALESCE(seen_at, $3)
-WHERE recipient_id = $1 AND id = $2
-RETURNING `+feedColumns, recipientID, id, at)
-	return scanNotification(row)
-}
-
-// MarkAllRead flips every unread item for the recipient. Returns the count.
-func (r *PGRepository) MarkAllRead(ctx context.Context, recipientID string, at time.Time) (int, error) {
-	tag, err := r.pool.Exec(ctx, `
-UPDATE notification_feed_items
-SET read = TRUE,
-    read_at = COALESCE(read_at, $2),
-    seen = TRUE,
-    seen_at = COALESCE(seen_at, $2)
-WHERE recipient_id = $1 AND archived = FALSE AND read = FALSE`, recipientID, at)
+WHERE organization_id = $1 AND recipient_id = $2 AND archived = FALSE AND read = FALSE`, organizationID, recipientID, at)
 	if err != nil {
 		return 0, err
 	}
@@ -262,12 +273,12 @@ WHERE recipient_id = $1 AND archived = FALSE AND read = FALSE`, recipientID, at)
 
 // MarkAllSeen flips the seen flag for every visible item (clears the
 // "you have N new" badge after the user opens the dropdown).
-func (r *PGRepository) MarkAllSeen(ctx context.Context, recipientID string, at time.Time) (int, error) {
+func (r *PGRepository) MarkAllSeen(ctx context.Context, organizationID, recipientID string, at time.Time) (int, error) {
 	tag, err := r.pool.Exec(ctx, `
 UPDATE notification_feed_items
 SET seen = TRUE,
-    seen_at = COALESCE(seen_at, $2)
-WHERE recipient_id = $1 AND archived = FALSE AND seen = FALSE`, recipientID, at)
+    seen_at = COALESCE(seen_at, $3)
+WHERE organization_id = $1 AND recipient_id = $2 AND archived = FALSE AND seen = FALSE`, organizationID, recipientID, at)
 	if err != nil {
 		return 0, err
 	}
@@ -275,12 +286,12 @@ WHERE recipient_id = $1 AND archived = FALSE AND seen = FALSE`, recipientID, at)
 }
 
 // Archive soft-deletes an item.
-func (r *PGRepository) Archive(ctx context.Context, recipientID, id string, at time.Time) error {
+func (r *PGRepository) Archive(ctx context.Context, organizationID, recipientID, id string, at time.Time) error {
 	tag, err := r.pool.Exec(ctx, `
 UPDATE notification_feed_items
 SET archived = TRUE,
-    archived_at = COALESCE(archived_at, $3)
-WHERE recipient_id = $1 AND id = $2`, recipientID, id, at)
+    archived_at = COALESCE(archived_at, $4)
+WHERE organization_id = $1 AND recipient_id = $2 AND id = $3`, organizationID, recipientID, id, at)
 	if err != nil {
 		return err
 	}
@@ -299,6 +310,7 @@ func scanNotification(row scannable) (*Notification, error) {
 	var payloadBytes []byte
 	if err := row.Scan(
 		&n.ID,
+		&n.OrganizationID,
 		&n.RecipientID,
 		&n.EventType,
 		&n.Channel,
@@ -315,6 +327,7 @@ func scanNotification(row scannable) (*Notification, error) {
 		&n.Read,
 		&n.Archived,
 		&n.DeliveryStatus,
+		&n.SubmittedAt,
 		&n.DeliveredAt,
 		&n.SeenAt,
 		&n.ReadAt,

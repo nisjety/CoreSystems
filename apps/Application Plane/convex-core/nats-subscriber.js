@@ -12,9 +12,135 @@ const nats = require("nats");
 
 // Configuration
 const NATS_URL = process.env.NATS_URL || "nats://localhost:4222";
-const NATS_TOKEN = process.env.NATS_TOKEN || "nats";
+const NATS_TOKEN = process.env.NATS_TOKEN;
 const CONVEX_URL = process.env.CONVEX_BACKEND_URL || "http://localhost:3000";
-const CONVEX_API_KEY = process.env.CONVEX_API_KEY || "dev-key";
+const CONVEX_API_KEY = process.env.CONVEX_API_KEY;
+
+if (!CONVEX_API_KEY) {
+  throw new Error("CONVEX_API_KEY must be configured");
+}
+if (!NATS_TOKEN) {
+  throw new Error("NATS_TOKEN must be configured");
+}
+
+const CONTROL_PLANE_SUBJECTS = Object.freeze({
+  organizationCreated: "aqencia.controlplane.org.created",
+  organizationUpdated: "aqencia.controlplane.org.updated",
+  organizationDeleted: "aqencia.controlplane.org.deleted",
+  memberAdded: "aqencia.controlplane.org.member_added",
+  memberRemoved: "aqencia.controlplane.org.member_removed",
+});
+const CONTROL_PLANE_DLQ_SUBJECT = "velion.application.dlq.convex.controlplane";
+const CONTROL_PLANE_DLQ_STREAM = "CONVEX_CONTROLPLANE_DLQ";
+const DEAD_LETTER_AFTER = 5;
+
+function redactControlPlanePayload(payload) {
+  const allowed = [
+    "org_id",
+    "user_id",
+    "role",
+    "_source",
+    "_published_at",
+  ];
+  return Object.fromEntries(
+    allowed
+      .filter((key) => payload?.[key] !== undefined)
+      .map((key) => [key, payload[key]]),
+  );
+}
+
+async function processJetStreamMessage(message, handler, publishDeadLetter) {
+  let payload = {};
+  try {
+    payload = JSON.parse(new TextDecoder().decode(message.data));
+    await handler(payload);
+    message.ack();
+    return "applied";
+  } catch (error) {
+    const redeliveryCount = message.info?.redeliveryCount ?? 1;
+    if (redeliveryCount >= DEAD_LETTER_AFTER) {
+      try {
+        await publishDeadLetter({
+          subject: message.subject,
+          payload: redactControlPlanePayload(payload),
+          failure: error instanceof Error ? error.name : "ProjectionError",
+          failedAt: new Date().toISOString(),
+          redeliveryCount,
+        });
+        message.term();
+        return "dead_lettered";
+      } catch {
+        // Never terminate the authoritative event unless the durable DLQ write
+        // succeeded. A later redelivery can retry the DLQ write.
+        message.nak(5000);
+        return "retrying_dlq_unavailable";
+      }
+    }
+    message.nak(1000);
+    return "retrying";
+  }
+}
+
+function requiredString(payload, field) {
+  const value = payload?.[field];
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`Control Plane event field ${field} is required`);
+  }
+  return value.trim();
+}
+
+function sourceUpdatedAt(payload) {
+  const value = Date.parse(requiredString(payload, "_published_at"));
+  if (!Number.isFinite(value)) {
+    throw new Error("Control Plane event _published_at is invalid");
+  }
+  return value;
+}
+
+function normalizeControlPlaneEvent(eventType, payload) {
+  const common = {
+    source: requiredString(payload, "_source"),
+    sourceUpdatedAt: sourceUpdatedAt(payload),
+  };
+  switch (eventType) {
+    case "organizationCreated":
+      return {
+        orgId: requiredString(payload, "org_id"),
+        name: requiredString(payload, "org_name"),
+        slug: requiredString(payload, "slug"),
+        createdAt: common.sourceUpdatedAt,
+      };
+    case "organizationUpdated": {
+      const changes = payload?.changes ?? {};
+      return {
+        orgId: requiredString(payload, "org_id"),
+        name: typeof changes.name === "string" ? changes.name : undefined,
+        slug: typeof changes.slug === "string" ? changes.slug : undefined,
+        settings: changes.settings,
+        updatedAt: common.sourceUpdatedAt,
+      };
+    }
+    case "organizationDeleted":
+      return { orgId: requiredString(payload, "org_id") };
+    case "memberAdded":
+      return {
+        orgId: requiredString(payload, "org_id"),
+        userId: requiredString(payload, "user_id"),
+        email: requiredString(payload, "user_email"),
+        role: requiredString(payload, "role"),
+        addedAt: common.sourceUpdatedAt,
+      };
+    case "memberRemoved":
+      return {
+        orgId: requiredString(payload, "org_id"),
+        userId: requiredString(payload, "user_id"),
+        source: common.source,
+        sourceUpdatedAt: common.sourceUpdatedAt,
+      };
+    default:
+      throw new Error(`Unsupported Control Plane event type: ${eventType}`);
+  }
+}
 
 // W4-2 (ui-ux-velion-gap.md §13): Model Plane's orchestrator-core publishes
 // `mp.v1.run.{id}.event` to `model-plane-nats` (port 4222 inside its compose
@@ -52,6 +178,7 @@ class ConvexNatsSubscriber {
 
       // Get JetStream context
       this.js = this.nc.jetstream();
+      await this.ensureDeadLetterStream();
 
       console.log("[Convex NATS] Connected successfully");
 
@@ -102,24 +229,29 @@ class ConvexNatsSubscriber {
 
     try {
       // Control Plane organization events (via velion-nats cross-plane bus)
-      await this.subscribeToTopic(
-        "velion.controlplane.org.created",
+      await this.subscribeToDurableTopic(
+        CONTROL_PLANE_SUBJECTS.organizationCreated,
+        "convex-org-created-v1",
         this.handleOrganizationCreated.bind(this)
       );
-      await this.subscribeToTopic(
-        "velion.controlplane.org.updated",
+      await this.subscribeToDurableTopic(
+        CONTROL_PLANE_SUBJECTS.organizationUpdated,
+        "convex-org-updated-v1",
         this.handleOrganizationUpdated.bind(this)
       );
-      await this.subscribeToTopic(
-        "velion.controlplane.org.deleted",
+      await this.subscribeToDurableTopic(
+        CONTROL_PLANE_SUBJECTS.organizationDeleted,
+        "convex-org-deleted-v1",
         this.handleOrganizationDeleted.bind(this)
       );
-      await this.subscribeToTopic(
-        "velion.controlplane.org.member.added",
+      await this.subscribeToDurableTopic(
+        CONTROL_PLANE_SUBJECTS.memberAdded,
+        "convex-org-member-added-v1",
         this.handleMemberAdded.bind(this)
       );
-      await this.subscribeToTopic(
-        "velion.controlplane.org.member.removed",
+      await this.subscribeToDurableTopic(
+        CONTROL_PLANE_SUBJECTS.memberRemoved,
+        "convex-org-member-removed-v1",
         this.handleMemberRemoved.bind(this)
       );
 
@@ -187,6 +319,67 @@ class ConvexNatsSubscriber {
     return this.subscribeToTopicOn(this.nc, topic, handler, "velion-nats");
   }
 
+  async ensureDeadLetterStream() {
+    const manager = await this.nc.jetstreamManager();
+    try {
+      await manager.streams.info(CONTROL_PLANE_DLQ_STREAM);
+      return;
+    } catch (error) {
+      const code = error?.code ?? error?.api_error?.code;
+      const errorCode = error?.api_error?.err_code;
+      if (String(code) !== "404" && errorCode !== 10059) {
+        throw error;
+      }
+    }
+
+    await manager.streams.add({
+      name: CONTROL_PLANE_DLQ_STREAM,
+      subjects: [CONTROL_PLANE_DLQ_SUBJECT],
+      retention: nats.RetentionPolicy.Limits,
+      storage: nats.StorageType.File,
+      discard: nats.DiscardPolicy.Old,
+      max_msgs: 10_000,
+      max_age: nats.nanos(14 * 24 * 60 * 60 * 1000),
+    });
+  }
+
+  async publishDeadLetter(payload) {
+    const codec = nats.StringCodec();
+    await this.js.publish(
+      CONTROL_PLANE_DLQ_SUBJECT,
+      codec.encode(JSON.stringify(payload)),
+    );
+  }
+
+  async subscribeToDurableTopic(topic, durableName, handler) {
+    const options = nats.consumerOpts();
+    options.durable(durableName);
+    options.manualAck();
+    options.ackExplicit();
+    options.ackWait(30_000);
+    // The application moves poison events into its own DLQ after five tries.
+    // Keep the broker ceiling higher so a transient DLQ outage cannot lose one.
+    options.maxDeliver(100);
+    options.deliverTo(nats.createInbox());
+
+    const subscription = await this.js.subscribe(topic, options);
+    console.log(`[Convex NATS] Durable subscription: ${topic} (${durableName})`);
+    (async () => {
+      for await (const message of subscription) {
+        const result = await processJetStreamMessage(
+          message,
+          handler,
+          this.publishDeadLetter.bind(this),
+        );
+        if (result !== "applied") {
+          console.error(
+            `[Convex NATS] Projection ${result}: subject=${topic} redelivery=${message.info?.redeliveryCount ?? 1}`,
+          );
+        }
+      }
+    })();
+  }
+
   /**
    * W4-2 (ui-ux-velion-gap.md §13): subscribe to a topic on an
    * arbitrary NATS connection so the subscriber can multiplex across
@@ -225,93 +418,45 @@ class ConvexNatsSubscriber {
    * Handle velion.controlplane.org.created event
    */
   async handleOrganizationCreated(payload) {
-    console.log("[Convex NATS] Processing org.created:", payload.id);
-
-    try {
-      await this.callConvexMutation("nats:onOrganizationCreated", {
-        orgId: payload.id,
-        name: payload.name,
-        slug: payload.slug,
-        createdAt: Date.now(),
-      });
-    } catch (error) {
-      console.error("[Convex NATS] Error syncing organization:", error);
-    }
+    const event = normalizeControlPlaneEvent("organizationCreated", payload);
+    console.log("[Convex NATS] Processing org.created:", event.orgId);
+    await this.callConvexMutation("nats:onOrganizationCreated", event);
   }
 
   /**
    * Handle velion.controlplane.org.updated event
    */
   async handleOrganizationUpdated(payload) {
-    console.log("[Convex NATS] Processing org.updated:", payload.id);
-
-    try {
-      await this.callConvexMutation("nats:onOrganizationUpdated", {
-        orgId: payload.id,
-        name: payload.name,
-        slug: payload.slug,
-        settings: payload.settings,
-        updatedAt: Date.now(),
-      });
-    } catch (error) {
-      console.error("[Convex NATS] Error updating organization:", error);
-    }
+    const event = normalizeControlPlaneEvent("organizationUpdated", payload);
+    console.log("[Convex NATS] Processing org.updated:", event.orgId);
+    await this.callConvexMutation("nats:onOrganizationUpdated", event);
   }
 
   /**
    * Handle velion.controlplane.org.deleted event
    */
   async handleOrganizationDeleted(payload) {
-    console.log("[Convex NATS] Processing org.deleted:", payload.id);
-
-    try {
-      await this.callConvexMutation("nats:onOrganizationDeleted", {
-        orgId: payload.id,
-      });
-    } catch (error) {
-      console.error("[Convex NATS] Error deleting organization:", error);
-    }
+    const event = normalizeControlPlaneEvent("organizationDeleted", payload);
+    console.log("[Convex NATS] Processing org.deleted:", event.orgId);
+    await this.callConvexMutation("nats:onOrganizationDeleted", event);
   }
 
   /**
    * Handle velion.controlplane.org.member.added event
    */
   async handleMemberAdded(payload) {
-    console.log(
-      "[Convex NATS] Processing org.member.added:",
-      payload.email
-    );
-
-    try {
-      await this.callConvexMutation("nats:onOrganizationMemberAdded", {
-        orgId: payload.orgId,
-        userId: payload.userId,
-        email: payload.email,
-        role: payload.role,
-        addedAt: Date.now(),
-      });
-    } catch (error) {
-      console.error("[Convex NATS] Error adding member:", error);
-    }
+    const event = normalizeControlPlaneEvent("memberAdded", payload);
+    console.log("[Convex NATS] Processing org.member.added:", event.userId);
+    await this.callConvexMutation("nats:onOrganizationMemberAdded", event);
   }
 
   /**
    * Handle velion.controlplane.org.member.removed event
    */
   async handleMemberRemoved(payload) {
-    console.log(
-      "[Convex NATS] Processing org.member.removed:",
-      payload.email
-    );
-
-    try {
-      await this.callConvexMutation("nats:onOrganizationMemberRemoved", {
-        orgId: payload.orgId,
-        userId: payload.userId,
-      });
-    } catch (error) {
-      console.error("[Convex NATS] Error removing member:", error);
-    }
+    const event = normalizeControlPlaneEvent("memberRemoved", payload);
+    console.log("[Convex NATS] Processing org.member.removed:", event.userId);
+    await this.callConvexMutation("nats:onOrganizationMemberRemoved", event);
   }
 
   /**
@@ -567,4 +712,9 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { ConvexNatsSubscriber };
+module.exports = {
+  CONTROL_PLANE_SUBJECTS,
+  ConvexNatsSubscriber,
+  normalizeControlPlaneEvent,
+  processJetStreamMessage,
+};

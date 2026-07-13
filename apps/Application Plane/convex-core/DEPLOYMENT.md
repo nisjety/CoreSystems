@@ -1,9 +1,11 @@
 # Convex Gateway Deployment Guide
 
+> **Verified 2026-07-11** — Corrected stale references against the current Application Plane compose and `convex-core/` source. Structure and self-hosting guidance are still valid; the following were fixed in place: (1) the local path is `apps/Application Plane/convex-core`, not `backend/convex-gateway`; (2) canonical plane compose points Convex at `model-gateway:8080` (env keeps the `AI_CORE_URL` name for compatibility) and adds `MODEL_GATEWAY_URL`, not `ai-core:8000`; (3) the org service is `org-core`, not `org-core-service`; (4) the live topology is 4 containers (backend, dashboard, gateway :3006, subscriber). See `apps/Application Plane/docs/core-research/convex-core.md` for the authoritative runtime shape (incl. the missing `api.jobs.*` webhook surface).
+
 ## Quick Start (Local Development)
 
 ```bash
-cd backend/convex-gateway
+cd "apps/Application Plane/convex-core"
 
 # 1. Setup and start services
 chmod +x setup.sh
@@ -31,9 +33,13 @@ Convex Gateway replaces the need for a custom Go WebSocket gateway by providing:
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| Backend API | http://localhost:3210 | Main Convex API |
+| Backend API | http://localhost:3210 | Main Convex API (live-verified 2026-07-11: HTTP 200) |
 | HTTP Actions | http://localhost:3211 | Inbound webhooks |
 | Dashboard | http://localhost:6791 | Management UI |
+| Dev Gateway | http://localhost:3006 | `convex-gateway` — schema push / `npx convex dev` (container-internal :3000) |
+| Subscriber | (no published port) | `convex-subscriber` — cross-plane NATS → Convex sync (`nats-subscriber.js`) |
+
+> Verified 2026-07-11 via `docker ps`: the running topology is 4 containers — `convex-backend` (:3210-3211), `convex-dashboard` (:6791), `convex-gateway` (:3006→3000), and `convex-subscriber` (no host port). The gateway/subscriber "(unhealthy)" state is the exec-based healthcheck failing under a corrupted container runtime, not the service being down.
 
 ## Data Flow Example: Chat Message
 
@@ -46,13 +52,14 @@ Convex Gateway replaces the need for a custom Go WebSocket gateway by providing:
    ↓
 4. Convex triggers action("ai:generateResponse")
    ↓
-5. Action calls AI Core: POST /stream/chat
+5. Action calls Model Gateway: POST ${AI_CORE_URL}/stream/chat
+   (AI_CORE_URL now resolves to model-gateway:8080; path verified in convex/ai.ts)
    ↓
-6. AI Core calls Org Core gRPC: GetContext(orgID, query)
+6. Model Plane performs reasoning/retrieval through its own plane
+   (retrieval/context is owned by Data Plane v2, not "Org Core"; the old
+    "Org Core gRPC GetContext → Postgres + Qdrant" step is stale)
    ↓
-7. Org Core retrieves from Postgres + Qdrant
-   ↓
-8. AI Core generates answer, streams chunks
+8. Model Gateway generates answer, streams chunks
    ↓
 9. Convex receives chunks, stores them
    ↓
@@ -73,13 +80,19 @@ CONVEX_SELF_HOSTED_URL=http://localhost:3210
 CONVEX_ADMIN_KEY=<generated-key>
 
 # Service Integration
-AI_CORE_URL=http://ai-core:8000
-ORG_CORE_URL=http://org-core-service:8080
-AUTH_SERVER_URL=http://auth-service:3001
+# Verified 2026-07-11: canonical Application Plane compose points Convex at
+# model-gateway:8080 (the AI_CORE_URL name is kept for backward compat) and
+# also sets MODEL_GATEWAY_URL. The old ai-core:8000 target no longer exists.
+AI_CORE_URL=http://model-gateway:8080
+MODEL_GATEWAY_URL=http://model-gateway:8080
+ORG_CORE_URL=http://org-core:8080          # service name is `org-core` (was `org-core-service`)
+AUTH_SERVER_URL=http://auth-core:3001      # Control Plane auth service
 
 # Auth
 JWT_SECRET=your-jwt-secret
 ```
+
+> Note: `convex-core/.env.local` and the standalone `convex-core/docker-compose.yml` still default `AI_CORE_URL` to `ai-core:8000`, but the **canonical plane compose** (`apps/Application Plane/docker-compose.yml`) overrides it to `model-gateway:8080`, which is what actually runs. `convex/ai.ts` calls `${AI_CORE_URL}/stream/chat` and `${AI_CORE_URL}/chat`.
 
 ### Storage Options
 

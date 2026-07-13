@@ -10,7 +10,7 @@ x-shared:
       POSTGRESQL_DB: ${POSTGRES_DB:-zammad_production}
       POSTGRESQL_HOST: ${POSTGRES_HOST:-zammad-postgresql}
       POSTGRESQL_USER: ${POSTGRES_USER:-zammad}
-      POSTGRESQL_PASS: ${POSTGRES_PASS:-zammad}
+      POSTGRESQL_PASS: ${POSTGRES_PASS:?POSTGRES_PASS must be set}
       POSTGRESQL_PORT: ${POSTGRES_PORT:-5432}
       POSTGRESQL_OPTIONS: ${POSTGRESQL_OPTIONS:-?pool=50}
       POSTGRESQL_DB_CREATE:
@@ -149,7 +149,7 @@ services:
     <<: *zammad-service
     command: ["zammad-nginx"]
     ports:
-      - "${ZAMMAD_EXPOSE_PORT:-8088}:${NGINX_PORT:-8080}"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${ZAMMAD_EXPOSE_PORT:-8088}:${NGINX_PORT:-8080}"
     depends_on:
       zammad-railsserver:
         condition: service_healthy
@@ -164,7 +164,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-zammad_production}
       POSTGRES_USER: ${POSTGRES_USER:-zammad}
-      POSTGRES_PASSWORD: ${POSTGRES_PASS:-zammad}
+      POSTGRES_PASSWORD: ${POSTGRES_PASS:?POSTGRES_PASS must be set}
     volumes:
       - postgresql-data:/var/lib/postgresql/data
     networks:
@@ -260,4 +260,4 @@ networks:
     driver: bridge
   velion-net:
     external: true
-    name: velion-net
+    name: inter-plane-bus

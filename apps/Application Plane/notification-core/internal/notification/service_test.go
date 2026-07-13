@@ -10,13 +10,14 @@ func TestAcceptValidRequest(t *testing.T) {
 	repository := newFakeRepository()
 	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "novu_req_test"}}
 	publisher := &fakePublisher{}
-	service := NewServiceLegacy(repository, runtimeClient, publisher, func() string { return "req_test" }, func() time.Time {
+	service := newLegacyTestService(repository, runtimeClient, publisher, func() string { return "req_test" }, func() time.Time {
 		return time.Date(2026, time.March, 31, 10, 0, 0, 0, time.UTC)
 	})
 
 	acceptedRequest, err := service.Accept(context.Background(), Request{
-		RecipientID: "user_123",
-		Type:        "notification.created",
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_123"},
+		Type:           "notification.created",
 		Payload: map[string]any{
 			"title": "Hello",
 		},
@@ -33,9 +34,13 @@ func TestAcceptValidRequest(t *testing.T) {
 }
 
 func TestAcceptMissingRecipientID(t *testing.T) {
-	service := NewServiceLegacy(nil, nil, nil, nil, nil)
+	service := newLegacyTestService(nil, nil, nil, nil, nil)
 
-	acceptedRequest, err := service.Accept(context.Background(), Request{Type: "notification.created"})
+	acceptedRequest, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser},
+		Type:           "notification.created",
+	})
 	if err == nil {
 		t.Fatal("Accept() error = nil, want error")
 	}
@@ -45,15 +50,19 @@ func TestAcceptMissingRecipientID(t *testing.T) {
 	if !IsValidationError(err) {
 		t.Fatalf("IsValidationError(%v) = false, want true", err)
 	}
-	if err.Error() != "recipient_id is required" {
-		t.Fatalf("error = %q, want %q", err.Error(), "recipient_id is required")
+	if err.Error() != "recipient.id is required" {
+		t.Fatalf("error = %q, want %q", err.Error(), "recipient.id is required")
 	}
 }
 
 func TestAcceptWhitespaceRecipientID(t *testing.T) {
-	service := NewServiceLegacy(nil, nil, nil, nil, nil)
+	service := newLegacyTestService(nil, nil, nil, nil, nil)
 
-	_, err := service.Accept(context.Background(), Request{RecipientID: "   ", Type: "notification.created"})
+	_, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "   "},
+		Type:           "notification.created",
+	})
 	if err == nil {
 		t.Fatal("Accept() error = nil, want error")
 	}
@@ -63,9 +72,12 @@ func TestAcceptWhitespaceRecipientID(t *testing.T) {
 }
 
 func TestAcceptMissingType(t *testing.T) {
-	service := NewServiceLegacy(nil, nil, nil, nil, nil)
+	service := newLegacyTestService(nil, nil, nil, nil, nil)
 
-	acceptedRequest, err := service.Accept(context.Background(), Request{RecipientID: "user_123"})
+	acceptedRequest, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_123"},
+	})
 	if err == nil {
 		t.Fatal("Accept() error = nil, want error")
 	}
@@ -81,13 +93,30 @@ func TestAcceptMissingType(t *testing.T) {
 }
 
 func TestAcceptWhitespaceType(t *testing.T) {
-	service := NewServiceLegacy(nil, nil, nil, nil, nil)
+	service := newLegacyTestService(nil, nil, nil, nil, nil)
 
-	_, err := service.Accept(context.Background(), Request{RecipientID: "user_123", Type: "   "})
+	_, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_123"},
+		Type:           "   ",
+	})
 	if err == nil {
 		t.Fatal("Accept() error = nil, want error")
 	}
 	if !IsValidationError(err) {
 		t.Fatalf("IsValidationError(%v) = false, want true", err)
+	}
+}
+
+func TestAcceptFailsWhenRepositoryIsNotConfigured(t *testing.T) {
+	service := NewService(nil, nil, nil)
+
+	result, err := service.Accept(nil, Request{
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_123"},
+		Type:           "notification.created",
+	})
+	if result != nil || err == nil {
+		t.Fatalf("Accept() = (%#v, %v), want nil result and configuration error", result, err)
 	}
 }

@@ -1,5 +1,11 @@
 # Convex Core Service
 
+> **Verified 2026-07-11 (Application Plane audit).** This file was written as a pre-build *proposal* ("Status: Ready for Implementation", "2-3 weeks", "replaces Gateway Service"). convex-core is now **live and deployed**: `convex-backend` answers on `:3210` (HTTP 200), containers have been up for days, and 20+ Convex function modules ship in `convex/`. Read the sections below as historical design intent; the corrections here plus the linked sources are authoritative for current runtime.
+> - **Frontend is Velion v3 (SolidJS/Vite), not Next.js/React.** The `convex/react`, `ConvexReactClient`, `NEXT_PUBLIC_CONVEX_URL`, and `useQuery`/`useMutation` examples reflect an abandoned Next.js plan.
+> - **The "Functions" inventory is wrong and incomplete.** `ai:generateResponse` exists, but there is **no `convex/jobs.ts` and no `convex/rag.ts`** — so the `jobs:*` / `rag:indexDocuments` functions and the `/webhooks/rag/*` + `/webhooks/job/*` HTTP actions in `http.ts` call a missing `api.jobs.*` module and are broken/dead. The actually-live surfaces are undocumented here: HTTP routes `/ingest/session`, `/ingest/session/message`, `/ingest/control-session`, and `/api/webhook/nats/{handler}`, plus modules `controlSessions`, `agentRuns`, `conversationProjection`, `plannerDocuments`, `knowledgeQnA`, `organizations`, `users`, and `nats`.
+> - **Service hostnames in "Environment Variables" are stale.** The deployed plane compose points Convex at `model-gateway:8080` (`AI_CORE_URL`/`MODEL_GATEWAY_URL`) and `org-core:8080`; `ai-core:8000`, `org-core-service:8080`, and `auth-service:3001` are legacy aliases being phased out (see `velion-gap.md` G7).
+> - Current sources of truth: `apps/Application Plane/docs/core-research/convex-core.md` and `apps/Application Plane/APPLICATION_PLANE_DEEP_DIVE.md`.
+
 **Purpose**: Reactive UI state layer for CoreSystem (Application Plane)
 
 Convex Core (self-hosted) provides real-time synchronization between backend services and frontend, acting as a **reactive mirror** of canonical backend state:
@@ -336,7 +342,6 @@ export function ChatInput({ conversationId }: { conversationId: string }) {
 
 ---
 
-**Status**: Ready for Implementation  
-**Priority**: 🔥 Critical (replaces Gateway Service)  
-**Timeline**: 2-3 weeks  
+**Status**: Live and deployed (this proposal-era doc predates the build — see the Verified 2026-07-11 banner at top)
+**Priority**: 🔥 Critical
 **Team**: 1-2 developers

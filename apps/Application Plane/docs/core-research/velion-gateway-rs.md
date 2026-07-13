@@ -1,5 +1,7 @@
 # velion-gateway-rs
 
+> **2026-07-13 update.** The active implementation is Frontend Plane Velion v3's gateway. Social metrics/catalog routes exist. The navbar support caller now targets canonical `POST /api/v1/notification-requests` with a non-PII deterministic idempotency key, and information UI contracts label observation provenance. Those source changes are not deployed. Notification tenant/recipient identity and support destination validation remain release blockers.
+
 ## Current State
 
 `velion-gateway-rs` is a real Rust onboarding/gateway BFF. It is not a stub.

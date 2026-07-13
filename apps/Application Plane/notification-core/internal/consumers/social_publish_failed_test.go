@@ -58,8 +58,11 @@ func TestSocialPublishFailed_ValidEvent_AcceptsOneNotification(t *testing.T) {
 		t.Fatalf("Accept called %d times, want 1", accepter.count())
 	}
 	req := accepter.requests[0]
-	if req.RecipientID != "user-1" {
-		t.Errorf("recipient_id = %q, want user-1", req.RecipientID)
+	if req.OrganizationID != "org-1" {
+		t.Errorf("organization_id = %q, want org-1", req.OrganizationID)
+	}
+	if req.Recipient.Kind != notification.RecipientKindUser || req.Recipient.ID != "user-1" {
+		t.Errorf("recipient = %#v, want typed user-1", req.Recipient)
 	}
 	if req.Type != NotificationTypeSocialPublishJobFailed {
 		t.Errorf("type = %q, want %q", req.Type, NotificationTypeSocialPublishJobFailed)

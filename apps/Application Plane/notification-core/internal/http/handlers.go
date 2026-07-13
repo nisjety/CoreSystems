@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -13,20 +14,22 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/feed"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/notification"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/preferences"
-	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/subscribers"
 	"github.com/gin-gonic/gin"
 )
 
 // Handler is the unified Gin handler for notification-core. It owns the
-// dispatch path (legacy) plus the new feed / preferences / channels /
-// subscribers paths added in U5-2 (ui-ux-velion-gap.md §10).
+// dispatch path plus the feed, preferences, and channels paths.
 type Handler struct {
 	cfg           *config.Config
 	notifications *notification.Service
 	feed          *feed.Service
 	preferences   *preferences.Service
 	channels      *channels.Service
-	subscribers   *subscribers.Service
+	recipients    RecipientAuthorizer
+}
+
+type RecipientAuthorizer interface {
+	ResolveUser(ctx context.Context, organizationID, userID string) (string, error)
 }
 
 // HandlerDeps groups the new services so NewHandler stays append-only.
@@ -35,7 +38,7 @@ type HandlerDeps struct {
 	Feed          *feed.Service
 	Preferences   *preferences.Service
 	Channels      *channels.Service
-	Subscribers   *subscribers.Service
+	Recipients    RecipientAuthorizer
 }
 
 func NewHandler(cfg *config.Config, deps HandlerDeps) *Handler {
@@ -45,17 +48,33 @@ func NewHandler(cfg *config.Config, deps HandlerDeps) *Handler {
 		feed:          deps.Feed,
 		preferences:   deps.Preferences,
 		channels:      deps.Channels,
-		subscribers:   deps.Subscribers,
+		recipients:    deps.Recipients,
 	}
 }
 
 // ── Health ────────────────────────────────────────────────────────────────
 
 func (h *Handler) Health(c *gin.Context) {
+	deliveryStatus := "ready"
+	if h.cfg.DeliveryMode == "disabled" {
+		deliveryStatus = "disabled"
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"status":  "ok",
-		"service": h.cfg.ServiceName,
+		"status":          "ok",
+		"service":         h.cfg.ServiceName,
+		"delivery_mode":   h.cfg.DeliveryMode,
+		"delivery_status": deliveryStatus,
 	})
+}
+
+func (h *Handler) Ready(c *gin.Context) {
+	if h.cfg.DeliveryMode == "disabled" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status": "degraded", "delivery_status": "disabled",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ready", "delivery_status": "ready"})
 }
 
 // ── Dispatch (legacy / V0) ────────────────────────────────────────────────
@@ -75,9 +94,42 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
+	principal, ok := delegatedPrincipal(c)
+	if !ok || strings.TrimSpace(principal.OrganizationID) == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "delegated organization scope required"})
+		return
+	}
+	if strings.TrimSpace(request.OrganizationID) != principal.OrganizationID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "request organization does not match delegated scope"})
+		return
+	}
+	if !isNotificationTypeAuthorized(principal.ServiceID, request.Type) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "caller is not authorized for notification type"})
+		return
+	}
+	if principal.ServiceID == "support-worker" && strings.ToLower(strings.TrimSpace(request.RetentionMode)) != notification.RetentionModeZDR {
+		c.JSON(http.StatusForbidden, gin.H{"error": "support notifications require zero-data-retention mode"})
+		return
+	}
+	switch principal.ServiceID {
+	case "velion-gateway":
+		if request.Recipient.Kind != notification.RecipientKindUser || request.Recipient.ID != principal.UserID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "gateway may notify only the delegated user"})
+			return
+		}
+	case "support-worker":
+	default:
+		c.JSON(http.StatusForbidden, gin.H{"error": "caller is not authorized to create notifications"})
+		return
+	}
+	request.Source = principal.ServiceID
 
 	acceptedRequest, err := h.notifications.Accept(c.Request.Context(), request)
 	if err != nil {
+		if errors.Is(err, notification.ErrRecipientNotAuthorized) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "recipient is not authorized for organization"})
+			return
+		}
 		if notification.IsValidationError(err) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -95,6 +147,23 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 	c.JSON(http.StatusAccepted, acceptedRequest)
 }
 
+func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
+	notificationType = strings.TrimSpace(notificationType)
+	allowed := map[string]map[string]struct{}{
+		"velion-gateway": {
+			"notification.created": {},
+		},
+		"support-worker": {
+			"ticket.assigned": {},
+			"ticket.triaged":  {},
+			"sla.warning":     {},
+			"sla.breach":      {},
+		},
+	}
+	_, ok := allowed[serviceID][notificationType]
+	return ok
+}
+
 // ── Feed ──────────────────────────────────────────────────────────────────
 
 func (h *Handler) ListFeed(c *gin.Context) {
@@ -102,17 +171,18 @@ func (h *Handler) ListFeed(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
 
 	page, _ := strconv.Atoi(c.Query("page"))
 	limit, _ := strconv.Atoi(c.Query("limit"))
 	params := feed.ListParams{
-		RecipientID: userID,
-		Page:        page,
-		Limit:       limit,
+		OrganizationID: orgID,
+		RecipientID:    userID,
+		Page:           page,
+		Limit:          limit,
 	}
 	if rs := c.Query("read"); rs != "" {
 		switch strings.ToLower(rs) {
@@ -146,11 +216,11 @@ func (h *Handler) UnreadCount(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
-	n, err := h.feed.UnreadCount(c.Request.Context(), userID)
+	n, err := h.feed.UnreadCount(c.Request.Context(), orgID, userID)
 	if err != nil {
 		log.Printf("notification-core: unread count: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count unread"})
@@ -164,11 +234,11 @@ func (h *Handler) UnseenCount(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
-	n, err := h.feed.UnseenCount(c.Request.Context(), userID)
+	n, err := h.feed.UnseenCount(c.Request.Context(), orgID, userID)
 	if err != nil {
 		log.Printf("notification-core: unseen count: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count unseen"})
@@ -182,8 +252,8 @@ func (h *Handler) MarkRead(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
 	id := c.Param("id")
@@ -191,7 +261,7 @@ func (h *Handler) MarkRead(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
 		return
 	}
-	n, err := h.feed.MarkRead(c.Request.Context(), userID, id)
+	n, err := h.feed.MarkRead(c.Request.Context(), orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, feed.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "notification not found"})
@@ -209,11 +279,11 @@ func (h *Handler) MarkAllRead(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
-	n, err := h.feed.MarkAllRead(c.Request.Context(), userID)
+	n, err := h.feed.MarkAllRead(c.Request.Context(), orgID, userID)
 	if err != nil {
 		log.Printf("notification-core: mark all read: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mark all read"})
@@ -230,8 +300,8 @@ func (h *Handler) MarkSeen(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
 	id := c.Param("id")
@@ -241,7 +311,7 @@ func (h *Handler) MarkSeen(c *gin.Context) {
 	}
 	// MarkRead also flips seen; we don't have a dedicated single-row
 	// MarkSeen because the UI always wants both flags moved together.
-	n, err := h.feed.MarkRead(c.Request.Context(), userID, id)
+	n, err := h.feed.MarkRead(c.Request.Context(), orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, feed.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "notification not found"})
@@ -259,11 +329,11 @@ func (h *Handler) MarkAllSeen(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
-	n, err := h.feed.MarkAllSeen(c.Request.Context(), userID)
+	n, err := h.feed.MarkAllSeen(c.Request.Context(), orgID, userID)
 	if err != nil {
 		log.Printf("notification-core: mark all seen: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mark all seen"})
@@ -277,8 +347,8 @@ func (h *Handler) DeleteNotification(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
 	id := c.Param("id")
@@ -286,7 +356,7 @@ func (h *Handler) DeleteNotification(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
 		return
 	}
-	if err := h.feed.Archive(c.Request.Context(), userID, id); err != nil {
+	if err := h.feed.Archive(c.Request.Context(), orgID, userID, id); err != nil {
 		if errors.Is(err, feed.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "notification not found"})
 			return
@@ -305,11 +375,11 @@ func (h *Handler) ListPreferences(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preferences service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
-	prefs, err := h.preferences.ListForUser(c.Request.Context(), userID)
+	prefs, err := h.preferences.ListForUser(c.Request.Context(), orgID, userID)
 	if err != nil {
 		log.Printf("notification-core: list preferences: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list preferences"})
@@ -327,8 +397,8 @@ func (h *Handler) SetPreference(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preferences service not configured"})
 		return
 	}
-	userID := requireUserID(c)
-	if userID == "" {
+	orgID, userID := requireScope(c)
+	if orgID == "" {
 		return
 	}
 	eventType := strings.TrimSpace(c.Param("eventType"))
@@ -343,10 +413,11 @@ func (h *Handler) SetPreference(c *gin.Context) {
 		return
 	}
 	pref, err := h.preferences.Put(c.Request.Context(), preferences.PutParams{
-		UserID:    userID,
-		EventType: eventType,
-		Channel:   channel,
-		Enabled:   body.Enabled,
+		OrganizationID: orgID,
+		UserID:         userID,
+		EventType:      eventType,
+		Channel:        channel,
+		Enabled:        body.Enabled,
 	})
 	if err != nil {
 		log.Printf("notification-core: set preference: %v", err)
@@ -363,9 +434,9 @@ func (h *Handler) ListChannelConfigs(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channels service not configured"})
 		return
 	}
-	orgID := strings.TrimSpace(c.Query("org_id"))
+	orgID := requireOrganizationID(c)
 	if orgID == "" {
-		orgID = strings.TrimSpace(c.GetHeader("x-org-id"))
+		return
 	}
 	configs, err := h.channels.ListForOrg(c.Request.Context(), orgID)
 	if err != nil {
@@ -388,12 +459,8 @@ func (h *Handler) PatchChannelConfig(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channels service not configured"})
 		return
 	}
-	orgID := strings.TrimSpace(c.Query("org_id"))
+	orgID := requireOrganizationID(c)
 	if orgID == "" {
-		orgID = strings.TrimSpace(c.GetHeader("x-org-id"))
-	}
-	if orgID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "org_id required (query or x-org-id header)"})
 		return
 	}
 	eventType := strings.TrimSpace(c.Param("eventType"))
@@ -427,65 +494,6 @@ func (h *Handler) PatchChannelConfig(c *gin.Context) {
 
 // ── Subscribers (internal recipient upsert) ───────────────────────────────
 
-type recipientUpsertBody struct {
-	UserID    string `json:"user_id"`
-	Email     string `json:"email"`
-	Name      string `json:"name"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Phone     string `json:"phone"`
-	Avatar    string `json:"avatar"`
-	Locale    string `json:"locale"`
-	Timezone  string `json:"timezone"`
-	OrgID     string `json:"org_id"`
-	Role      string `json:"role"`
-}
-
-func (h *Handler) UpsertRecipient(c *gin.Context) {
-	if h.subscribers == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subscribers service not configured"})
-		return
-	}
-	var body recipientUpsertBody
-	if err := json.NewDecoder(c.Request.Body).Decode(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	if strings.TrimSpace(body.UserID) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id required"})
-		return
-	}
-
-	first, last := body.FirstName, body.LastName
-	// Velion sends a combined `name`; split conservatively.
-	if first == "" && last == "" && body.Name != "" {
-		parts := strings.SplitN(strings.TrimSpace(body.Name), " ", 2)
-		first = parts[0]
-		if len(parts) == 2 {
-			last = parts[1]
-		}
-	}
-
-	sub, err := h.subscribers.Upsert(c.Request.Context(), subscribers.UpsertParams{
-		UserID:    body.UserID,
-		Email:     body.Email,
-		Phone:     body.Phone,
-		FirstName: first,
-		LastName:  last,
-		Avatar:    body.Avatar,
-		Locale:    body.Locale,
-		Timezone:  body.Timezone,
-		OrgID:     body.OrgID,
-		Role:      body.Role,
-	})
-	if err != nil {
-		log.Printf("notification-core: upsert recipient: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upsert recipient"})
-		return
-	}
-	c.JSON(http.StatusOK, sub)
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 // requireUserID extracts and validates the `x-user-id` header. Writes a
@@ -498,4 +506,25 @@ func requireUserID(c *gin.Context) string {
 		return ""
 	}
 	return uid
+}
+
+func requireOrganizationID(c *gin.Context) string {
+	orgID := strings.TrimSpace(c.GetHeader("x-org-id"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "x-org-id header required"})
+		return ""
+	}
+	return orgID
+}
+
+func requireScope(c *gin.Context) (string, string) {
+	organizationID := requireOrganizationID(c)
+	if organizationID == "" {
+		return "", ""
+	}
+	userID := requireUserID(c)
+	if userID == "" {
+		return "", ""
+	}
+	return organizationID, userID
 }

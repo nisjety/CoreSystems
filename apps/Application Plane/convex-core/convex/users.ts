@@ -9,6 +9,7 @@ import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
 import { assertServiceKey } from "./authz";
+import { normalizeProjectionRole, shouldApplyMembershipAdd } from "./membershipProjection";
 
 /**
  * Query: Get user by external auth ID
@@ -150,10 +151,29 @@ export const createOrUpdateFromExternal = mutation({
     role: v.string(),
     name: v.optional(v.string()),
     externalCreatedAt: v.number(),
+    sourceUpdatedAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     assertServiceKey(args.serviceKey);
     const { externalAuthId, email, convexOrgId, role, name, externalCreatedAt } = args;
+    const sourceUpdatedAt = args.sourceUpdatedAt ?? externalCreatedAt;
+    const organization = await ctx.db.get(convexOrgId);
+    if (!organization) throw new Error(`Organization not found: ${convexOrgId}`);
+
+    const tombstones = await ctx.db
+      .query("membershipTombstones")
+      .withIndex("by_external_org_and_user", (q) =>
+        q
+          .eq("externalOrgId", organization.externalOrgId)
+          .eq("externalAuthId", externalAuthId)
+      )
+      .collect();
+    const latestTombstone = tombstones.sort(
+      (left, right) => right.sourceUpdatedAt - left.sourceUpdatedAt
+    )[0];
+    if (!shouldApplyMembershipAdd(latestTombstone?.sourceUpdatedAt, undefined, sourceUpdatedAt)) {
+      return null;
+    }
 
     // Check if user already exists
     const existing = await ctx.db
@@ -170,14 +190,22 @@ export const createOrUpdateFromExternal = mutation({
     if (existing.length > 0) {
       // Update existing user
       const user = existing[0];
+      if (!shouldApplyMembershipAdd(undefined, user.sourceUpdatedAt, sourceUpdatedAt)) {
+        return user;
+      }
       await ctx.db.patch(user._id, {
         email,
-        role,
+        role: normalizeProjectionRole(role),
         name: name || user.name,
         syncStatus: "synced",
         lastSyncedAt: Date.now(),
+        sourceUpdatedAt,
+        deletedAt: undefined,
       });
-      return user;
+      for (const tombstone of tombstones) {
+        await ctx.db.delete(tombstone._id);
+      }
+      return await ctx.db.get(user._id);
     }
 
     // Create new user
@@ -186,12 +214,17 @@ export const createOrUpdateFromExternal = mutation({
       email,
       name: name || String(email).split("@")[0],
       orgId: convexOrgId,
-      role: role as unknown as "admin" | "member" | "viewer",
+      role: normalizeProjectionRole(role),
       syncStatus: "synced",
       lastSyncedAt: Date.now(),
+      sourceUpdatedAt,
       createdAt: externalCreatedAt,
       lastSeenAt: externalCreatedAt,
     });
+
+    for (const tombstone of tombstones) {
+      await ctx.db.delete(tombstone._id);
+    }
 
     return await ctx.db.get(userId);
   },

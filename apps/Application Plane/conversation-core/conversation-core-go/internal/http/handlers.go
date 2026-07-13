@@ -9,6 +9,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/delegation"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,12 +23,11 @@ func NewHandler(cfg *config.Config, service *conversation.Service) *Handler {
 }
 
 type addMessageBody struct {
-	BodyText   string `json:"body_text"`
-	Body       string `json:"body"`
-	BodyHTML   string `json:"body_html"`
-	Internal   bool   `json:"internal"`
-	ActorName  string `json:"actor_name"`
-	ActorEmail string `json:"actor_email"`
+	BodyText       string `json:"body_text"`
+	Body           string `json:"body"`
+	BodyHTML       string `json:"body_html"`
+	Internal       bool   `json:"internal"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type statusBody struct {
@@ -333,10 +333,10 @@ func (h *Handler) CreateTicket(c *gin.Context) {
 		TeamID:              body.TeamID,
 		TeamName:            body.TeamName,
 		DueAt:               dueAt,
-		Source:              body.Source,
-		AIConfidence:        body.AIConfidence,
-		AIReason:            body.AIReason,
-		CreatedBy:           body.CreatedBy,
+		Source:              "manual",
+		AIConfidence:        0,
+		AIReason:            "",
+		CreatedBy:           actorUserID(c),
 		WaitingSince:        waitingSince,
 		LastCustomerReplyAt: lastCustomerReplyAt,
 		FirstResponseAt:     firstResponseAt,
@@ -425,9 +425,9 @@ func (h *Handler) PatchTicket(c *gin.Context) {
 		TeamID:              body.TeamID,
 		TeamName:            body.TeamName,
 		DueAt:               dueAt,
-		Source:              body.Source,
-		AIConfidence:        body.AIConfidence,
-		AIReason:            body.AIReason,
+		Source:              nil,
+		AIConfidence:        nil,
+		AIReason:            nil,
 		WaitingSince:        waitingSince,
 		LastCustomerReplyAt: lastCustomerReplyAt,
 		FirstResponseAt:     firstResponseAt,
@@ -866,6 +866,11 @@ func (h *Handler) IngestEvent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
 		return
 	}
+	principal, ok := delegation.PrincipalFromContext(c.Request.Context())
+	if !ok || principal.ServiceID != "conversation-ingest" || strings.TrimSpace(event.OrgID) != principal.OrganizationID {
+		c.JSON(http.StatusForbidden, errorPayload("forbidden", "event organization does not match verified delegation scope"))
+		return
+	}
 	result, err := h.service.IngestEvent(c.Request.Context(), event)
 	if err != nil {
 		writeServiceError(c, err)
@@ -892,20 +897,29 @@ func (h *Handler) addMessage(c *gin.Context, forceInternal bool) {
 		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
 		return
 	}
+	if !forceInternal && body.Internal {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload(
+			"validation_error",
+			"internal is not accepted on the messages route. Use /notes for internal notes.",
+		))
+		return
+	}
 	text := strings.TrimSpace(body.BodyText)
 	if text == "" {
 		text = strings.TrimSpace(body.Body)
 	}
+	actorName, actorEmail := trustedMessageActor(c)
 	message, err := h.service.AddMessage(c.Request.Context(), conversation.AddMessageInput{
 		OrgID:          orgID,
 		ConversationID: c.Param("id"),
 		ActorUserID:    actorUserID(c),
-		ActorName:      body.ActorName,
-		ActorEmail:     body.ActorEmail,
+		ActorName:      actorName,
+		ActorEmail:     actorEmail,
 		BodyText:       text,
 		BodyHTML:       body.BodyHTML,
-		Internal:       forceInternal || body.Internal,
+		Internal:       forceInternal,
 		Direction:      conversation.DirectionOutbound,
+		IdempotencyKey: body.IdempotencyKey,
 	})
 	if err != nil {
 		writeServiceError(c, err)
@@ -1107,15 +1121,10 @@ func listFilterFromRequest(c *gin.Context, orgID string) conversation.ListFilter
 }
 
 func requireOrgID(c *gin.Context) string {
-	orgID := strings.TrimSpace(c.GetHeader("x-org-id"))
-	if orgID == "" {
-		orgID = strings.TrimSpace(c.Query("org_id"))
-	}
-	if orgID == "" {
-		orgID = strings.TrimSpace(c.Query("orgId"))
-	}
-	if orgID == "" {
-		c.JSON(http.StatusBadRequest, errorPayload("missing_org_id", "x-org-id is required."))
+	principal, ok := delegation.PrincipalFromContext(c.Request.Context())
+	orgID := strings.TrimSpace(principal.OrganizationID)
+	if !ok || orgID == "" {
+		c.JSON(http.StatusBadRequest, errorPayload("missing_org_id", "verified organization scope is required."))
 		return ""
 	}
 	return orgID
@@ -1142,11 +1151,18 @@ func parseOptionalTimePtr(value *string) (*time.Time, error) {
 }
 
 func actorUserID(c *gin.Context) string {
-	userID := strings.TrimSpace(c.GetHeader("x-user-id"))
-	if userID == "" {
-		return "internal-service"
+	principal, ok := delegation.PrincipalFromContext(c.Request.Context())
+	if !ok {
+		return ""
 	}
-	return userID
+	return strings.TrimSpace(principal.UserID)
+}
+
+func trustedMessageActor(c *gin.Context) (string, string) {
+	// The v2 delegation contract binds the stable Control user id, not display
+	// attributes. Persist that verified id rather than caller-controlled JSON or
+	// unsigned x-user-name/x-user-email values.
+	return actorUserID(c), ""
 }
 
 func stringValue(value *string) string {
@@ -1178,11 +1194,15 @@ func writeServiceError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, errorPayload("conflict", "Conversation resource already exists."))
 	case conversation.IsInvalidInput(err):
 		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", err.Error()))
+	case errors.Is(err, conversation.ErrDeliveryUnknown):
+		c.JSON(http.StatusConflict, errorPayload("delivery_unknown", "The reply may have been submitted, but its outcome is unknown. Do not retry automatically; reconciliation is required."))
 	case errors.Is(err, conversation.ErrSendFailed):
 		// The reply was attempted but the customer channel did not accept it.
 		// 502 (not 201) so the Inbox surfaces a real failure instead of a phantom
 		// "Reply sent" for a message that was never delivered or persisted.
 		c.JSON(http.StatusBadGateway, errorPayload("send_failed", "The reply could not be delivered to the customer channel and was not sent."))
+	case errors.Is(err, conversation.ErrDeliveryUnavailable):
+		c.JSON(http.StatusServiceUnavailable, errorPayload("delivery_unavailable", "The customer channel is not configured for outbound delivery. The reply was not sent or stored."))
 	default:
 		c.JSON(http.StatusInternalServerError, errorPayload("internal_error", "Internal error."))
 	}

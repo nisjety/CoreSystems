@@ -22,11 +22,9 @@ type MetricsSource interface {
 	Overview(ctx context.Context, query insights.OverviewQuery) (*insights.Overview, error)
 }
 
-// Scheduler delivers the daily brief for every org with recent recorded
-// activity through notification-core. Delivery is idempotent per (org, UTC day):
-// the idempotency key is stable, so a re-tick or a restart on the same day does
-// not double-send (notification-core dedupes on the key, and Novu dedupes on it
-// in turn).
+// Scheduler is an unwired brief-assembly helper. It must not be started until an
+// authoritative organization subscription resolves a Control user recipient.
+// Its request key is deterministic per (org, UTC day) for contract tests.
 type Scheduler struct {
 	source   MetricsSource
 	notifier NotificationClient
@@ -107,10 +105,9 @@ func (s *Scheduler) deliverRound(ctx context.Context) {
 	}
 }
 
-// deliverForOrg assembles and delivers one org's brief for the given UTC day.
-// The org is the unit of attribution (resolved server-side from the metric
-// store), so the recipient is the org itself; notification-core / Novu treat it
-// as the subscriber id. Exposed for tests.
+// deliverForOrg assembles one org's brief for the given UTC day. RecipientID is
+// currently an org placeholder and is not a valid notification-core recipient;
+// production wiring is intentionally absent. Exposed for tests.
 func (s *Scheduler) deliverForOrg(ctx context.Context, orgID, day string) error {
 	to := s.now().UTC()
 	from := to.Add(-briefWindow)

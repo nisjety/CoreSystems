@@ -32,13 +32,6 @@ type Config struct {
 	ModelPlaneNATSURL   string
 	ModelPlaneNATSToken string
 
-	// W3 (PR-5) — scheduled brief delivery, OPTIONAL. When NotificationCoreURL
-	// is set AND a durable metric store is enabled, insight-core runs the daily
-	// brief scheduler that POSTs a `daily_brief` notification (carrying the
-	// Preview gate) to notification-core's existing Novu adapter. When empty the
-	// scheduler is not started.
-	NotificationCoreURL string
-
 	// SocialCoreURL is the metrics.snapshotted follow-up fetch target
 	// (GET /api/v1/social/metrics) — social-core's lifecycle event carries
 	// only a summary count, so the metric subscriber fetches the real values
@@ -64,7 +57,6 @@ func Load() (*Config, error) {
 		NATSToken:                     strings.TrimSpace(getEnv("NATS_TOKEN", "")),
 		ModelPlaneNATSURL:             strings.TrimSpace(getEnv("MODEL_PLANE_NATS_URL", "")),
 		ModelPlaneNATSToken:           strings.TrimSpace(getEnv("MODEL_PLANE_NATS_TOKEN", "")),
-		NotificationCoreURL:           strings.TrimRight(strings.TrimSpace(getEnv("NOTIFICATION_CORE_URL", "")), "/"),
 		SocialCoreURL:                 strings.TrimRight(strings.TrimSpace(getEnv("SOCIAL_CORE_URL", "http://social-core:3162")), "/"),
 	}
 

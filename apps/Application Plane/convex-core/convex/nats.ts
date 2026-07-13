@@ -13,6 +13,7 @@
 import { v } from "convex/values";
 import { internalAction, internalMutation } from "./_generated/server";
 import { api, internal } from "./_generated/api";
+import { normalizeProjectionRole, shouldApplyMembershipRemoval } from "./membershipProjection";
 
 // Control-Plane-owned shared key; no hardcoded fallback. Empty only if the env
 // is misconfigured, in which case the receiving validator rejects the call.
@@ -46,7 +47,7 @@ export const startSubscriber = internalAction(async (ctx) => {
 export const onUserRegistered = internalAction(async (ctx, args: any) => {
   const { userId, email, name, createdAt } = args;
 
-  console.log(`[Convex] Processing user.registered: ${email}`);
+  console.log(`[Convex] Processing user.registered: ${userId}`);
 
   // Note: We don't create the user here yet as we need to know which org they belong to
   // The user will be created when they're invited to an org or create one
@@ -107,7 +108,7 @@ export const onOrganizationMemberAdded = internalAction(
   async (ctx, args: { orgId: string; userId: string; email: string; role: string; addedAt: number }) => {
     const { orgId, userId, email, role, addedAt } = args;
 
-    console.log(`[Convex] Processing organization.member.added: ${email} -> ${orgId}`);
+    console.log(`[Convex] Processing organization.member.added: ${userId} -> ${orgId}`);
 
     try {
       // Get the Convex org ID from the external org ID
@@ -117,8 +118,7 @@ export const onOrganizationMemberAdded = internalAction(
       });
 
       if (!org) {
-        console.warn(`[Convex] Organization not found: ${orgId}`);
-        return { status: "org_not_found", orgId };
+        throw new Error(`Organization projection not found: ${orgId}`);
       }
 
       // Create user in Convex if they don't exist
@@ -127,17 +127,150 @@ export const onOrganizationMemberAdded = internalAction(
         email,
         convexOrgId: org._id,
         serviceKey: CONVEX_INTERNAL_SERVICE_KEY,
-        role,
+        role: normalizeProjectionRole(role),
         externalCreatedAt: addedAt,
+        sourceUpdatedAt: addedAt,
       });
 
-      console.log(`[Convex] User synced: ${email} (${user._id}) in org ${org._id}`);
+      if (!user) {
+        return { status: "stale_ignored", orgId: org._id };
+      }
+
+      console.log(`[Convex] User synced: ${userId} (${user._id}) in org ${org._id}`);
 
       return { status: "synced", userId: user._id, orgId: org._id };
     } catch (error) {
-      console.error(`[Convex] Error syncing member ${email}:`, error);
+      console.error(`[Convex] Error syncing member ${userId}:`, error);
       throw error;
     }
+  }
+);
+
+export const removeOrganizationMemberProjection = internalMutation({
+  args: {
+    orgId: v.string(),
+    userId: v.string(),
+    sourceUpdatedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    if (!args.orgId.trim() || !args.userId.trim()) {
+      throw new Error("orgId and userId are required");
+    }
+
+    const organizations = await ctx.db
+      .query("organizations")
+      .withIndex("by_external_id", (q) => q.eq("externalOrgId", args.orgId))
+      .collect();
+    const organization = organizations.find((item) => item.syncStatus !== "deleted");
+
+    let membership = null;
+    if (organization) {
+      const memberships = await ctx.db
+        .query("users")
+        .withIndex("by_external_and_org", (q) =>
+          q.eq("externalAuthId", args.userId).eq("orgId", organization._id)
+        )
+        .collect();
+      membership = memberships[0] ?? null;
+      if (
+        memberships.length > 0 &&
+        memberships.every((candidate) =>
+          !shouldApplyMembershipRemoval(
+            candidate.sourceUpdatedAt,
+            args.sourceUpdatedAt
+          )
+        )
+      ) {
+        return { status: "stale_ignored" };
+      }
+      for (const candidate of memberships) {
+        if (
+          candidate.syncStatus !== "deleted" &&
+          shouldApplyMembershipRemoval(
+            candidate.sourceUpdatedAt,
+            args.sourceUpdatedAt
+          )
+        ) {
+          await ctx.db.patch(candidate._id, {
+            syncStatus: "deleted",
+            deletedAt: Date.now(),
+            lastSyncedAt: Date.now(),
+            sourceUpdatedAt: args.sourceUpdatedAt,
+          });
+        }
+      }
+    }
+
+    const tombstones = await ctx.db
+      .query("membershipTombstones")
+      .withIndex("by_external_org_and_user", (q) =>
+        q.eq("externalOrgId", args.orgId).eq("externalAuthId", args.userId)
+      )
+      .collect();
+    const latestTombstone = tombstones.sort(
+      (left, right) => right.sourceUpdatedAt - left.sourceUpdatedAt
+    )[0];
+    if (latestTombstone && latestTombstone.sourceUpdatedAt >= args.sourceUpdatedAt) {
+      return { status: "already_removed" };
+    }
+
+    const removedAt = Date.now();
+    if (latestTombstone) {
+      await ctx.db.patch(latestTombstone._id, {
+        sourceUpdatedAt: args.sourceUpdatedAt,
+        removedAt,
+      });
+    } else {
+      await ctx.db.insert("membershipTombstones", {
+        externalOrgId: args.orgId,
+        externalAuthId: args.userId,
+        sourceUpdatedAt: args.sourceUpdatedAt,
+        removedAt,
+      });
+    }
+
+    for (const duplicate of tombstones.filter(
+      (item) => item._id !== latestTombstone?._id
+    )) {
+      await ctx.db.delete(duplicate._id);
+    }
+
+    const controlSessions = await ctx.db
+      .query("controlSessions")
+      .withIndex("by_external_user_and_org", (q) =>
+        q.eq("externalUserId", args.userId).eq("externalOrgId", args.orgId)
+      )
+      .collect();
+    for (const session of controlSessions) {
+      await ctx.db.delete(session._id);
+    }
+
+    if (organization) {
+      await ctx.db.insert("auditLog", {
+        orgId: organization._id,
+        userId: membership?._id,
+        action: "membership.projection.removed",
+        resource: "user_membership",
+        resourceId: args.userId,
+        changes: { sourceUpdatedAt: args.sourceUpdatedAt },
+        createdAt: removedAt,
+      });
+    }
+
+    return { status: membership ? "removed" : "tombstoned" };
+  },
+});
+
+export const onOrganizationMemberRemoved = internalAction(
+  async (
+    ctx,
+    args: { orgId: string; userId: string; sourceUpdatedAt: number }
+  ) => {
+    return await ctx.runMutation(internal.nats.removeOrganizationMemberProjection, {
+      orgId: args.orgId,
+      userId: args.userId,
+      sourceUpdatedAt: args.sourceUpdatedAt,
+    });
   }
 );
 
@@ -261,12 +394,11 @@ export const onImportCompleted = internalAction(
         return { status: "org_not_found", orgId };
       }
 
-      await ctx.runMutation(api.imports.recordCompleted, {
-        convexOrgId: org._id,
+      await ctx.runMutation(internal.imports.recordCompleted, {
+        externalOrgId: orgId,
         externalImportId: importId,
         sourceType,
         totalDocuments,
-        serviceKey: CONVEX_INTERNAL_SERVICE_KEY,
         completedAt,
       });
 

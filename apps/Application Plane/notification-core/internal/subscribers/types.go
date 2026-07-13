@@ -44,3 +44,31 @@ type UpsertParams struct {
 	OrgID            string
 	Role             string
 }
+
+const (
+	MembershipStatusActive  = "active"
+	MembershipStatusRemoved = "removed"
+)
+
+type Membership struct {
+	OrganizationID       string    `json:"organization_id"`
+	UserID               string    `json:"user_id"`
+	ProviderSubscriberID string    `json:"provider_subscriber_id"`
+	Role                 string    `json:"role,omitempty"`
+	Status               string    `json:"status"`
+	AuthorityRevision    *int64    `json:"authority_revision,omitempty"`
+	SourceEventID        string    `json:"source_event_id,omitempty"`
+	OccurredAt           time.Time `json:"occurred_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+type MembershipParams struct {
+	OrganizationID       string
+	UserID               string
+	ProviderSubscriberID string
+	Role                 string
+	Status               string
+	AuthorityRevision    *int64
+	SourceEventID        string
+	OccurredAt           time.Time
+}

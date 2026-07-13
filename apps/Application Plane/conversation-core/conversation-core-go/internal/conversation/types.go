@@ -31,6 +31,10 @@ const (
 	// this honestly rather than ever claiming "sent". It stays in the
 	// application namespace, covered by the existing application stream.
 	SubjectAIActionSendFailed = "velion.application.conversation.ai_action.send_failed"
+	// SubjectAIActionSendUnknown is emitted when a provider may have accepted a
+	// reply but the result cannot be proven. It is reconciliation-required and
+	// must never trigger an automatic retransmission.
+	SubjectAIActionSendUnknown = "velion.application.conversation.ai_action.send_unknown"
 	// SubjectModelActionProposed is the Model-Plane → Application-Plane subject a
 	// model (or hook) publishes to propose an action (e.g. a draft.reply) into the
 	// HITL review queue. It lives in the model namespace, so it needs its own
@@ -56,7 +60,20 @@ var (
 	// integration-corev2 send errored). The HTTP layer surfaces it as 502 so the
 	// Inbox never shows a phantom "Reply sent" for a message the customer never
 	// received, and no outbound message row is persisted for it.
-	ErrSendFailed = errors.New("outbound reply delivery failed")
+	ErrSendFailed          = errors.New("outbound reply delivery failed")
+	ErrDeliveryUnavailable = errors.New("outbound reply delivery is unavailable")
+	// ErrDeliveryUnknown means the provider may have accepted an outbound
+	// message but conversation-core cannot prove the final outcome. Callers must
+	// surface reconciliation-required state and must not blindly retry it.
+	ErrDeliveryUnknown = errors.New("outbound reply delivery outcome is unknown")
+)
+
+const (
+	OutboundIntentSending   = "sending"
+	OutboundIntentRetryable = "retryable"
+	OutboundIntentSubmitted = "submitted"
+	OutboundIntentFailed    = "failed"
+	OutboundIntentUnknown   = "unknown"
 )
 
 type EventPublisher interface {
@@ -69,6 +86,10 @@ type Repository interface {
 	GetConversation(ctx context.Context, orgID, conversationID string) (*ConversationDetail, error)
 	StoreInboundEvent(ctx context.Context, event InboundEvent) (*StoredEventResult, error)
 	AddMessage(ctx context.Context, input AddMessageInput) (*Message, error)
+	ClaimOutboundIntent(ctx context.Context, input OutboundIntentClaimInput) (*OutboundIntentClaim, error)
+	FinalizeOutboundIntent(ctx context.Context, input OutboundIntentFinalizeInput) (*Message, error)
+	MarkOutboundIntentOutcome(ctx context.Context, input OutboundIntentOutcomeInput) error
+	GetMessage(ctx context.Context, orgID, messageID string) (*Message, error)
 	// GetChannelThreadRefByConversation resolves the outbound send target
 	// (provider/connection/thread) for a conversation, or ErrNotFound when the
 	// conversation is not bound to an external channel. The Service uses it to
@@ -359,6 +380,10 @@ type AddMessageInput struct {
 	BodyHTML       string
 	Internal       bool
 	Direction      string
+	// IdempotencyKey is a stable manual-send intent identifier supplied in the
+	// signed request body and reused across retries. It becomes both the human
+	// approval reference and the integration-corev2 receipt key.
+	IdempotencyKey string
 	// Provider and ProviderMessageID record the channel a human reply was
 	// actually delivered through. They are set by the Service after a successful
 	// integration-corev2 send so the stored outbound row reflects the real
@@ -366,6 +391,72 @@ type AddMessageInput struct {
 	Provider          string
 	ProviderMessageID string
 	OccurredAt        time.Time
+}
+
+// OutboundIntent contains only routing identifiers, hashes, and outcome state;
+// message content is never duplicated into this ledger.
+type OutboundIntent struct {
+	ID                 string
+	OrgID              string
+	IdempotencyKey     string
+	ConversationID     string
+	AIActionID         string
+	RequestFingerprint string
+	Status             string
+	Provider           string
+	ConnectionID       string
+	ProviderThreadID   string
+	AuthorizationKind  string
+	ActorUserID        string
+	ApprovalID         string
+	ActionID           string
+	Operation          string
+	PayloadSHA256      string
+	ProviderMessageID  string
+	MessageID          string
+	ErrorCode          string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type OutboundIntentClaimInput struct {
+	IntentID           string
+	OrgID              string
+	IdempotencyKey     string
+	ConversationID     string
+	AIActionID         string
+	RequestFingerprint string
+	Provider           string
+	ConnectionID       string
+	ProviderThreadID   string
+	AuthorizationKind  string
+	ActorUserID        string
+	ApprovalID         string
+	ActionID           string
+	Operation          string
+	PayloadSHA256      string
+}
+
+type OutboundIntentClaim struct {
+	Intent  OutboundIntent
+	Claimed bool
+}
+
+type OutboundIntentFinalizeInput struct {
+	OrgID              string
+	IdempotencyKey     string
+	RequestFingerprint string
+	AIActionID         string
+	Message            AddMessageInput
+	ProviderMessageID  string
+}
+
+type OutboundIntentOutcomeInput struct {
+	OrgID          string
+	IdempotencyKey string
+	AIActionID     string
+	Status         string
+	ErrorCode      string
 }
 
 type ListFilter struct {

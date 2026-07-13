@@ -6,23 +6,23 @@ services:
   # ============================================================================
 
   convex-backend:
-    image: ghcr.io/get-convex/convex-backend:latest
+    image: ghcr.io/get-convex/convex-backend@sha256:104b8bc70e29b31fa4a57551596090bfc9eedc3d1f27fd4b8cd8d0e782b9b070
     container_name: convex-backend
     restart: unless-stopped
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 20s
     ports:
-      - "3210:3210"  # Backend API
-      - "3211:3211"  # HTTP Actions
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3210:3210"  # Backend API
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3211:3211"  # HTTP Actions
     volumes:
       - convex-data:/data
       - ./convex:/app/convex:ro
     environment:
       # Instance configuration
       CONVEX_INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
-      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
-      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:-926e27b2f16124ab7a47d9f62eb0a2244a9b1b61b9b5486c2bc9afddfc6579e9}
+      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
+      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
       INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
 
       # Database configuration
@@ -39,7 +39,7 @@ services:
       AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-core:3011}
 
       # Auth configuration
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
 
       # Logging
@@ -73,14 +73,14 @@ services:
   # ============================================================================
 
   convex-dashboard:
-    image: ghcr.io/get-convex/convex-dashboard:latest
+    image: ghcr.io/get-convex/convex-dashboard@sha256:60b04b339d6cd6623057b03e5275329a20011051907ec5e689a38a401cfdc409
     container_name: convex-dashboard
     restart: unless-stopped
     init: true
     stop_signal: SIGTERM
     stop_grace_period: 15s
     ports:
-      - "6791:6791"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6791:6791"
     environment:
       CONVEX_BACKEND_URL: http://convex-backend:3210
       NODE_ENV: ${NODE_ENV:-development}
@@ -129,15 +129,11 @@ services:
     # `Could not find public function for 'controlSessions:byUser'`.
     volumes:
       - ./convex:/app/convex
-    ports:
-      - "3000:3000"
     networks:
       - app-net
     healthcheck:
-      # The gateway image installs wget/curl and serves the dev server on
-      # :3000 (see Dockerfile EXPOSE 3000 + its own HEALTHCHECK). An actual
-      # HTTP probe is far more reliable than matching a process name.
-      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:3000 || curl -fsS http://127.0.0.1:3000 || exit 1"]
+      # This container is a schema deployer/watcher, not an HTTP gateway.
+      test: ["CMD-SHELL", "pgrep -f 'convex dev' >/dev/null && curl -fsS http://convex-backend:3210/version >/dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -183,8 +179,12 @@ services:
     environment:
       # controlplane-nats is now on inter-plane-bus — no more host.docker.internal hack
       NATS_URL: nats://controlplane-nats:4222
-      VELION_NATS_URL: ${VELION_NATS_URL}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      # NATS_TOKEN is loaded from the required .env.local and must match
+      # Control Plane NATS_TOKEN. Model mirroring is optional in this standalone stack.
+      MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-}
+      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:-}
       CONVEX_BACKEND_URL: http://convex-backend:3210
     networks:
       - app-net
@@ -228,15 +228,17 @@ services:
       retries: 3
       start_period: 30s
     ports:
-      - "1234:1234"
+      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:1234:1234"
     environment:
       HOST: 0.0.0.0
       PORT: 1234
       AUTH_SERVICE_URL: http://auth-core:3011
       USER_SERVICE_URL: http://user-core:3012
-      AFFINE_CORE_URL: http://affine-core:3180
+      # The former first-party affine-core build context no longer exists.
+      # Keep the integration disabled unless an operator supplies a verified URL.
+      AFFINE_CORE_URL: ${AFFINE_CORE_URL:-}
       CONVEX_URL: http://convex-backend:3210
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
     networks:
@@ -260,7 +262,7 @@ services:
   # ============================================================================
 
   affine:
-    image: ghcr.io/toeverything/affine:stable
+    image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
     container_name: affine-server
     profiles: ["affine"]
     restart: unless-stopped
@@ -278,7 +280,7 @@ services:
       NODE_ENV: production
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
-      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@affine-postgres:5432/affine
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@affine-postgres:5432/affine
       REDIS_SERVER_HOST: affine-dragonfly
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
@@ -307,7 +309,7 @@ services:
       start_period: 30s
 
   affine-migration:
-    image: ghcr.io/toeverything/affine:stable
+    image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
     container_name: affine-migration-job
     profiles: ["affine"]
     depends_on:
@@ -320,7 +322,7 @@ services:
       NODE_ENV: production
       DEPLOYMENT_TYPE: selfhosted
       AFFINE_SERVER_HTTPS: "false"
-      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:-affine_secret}@affine-postgres:5432/affine
+      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@affine-postgres:5432/affine
       REDIS_SERVER_HOST: affine-dragonfly
       AFFINE_INDEXER_ENABLED: "false"
     volumes:
@@ -335,7 +337,7 @@ services:
         max-file: "3"
 
   affine-postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
     container_name: affine-postgres
     profiles: ["affine"]
     restart: unless-stopped
@@ -345,7 +347,7 @@ services:
     environment:
       POSTGRES_DB: affine
       POSTGRES_USER: affine
-      POSTGRES_PASSWORD: ${AFFINE_POSTGRES_PASSWORD:-affine_secret}
+      POSTGRES_PASSWORD: ${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}
     volumes:
       - affine-postgres-data:/var/lib/postgresql/data
     networks:
@@ -369,7 +371,7 @@ services:
       retries: 10
 
   affine-dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0@sha256:84b1009aee0b68327758bce8e99ed514f782d713353acc46caf5738feaa481d6
     container_name: affine-dragonfly
     profiles: ["affine"]
     restart: unless-stopped

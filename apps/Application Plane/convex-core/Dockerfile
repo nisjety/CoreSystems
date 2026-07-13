@@ -1,5 +1,10 @@
+# syntax=docker/dockerfile:1.7
 # Convex Gateway Service - Local SQLite backend
-FROM node:20-alpine
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 WORKDIR /app
 
@@ -9,7 +14,7 @@ ENV NPM_CONFIG_AUDIT=false \
 
 # Install required tools
 RUN set -e; \
-    if ! apk add --no-cache --quiet wget curl bash > /tmp/apk-add.log 2>&1; then \
+    if ! apk add --no-cache --quiet wget curl bash procps > /tmp/apk-add.log 2>&1; then \
       cat /tmp/apk-add.log; \
       exit 1; \
     fi; \
@@ -19,14 +24,14 @@ RUN set -e; \
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --omit=dev --no-audit --no-fund --loglevel=error
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev --no-audit --no-fund --loglevel=error
 
 # Copy convex schema and functions
 COPY convex/ ./convex/
 COPY convex.config.ts ./
 COPY tsconfig.json ./
 COPY convex.json ./
-COPY .env.local ./
 COPY startup.sh ./
 COPY nats-subscriber.js ./
 
@@ -36,13 +41,9 @@ RUN chmod +x startup.sh
 # Create data directory for SQLite
 RUN mkdir -p /data
 
-# Expose Convex dev server ports
-# 3000 - HTTP API & Dashboard
-EXPOSE 3000
-
-# Health check - check if port 3000 is responding
+# This container is a schema/function deployer and watcher, not an HTTP proxy.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD wget --quiet --tries=1 --spider http://localhost:3000 || exit 1
+  CMD pgrep -f "convex dev" >/dev/null && wget --quiet --tries=1 -O /dev/null http://convex-backend:3210/version || exit 1
 
 # Start Convex dev server using the startup script
 # This ensures it's configured for local deployment to bypass auth

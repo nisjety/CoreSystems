@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -9,12 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/channels"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/config"
-	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/database"
+	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/delegation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/eventing"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/feed"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/http"
@@ -65,23 +64,27 @@ func main() {
 	if err := publisher.EnsureStream(); err != nil {
 		log.Printf("warning: ensure VELION_APPLICATION stream: %v", err)
 	}
-	runtime := runtimeclient.NewNovuAdapter(runtimeclient.Config{
+	runtime, err := runtimeclient.NewNovuAdapter(runtimeclient.Config{
+		Mode:      cfg.DeliveryMode,
 		SecretKey: cfg.NovuSecretKey,
 		BaseURL:   cfg.NovuBaseURL,
 	})
+	if err != nil {
+		log.Fatalf("configure notification runtime: %v", err)
+	}
 
 	// U5-2 services. Each is independently nil-tolerant in the handlers.
 	feedRepo := feed.NewRepository(db.Pool)
 	feedSvc := feed.NewService(feedRepo)
-
-	prefRepo := preferences.NewRepository(db.Pool)
-	prefSvc := preferences.NewService(prefRepo, runtime)
 
 	channelsRepo := channels.NewRepository(db.Pool)
 	channelsSvc := channels.NewService(channelsRepo)
 
 	subRepo := subscribers.NewRepository(db.Pool)
 	subSvc := subscribers.NewService(subRepo, runtime)
+
+	prefRepo := preferences.NewRepository(db.Pool)
+	prefSvc := preferences.NewService(prefRepo, runtime, subSvc)
 
 	// Service.WithFeed hook: every dispatched notification gets mirrored
 	// into the local feed cache so the /notifications endpoints serve the
@@ -94,6 +97,7 @@ func main() {
 		notification.WithFeedSink(func(ctx context.Context, params notification.FeedSinkParams) {
 			_, err := feedSvc.Create(ctx, feed.CreateParams{
 				ID:                    params.RequestID,
+				OrganizationID:        params.OrganizationID,
 				RecipientID:           params.RecipientID,
 				EventType:             params.Type,
 				Channel:               feed.ChannelInApp, // V0: every dispatch creates an in-app row
@@ -109,16 +113,36 @@ func main() {
 				Provider:              params.Provider,
 				ProviderTransactionID: params.ProviderTransactionID,
 				Source:                params.Source,
+				DeliveryStatus:        params.DeliveryStatus,
+				SubmittedAt:           params.SubmittedAt,
+				DeliveredAt:           params.DeliveredAt,
 			})
 			if err != nil {
 				log.Printf("notification-core: feed sink write failed for %s: %v", params.RequestID, err)
 			}
 		}),
-		notification.WithSubscriberEnsurer(func(ctx context.Context, recipientID string) {
-			if _, err := subSvc.EnsureForRecipient(ctx, recipientID); err != nil {
-				log.Printf("notification-core: ensure subscriber failed for %s: %v", recipientID, err)
+		notification.WithRecipientResolver(notification.RecipientResolveFn(func(
+			ctx context.Context,
+			organizationID string,
+			recipient notification.Recipient,
+		) (*notification.ResolvedRecipient, error) {
+			if recipient.Kind != notification.RecipientKindUser {
+				return nil, notification.ErrRecipientNotAuthorized
 			}
-		}),
+			providerSubscriberID, err := subSvc.ResolveUser(ctx, organizationID, recipient.ID)
+			if errors.Is(err, subscribers.ErrNotFound) {
+				return nil, notification.ErrRecipientNotAuthorized
+			}
+			if err != nil {
+				return nil, err
+			}
+			return &notification.ResolvedRecipient{
+				Kind:                 notification.RecipientKindUser,
+				ID:                   recipient.ID,
+				ProviderSubscriberID: providerSubscriberID,
+			}, nil
+		})),
+		notification.WithPreferenceGate(prefSvc),
 	)
 
 	handler := httpserver.NewHandler(cfg, httpserver.HandlerDeps{
@@ -126,85 +150,21 @@ func main() {
 		Feed:          feedSvc,
 		Preferences:   prefSvc,
 		Channels:      channelsSvc,
-		Subscribers:   subSvc,
+		Recipients:    subSvc,
 	})
-	server := httpserver.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
+	delegationVerifier, err := delegation.NewVerifier(delegation.Config{
+		Audience: "notification-core",
+		Keys:     cfg.DelegationKeys,
+	})
+	if err != nil {
+		log.Fatalf("configure delegation verifier: %v", err)
+	}
+	server := httpserver.NewServer(cfg.HTTPPort, handler, delegationVerifier)
 
 	// ── Shared bus consumers ────────────────────────────────────────────
-	// G14 + U5-2: subscribe to Control Session events from CP session-core
-	// + future auth/billing/org-core consumers go alongside this one.
-	sharedNATSClient := natsClient
-	if cfg.SharedNATSURL != "" && cfg.SharedNATSURL != cfg.NATSURL {
-		sc, err := natsclient.NewClient(natsclient.Config{
-			URL:   cfg.SharedNATSURL,
-			Token: cfg.SharedNATSToken,
-			Name:  cfg.ServiceName + "-shared",
-		})
-		if err != nil {
-			log.Printf("warning: connect shared nats (%s): %v — control-session subscriber will not bind", cfg.SharedNATSURL, err)
-			sharedNATSClient = nil
-		} else {
-			sharedNATSClient = sc
-			defer func() {
-				if drainErr := sc.Conn.Drain(); drainErr != nil {
-					log.Printf("shared nats drain error: %v", drainErr)
-				}
-				sc.Conn.Close()
-			}()
-			log.Printf("connected to shared nats at %s", cfg.SharedNATSURL)
-		}
-	}
-	if sharedNATSClient != nil {
-		if err := ensureSharedConsumerStream(sharedNATSClient.JS); err != nil {
-			log.Printf("shared nats stream setup skipped: %v", err)
-		}
-	}
-
-	var controlSessionSub *consumers.ControlSessionSubscriber
-	if sharedNATSClient != nil {
-		controlSessionSub = consumers.NewControlSessionSubscriber(sharedNATSClient.JS, notificationService)
-		if err := controlSessionSub.Start(context.Background()); err != nil {
-			log.Printf("warning: start control-session subscriber: %v", err)
-		}
-	}
-	defer func() {
-		if controlSessionSub != nil {
-			controlSessionSub.Stop()
-		}
-	}()
-
-	// Identity sync consumer: when auth-core publishes user lifecycle
-	// events on the shared bus, we update the local subscriber row and
-	// fan out the identity to Novu. See consumers/identity_sync.go.
-	var identitySub *consumers.IdentitySyncSubscriber
-	if sharedNATSClient != nil {
-		identitySub = consumers.NewIdentitySyncSubscriber(sharedNATSClient.JS, subSvc)
-		if err := identitySub.Start(context.Background()); err != nil {
-			log.Printf("warning: start identity-sync subscriber: %v", err)
-		}
-	}
-	defer func() {
-		if identitySub != nil {
-			identitySub.Stop()
-		}
-	}()
-
-	// Social publish-job failures (task #26, provider business modules
-	// program): social-core's own JetStream stream already covers this
-	// subject, so this reuses sharedNATSClient rather than needing a new
-	// stream. See consumers/social_publish_failed.go.
-	var socialPublishFailedSub *consumers.SocialPublishFailedSubscriber
-	if sharedNATSClient != nil {
-		socialPublishFailedSub = consumers.NewSocialPublishFailedSubscriber(sharedNATSClient.JS, notificationService)
-		if err := socialPublishFailedSub.Start(context.Background()); err != nil {
-			log.Printf("warning: start social-publish-failed subscriber: %v", err)
-		}
-	}
-	defer func() {
-		if socialPublishFailedSub != nil {
-			socialPublishFailedSub.Stop()
-		}
-	}()
+	// Shared-bus notification consumers remain off until workload-signed,
+	// revisioned authority events and subject ACLs are deployed.
+	log.Printf("notification-core: unsigned shared-bus consumers intentionally disabled")
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -228,53 +188,4 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
-}
-
-func ensureSharedConsumerStream(js nats.JetStreamContext) error {
-	if js == nil {
-		return nil
-	}
-
-	const streamName = "VELION_SHARED_CONSUMERS"
-	requiredSubjects := []string{
-		"auth.user.>",
-		"org.member.>",
-	}
-
-	info, err := js.StreamInfo(streamName)
-	if err != nil {
-		_, err = js.AddStream(&nats.StreamConfig{
-			Name:      streamName,
-			Subjects:  requiredSubjects,
-			Retention: nats.LimitsPolicy,
-			MaxAge:    14 * 24 * time.Hour,
-			MaxMsgs:   100_000,
-			Storage:   nats.FileStorage,
-		})
-		return err
-	}
-
-	subjects := append([]string{}, info.Config.Subjects...)
-	changed := false
-	for _, required := range requiredSubjects {
-		found := false
-		for _, existing := range subjects {
-			if existing == required {
-				found = true
-				break
-			}
-		}
-		if !found {
-			subjects = append(subjects, required)
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-
-	cfg := info.Config
-	cfg.Subjects = subjects
-	_, err = js.UpdateStream(&cfg)
-	return err
 }

@@ -19,8 +19,12 @@
 
 import { v } from "convex/values";
 
-import { httpAction, mutation, query } from "./_generated/server";
-import { api } from "./_generated/api";
+import { httpAction, internalMutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
+import {
+  requireIdentityForExternalUser,
+  requireViewerMembership,
+} from "./authz";
 
 function getServiceKey(): string {
   // Fail closed: no hardcoded default (see ingest.ts). Control-Plane-owned key.
@@ -60,7 +64,7 @@ function jsonErr(message: string, status: number): Response {
  * action. Splits the write from the auth/parsing layer so the mutation
  * stays trivially unit-testable.
  */
-export const upsertControlSessionInternal = mutation({
+export const upsertControlSessionInternal = internalMutation({
   args: {
     externalUserId: v.string(),
     externalOrgId: v.optional(v.string()),
@@ -133,7 +137,7 @@ export async function upsertControlSessionHandler(ctx: any, request: Request) {
     return jsonErr("snapshot required", 400);
   }
 
-  const id = await ctx.runMutation(api.controlSessions.upsertControlSessionInternal, {
+  const id = await ctx.runMutation(internal.controlSessions.upsertControlSessionInternal, {
     externalUserId: payload.external_user_id,
     externalOrgId: payload.external_org_id,
     snapshot: payload.snapshot,
@@ -156,11 +160,15 @@ export const upsertControlSession = httpAction(upsertControlSessionHandler);
 export const byUser = query({
   args: { externalUserId: v.string() },
   handler: async (ctx, { externalUserId }) => {
-    return await ctx.db
+    await requireIdentityForExternalUser(ctx, externalUserId);
+    const snapshot = await ctx.db
       .query("controlSessions")
       .withIndex("by_external_user", (q) => q.eq("externalUserId", externalUserId))
       .order("desc")
       .first();
+    if (!snapshot?.externalOrgId) return null;
+    await requireViewerMembership(ctx, snapshot.externalOrgId);
+    return snapshot;
   },
 });
 
@@ -170,9 +178,11 @@ export const byUser = query({
 export const byUserAndOrg = query({
   args: {
     externalUserId: v.string(),
-    externalOrgId: v.optional(v.string()),
+    externalOrgId: v.string(),
   },
   handler: async (ctx, { externalUserId, externalOrgId }) => {
+    await requireIdentityForExternalUser(ctx, externalUserId);
+    await requireViewerMembership(ctx, externalOrgId);
     return await ctx.db
       .query("controlSessions")
       .withIndex("by_external_user_and_org", (q) =>

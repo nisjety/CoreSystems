@@ -9,10 +9,15 @@
  */
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import {
+  requireEditorMembershipByOrgId,
+  requireViewerMembershipByOrgId,
+} from "./authz";
 
 export const listByOrg = query({
   args: { orgId: v.id("organizations") },
   handler: async (ctx, { orgId }) => {
+    await requireViewerMembershipByOrgId(ctx, orgId);
     return await ctx.db
       .query("knowledgeQnA")
       .withIndex("by_org", (q) => q.eq("orgId", orgId))
@@ -24,6 +29,7 @@ export const listByOrg = query({
 export const listPublishedByOrg = query({
   args: { orgId: v.id("organizations") },
   handler: async (ctx, { orgId }) => {
+    await requireViewerMembershipByOrgId(ctx, orgId);
     return await ctx.db
       .query("knowledgeQnA")
       .withIndex("by_org_and_status", (q) =>
@@ -44,10 +50,12 @@ export const create = mutation({
     ),
   },
   handler: async (ctx, args) => {
+    const viewer = await requireEditorMembershipByOrgId(ctx, args.orgId);
+    if (args.createdBy !== viewer.membership._id) throw new Error("Unauthorized");
     const now = Date.now();
     const entryId = await ctx.db.insert("knowledgeQnA", {
       orgId: args.orgId,
-      createdBy: args.createdBy,
+      createdBy: viewer.membership._id,
       question: args.question,
       answer: args.answer,
       status: args.status ?? "draft",
@@ -74,6 +82,7 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const existing = await ctx.db.get(args.entryId);
     if (!existing) throw new Error("Q&A entry not found");
+    await requireEditorMembershipByOrgId(ctx, existing.orgId);
     if (existing.orgId !== args.orgId) {
       throw new Error("Q&A entry belongs to a different organization");
     }
@@ -96,6 +105,7 @@ export const remove = mutation({
   handler: async (ctx, args) => {
     const existing = await ctx.db.get(args.entryId);
     if (!existing) return null;
+    await requireEditorMembershipByOrgId(ctx, existing.orgId);
     if (existing.orgId !== args.orgId) {
       throw new Error("Q&A entry belongs to a different organization");
     }
@@ -114,6 +124,7 @@ export const incrementCitation = mutation({
   handler: async (ctx, args) => {
     const existing = await ctx.db.get(args.entryId);
     if (!existing) return null;
+    await requireViewerMembershipByOrgId(ctx, existing.orgId);
     const patch: Record<string, unknown> = {
       citationCount: (existing.citationCount ?? 0) + 1,
       updatedAt: Date.now(),

@@ -1,14 +1,11 @@
 # syntax=docker/dockerfile:1.7
-# rust:1 = latest stable 1.x (matches the other planes' base + satisfies deps
-# like icu_*/idna_adapter that now require rustc >= 1.86; the old 1.85 pin
-# broke `cargo build --release` here with "rustc 1.85.1 is not supported").
+# Rust 1.89 matches the gateway toolchain and satisfies transitive dependencies
+# that require rustc >= 1.86 while remaining reproducible across rebuilds.
 
 # ---- chef: pin cargo-chef once on the shared toolchain image ----------------
-FROM rust:1-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.89-bookworm@sha256:0a0b3f65242ff7f1d5c3ea5c3ae10f4a1897204fedb8a4602651014f4302a129 AS chef
 WORKDIR /src
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-chef --locked
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 # ---- planner: compute the dependency recipe ---------------------------------
 FROM chef AS planner
@@ -33,7 +30,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release \
     && cp target/release/conversation-ingest-rs /usr/local/bin/conversation-ingest-rs
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 WORKDIR /app
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \

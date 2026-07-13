@@ -8,6 +8,7 @@
 
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { requireEditorMembership, requireViewerMembership } from "./authz";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Queries
@@ -19,6 +20,7 @@ export const listByOrg = query({
     includeArchived: v.optional(v.boolean()),
   },
   handler: async (ctx, { externalOrgId, includeArchived }) => {
+    await requireViewerMembership(ctx, externalOrgId);
     const archived = includeArchived === true;
     if (archived) {
       return await ctx.db
@@ -40,7 +42,10 @@ export const listByOrg = query({
 export const getById = query({
   args: { projectId: v.id("projects") },
   handler: async (ctx, { projectId }) => {
-    return await ctx.db.get(projectId);
+    const project = await ctx.db.get(projectId);
+    if (!project) return null;
+    await requireViewerMembership(ctx, project.externalOrgId);
+    return project;
   },
 });
 
@@ -57,6 +62,8 @@ export const create = mutation({
     color: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const viewer = await requireEditorMembership(ctx, args.externalOrgId);
+    if (args.createdBy !== viewer.externalAuthId) throw new Error("Unauthorized");
     const title = args.title.trim();
     if (title.length === 0) {
       throw new Error("title must not be empty");
@@ -66,7 +73,7 @@ export const create = mutation({
       externalOrgId: args.externalOrgId,
       title,
       description: args.description?.trim() || undefined,
-      createdBy: args.createdBy,
+      createdBy: viewer.externalAuthId,
       color: args.color,
       archived: false,
       createdAt: now,
@@ -89,6 +96,7 @@ export const update = mutation({
     if (!existing) {
       throw new Error("project not found");
     }
+    await requireEditorMembership(ctx, existing.externalOrgId);
     const update: Record<string, unknown> = { updatedAt: Date.now() };
     if (patch.title !== undefined) {
       const t = patch.title.trim();
@@ -108,6 +116,9 @@ export const update = mutation({
 export const remove = mutation({
   args: { projectId: v.id("projects") },
   handler: async (ctx, { projectId }) => {
+    const existing = await ctx.db.get(projectId);
+    if (!existing) return { ok: true };
+    await requireEditorMembership(ctx, existing.externalOrgId);
     await ctx.db.delete(projectId);
     return { ok: true };
   },

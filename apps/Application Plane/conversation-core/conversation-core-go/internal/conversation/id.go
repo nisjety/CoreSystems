@@ -3,6 +3,7 @@ package conversation
 import (
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -15,6 +16,13 @@ func newID(prefix string) string {
 		return prefix + "_" + hex.EncodeToString(bytes[:])
 	}
 	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+}
+
+// stableOutboundIntentID lets an exact idempotency-key replay address the same
+// durable authorization row without storing message content in the identifier.
+func OutboundIntentID(orgID, idempotencyKey string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(orgID) + ":" + strings.TrimSpace(idempotencyKey)))
+	return "outintent_" + hex.EncodeToString(digest[:12])
 }
 
 func stableInboxID(orgID, channel string) string {

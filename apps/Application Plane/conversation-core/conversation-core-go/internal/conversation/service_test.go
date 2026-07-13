@@ -1,49 +1,65 @@
 package conversation
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/attestation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 )
 
 type fakeRepository struct {
-	inboxes         []Inbox
-	conversations   []ConversationSummary
-	details         map[string]*ConversationDetail
-	stored          map[string]*StoredEventResult
-	lastMessage     AddMessageInput
-	addMessageCalls int
-	threadRefs      map[string]*ChannelThreadRef
-	threadRefErr    error
-	statusUpdate    StatusUpdate
-	tickets         map[string]*Ticket
-	macros          map[string]*TicketMacro
-	checklists      map[string]*TicketChecklist
-	rules           []TicketAutomationRule
-	classifications []TicketClassificationInput
-	aiActions       []AIAction
-	lastReview      AIActionReview
-	reviewCalls     int
-	reviewErr       error
+	mu               sync.Mutex
+	inboxes          []Inbox
+	conversations    []ConversationSummary
+	details          map[string]*ConversationDetail
+	stored           map[string]*StoredEventResult
+	lastMessage      AddMessageInput
+	addMessageCalls  int
+	addMessageErr    error
+	threadRefs       map[string]*ChannelThreadRef
+	threadRefErr     error
+	statusUpdate     StatusUpdate
+	tickets          map[string]*Ticket
+	macros           map[string]*TicketMacro
+	checklists       map[string]*TicketChecklist
+	rules            []TicketAutomationRule
+	classifications  []TicketClassificationInput
+	aiActions        []AIAction
+	lastReview       AIActionReview
+	reviewCalls      int
+	reviewErr        error
+	outboundIntents  map[string]*OutboundIntent
+	outboundMessages map[string]*Message
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
-		details:    make(map[string]*ConversationDetail),
-		stored:     make(map[string]*StoredEventResult),
-		threadRefs: make(map[string]*ChannelThreadRef),
-		tickets:    make(map[string]*Ticket),
-		macros:     make(map[string]*TicketMacro),
-		checklists: make(map[string]*TicketChecklist),
+		details:          make(map[string]*ConversationDetail),
+		stored:           make(map[string]*StoredEventResult),
+		threadRefs:       make(map[string]*ChannelThreadRef),
+		tickets:          make(map[string]*Ticket),
+		macros:           make(map[string]*TicketMacro),
+		checklists:       make(map[string]*TicketChecklist),
+		outboundIntents:  make(map[string]*OutboundIntent),
+		outboundMessages: make(map[string]*Message),
 	}
 }
 
 // fakeSender records outbound send attempts so tests can assert whether a reply
 // was actually delivered and with what request shape.
 type fakeSender struct {
+	mu      sync.Mutex
 	calls   int
 	lastReq integration.SendRequest
 	result  *integration.SendResult
@@ -51,6 +67,8 @@ type fakeSender struct {
 }
 
 func (f *fakeSender) Send(_ context.Context, req integration.SendRequest) (*integration.SendResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	f.lastReq = req
 	if f.err != nil {
@@ -60,6 +78,12 @@ func (f *fakeSender) Send(_ context.Context, req integration.SendRequest) (*inte
 		return f.result, nil
 	}
 	return &integration.SendResult{}, nil
+}
+
+func (f *fakeSender) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func (f *fakeRepository) ListInboxes(_ context.Context, _ string) ([]Inbox, error) {
@@ -104,6 +128,9 @@ func (f *fakeRepository) StoreInboundEvent(_ context.Context, event InboundEvent
 func (f *fakeRepository) AddMessage(_ context.Context, input AddMessageInput) (*Message, error) {
 	f.addMessageCalls++
 	f.lastMessage = input
+	if f.addMessageErr != nil {
+		return nil, f.addMessageErr
+	}
 	return &Message{
 		ID:                "msg_reply",
 		OrgID:             input.OrgID,
@@ -116,6 +143,87 @@ func (f *fakeRepository) AddMessage(_ context.Context, input AddMessageInput) (*
 		OccurredAt:        input.OccurredAt,
 		CreatedAt:         input.OccurredAt,
 	}, nil
+}
+
+func (f *fakeRepository) ClaimOutboundIntent(_ context.Context, input OutboundIntentClaimInput) (*OutboundIntentClaim, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := input.OrgID + ":" + input.IdempotencyKey
+	if existing := f.outboundIntents[key]; existing != nil {
+		if !outboundIntentBindingMatches(*existing, input) {
+			return nil, ErrConflict
+		}
+		if existing.Status == OutboundIntentRetryable {
+			existing.Status = OutboundIntentSending
+			return &OutboundIntentClaim{Intent: *existing, Claimed: true}, nil
+		}
+		return &OutboundIntentClaim{Intent: *existing, Claimed: false}, nil
+	}
+	intent := &OutboundIntent{
+		ID: input.IntentID, OrgID: input.OrgID, IdempotencyKey: input.IdempotencyKey,
+		ConversationID: input.ConversationID, AIActionID: input.AIActionID,
+		RequestFingerprint: input.RequestFingerprint, Status: OutboundIntentSending,
+		Provider: input.Provider, ConnectionID: input.ConnectionID, ProviderThreadID: input.ProviderThreadID,
+		AuthorizationKind: input.AuthorizationKind, ActorUserID: input.ActorUserID,
+		ApprovalID: input.ApprovalID, ActionID: input.ActionID, Operation: input.Operation, PayloadSHA256: input.PayloadSHA256,
+	}
+	f.outboundIntents[key] = intent
+	return &OutboundIntentClaim{Intent: *intent, Claimed: true}, nil
+}
+
+func (f *fakeRepository) FinalizeOutboundIntent(_ context.Context, input OutboundIntentFinalizeInput) (*Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addMessageCalls++
+	if f.addMessageErr != nil {
+		f.lastMessage = input.Message
+		return nil, f.addMessageErr
+	}
+	key := input.OrgID + ":" + input.IdempotencyKey
+	intent := f.outboundIntents[key]
+	if intent == nil || intent.Status != OutboundIntentSending || intent.RequestFingerprint != input.RequestFingerprint {
+		return nil, ErrConflict
+	}
+	f.lastMessage = input.Message
+	f.lastMessage.Provider = intent.Provider
+	f.lastMessage.ProviderMessageID = input.ProviderMessageID
+	message := &Message{
+		ID: "msg_reply", OrgID: input.Message.OrgID, ConversationID: input.Message.ConversationID,
+		Direction: input.Message.Direction, BodyText: input.Message.BodyText,
+		Provider: intent.Provider, ProviderMessageID: input.ProviderMessageID,
+		OccurredAt: input.Message.OccurredAt, CreatedAt: input.Message.OccurredAt,
+	}
+	intent.Status = OutboundIntentSubmitted
+	intent.ProviderMessageID = input.ProviderMessageID
+	intent.MessageID = message.ID
+	f.outboundMessages[input.OrgID+":"+message.ID] = message
+	return message, nil
+}
+
+func (f *fakeRepository) MarkOutboundIntentOutcome(_ context.Context, input OutboundIntentOutcomeInput) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	intent := f.outboundIntents[input.OrgID+":"+input.IdempotencyKey]
+	if intent == nil {
+		return ErrNotFound
+	}
+	if intent.Status != OutboundIntentSending && intent.Status != input.Status {
+		return ErrConflict
+	}
+	intent.Status = input.Status
+	intent.ErrorCode = input.ErrorCode
+	return nil
+}
+
+func (f *fakeRepository) GetMessage(_ context.Context, orgID, messageID string) (*Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	message := f.outboundMessages[orgID+":"+messageID]
+	if message == nil {
+		return nil, ErrNotFound
+	}
+	copy := *message
+	return &copy, nil
 }
 
 func (f *fakeRepository) GetChannelThreadRefByConversation(_ context.Context, _ string, conversationID string) (*ChannelThreadRef, error) {
@@ -487,17 +595,37 @@ func TestIngestEventRejectsMissingBody(t *testing.T) {
 	}
 }
 
+func TestIngestEventRejectsOutboundDirection(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	_, err := service.IngestEvent(t.Context(), InboundEvent{
+		OrgID:          "org_1",
+		IDempotencyKey: "email-outbound-attempt-0001",
+		Direction:      DirectionOutbound,
+		Subject:        "Forged sent state",
+		From:           ParticipantInput{Email: "attacker@example.com"},
+		BodyText:       "This was never sent by a provider.",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("IngestEvent() error = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestAddMessageDefaultsOutboundAndPublishes(t *testing.T) {
 	repository := newFakeRepository()
+	repository.threadRefs["conv_1"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_1", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone:recipient",
+	}
 	publisher := &fakePublisher{}
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "provider-message-1"}}
 	now := time.Date(2026, time.June, 3, 12, 10, 0, 0, time.UTC)
-	service := NewService(repository, publisher, WithNow(func() time.Time { return now }))
+	service := NewService(repository, publisher, WithSender(sender), WithNow(func() time.Time { return now }))
 
 	message, err := service.AddMessage(context.Background(), AddMessageInput{
 		OrgID:          "org_1",
 		ConversationID: "conv_1",
 		ActorUserID:    "user_1",
 		BodyText:       "Reply",
+		IdempotencyKey: "human-reply-defaults-0001",
 	})
 	if err != nil {
 		t.Fatalf("AddMessage() error = %v", err)
@@ -531,6 +659,7 @@ func TestAddMessageDeliversReplyToChannelBackedConversation(t *testing.T) {
 		ConversationID: "conv_wa",
 		ActorUserID:    "user_1",
 		BodyText:       "Hei!",
+		IdempotencyKey: "human-reply-whatsapp-0001",
 	})
 	if err != nil {
 		t.Fatalf("AddMessage() error = %v", err)
@@ -544,6 +673,12 @@ func TestAddMessageDeliversReplyToChannelBackedConversation(t *testing.T) {
 	}
 	if sender.lastReq.BodyText != "Hei!" {
 		t.Fatalf("send body_text = %q, want the reply text", sender.lastReq.BodyText)
+	}
+	if sender.lastReq.AuthorizationKind != "human_intent" || sender.lastReq.ApprovalID != "" || sender.lastReq.AuthorizationID == "" || sender.lastReq.ActionID != sender.lastReq.AuthorizationID || sender.lastReq.PayloadSHA256 == "" {
+		t.Fatalf("human authorization binding = %#v", sender.lastReq)
+	}
+	if sender.lastReq.IdempotencyKey != "conversation:human-reply-whatsapp-0001" {
+		t.Fatalf("idempotency = %q, want durable human reply contract", sender.lastReq.IdempotencyKey)
 	}
 	// ...and the stored message must record the real delivery.
 	if repository.addMessageCalls != 1 {
@@ -578,6 +713,7 @@ func TestAddMessageSurfacesSendFailureWithoutStoring(t *testing.T) {
 		ConversationID: "conv_wa",
 		ActorUserID:    "user_1",
 		BodyText:       "Takk!",
+		IdempotencyKey: "human-reply-failure-0001",
 	})
 	if !errors.Is(err, ErrSendFailed) {
 		t.Fatalf("error = %v, want ErrSendFailed (a failed send must surface, not a false success)", err)
@@ -592,6 +728,254 @@ func TestAddMessageSurfacesSendFailureWithoutStoring(t *testing.T) {
 	if len(publisher.subjects) != 0 {
 		t.Fatalf("subjects = %#v, want none (nothing sent, nothing published)", publisher.subjects)
 	}
+}
+
+func TestAddMessageProviderAcceptedThenFinalizeFailsRetryDoesNotResend(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone-1:recipient-1",
+	}
+	repository.addMessageErr = errors.New("database unavailable after provider acceptance")
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "wamid.accepted"}}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_wa", ActorUserID: "user_1", BodyText: "One durable reply", IdempotencyKey: "human-reply-finalize-0001",
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := service.AddMessage(t.Context(), input); !errors.Is(err, ErrDeliveryUnknown) {
+			t.Fatalf("attempt %d error = %v, want ErrDeliveryUnknown", attempt, err)
+		}
+	}
+	if got := sender.count(); got != 1 {
+		t.Fatalf("provider sends = %d, want 1 after ambiguous local finalization", got)
+	}
+}
+
+func TestAddMessageSuccessfulReplayReturnsSameMessageWithoutResend(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone-1:recipient-1",
+	}
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "wamid.once"}}
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher, WithSender(sender))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_wa", ActorUserID: "user_1", BodyText: "One durable reply", IdempotencyKey: "human-reply-replay-0001",
+	}
+
+	first, err := service.AddMessage(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.AddMessage(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.ProviderMessageID != second.ProviderMessageID {
+		t.Fatalf("replay = %#v, want original %#v", second, first)
+	}
+	if got := sender.count(); got != 1 {
+		t.Fatalf("provider sends = %d, want 1", got)
+	}
+	if len(publisher.subjects) != 1 {
+		t.Fatalf("message.sent publications = %d, want 1", len(publisher.subjects))
+	}
+}
+
+func TestAddMessageSameKeyDifferentPayloadConflictsWithoutResend(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone-1:recipient-1",
+	}
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "wamid.once"}}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_wa", ActorUserID: "user_1", BodyText: "Original reply", IdempotencyKey: "human-reply-conflict-0001",
+	}
+	if _, err := service.AddMessage(t.Context(), input); err != nil {
+		t.Fatal(err)
+	}
+	input.BodyText = "Changed reply"
+	if _, err := service.AddMessage(t.Context(), input); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed replay error = %v, want ErrConflict", err)
+	}
+	if got := sender.count(); got != 1 {
+		t.Fatalf("provider sends = %d, want 1", got)
+	}
+}
+
+func TestAddMessageConcurrentSameKeySendsOnce(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone-1:recipient-1",
+	}
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "wamid.once"}}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_wa", ActorUserID: "user_1", BodyText: "Concurrent reply", IdempotencyKey: "human-reply-concurrent-0001",
+	}
+
+	const attempts = 16
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for range attempts {
+		go func() {
+			defer wg.Done()
+			_, _ = service.AddMessage(t.Context(), input)
+		}()
+	}
+	wg.Wait()
+	if got := sender.count(); got != 1 {
+		t.Fatalf("provider sends = %d, want exactly 1", got)
+	}
+	if _, err := service.AddMessage(t.Context(), input); err != nil {
+		t.Fatalf("settled replay error = %v", err)
+	}
+}
+
+func TestAddMessageTransientProviderOutcomeBecomesDurableUnknown(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone-1:recipient-1",
+	}
+	sender := &fakeSender{err: &integration.SendError{Terminal: false, Code: "transport", Message: "response lost"}}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_wa", ActorUserID: "user_1", BodyText: "Ambiguous reply", IdempotencyKey: "human-reply-unknown-0001",
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := service.AddMessage(t.Context(), input); !errors.Is(err, ErrDeliveryUnknown) {
+			t.Fatalf("attempt %d error = %v, want ErrDeliveryUnknown", attempt, err)
+		}
+	}
+	if got := sender.count(); got != 1 {
+		t.Fatalf("provider sends = %d, want 1 while outcome is unknown", got)
+	}
+}
+
+func TestAddMessagePreProviderFailureReclaimsSameIntentSafely(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_1", ProviderThreadID: "phone-1:recipient-1",
+	}
+	sender := &fakeSender{err: &integration.SendError{SafeToRetry: true, Code: "auth_token_unavailable", Message: "pre-provider"}}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_wa", ActorUserID: "user_1", BodyText: "Safe retry", IdempotencyKey: "human-reply-safe-retry-0001",
+	}
+	if _, err := service.AddMessage(t.Context(), input); !errors.Is(err, ErrSendFailed) {
+		t.Fatalf("first error = %v, want visible ErrSendFailed", err)
+	}
+	intent := repository.outboundIntents["org_1:"+input.IdempotencyKey]
+	if intent == nil || intent.Status != OutboundIntentRetryable {
+		t.Fatalf("intent = %#v, want retryable", intent)
+	}
+	sender.mu.Lock()
+	sender.err = nil
+	sender.result = &integration.SendResult{ProviderMessageID: "wamid.retry"}
+	sender.mu.Unlock()
+	if _, err := service.AddMessage(t.Context(), input); err != nil {
+		t.Fatalf("same-key retry = %v", err)
+	}
+	if sender.count() != 2 {
+		t.Fatalf("send calls = %d, want pre-provider failure plus one safe retry", sender.count())
+	}
+}
+
+func TestAddMessageRealHTTPPreProviderSentinelResignsFreshJTIAndSucceeds(t *testing.T) {
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"token": "tenant-token", "expiresAt": "2099-01-01T00:00:00Z",
+		})
+	}))
+	defer authServer.Close()
+	var attestations []string
+	actionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			WriteAttestation string `json:"writeAttestation"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		attestations = append(attestations, body.WriteAttestation)
+		if len(attestations) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"action_pre_provider_retryable"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"result":{"ts":"42.1"}}}}`))
+	}))
+	defer actionServer.Close()
+	privateKey := ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))
+	signer, err := attestation.NewSigner(attestation.Config{
+		PrivateKey: privateKey, KeyID: "test-key", Issuer: attestation.IssuerConversationCore,
+		Audience: attestation.AudienceIntegrationCore, Presenter: attestation.PresenterConversationCore,
+		Now:    func() time.Time { return time.Date(2026, time.July, 13, 18, 0, 0, 0, time.UTC) },
+		Random: bytes.NewReader(append(bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 16)...)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := integration.NewClient(actionServer.URL, "internal",
+		integration.WithServicePrincipal(authServer.URL, "conversation-core", "credential"),
+		integration.WithWriteAttestor(signer),
+	)
+	repository := newFakeRepository()
+	repository.threadRefs["conv_slack"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_slack", Provider: "slack", ConnectionID: "conn_1", ProviderThreadID: "C123",
+	}
+	service := NewService(repository, &fakePublisher{}, WithSender(client))
+	input := AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_slack", ActorUserID: "user_1", BodyText: "Safe retry", IdempotencyKey: "human-reply-http-retry-0001",
+	}
+	if _, err := service.AddMessage(t.Context(), input); !errors.Is(err, ErrSendFailed) {
+		t.Fatalf("first error = %v", err)
+	}
+	intent := repository.outboundIntents["org_1:"+input.IdempotencyKey]
+	if intent == nil || intent.Status != OutboundIntentRetryable {
+		t.Fatalf("first intent = %#v", intent)
+	}
+	if _, err := service.AddMessage(t.Context(), input); err != nil {
+		t.Fatalf("same-intent retry = %v", err)
+	}
+	if len(attestations) != 2 || attestations[0] == attestations[1] {
+		t.Fatalf("attestations = %#v, want two fresh proofs", attestations)
+	}
+	firstClaims := decodeTestAttestationClaims(t, attestations[0])
+	secondClaims := decodeTestAttestationClaims(t, attestations[1])
+	wantAuthorizationID := OutboundIntentID(input.OrgID, input.IdempotencyKey)
+	if firstClaims.AuthorizationID != wantAuthorizationID || secondClaims.AuthorizationID != wantAuthorizationID || firstClaims.PayloadSHA256 != secondClaims.PayloadSHA256 {
+		t.Fatalf("claim bindings = %#v / %#v", firstClaims, secondClaims)
+	}
+	if firstClaims.JWTID == secondClaims.JWTID {
+		t.Fatal("safe retry reused the attestation jti")
+	}
+	for _, jti := range []string{firstClaims.JWTID, secondClaims.JWTID} {
+		decoded, err := base64.RawURLEncoding.DecodeString(jti)
+		if err != nil || len(decoded) != 16 {
+			t.Fatalf("jti %q = %d bytes, %v", jti, len(decoded), err)
+		}
+	}
+}
+
+func decodeTestAttestationClaims(t *testing.T, compact string) attestation.Claims {
+	t.Helper()
+	parts := strings.Split(compact, ".")
+	if len(parts) != 3 {
+		t.Fatalf("compact JWS parts = %d", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims attestation.Claims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatal(err)
+	}
+	return claims
 }
 
 func TestAddMessageInternalNoteDoesNotSend(t *testing.T) {
@@ -619,8 +1003,30 @@ func TestAddMessageInternalNoteDoesNotSend(t *testing.T) {
 	}
 }
 
-func TestAddMessageWithoutChannelRefStoresWithoutSending(t *testing.T) {
-	repository := newFakeRepository() // no thread ref => store-only (e.g. unbound/email)
+func TestAddMessageExternalReplyRequiresIdempotencyKeyBeforeSend(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_wa"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_wa", Provider: "whatsapp", ConnectionID: "conn_9", ProviderThreadID: "b:r",
+	}
+	sender := &fakeSender{}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+
+	_, err := service.AddMessage(t.Context(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_wa",
+		ActorUserID:    "user_1",
+		BodyText:       "Reply",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("AddMessage() error = %v, want ErrInvalidInput", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender.calls = %d, want 0 before idempotency validation", sender.calls)
+	}
+}
+
+func TestAddMessageWithoutChannelRefFailsWithoutStoring(t *testing.T) {
+	repository := newFakeRepository()
 	sender := &fakeSender{}
 	service := NewService(repository, &fakePublisher{}, WithSender(sender))
 
@@ -629,18 +1035,19 @@ func TestAddMessageWithoutChannelRefStoresWithoutSending(t *testing.T) {
 		ConversationID: "conv_email",
 		ActorUserID:    "user_1",
 		BodyText:       "Reply",
-	}); err != nil {
-		t.Fatalf("AddMessage() error = %v", err)
+		IdempotencyKey: "human-reply-no-ref-0001",
+	}); !errors.Is(err, ErrDeliveryUnavailable) {
+		t.Fatalf("AddMessage() error = %v, want ErrDeliveryUnavailable", err)
 	}
 	if sender.calls != 0 {
 		t.Fatalf("sender.calls = %d, want 0 (no channel ref => store only)", sender.calls)
 	}
-	if repository.addMessageCalls != 1 {
-		t.Fatalf("repository.AddMessage calls = %d, want 1", repository.addMessageCalls)
+	if repository.addMessageCalls != 0 {
+		t.Fatalf("repository.AddMessage calls = %d, want 0", repository.addMessageCalls)
 	}
 }
 
-func TestAddMessageUnsupportedProviderStoresWithoutSending(t *testing.T) {
+func TestAddMessageUnsupportedProviderFailsWithoutStoring(t *testing.T) {
 	repository := newFakeRepository()
 	repository.threadRefs["conv_x"] = &ChannelThreadRef{
 		OrgID: "org_1", ConversationID: "conv_x", Provider: "discord", ConnectionID: "c", ProviderThreadID: "t",
@@ -653,14 +1060,33 @@ func TestAddMessageUnsupportedProviderStoresWithoutSending(t *testing.T) {
 		ConversationID: "conv_x",
 		ActorUserID:    "user_1",
 		BodyText:       "Reply",
-	}); err != nil {
-		t.Fatalf("AddMessage() error = %v", err)
+		IdempotencyKey: "human-reply-unsupported-0001",
+	}); !errors.Is(err, ErrDeliveryUnavailable) {
+		t.Fatalf("AddMessage() error = %v, want ErrDeliveryUnavailable", err)
 	}
 	if sender.calls != 0 {
 		t.Fatalf("sender.calls = %d, want 0 (unsupported provider => store only, no false error)", sender.calls)
 	}
-	if repository.addMessageCalls != 1 {
-		t.Fatalf("repository.AddMessage calls = %d, want 1", repository.addMessageCalls)
+	if repository.addMessageCalls != 0 {
+		t.Fatalf("repository.AddMessage calls = %d, want 0", repository.addMessageCalls)
+	}
+}
+
+func TestAddMessageExternalMissingSenderFailsWithoutStoring(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+
+	if _, err := service.AddMessage(context.Background(), AddMessageInput{
+		OrgID:          "org_1",
+		ConversationID: "conv_external",
+		ActorUserID:    "user_1",
+		BodyText:       "Reply",
+		IdempotencyKey: "human-reply-no-sender-0001",
+	}); !errors.Is(err, ErrDeliveryUnavailable) {
+		t.Fatalf("AddMessage() error = %v, want ErrDeliveryUnavailable", err)
+	}
+	if repository.addMessageCalls != 0 {
+		t.Fatalf("repository.AddMessage calls = %d, want 0", repository.addMessageCalls)
 	}
 }
 
@@ -936,6 +1362,26 @@ func TestReviewAIActionPropagatesNotFoundWithoutPublishing(t *testing.T) {
 	}
 	if len(publisher.subjects) != 0 {
 		t.Fatalf("subjects = %#v, want none (no reviewed event for a non-existent action)", publisher.subjects)
+	}
+}
+
+func TestReviewAIActionPropagatesConflictWithoutPublishing(t *testing.T) {
+	repository := newFakeRepository()
+	repository.reviewErr = ErrConflict
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher)
+
+	err := service.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:      "org_1",
+		AIActionID: "aiact_1",
+		ReviewerID: "user_1",
+		Decision:   "approved",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("error = %v, want ErrConflict", err)
+	}
+	if len(publisher.subjects) != 0 {
+		t.Fatalf("subjects = %#v, want none (no reviewed event for a terminal action)", publisher.subjects)
 	}
 }
 
