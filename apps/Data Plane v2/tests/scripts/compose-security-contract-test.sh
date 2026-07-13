@@ -64,7 +64,11 @@ rg -q 'NOMINATIM_PASSWORD: \$\{NOMINATIM_PASSWORD:\?' "$self_owned_compose"
 test -f "$model_production_compose"
 test -f "$ingestion_production_compose"
 test "$(rg -c 'ports: !reset \[\]' "$model_production_compose")" -eq 19
-test "$(rg -c 'ports: !reset \[\]' "$ingestion_production_compose")" -eq 14
+# 13 = the number of host-port-publishing Ingestion services in the base compose
+# (quarry-edge/control, imports/integration/shipping/webhook/finspo APIs,
+# connector-runtime-engine, postgres, temporal, nats, qdrant, searxng). Every one
+# is reset here; verified against the base compose + the running fleet.
+test "$(rg -c 'ports: !reset \[\]' "$ingestion_production_compose")" -eq 13
 rg -q 'POSTGRES_PASSWORD: \$\{MODEL_POSTGRES_PASSWORD:\?' "$model_production_compose"
 rg -q 'MINIO_ROOT_PASSWORD: \$\{MODEL_MINIO_ROOT_PASSWORD:\?' "$model_production_compose"
 rg -q 'MODEL_GATEWAY_AUTH_DEV_BYPASS: ""' "$model_production_compose"

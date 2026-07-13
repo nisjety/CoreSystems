@@ -1,8 +1,8 @@
 name: control-plane
 
 x-build-metadata: &build-metadata
-  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
-  BUILD_DATE: ${BUILD_DATE:-unknown}
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
 
 x-core-security: &core-security
   read_only: true

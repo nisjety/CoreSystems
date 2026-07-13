@@ -1,8 +1,8 @@
 name: ${DATA_PLANE_COMPOSE_PROJECT:-data-plane-v2}
 
 x-build-metadata: &build-metadata
-  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
-  BUILD_DATE: ${BUILD_DATE:-unknown}
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
 
 x-hardened-runtime: &hardened-runtime
   security_opt:

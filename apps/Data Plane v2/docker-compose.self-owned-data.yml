@@ -50,9 +50,9 @@ services:
     environment:
       YENTE_INDEX_URL: ${YENTE_INDEX_URL:-http://opensanctions-elasticsearch:9200}
       YENTE_AUTO_REINDEX: ${YENTE_AUTO_REINDEX:-false}
-      # Required when this profile is selected; left empty here so the unrelated
-      # self-owned-geo profile can render independently.
-      YENTE_UPDATE_TOKEN: ${YENTE_UPDATE_TOKEN:-}
+      # Required (fail-fast) when the self-owned-risk profile is selected — no
+      # empty default, so an unauthenticated OpenSanctions updater can't start.
+      YENTE_UPDATE_TOKEN: ${YENTE_UPDATE_TOKEN:?set YENTE_UPDATE_TOKEN when selecting the self-owned-risk profile}
     expose:
       - "8000"
     networks:
@@ -83,9 +83,9 @@ services:
       PBF_URL: ${NOMINATIM_PBF_URL:-https://download.geofabrik.de/europe/monaco-latest.osm.pbf}
       REPLICATION_URL: ${NOMINATIM_REPLICATION_URL:-}
       IMPORT_WIKIPEDIA: ${NOMINATIM_IMPORT_WIKIPEDIA:-false}
-      # Required when this profile is selected; the image fails startup if it
-      # is omitted, without blocking self-owned-risk Compose interpolation.
-      NOMINATIM_PASSWORD: ${NOMINATIM_PASSWORD:-}
+      # Required (fail-fast) when the self-owned-geo profile is selected — no
+      # empty default, so Nominatim can't start with a blank DB password.
+      NOMINATIM_PASSWORD: ${NOMINATIM_PASSWORD:?set NOMINATIM_PASSWORD when selecting the self-owned-geo profile}
     expose:
       - "8080"
     volumes:
