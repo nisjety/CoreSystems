@@ -37,6 +37,22 @@ func (s *Server) health(c *gin.Context) {
 	})
 }
 
+func (s *Server) deactivateOrganization(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("orgId"))
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if orgID == "" || c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "orgId and request body are required"})
+		return
+	}
+	if err := s.billingCore.DeactivateOrganization(c.Request.Context(), orgID, req.Reason); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to deactivate organization billing"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (s *Server) getAccount(c *gin.Context) {
 	orgID := c.Param("orgId")
 	account, err := s.billingCore.GetAccount(c.Request.Context(), orgID)

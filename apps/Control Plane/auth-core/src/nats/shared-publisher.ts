@@ -19,7 +19,9 @@ export class SharedPublisher {
   /**
    * Connect is a no-op since SharedNatsService initializes itself via OnModuleInit
    */
-  async connect(sharedURL: string, token: string): Promise<void> {
+  connect(sharedURL: string, token: string): void {
+    void sharedURL;
+    void token;
     if (this.sharedNats.isConnected()) {
       this.logger.log('✅ Shared NATS (connected via SharedNatsService)');
     } else {
@@ -69,20 +71,20 @@ export class SharedPublisher {
     userId: string,
     email: string,
     provider: string,
-    metadata?: Record<string, any>,
+    metadata?: Record<string, unknown>,
   ): Promise<void> {
     await this.sharedNats.publish('aqencia.controlplane.user.oauth_callback', {
       user_id: userId,
       email,
       provider,
-      metadata: metadata || {},
+      metadata: metadata ?? {},
     });
   }
 
   /**
    * Close is a no-op since SharedNatsService manages its own lifecycle
    */
-  async close(): Promise<void> {
+  close(): void {
     this.logger.log(
       '🔌 SharedPublisher close (no-op, SharedNatsService handles cleanup)',
     );

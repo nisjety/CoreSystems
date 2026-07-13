@@ -24,7 +24,8 @@ type Config struct {
 
 // UserCoreConfig — upstream user-core for the Control Session aggregator (G10).
 type UserCoreConfig struct {
-	URL string
+	URL          string
+	ServiceToken string
 }
 
 // BillingCoreConfig — upstream billing-core for the Control Session aggregator (G10).
@@ -104,10 +105,10 @@ func Load() *Config {
 			Environment: getEnv("ENVIRONMENT", "development"),
 		},
 		Database: DatabaseConfig{
-			URL:            getEnv("DATABASE_URL", ""),
-			Host:           getEnv("DATABASE_HOST", "controlplane-postgres"),
-			Port:           getEnv("DATABASE_PORT", "5432"),
-			User:           getEnv("DATABASE_USER", "controlplane_user"),
+			URL:  getEnv("DATABASE_URL", ""),
+			Host: getEnv("DATABASE_HOST", "controlplane-postgres"),
+			Port: getEnv("DATABASE_PORT", "5432"),
+			User: getEnv("DATABASE_USER", "controlplane_user"),
 			// No baked-in default: DATABASE_PASSWORD is the single source of truth,
 			// injected from the root Control Plane .env via compose ($DB_PASSWORD).
 			// A stale literal here drifts from the live hex and breaks DB auth.
@@ -146,7 +147,8 @@ func Load() *Config {
 			URL: getEnv("ORG_CORE_URL", "http://org-core:8080"),
 		},
 		UserCore: UserCoreConfig{
-			URL: getEnv("USER_CORE_URL", "http://user-core:3012"),
+			URL:          getEnv("USER_CORE_URL", "http://user-core:3012"),
+			ServiceToken: getEnv("USER_CORE_SERVICE_TOKEN", ""),
 		},
 		BillingCore: BillingCoreConfig{
 			URL: getEnv("BILLING_CORE_URL", "http://billing-core:3014"),

@@ -1,0 +1,32 @@
+diff --git a/dist/generators-Ht8QYIi_.mjs b/dist/generators-Ht8QYIi_.mjs
+index becb8cdc9c863db0f60e41bec99cee96fdcdb21e..6784c41088287229bf9c983145c62e4096de4756 100644
+--- a/dist/generators-Ht8QYIi_.mjs
++++ b/dist/generators-Ht8QYIi_.mjs	
+@@ -1,10 +1,11 @@
+ import fs, { existsSync } from "node:fs";
+ import fs$1 from "node:fs/promises";
+ import path from "node:path";
+-import { getAuthTables, getMigrations } from "better-auth/db";
++import { getAuthTables } from "better-auth/db";
++import { getMigrations } from "better-auth/db/migration";
+ import { initGetFieldName, initGetModelName } from "better-auth/adapters";
+ import prettier from "prettier";
+-import { capitalizeFirstLetter } from "@better-auth/core/utils";
++import { capitalizeFirstLetter } from "@better-auth/core/utils/string";
+ import { produceSchema } from "@mrleebo/prisma-ast";
+ 
+ //#region src/generators/drizzle.ts
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 4e93417621e97653bb1d86480217e03f65671f92..5a252d6f820e07995a2af7d7c4420c746b520dae 100755
+--- a/dist/index.mjs
++++ b/dist/index.mjs	
+@@ -7,7 +7,8 @@ import fs$1 from "node:fs/promises";
+ import * as path$1 from "node:path";
+ import path from "node:path";
+ import { createTelemetry, getTelemetryAuthConfig } from "@better-auth/telemetry";
+-import { getAdapter, getMigrations } from "better-auth/db";
++import { getAdapter } from "better-auth/db/adapter";
++import { getMigrations } from "better-auth/db/migration";
+ import chalk from "chalk";
+ import prompts from "prompts";
+ import yoctoSpinner from "yocto-spinner";

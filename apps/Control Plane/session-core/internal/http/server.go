@@ -2,6 +2,9 @@ package http
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -156,10 +159,133 @@ func isAllowedOrigin(origin string) bool {
 	return false
 }
 
+var bearerHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+type bearerIdentity struct {
+	userID string
+	role   string
+}
+
+const serviceCredentialAudience = "session-core"
+
+type serviceCredential struct {
+	Principal string   `json:"principal"`
+	Audience  string   `json:"audience"`
+	Token     string   `json:"token"`
+	Scopes    []string `json:"scopes"`
+}
+
+func loadServiceCredentials() []serviceCredential {
+	raw := strings.TrimSpace(os.Getenv("SESSION_CORE_SERVICE_CREDENTIALS"))
+	if raw == "" {
+		return nil
+	}
+
+	var configured []serviceCredential
+	if err := json.Unmarshal([]byte(raw), &configured); err != nil {
+		log.Error().Err(err).Msg("session service credentials: invalid JSON; service-principal auth disabled")
+		return nil
+	}
+
+	validated := make([]serviceCredential, 0, len(configured))
+	for _, credential := range configured {
+		credential.Principal = strings.TrimSpace(credential.Principal)
+		credential.Audience = strings.TrimSpace(credential.Audience)
+		credential.Token = strings.TrimSpace(credential.Token)
+		if credential.Principal == "" || credential.Audience != serviceCredentialAudience || len(credential.Token) < 32 {
+			log.Error().Str("principal", credential.Principal).Msg("session service credentials: invalid entry ignored")
+			continue
+		}
+
+		scopes := make([]string, 0, len(credential.Scopes))
+		for _, scope := range credential.Scopes {
+			scope = strings.TrimSpace(scope)
+			if scope == "sessions:read" || scope == "sessions:write" {
+				scopes = append(scopes, scope)
+			}
+		}
+		if len(scopes) == 0 {
+			log.Error().Str("principal", credential.Principal).Msg("session service credentials: entry has no valid scopes")
+			continue
+		}
+		credential.Scopes = scopes
+		validated = append(validated, credential)
+	}
+	return validated
+}
+
+func findServiceCredential(token string, configured []serviceCredential) (serviceCredential, bool) {
+	token = strings.TrimSpace(token)
+	for _, credential := range configured {
+		if len(token) == len(credential.Token) && subtle.ConstantTimeCompare([]byte(token), []byte(credential.Token)) == 1 {
+			return credential, true
+		}
+	}
+	return serviceCredential{}, false
+}
+
+func requiredServiceScope(method string) string {
+	if method == http.MethodGet || method == http.MethodHead {
+		return "sessions:read"
+	}
+	return "sessions:write"
+}
+
+func hasServiceScope(credential serviceCredential, required string) bool {
+	for _, scope := range credential.Scopes {
+		if scope == required {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveIdentityFromBearer validates the bearer token against auth-core's
+// live session, rather than trusting any client-supplied identity header.
+// Mirrors user-core's internal/http/server.go resolveIdentityFromBearer.
+func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string) bearerIdentity {
+	reqURL := authServiceURL + "/api/auth/get-session"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		log.Warn().Err(err).Msg("resolveIdentityFromBearer: failed to build request")
+		return bearerIdentity{}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := bearerHTTPClient.Do(req)
+	if err != nil {
+		log.Warn().Err(err).Msg("resolveIdentityFromBearer: auth-service request failed")
+		return bearerIdentity{}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return bearerIdentity{}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return bearerIdentity{}
+	}
+
+	// Better Auth get-session response: { "session": {...}, "user": { "id": "...", ... } }
+	var payload struct {
+		User *struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.User == nil || payload.User.ID == "" {
+		return bearerIdentity{}
+	}
+	return bearerIdentity{userID: payload.User.ID, role: payload.User.Role}
+}
+
 func authContextMiddleware() gin.HandlerFunc {
-	configuredKeys := []string{
-		strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET")),
+	serviceCredentials := loadServiceCredentials()
+	authServiceURL := strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/")
+	if authServiceURL == "" {
+		authServiceURL = "http://auth-service:3011"
 	}
 
 	return func(c *gin.Context) {
@@ -168,29 +294,52 @@ func authContextMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Internal service-to-service auth
-		if reqKey := c.GetHeader("X-Internal-Api-Key"); reqKey != "" {
-			for _, key := range configuredKeys {
-				if key != "" && reqKey == key {
-					c.Set("user_id", c.GetHeader("X-User-Id"))
-					c.Set("user_email", c.GetHeader("X-User-Email"))
-					c.Set("user_name", c.GetHeader("X-User-Name"))
-					c.Set("auth_method", "internal")
+		// Internal service-to-service auth is deliberately separate from user
+		// Bearer auth. Each credential is pinned in server configuration to the
+		// session-core audience, a principal, and an allow-listed scope set. The
+		// fleet-wide INTERNAL_API_KEY is never accepted as delegated user identity.
+		if token := c.GetHeader("X-Service-Token"); token != "" {
+			credential, ok := findServiceCredential(token, serviceCredentials)
+			if !ok {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid service credential"})
+				return
+			}
+			if !hasServiceScope(credential, requiredServiceScope(c.Request.Method)) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "service scope denied"})
+				return
+			}
+			delegation, ok := verifySessionServiceDelegation(c.Request, credential, time.Now())
+			if !ok {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "signed service delegation required"})
+				return
+			}
+			c.Set("user_id", delegation.UserID)
+			c.Set("user_email", delegation.Email)
+			c.Set("user_name", delegation.Name)
+			c.Set("service_principal", credential.Principal)
+			c.Set("service_scopes", append([]string(nil), credential.Scopes...))
+			c.Set("auth_method", "service_principal")
+			c.Next()
+			return
+		}
+
+		// Bearer token auth — the token itself must be validated against
+		// auth-core's live session; forwarded X-User-Id/X-User-Email/X-User-Name
+		// headers are NEVER trusted on their own (they are trivially forgeable
+		// and were the root cause of a full session-impersonation bypass found
+		// 2026-07-10 — see docs/core-research/plane-audit-2026-07-10.md finding #1).
+		if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+			token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+			if token != "" {
+				if identity := resolveIdentityFromBearer(c.Request.Context(), token, authServiceURL); identity.userID != "" {
+					c.Set("user_id", identity.userID)
+					if identity.role != "" {
+						c.Set("user_role", identity.role)
+					}
+					c.Set("auth_method", "bearer")
 					c.Next()
 					return
 				}
-			}
-		}
-
-		// Bearer token auth
-		if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
-			// Forward to auth-core via session.validate NATS or direct HTTP
-			// For now, extract user-id from forwarded headers (frontend proxy sets these)
-			if userID := c.GetHeader("X-User-Id"); userID != "" {
-				c.Set("user_id", userID)
-				c.Set("auth_method", "bearer")
-				c.Next()
-				return
 			}
 		}
 

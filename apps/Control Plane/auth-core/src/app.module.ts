@@ -8,6 +8,8 @@ import { NatsAuthController } from './auth/nats-auth.controller';
 import { ConvexAuthController } from './auth/convex-auth.controller';
 import { ModelPlaneTokenController } from './auth/model-plane-token.controller';
 import { PlaneTokenController } from './auth/plane-token.controller';
+import { DataPlaneAuthorizationController } from './auth/data-plane-authorization.controller';
+import { MembershipAuthorityController } from './auth/membership-authority.controller';
 import { AuthGrpcController } from './grpc/auth-grpc.controller';
 import { EmailModule } from './email/email.module';
 import { ORPCModule } from './orpc/orpc.module';
@@ -18,6 +20,7 @@ import { DocsModule } from './docs/docs.module';
 import { InternalServicesModule } from './internal/internal-services.module';
 import { NatsModule } from './nats/nats.module';
 import { OrganizationEventMiddleware } from './middleware/organization-event.middleware';
+import { OrphanOrganizationCleanupService } from './services/orphan-organization-cleanup.service';
 
 @Module({
   imports: [
@@ -39,6 +42,8 @@ import { OrganizationEventMiddleware } from './middleware/organization-event.mid
     ConvexAuthController,
     ModelPlaneTokenController,
     PlaneTokenController,
+    DataPlaneAuthorizationController,
+    MembershipAuthorityController,
     AuthGrpcController,
   ],
   providers: [
@@ -46,6 +51,7 @@ import { OrganizationEventMiddleware } from './middleware/organization-event.mid
     MicrosoftGraphService,
     ConvexTokenService,
     OrganizationEventMiddleware,
+    OrphanOrganizationCleanupService,
   ],
 })
 export class AppModule implements NestModule {

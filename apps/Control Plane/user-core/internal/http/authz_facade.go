@@ -16,14 +16,53 @@ import (
 // resolves those from its own visibility columns), so the returned id set stays
 // small.
 
-// requireInternalKeyOnly rejects callers that authenticated with a user Bearer
-// token. The global authContextMiddleware accepts EITHER a Bearer JWT OR the
-// internal key; the facade leaks which documents are shared with an arbitrary
-// subject_id, so it must be reachable only by trusted internal services (the
-// internal key), never by an end-user token. Fail closed.
-func (s *Server) requireInternalKeyOnly(c *gin.Context) {
-	if c.GetString("auth_method") != "internal_key" {
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "internal key required"})
+// requireServicePrincipal protects internal operations whose explicit service
+// scope is sufficient and which do not impersonate a delegated end user.
+func (s *Server) requireServicePrincipal(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "service principal required"})
+		return
+	}
+	c.Next()
+}
+
+// requireVerifiedAuthzDelegation permits only claim-pinned grant reads. The
+// service credential authenticates the workload while the request signature
+// binds its method, URI/resource selectors, body digest, tenant, and user.
+// Grant listing/mutations remain disabled until the owning Data service proves
+// the actor may administer the selected resource.
+func (s *Server) requireVerifiedAuthzDelegation(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" || !c.GetBool("delegation_verified") || !c.GetBool("delegated_user_proof_verified") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "verified service delegation required"})
+		return
+	}
+	if c.GetString("delegation_version") != "v2" || c.GetString("delegation_zdr") != "true" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "bounded authz delegation required"})
+		return
+	}
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "verified resource-owner delegation required"})
+		return
+	}
+	path := c.Request.URL.Path
+	if path != "/api/v1/internal/authz/visible" && path != "/api/v1/internal/authz/check" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "verified resource-owner delegation required"})
+		return
+	}
+	wantOperation := "authz:visible"
+	if path == "/api/v1/internal/authz/check" {
+		wantOperation = "authz:check"
+	}
+	if c.GetString("delegation_operation") != wantOperation || strings.TrimSpace(c.Query("resource_type")) != c.GetString("delegation_resource_type") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "delegated operation or resource mismatch"})
+		return
+	}
+	if path == "/api/v1/internal/authz/check" && strings.TrimSpace(c.Query("resource_id")) != c.GetString("delegation_resource_id") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "delegated resource mismatch"})
+		return
+	}
+	if strings.TrimSpace(c.Query("org_id")) != c.GetString("org_id") || strings.TrimSpace(c.Query("subject_id")) != c.GetString("user_id") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "delegated tenant or subject mismatch"})
 		return
 	}
 	c.Next()

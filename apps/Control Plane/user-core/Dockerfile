@@ -5,7 +5,7 @@
 # =============================================================
 
 # ── Builder ──────────────────────────────────────────────────
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.5-alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -e; \
@@ -65,6 +65,10 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 # ── Runtime ──────────────────────────────────────────────────
 FROM alpine:3.22
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
+      org.opencontainers.image.created=$BUILD_DATE
 
 # Pinned from alpine:latest — deterministic builds
 # Merge apk layers and create non-root user
@@ -80,15 +84,13 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 
 WORKDIR /app
 
-COPY --from=builder /build/user-service      ./user-service
-COPY --from=builder /build/migrations        ./migrations
-COPY docker-entrypoint.sh                    /app/docker-entrypoint.sh
-COPY scripts/shared-entrypoint.sh            /app/scripts/shared-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh /app/scripts/shared-entrypoint.sh && \
-    chown -R appuser:appgroup /app
+COPY --chown=appuser:appgroup --from=builder /build/user-service ./user-service
+COPY --chown=appuser:appgroup --from=builder /build/migrations ./migrations
+COPY --chown=appuser:appgroup --chmod=755 docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY --chown=appuser:appgroup --chmod=755 scripts/shared-entrypoint.sh /app/scripts/shared-entrypoint.sh
 
 # HTTP + gRPC
-EXPOSE 3012 50012
+EXPOSE 3012 50012 9091
 
 USER appuser
 

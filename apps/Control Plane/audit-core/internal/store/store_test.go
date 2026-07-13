@@ -122,3 +122,124 @@ func TestPurge_DeletesOnlyExpiredRows(t *testing.T) {
 		t.Errorf("usage rows remaining = %d; want 1 (recent only)", usageRemaining)
 	}
 }
+
+func TestJetStreamInboxDeduplicatesRedelivery(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	st := store.New(pool)
+	const orgID = "org-jetstream-inbox-test"
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
+		_, _ = pool.Exec(ctx, `DELETE FROM usage_events WHERE org_id = $1`, orgID)
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	audit := &events.AuditEvent{OccurredAt: time.Now(), OrgID: orgID, Plane: "control", Event: "dedupe"}
+	inserted, err := st.InsertAuditFromStream(ctx, audit, "primary", 42)
+	if err != nil || !inserted {
+		t.Fatalf("first audit insert: inserted=%v err=%v", inserted, err)
+	}
+	inserted, err = st.InsertAuditFromStream(ctx, audit, "primary", 42)
+	if err != nil || inserted {
+		t.Fatalf("duplicate audit insert: inserted=%v err=%v", inserted, err)
+	}
+
+	usage := &events.UsageEvent{OccurredAt: time.Now(), OrgID: orgID, Plane: "model", Op: "tokens", CostCents: 1.25}
+	inserted, err = st.InsertUsageFromStream(ctx, usage, "primary", 43)
+	if err != nil || !inserted {
+		t.Fatalf("first usage insert: inserted=%v err=%v", inserted, err)
+	}
+	inserted, err = st.InsertUsageFromStream(ctx, usage, "primary", 43)
+	if err != nil || inserted {
+		t.Fatalf("duplicate usage insert: inserted=%v err=%v", inserted, err)
+	}
+
+	var auditCount, usageCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM audit_events WHERE org_id = $1`, orgID).Scan(&auditCount); err != nil {
+		t.Fatalf("count audit: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM usage_events WHERE org_id = $1`, orgID).Scan(&usageCount); err != nil {
+		t.Fatalf("count usage: %v", err)
+	}
+	if auditCount != 1 || usageCount != 1 {
+		t.Fatalf("dedupe counts audit=%d usage=%d; want 1/1", auditCount, usageCount)
+	}
+
+	var migrationApplied bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '002_jetstream_inbox')`).Scan(&migrationApplied); err != nil {
+		t.Fatalf("check migration ledger: %v", err)
+	}
+	if !migrationApplied {
+		t.Fatal("002_jetstream_inbox migration was not recorded")
+	}
+}
+
+func TestSummariseUsage_AggregatesAndOrdersByTotalCost(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	orgID := "org-usage-summary-" + time.Now().UTC().Format("20060102150405.000000000")
+	cleanup := func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM usage_events WHERE org_id = $1`, orgID)
+	}
+	t.Cleanup(cleanup)
+	st := store.New(pool)
+
+	fixtures := []events.UsageEvent{
+		{OccurredAt: time.Now(), OrgID: orgID, Plane: "model", Op: "inference", TokensIn: 10, CostCents: 3},
+		{OccurredAt: time.Now(), OrgID: orgID, Plane: "model", Op: "inference", TokensIn: 20, CostCents: 2},
+		{OccurredAt: time.Now(), OrgID: orgID, Plane: "application", Op: "export", BytesOut: 100, CostCents: 1},
+	}
+	for index := range fixtures {
+		if _, err := st.InsertUsage(ctx, &fixtures[index]); err != nil {
+			t.Fatalf("insert fixture %d: %v", index, err)
+		}
+	}
+
+	rows, err := st.SummariseUsage(
+		ctx,
+		orgID,
+		time.Now().Add(-time.Hour),
+		time.Now().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("SummariseUsage: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("summary row count = %d; want 2", len(rows))
+	}
+	if rows[0].Plane != "model" || rows[0].Op != "inference" {
+		t.Fatalf("first row = %s/%s; want model/inference", rows[0].Plane, rows[0].Op)
+	}
+	if rows[0].Events != 2 || rows[0].TokensIn != 30 || rows[0].CostCents != 5 {
+		t.Fatalf("model aggregate = %+v; want events=2 tokens_in=30 cost_cents=5", rows[0])
+	}
+}

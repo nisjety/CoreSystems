@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,18 +25,16 @@ type authCoreTokenResponse struct {
 	Error     string `json:"error"`
 }
 
-type orgCoreOrganizationSummary struct {
-	ID string `json:"id"`
+type authMembershipDecision struct {
+	Version string  `json:"version"`
+	Member  bool    `json:"member"`
+	Role    *string `json:"role"`
 }
 
-type orgCoreMember struct {
-	UserID      string `json:"userId"`
-	UserIDSnake string `json:"user_id"`
-	Role        string `json:"role"`
-}
+var ErrMembershipNotFound = errors.New("authoritative organization membership not found")
 
-type orgCoreMembersResponse struct {
-	Members []orgCoreMember `json:"members"`
+func verifiedProfileFromContext(c *gin.Context) (email, name, avatar string) {
+	return c.GetString("user_email"), c.GetString("user_name"), c.GetString("user_avatar")
 }
 
 func (s *Server) ensureCanonicalCurrentUser(c *gin.Context) (*users.User, string, bool) {
@@ -45,12 +44,13 @@ func (s *Server) ensureCanonicalCurrentUser(c *gin.Context) (*users.User, string
 		return nil, "", false
 	}
 
+	email, name, avatar := verifiedProfileFromContext(c)
 	user, err := s.userService.GetOrCreateUser(
 		c.Request.Context(),
 		userID,
-		c.GetHeader("X-User-Email"),
-		c.GetHeader("X-User-Name"),
-		c.GetHeader("X-User-Avatar"),
+		email,
+		name,
+		avatar,
 	)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to resolve current user")
@@ -61,114 +61,110 @@ func (s *Server) ensureCanonicalCurrentUser(c *gin.Context) (*users.User, string
 	return user, userID, true
 }
 
-// resolveMembershipFromOrgCore resolves the authoritative org membership from
-// org-core. When `preferOrgID` is set and the user is a member of that org, it
-// resolves the role for THAT org (so the session context reflects the active
-// organization); otherwise it falls back to the user's primary org
-// (`organizations[0]`). A requested org the user does not belong to is ignored —
-// org-core's `/orgs/me` is the membership allow-list, so no role is granted for
-// a non-member org.
-func (s *Server) resolveMembershipFromOrgCore(
+// resolveMembershipFromAuthCore asks the Better Auth database authority for
+// one exact (user, organization) membership. Conversation access deliberately
+// has no primary/latest-organization fallback: callers must carry the active
+// organization chosen by the validated session.
+func (s *Server) resolveMembershipFromAuthCore(
 	ctx context.Context,
 	userID string,
-	preferOrgID string,
+	requestedOrgID string,
 ) (string, string, error) {
-	if strings.TrimSpace(s.orgService) == "" || userID == "" {
-		return "", "", nil
+	userID = strings.TrimSpace(userID)
+	requestedOrgID = strings.TrimSpace(requestedOrgID)
+	if userID == "" || requestedOrgID == "" {
+		return "", "", ErrMembershipNotFound
+	}
+	if strings.TrimSpace(s.authMembershipService) == "" || strings.TrimSpace(s.authMembershipToken) == "" {
+		return "", "", fmt.Errorf("canonical membership authority is not configured")
 	}
 
-	orgReq, err := http.NewRequestWithContext(
+	body, err := json.Marshal(map[string]string{
+		"userId": userID,
+		"orgId":  requestedOrgID,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("encode canonical membership request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(
 		ctx,
-		http.MethodGet,
-		s.orgService+"/orgs/me",
-		nil,
+		http.MethodPost,
+		s.authMembershipService+"/api/v1/internal/membership/decision",
+		bytes.NewReader(body),
 	)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("build canonical membership request: %w", err)
 	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-User-Core-Membership-Token", s.authMembershipToken)
 
-	orgReq.Header.Set("Content-Type", "application/json")
-	orgReq.Header.Set("X-User-Id", userID)
-	if s.internalKey != "" {
-		orgReq.Header.Set("X-Internal-Api-Key", s.internalKey)
-	}
-
-	orgResp, err := s.httpClient.Do(orgReq)
+	response, err := s.httpClient.Do(request)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("call canonical membership authority: %w", err)
 	}
-	defer orgResp.Body.Close()
-
-	if orgResp.StatusCode != http.StatusOK {
-		return "", "", nil
-	}
-
-	var organizations []orgCoreOrganizationSummary
-	if err := json.NewDecoder(orgResp.Body).Decode(&organizations); err != nil {
-		return "", "", err
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("canonical membership authority returned %d", response.StatusCode)
 	}
 
-	if len(organizations) == 0 || strings.TrimSpace(organizations[0].ID) == "" {
-		return "", "", nil
+	var decision authMembershipDecision
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decision); err != nil {
+		return "", "", fmt.Errorf("decode canonical membership decision: %w", err)
 	}
-
-	// Default to the primary org; switch to the requested org only when the user
-	// is actually a member of it (present in the /orgs/me allow-list).
-	orgID := strings.TrimSpace(organizations[0].ID)
-	if prefer := strings.TrimSpace(preferOrgID); prefer != "" {
-		for _, org := range organizations {
-			if strings.TrimSpace(org.ID) == prefer {
-				orgID = prefer
-				break
-			}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return "", "", fmt.Errorf("decode canonical membership decision: trailing data")
+	}
+	if decision.Version != "v1" {
+		return "", "", fmt.Errorf("canonical membership authority returned unsupported contract version")
+	}
+	if !decision.Member {
+		if decision.Role != nil {
+			return "", "", fmt.Errorf("canonical membership denial included a role")
 		}
+		return "", "", ErrMembershipNotFound
 	}
-	role := "member"
-
-	memberReq, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		fmt.Sprintf("%s/orgs/%s/members", s.orgService, orgID),
-		nil,
-	)
-	if err != nil {
-		return orgID, role, nil
+	if decision.Role == nil {
+		return "", "", fmt.Errorf("canonical membership grant omitted role")
 	}
-
-	memberReq.Header.Set("Content-Type", "application/json")
-	memberReq.Header.Set("X-User-Id", userID)
-	if s.internalKey != "" {
-		memberReq.Header.Set("X-Internal-Api-Key", s.internalKey)
+	role := strings.ToLower(strings.TrimSpace(*decision.Role))
+	if role != "owner" && role != "admin" && role != "member" && role != "viewer" {
+		return "", "", fmt.Errorf("canonical membership authority returned unsupported role")
 	}
+	return requestedOrgID, role, nil
+}
 
-	memberResp, err := s.httpClient.Do(memberReq)
-	if err != nil {
-		return orgID, role, nil
-	}
-	defer memberResp.Body.Close()
-
-	if memberResp.StatusCode != http.StatusOK {
-		return orgID, role, nil
+func (s *Server) handleMembershipResolutionError(
+	c *gin.Context,
+	userID string,
+	requestedOrgID string,
+	resolveErr error,
+) (denied bool, continueRequest bool) {
+	if !errors.Is(resolveErr, ErrMembershipNotFound) {
+		log.Warn().Err(resolveErr).Str("user_id", strings.TrimSpace(userID)).Msg("auth-core membership authority unavailable for session context")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "organization membership authority unavailable"})
+		return false, false
 	}
 
-	var membersPayload orgCoreMembersResponse
-	if err := json.NewDecoder(memberResp.Body).Decode(&membersPayload); err != nil {
-		return orgID, role, nil
+	userID = strings.TrimSpace(userID)
+	requestedOrgID = strings.TrimSpace(requestedOrgID)
+	if requestedOrgID == "" {
+		// No exact organization was requested, so there is no scoped local row to
+		// revoke. The caller still receives no organization or role grant.
+		return true, true
 	}
-
-	for _, member := range membersPayload.Members {
-		memberUserID := member.UserID
-		if memberUserID == "" {
-			memberUserID = member.UserIDSnake
-		}
-
-		if memberUserID == userID && strings.TrimSpace(member.Role) != "" {
-			role = member.Role
-			break
-		}
+	if userID == "" || s.removeMembershipProjection == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke stale organization membership"})
+		return true, false
 	}
-
-	return orgID, role, nil
+	if err := s.removeMembershipProjection(c.Request.Context(), userID, requestedOrgID); err != nil {
+		log.Error().Err(err).Str("user_id", userID).Str("org_id", requestedOrgID).Msg("failed to revoke stale user-core membership projection")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke stale organization membership"})
+		return true, false
+	}
+	return true, true
 }
 
 // ============================================
@@ -195,10 +191,11 @@ func (s *Server) getCurrentUserProfile(c *gin.Context) {
 		return
 	}
 
-	// Try to get email and name from headers (for auto-provisioning)
-	email := c.GetHeader("X-User-Email")
-	name := c.GetHeader("X-User-Name")
-	avatar := c.GetHeader("X-User-Avatar")
+	// Auto-provisioning attributes come only from Auth Core's verified session
+	// response. Caller-supplied X-User-* headers are never identity evidence.
+	email := c.GetString("user_email")
+	name := c.GetString("user_name")
+	avatar := c.GetString("user_avatar")
 
 	// Get or create user (auto-provision from OAuth/Better Auth if needed)
 	user, err := s.userService.GetOrCreateUser(c.Request.Context(), userIDStr, email, name, avatar)
@@ -285,12 +282,13 @@ func (s *Server) getSessionContext(c *gin.Context) {
 	// rather than always the primary membership.
 	requestedOrg := strings.TrimSpace(c.GetHeader("X-Org-Id"))
 
+	email, name, avatar := verifiedProfileFromContext(c)
 	ctxData, err := s.userService.GetSessionContext(
 		c.Request.Context(),
 		userID,
-		c.GetHeader("X-User-Email"),
-		c.GetHeader("X-User-Name"),
-		c.GetHeader("X-User-Avatar"),
+		email,
+		name,
+		avatar,
 		requestedOrg,
 	)
 	if err != nil {
@@ -299,9 +297,16 @@ func (s *Server) getSessionContext(c *gin.Context) {
 		return
 	}
 
-	orgID, role, resolveErr := s.resolveMembershipFromOrgCore(c.Request.Context(), userID, requestedOrg)
+	orgID, role, resolveErr := s.resolveMembershipFromAuthCore(c.Request.Context(), userID, requestedOrg)
 	if resolveErr != nil {
-		log.Warn().Err(resolveErr).Str("user_id", userID).Msg("org-core fallback failed for session context")
+		denied, continueRequest := s.handleMembershipResolutionError(c, userID, requestedOrg, resolveErr)
+		if !continueRequest {
+			return
+		}
+		if denied {
+			ctxData.OrgID = ""
+			ctxData.Role = ""
+		}
 	} else if orgID != "" && (ctxData.OrgID != orgID || ctxData.Role != role) {
 		ctxData.OrgID = orgID
 		ctxData.Role = role
@@ -390,12 +395,13 @@ func (s *Server) updateCurrentUserProfile(c *gin.Context) {
 
 	// Resolve the canonical local user row before issuing writes. The auth user
 	// id can differ from the historical local user id for the same email.
+	email, name, avatar := verifiedProfileFromContext(c)
 	currentUser, err := s.userService.GetOrCreateUser(
 		c.Request.Context(),
 		userIDStr,
-		c.GetHeader("X-User-Email"),
-		c.GetHeader("X-User-Name"),
-		c.GetHeader("X-User-Avatar"),
+		email,
+		name,
+		avatar,
 	)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get or create user before update")
@@ -524,7 +530,7 @@ func mapUserStatusToPresence(status users.UserStatus) string {
 // getUserByID retrieves a user by ID (admin only)
 // GET /api/v1/users/:id
 func (s *Server) getUserByID(c *gin.Context) {
-	if !isAdminRequest(c) {
+	if !isAdminRequest(c) && !hasServiceScope(c, "users:read:any") {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": "admin role required",
 		})

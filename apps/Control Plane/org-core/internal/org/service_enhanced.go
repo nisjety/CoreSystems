@@ -12,6 +12,8 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrOwnerConflict = errors.New("organization already has a different owner")
+var ErrOrganizationDeleted = errors.New("organization is deleted and cannot be reprovisioned")
 
 const (
 	orgCacheTTL         = 10 * time.Minute // Orgs change rarely; 10m reduces DB reads
@@ -193,6 +195,37 @@ func (s *Service) AddOrganizationMember(ctx context.Context, orgID, userID, role
 	return nil
 }
 
+// ProvisionOrganizationWithOwner commits the organization projection, its
+// canonical first owner, default entitlements, and initial onboarding state as
+// one atomic org-core write. Events are emitted only after the commit succeeds.
+func (s *Service) ProvisionOrganizationWithOwner(
+	ctx context.Context,
+	organization Organization,
+	ownerUserID string,
+) error {
+	existing, _ := s.repo.GetOrganization(ctx, organization.ID)
+	isNew := existing == nil
+	if err := s.repo.ProvisionOrganizationWithOwner(ctx, organization, ownerUserID); err != nil {
+		return err
+	}
+
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+organization.ID, "org:ent:"+organization.ID)
+	}
+	if isNew {
+		s.publishOrganizationCreated(
+			ctx,
+			organization.ID,
+			organization.Name,
+			organization.Slug,
+			organization.Plan,
+			organization.Metadata,
+		)
+	}
+	s.publishMemberAdded(ctx, organization.ID, organization.Name, ownerUserID, "", "owner")
+	return nil
+}
+
 // ListOrganizationMembers returns all active/invited members for an org.
 func (s *Service) ListOrganizationMembers(ctx context.Context, orgID string) ([]OrgMember, error) {
 	if orgID == "" {
@@ -218,6 +251,50 @@ func (s *Service) RemoveOrganizationMember(ctx context.Context, orgID, userID st
 	return nil
 }
 
+func (s *Service) ReconcileOrganizationMember(ctx context.Context, orgID, userID, role, action string, revision int64) (bool, error) {
+	return s.repo.ReconcileOrganizationMember(ctx, orgID, userID, role, action, revision)
+}
+
+func (s *Service) ReconcileOrganizationProjection(
+	ctx context.Context,
+	organization Organization,
+	ownerUserID string,
+	revision int64,
+) (bool, error) {
+	existing, _ := s.repo.GetOrganization(ctx, organization.ID)
+	applied, err := s.repo.ReconcileOrganizationProjection(ctx, organization, ownerUserID, revision)
+	if err != nil || !applied {
+		return applied, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+organization.ID, "org:ent:"+organization.ID)
+	}
+	if existing == nil {
+		s.publishOrganizationCreated(
+			ctx,
+			organization.ID,
+			organization.Name,
+			organization.Slug,
+			organization.Plan,
+			organization.Metadata,
+		)
+	} else {
+		s.publishOrganizationUpdated(ctx, organization.ID, map[string]interface{}{
+			"name": organization.Name,
+			"slug": organization.Slug,
+		})
+	}
+	return true, nil
+}
+
+func (s *Service) ReconcileOrganizationDeletion(ctx context.Context, orgID string) (json.RawMessage, error) {
+	receipt, err := s.repo.ReconcileOrganizationDeletion(ctx, orgID)
+	if err == nil && s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+	}
+	return receipt, err
+}
+
 // AddPendingInvite records an email invite for a user who has not yet registered.
 func (s *Service) AddPendingInvite(ctx context.Context, orgID, invitedEmail, role, invitedBy string) (string, error) {
 	if orgID == "" || invitedEmail == "" {
@@ -234,18 +311,18 @@ func (s *Service) UpsertFromAuthEvent(ctx context.Context, id, name, slug string
 		return fmt.Errorf("organization id and name are required")
 	}
 
-	// Check if org exists
-	existing, _ := s.repo.GetOrganization(ctx, id)
-	isNew := existing == nil
+	// Creation must carry a canonical owner and use
+	// ProvisionOrganizationWithOwner. This legacy method is update-only so it
+	// can never violate the database owner invariant.
+	existing, err := s.repo.GetOrganization(ctx, id)
+	if err != nil || existing == nil {
+		return fmt.Errorf("organization must already exist: %w", ErrNotFound)
+	}
 
-	if err := s.repo.UpsertOrganization(ctx, Organization{
-		ID:       id,
-		Name:     name,
-		Slug:     slug,
-		Plan:     "free",
-		Status:   "active",
-		Metadata: metadata,
-	}); err != nil {
+	existing.Name = name
+	existing.Slug = slug
+	existing.Metadata = metadata
+	if err := s.repo.UpsertOrganization(ctx, *existing); err != nil {
 		return err
 	}
 
@@ -259,27 +336,26 @@ func (s *Service) UpsertFromAuthEvent(ctx context.Context, id, name, slug string
 	}
 
 	// Publish event
-	if isNew {
-		s.publishOrganizationCreated(ctx, id, name, slug, "free", metadata)
-	} else {
-		s.publishOrganizationUpdated(ctx, id, map[string]interface{}{
-			"name": name,
-			"slug": slug,
-		})
-	}
+	s.publishOrganizationUpdated(ctx, id, map[string]interface{}{
+		"name": name,
+		"slug": slug,
+	})
 
 	return nil
 }
 
 // EnsureOrganizationFromTenant resolves an organization by provider+tenant id,
 // creating a new org + tenant link + onboarding state when needed.
-func (s *Service) EnsureOrganizationFromTenant(ctx context.Context, provider, tenantID, displayName, primaryDomain string, domains []string, region, defaultLocale string) (*Organization, bool, error) {
+func (s *Service) EnsureOrganizationFromTenant(ctx context.Context, provider, tenantID, ownerUserID, displayName, primaryDomain string, domains []string, region, defaultLocale string) (*Organization, bool, error) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		provider = "microsoft"
 	}
 	if strings.TrimSpace(tenantID) == "" {
 		return nil, false, fmt.Errorf("tenant id is required")
+	}
+	if strings.TrimSpace(ownerUserID) == "" {
+		return nil, false, fmt.Errorf("owner user id is required")
 	}
 
 	resolved, err := s.repo.GetOrganizationByTenant(ctx, provider, tenantID)
@@ -310,10 +386,7 @@ func (s *Service) EnsureOrganizationFromTenant(ctx context.Context, provider, te
 		DefaultLocale: defaultLocale,
 	}
 
-	if err := s.repo.UpsertOrganization(ctx, org); err != nil {
-		return nil, false, err
-	}
-	if err := s.repo.SetDefaultEntitlements(ctx, orgID); err != nil {
+	if err := s.ProvisionOrganizationWithOwner(ctx, org, ownerUserID); err != nil {
 		return nil, false, err
 	}
 

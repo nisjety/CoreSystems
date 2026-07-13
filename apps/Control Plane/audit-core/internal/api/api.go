@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -23,15 +24,40 @@ import (
 type API struct {
 	store          *store.Store
 	internalAPIKey string
+	readiness      func(context.Context) Readiness
 }
 
-func New(s *store.Store, internalAPIKey string) *API {
-	return &API{store: s, internalAPIKey: internalAPIKey}
+type Readiness struct {
+	DatabaseConnected    bool   `json:"database_connected"`
+	PrimaryNATSConnected bool   `json:"primary_nats_connected"`
+	ExtraNATSConnected   []bool `json:"extra_nats_connected"`
+	DeliveryMode         string `json:"delivery_mode"`
+	LagMetric            string `json:"lag_metric"`
+}
+
+func (r Readiness) Ready() bool {
+	if !r.DatabaseConnected || !r.PrimaryNATSConnected {
+		return false
+	}
+	for _, connected := range r.ExtraNATSConnected {
+		if !connected {
+			return false
+		}
+	}
+	return true
+}
+
+func New(s *store.Store, internalAPIKey string, readiness ...func(context.Context) Readiness) *API {
+	provider := func(context.Context) Readiness { return Readiness{} }
+	if len(readiness) > 0 && readiness[0] != nil {
+		provider = readiness[0]
+	}
+	return &API{store: s, internalAPIKey: internalAPIKey, readiness: provider}
 }
 
 func (a *API) Mount(r chi.Router) {
 	r.Get("/healthz", a.healthz)
-	r.Get("/readyz", a.healthz)
+	r.Get("/readyz", a.readyz)
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(a.internalAuth)
@@ -39,6 +65,18 @@ func (a *API) Mount(r chi.Router) {
 		r.Post("/audit", a.ingestAudit)
 		r.Get("/usage", a.listUsage)
 		r.Get("/usage/summary", a.summariseUsage)
+	})
+}
+
+func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
+	status := a.readiness(r.Context())
+	httpStatus := http.StatusOK
+	if !status.Ready() {
+		httpStatus = http.StatusServiceUnavailable
+	}
+	writeJSON(w, httpStatus, map[string]any{
+		"status":       map[bool]string{true: "ready", false: "degraded"}[status.Ready()],
+		"dependencies": status,
 	})
 }
 

@@ -62,6 +62,7 @@ func (s *Server) setupRoutes() {
 	v1.POST("/orgs/:orgId/invoices", s.createInvoice)
 	v1.POST("/orgs/:orgId/checkout-session", s.createCheckoutSession)
 	v1.POST("/orgs/:orgId/checkout-session/confirm", s.confirmCheckoutSession)
+	v1.POST("/orgs/:orgId/deactivate", s.deactivateOrganization)
 	// Nexi Checkout payment webhook. Authenticated by the per-webhook shared
 	// secret Nexi echoes in the Authorization header (verified in the handler),
 	// NOT by the internal API key — so its path is exempted from

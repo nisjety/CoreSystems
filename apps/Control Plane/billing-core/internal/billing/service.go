@@ -310,12 +310,26 @@ func (s *Service) syncPaymentCustomer(ctx context.Context, account Account) (Acc
 }
 
 func (s *Service) UpsertAccount(ctx context.Context, account Account) error {
+	tombstoned, err := s.repo.IsOrganizationTombstoned(ctx, account.OrgID)
+	if err != nil {
+		return err
+	}
+	if err := ensureBillingOrganizationActive(tombstoned); err != nil {
+		return err
+	}
 	syncedAccount, err := s.syncPaymentCustomer(ctx, account)
 	if err != nil {
 		return err
 	}
 
 	return s.persistAccount(ctx, syncedAccount)
+}
+
+func ensureBillingOrganizationActive(tombstoned bool) error {
+	if tombstoned {
+		return ErrOrganizationDeleted
+	}
+	return nil
 }
 
 func (s *Service) SyncOrganization(ctx context.Context, orgID, orgName string) error {
@@ -405,19 +419,17 @@ func (s *Service) DeactivateOrganization(ctx context.Context, orgID, reason stri
 		return fmt.Errorf("org_id is required")
 	}
 
-	account, err := s.GetAccount(ctx, orgID)
-	if err != nil {
+	trimmedReason := strings.TrimSpace(reason)
+	if trimmedReason == "" {
+		trimmedReason = "organization_deleted"
+	}
+	if err := s.repo.TombstoneOrganization(ctx, orgID, trimmedReason); err != nil {
 		return err
 	}
-	account.SubscriptionState = SubscriptionStateCanceled
-	if account.Metadata == nil {
-		account.Metadata = map[string]interface{}{}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "billing:account:"+orgID)
 	}
-	if trimmedReason := strings.TrimSpace(reason); trimmedReason != "" {
-		account.Metadata["deactivated_reason"] = trimmedReason
-	}
-
-	return s.persistAccount(ctx, account)
+	return nil
 }
 
 // ExpireTrials reverts organizations whose 14-day Pro trial has elapsed back to
@@ -700,6 +712,9 @@ func (s *Service) CanUseFeature(ctx context.Context, orgID, feature string) (boo
 	}
 
 	if feature == "" {
+		return false, account, nil
+	}
+	if account.SubscriptionState == SubscriptionStateCanceled {
 		return false, account, nil
 	}
 

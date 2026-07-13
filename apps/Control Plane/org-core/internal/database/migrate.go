@@ -20,22 +20,10 @@ import (
 // Each migration runs inside its own transaction: every statement in the file
 // plus the ledger insert either commit together or roll back together.
 //
-// Adopt-existing baseline: org-core ran for a long time *without* a ledger,
-// re-executing all idempotent DDL on every boot, so live databases already
-// carry the full current schema. On the first boot after this ledger is
-// introduced (the table is brand new) but the database already has application
-// tables, we record every on-disk migration as already-applied instead of
-// re-running it. That makes the cut-over a no-op on existing data, while a
-// genuinely fresh database still runs every migration from scratch.
+// Existing pre-ledger databases execute every idempotent migration once before
+// recording it. Baselining every file found on disk would let newly shipped
+// owner/RLS/projection migrations be marked applied without taking effect.
 func RunMigrations(ctx context.Context, db *DB, migrationsDir string) error {
-	// Probe whether the ledger predates this boot — drives the baseline below.
-	var ledgerExisted bool
-	if err := db.Pool.QueryRow(ctx,
-		"SELECT to_regclass('public.schema_migrations') IS NOT NULL",
-	).Scan(&ledgerExisted); err != nil {
-		return fmt.Errorf("probe schema_migrations: %w", err)
-	}
-
 	if _, err := db.Pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version     TEXT        PRIMARY KEY,
@@ -61,32 +49,6 @@ func RunMigrations(ctx context.Context, db *DB, migrationsDir string) error {
 		}
 	}
 	sort.Strings(files)
-
-	// Adopt-existing baseline (see doc comment): first ever boot of the ledger
-	// against an already-populated database — record everything as applied.
-	if !ledgerExisted {
-		var hasAppTables bool
-		if err := db.Pool.QueryRow(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM information_schema.tables
-				WHERE table_schema = 'public' AND table_name <> 'schema_migrations'
-			)`).Scan(&hasAppTables); err != nil {
-			return fmt.Errorf("probe existing schema: %w", err)
-		}
-		if hasAppTables {
-			for _, name := range files {
-				version := strings.TrimSuffix(name, ".up.sql")
-				if _, err := db.Pool.Exec(ctx,
-					"INSERT INTO schema_migrations (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
-					version, version,
-				); err != nil {
-					return fmt.Errorf("baseline-record %s: %w", version, err)
-				}
-			}
-			log.Printf("schema_migrations: adopted existing schema, baselined %d migration(s)", len(files))
-			return nil
-		}
-	}
 
 	for _, name := range files {
 		version := strings.TrimSuffix(name, ".up.sql")
@@ -273,4 +235,3 @@ func splitStatements(sql string) []string {
 
 	return stmts
 }
-

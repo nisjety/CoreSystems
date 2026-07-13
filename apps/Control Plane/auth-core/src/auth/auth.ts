@@ -35,6 +35,7 @@ import { TwilioVerifyService } from '../sms/twilio-verify.service';
 import { auditPlugin } from './audit-plugin';
 import { userServiceIntegrationPlugin } from './user-service-integration.plugin';
 import { organizationEventsPlugin } from './organization-events.plugin';
+import { normalizeIdentityEmail } from './account-linking.policy';
 
 // Ensure environment variables are loaded
 dotenv.config();
@@ -145,7 +146,9 @@ function captchaAuthPlugins() {
         provider,
         expectedAction,
         minScore: Number(process.env.RECAPTCHA_MIN_SCORE ?? 0.5),
-        allowedHostnames: allowedHostnames.length ? allowedHostnames : undefined,
+        allowedHostnames: allowedHostnames.length
+          ? allowedHostnames
+          : undefined,
       }),
     ];
   }
@@ -334,33 +337,6 @@ function encryptToken(token: string): string {
   const tag = cipher.getAuthTag();
   // Store as base64 segments: iv.tag.ciphertext
   return `${iv.toString('base64')}.${tag.toString('base64')}.${enc.toString('base64')}`;
-}
-
-function configuredTrustedProviders(): string[] {
-  const providers = new Set<string>();
-  if (process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET) {
-    providers.add('microsoft');
-  }
-  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-    providers.add('google');
-  }
-  if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
-    providers.add('github');
-  }
-  if (process.env.APPLE_CLIENT_ID) {
-    providers.add('apple');
-  }
-  if (process.env.VIPPS_CLIENT_ID && process.env.VIPPS_CLIENT_SECRET) {
-    providers.add('vipps');
-  }
-  if (
-    process.env.OKTA_CLIENT_ID &&
-    process.env.OKTA_CLIENT_SECRET &&
-    process.env.OKTA_DOMAIN
-  ) {
-    providers.add('okta');
-  }
-  return Array.from(providers);
 }
 
 function normalizePrivateKey(value: string): string {
@@ -710,6 +686,23 @@ export const auth: any = betterAuth({
 
   // Encrypt provider tokens before storing in DB
   databaseHooks: {
+    user: {
+      create: {
+        async before(user) {
+          return {
+            data: { ...user, email: normalizeIdentityEmail(user.email) },
+          };
+        },
+      },
+      update: {
+        async before(user) {
+          if (typeof user.email !== 'string') return { data: user };
+          return {
+            data: { ...user, email: normalizeIdentityEmail(user.email) },
+          };
+        },
+      },
+    },
     account: {
       create: {
         async before(account) {
@@ -763,8 +756,10 @@ export const auth: any = betterAuth({
       // update user info (name, avatar) from linked provider by default
       updateUserInfoOnLink:
         process.env.ACCOUNT_LINKING_UPDATE_USER_INFO !== 'false',
-      // Only configured providers are trusted for same-email account linking.
-      trustedProviders: configuredTrustedProviders(),
+      // Empty by design. Better Auth still links a same-email OAuth identity
+      // when that provider verifies the address. A trusted provider bypasses
+      // the verification requirement and would create an account-takeover path.
+      trustedProviders: [],
     },
   },
 
@@ -891,9 +886,10 @@ export const auth: any = betterAuth({
               process.env.ORG_LIMIT_PER_USER,
               5,
             ),
-            creatorRole: (process.env.ORG_CREATOR_ROLE || 'owner') as
-              | 'admin'
-              | 'owner',
+            // The creator is always the canonical owner. `owner` includes the
+            // administrative permissions required by onboarding, and avoids a
+            // supported configuration that could create an org with no owner.
+            creatorRole: 'owner',
             membershipLimit: parsePositiveInt(
               process.env.ORG_MEMBERSHIP_LIMIT,
               100,
@@ -903,7 +899,7 @@ export const auth: any = betterAuth({
               172800,
             ), // 48 hours
             requireEmailVerificationOnInvitation:
-              process.env.ORG_REQUIRE_EMAIL_VERIFICATION === 'true',
+              process.env.ORG_REQUIRE_EMAIL_VERIFICATION !== 'false',
             async sendInvitationEmail(data) {
               const companyName = process.env.RESEND_FROM_NAME || 'ID-Knuten';
               const supportEmail =

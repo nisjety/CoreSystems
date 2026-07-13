@@ -24,7 +24,7 @@ export class AuthServiceInitializer implements OnModuleInit {
     private directNats: DirectNatsService,
   ) {}
 
-  async onModuleInit() {
+  onModuleInit(): void {
     try {
       this.logger.log('Initializing auth service integration...');
 
@@ -41,7 +41,9 @@ export class AuthServiceInitializer implements OnModuleInit {
       // primary subscription listens there; the shared velion-nats bus is reserved
       // for cross-plane domain/ACL events.
       setAuditNatsPublisher(this.directNats);
-      this.logger.log('Audit NATS publisher initialized (local control-plane bus)');
+      this.logger.log(
+        'Audit NATS publisher initialized (local control-plane bus)',
+      );
 
       this.logger.log('Auth service integration initialized successfully', {
         // user-core authenticates against auth-core during its own startup, so

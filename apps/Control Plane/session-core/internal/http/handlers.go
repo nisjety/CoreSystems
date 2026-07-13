@@ -71,8 +71,13 @@ func (s *Server) getSessionState(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "session id required"})
 		return
 	}
+	userID := getUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
 
-	state, err := s.sessionService.GetSessionState(c.Request.Context(), sessionID)
+	state, err := s.sessionService.GetSessionState(c.Request.Context(), sessionID, userID)
 	if err != nil {
 		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to get session state")
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
@@ -96,8 +101,12 @@ func (s *Server) sendMessage(c *gin.Context) {
 		return
 	}
 
-	evt, err := s.sessionService.SendMessage(c.Request.Context(), sessionID, &req)
+	evt, err := s.sessionService.SendMessage(c.Request.Context(), sessionID, userID, &req)
 	if err != nil {
+		if errors.Is(err, domain.ErrSessionAccessDenied) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
 		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to send message")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send message"})
 		return
@@ -121,7 +130,11 @@ func (s *Server) resolveApproval(c *gin.Context) {
 		return
 	}
 
-	if err := s.sessionService.ResolveApproval(c.Request.Context(), sessionID, approvalID, &req); err != nil {
+	if err := s.sessionService.ResolveApproval(c.Request.Context(), sessionID, approvalID, userID, &req); err != nil {
+		if errors.Is(err, domain.ErrSessionAccessDenied) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
 		log.Error().Err(err).Str("approval_id", approvalID).Msg("Failed to resolve approval")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve approval"})
 		return
@@ -138,7 +151,11 @@ func (s *Server) resumeSession(c *gin.Context) {
 		return
 	}
 
-	if err := s.sessionService.ResumeSession(c.Request.Context(), sessionID); err != nil {
+	if err := s.sessionService.ResumeSession(c.Request.Context(), sessionID, userID); err != nil {
+		if errors.Is(err, domain.ErrSessionAccessDenied) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
 		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to resume session")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resume session"})
 		return
@@ -160,6 +177,11 @@ func (s *Server) streamEvents(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "session id required"})
 		return
 	}
+	userID := getUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
 
 	// Parse last-event-id for cursor recovery
 	var afterSequence int64
@@ -175,7 +197,7 @@ func (s *Server) streamEvents(c *gin.Context) {
 	}
 
 	// Verify session exists
-	_, err := s.sessionService.GetSessionState(c.Request.Context(), sessionID)
+	_, err := s.sessionService.GetSessionState(c.Request.Context(), sessionID, userID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
@@ -385,4 +407,3 @@ func getUserID(c *gin.Context) string {
 	}
 	return ""
 }
-

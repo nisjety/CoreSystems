@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
@@ -57,6 +58,30 @@ type Repository struct {
 	// pool is db.Pool, kept for the genuinely cross-org / multi-org / lookup
 	// paths that intentionally run unscoped (superuser, RLS-bypassing).
 	pool *pgxpool.Pool
+}
+
+func lockOrganizationLifecycle(ctx context.Context, tx pgx.Tx, orgID string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
+		return fmt.Errorf("lock organization lifecycle: %w", err)
+	}
+	return nil
+}
+
+func validateDeletionReceipt(receipt []byte) error {
+	var result struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(receipt, &result); err != nil {
+		return fmt.Errorf("decode deletion receipt: %w", err)
+	}
+	if !result.Success {
+		if strings.TrimSpace(result.Error) == "" {
+			result.Error = "organization erasure reported failure"
+		}
+		return fmt.Errorf("organization erasure failed: %s", result.Error)
+	}
+	return nil
 }
 
 func NewRepository(db *database.DB) *Repository {
@@ -156,6 +181,274 @@ DO UPDATE SET
 		}
 		return nil
 	})
+}
+
+// ProvisionOrganizationWithOwner creates or repairs an organization projection
+// and its first owner in one local transaction. Cross-plane callers may safely
+// retry this operation with the canonical Better Auth organization ID.
+func (r *Repository) ProvisionOrganizationWithOwner(
+	ctx context.Context,
+	organization Organization,
+	ownerUserID string,
+) error {
+	if strings.TrimSpace(organization.ID) == "" || strings.TrimSpace(ownerUserID) == "" {
+		return fmt.Errorf("organization id and owner user id are required")
+	}
+
+	metadata := map[string]any{}
+	if organization.Metadata != nil {
+		metadata = organization.Metadata
+	}
+	metadataBuf, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	var brregBuf []byte
+	if organization.BrregData != nil {
+		brregBuf, err = json.Marshal(organization.BrregData)
+		if err != nil {
+			return fmt.Errorf("marshal brreg data: %w", err)
+		}
+	}
+
+	plan := organization.Plan
+	if plan == "" {
+		plan = "free"
+	}
+	status := organization.Status
+	if status == "" {
+		status = "active"
+	}
+	region := organization.Region
+	if region == "" {
+		region = "eu"
+	}
+	locale := organization.DefaultLocale
+	if locale == "" {
+		locale = "nb-NO"
+	}
+	verificationStatus := organization.VerificationStatus
+	if verificationStatus == "" {
+		verificationStatus = "unverified"
+	}
+
+	return r.db.WithOrgScope(ctx, organization.ID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, organization.ID); err != nil {
+			return err
+		}
+		return r.provisionOrganizationWithOwnerTx(
+			ctx, tx, organization, ownerUserID, metadataBuf, brregBuf,
+			plan, status, region, locale, verificationStatus,
+		)
+	})
+}
+
+func (r *Repository) provisionOrganizationWithOwnerTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	organization Organization,
+	ownerUserID string,
+	metadataBuf, brregBuf []byte,
+	plan, status, region, locale, verificationStatus string,
+) error {
+	var tombstoned bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM auth_organization_tombstones WHERE org_id = $1)`,
+		organization.ID,
+	).Scan(&tombstoned); err != nil {
+		return fmt.Errorf("check organization tombstone: %w", err)
+	}
+	if tombstoned {
+		return ErrOrganizationDeleted
+	}
+
+	const upsertOrg = `
+INSERT INTO organizations (id, name, slug, plan, status, primary_domain, region, default_locale, metadata, org_number, verification_status, brreg_data)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  slug = EXCLUDED.slug,
+  metadata = organizations.metadata || EXCLUDED.metadata,
+  primary_domain = COALESCE(NULLIF(organizations.primary_domain, ''), EXCLUDED.primary_domain),
+  org_number = COALESCE(organizations.org_number, EXCLUDED.org_number),
+  verification_status = CASE
+    WHEN organizations.verification_status = 'verified' THEN organizations.verification_status
+    ELSE EXCLUDED.verification_status
+  END,
+  brreg_data = COALESCE(organizations.brreg_data, EXCLUDED.brreg_data),
+  updated_at = NOW()
+WHERE organizations.deleted_at IS NULL`
+	result, err := tx.Exec(ctx, upsertOrg,
+		organization.ID, organization.Name, organization.Slug, plan, status,
+		organization.PrimaryDomain, region, locale, metadataBuf,
+		organization.OrgNumber, verificationStatus, brregBuf,
+	)
+	if err != nil {
+		return fmt.Errorf("provision organization: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrOrganizationDeleted
+	}
+
+	const existingOwner = `
+SELECT user_id
+FROM organization_members
+WHERE org_id = $1 AND status = 'active'
+  AND 'owner' = ANY(string_to_array(role, ','))
+FOR UPDATE`
+	rows, err := tx.Query(ctx, existingOwner, organization.ID)
+	if err != nil {
+		return fmt.Errorf("query existing owner: %w", err)
+	}
+	ownerMatches := false
+	hasOwner := false
+	for rows.Next() {
+		hasOwner = true
+		var existingUserID string
+		if err := rows.Scan(&existingUserID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan existing owner: %w", err)
+		}
+		ownerMatches = ownerMatches || existingUserID == ownerUserID
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate existing owners: %w", err)
+	}
+	if hasOwner && !ownerMatches {
+		return ErrOwnerConflict
+	}
+
+	const upsertOwner = `
+INSERT INTO organization_members (id, org_id, user_id, role, status, joined_at)
+VALUES (gen_random_uuid()::TEXT, $1, $2, 'owner', 'active', NOW())
+ON CONFLICT (org_id, user_id) DO UPDATE SET
+  role = 'owner', status = 'active', joined_at = COALESCE(organization_members.joined_at, NOW()), updated_at = NOW()`
+	if _, err := tx.Exec(ctx, upsertOwner, organization.ID, ownerUserID); err != nil {
+		return fmt.Errorf("provision owner: %w", err)
+	}
+
+	const upsertEntitlement = `
+INSERT INTO org_entitlements (org_id, entitlement_key, enabled)
+VALUES ($1, $2, $3)
+ON CONFLICT (org_id, entitlement_key) DO NOTHING`
+	for _, entitlement := range defaultEntitlements {
+		if _, err := tx.Exec(ctx, upsertEntitlement, organization.ID, entitlement.Key, entitlement.Enabled); err != nil {
+			return fmt.Errorf("provision entitlements: %w", err)
+		}
+	}
+
+	const upsertOnboarding = `
+INSERT INTO org_onboarding_states (org_id, status, steps, last_updated_at)
+VALUES ($1, 'PROFILE_READY', '{"ownerProvisioned":true}'::jsonb, NOW())
+ON CONFLICT (org_id) DO UPDATE SET
+  status = CASE
+    WHEN org_onboarding_states.status = 'COMPLETED' THEN org_onboarding_states.status
+    ELSE 'PROFILE_READY'
+  END,
+  steps = org_onboarding_states.steps || EXCLUDED.steps,
+  last_updated_at = NOW()`
+	if _, err := tx.Exec(ctx, upsertOnboarding, organization.ID); err != nil {
+		return fmt.Errorf("provision onboarding state: %w", err)
+	}
+
+	if organization.PrimaryDomain != "" {
+		const addPendingDomain = `
+INSERT INTO organization_domains (org_id, normalized_domain, status, verification_method, auto_invite_enabled)
+VALUES ($1, $2, 'pending', 'authenticated_email', false)
+ON CONFLICT (org_id, normalized_domain) DO NOTHING`
+		if _, err := tx.Exec(ctx, addPendingDomain, organization.ID, organization.PrimaryDomain); err != nil {
+			return fmt.Errorf("record pending organization domain: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ReconcileOrganizationProjection applies an Auth-owned organization snapshot
+// only when its revision is newer than the last committed projection. The
+// revision compare, organization/owner upsert, and defaults share one
+// transaction so a failed write remains retryable and delayed delivery cannot
+// restore stale state.
+func (r *Repository) ReconcileOrganizationProjection(
+	ctx context.Context,
+	organization Organization,
+	ownerUserID string,
+	revision int64,
+) (bool, error) {
+	if revision < 1 {
+		return false, fmt.Errorf("revision must be positive")
+	}
+	if strings.TrimSpace(organization.ID) == "" || strings.TrimSpace(ownerUserID) == "" {
+		return false, fmt.Errorf("organization id and owner user id are required")
+	}
+
+	metadata := map[string]any{}
+	if organization.Metadata != nil {
+		metadata = organization.Metadata
+	}
+	metadataBuf, err := json.Marshal(metadata)
+	if err != nil {
+		return false, fmt.Errorf("marshal metadata: %w", err)
+	}
+	var brregBuf []byte
+	if organization.BrregData != nil {
+		brregBuf, err = json.Marshal(organization.BrregData)
+		if err != nil {
+			return false, fmt.Errorf("marshal brreg data: %w", err)
+		}
+	}
+	plan := organization.Plan
+	if plan == "" {
+		plan = "free"
+	}
+	status := organization.Status
+	if status == "" {
+		status = "active"
+	}
+	region := organization.Region
+	if region == "" {
+		region = "eu"
+	}
+	locale := organization.DefaultLocale
+	if locale == "" {
+		locale = "nb-NO"
+	}
+	verificationStatus := organization.VerificationStatus
+	if verificationStatus == "" {
+		verificationStatus = "unverified"
+	}
+
+	applied := false
+	err = r.db.WithOrgScope(ctx, organization.ID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, organization.ID); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx, `
+INSERT INTO auth_organization_projection_versions (org_id, revision)
+VALUES ($1, $2)
+ON CONFLICT (org_id) DO UPDATE SET
+  revision = EXCLUDED.revision,
+  applied_at = NOW()
+WHERE auth_organization_projection_versions.revision < EXCLUDED.revision`,
+			organization.ID, revision)
+		if err != nil {
+			return fmt.Errorf("record organization projection revision: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			return nil
+		}
+		if err := r.provisionOrganizationWithOwnerTx(
+			ctx, tx, organization, ownerUserID, metadataBuf, brregBuf,
+			plan, status, region, locale, verificationStatus,
+		); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
 }
 
 func (r *Repository) SetDefaultEntitlements(ctx context.Context, orgID string) error {
@@ -476,6 +769,112 @@ WHERE org_id = $1 AND user_id = $2`
 		}
 		return nil
 	})
+}
+
+// ReconcileOrganizationMember applies a canonical Auth Core membership intent
+// only when its per-member revision is newer than the last applied revision.
+// Version check and membership mutation share one transaction, preventing a
+// delayed request from restoring stale authorization.
+func (r *Repository) ReconcileOrganizationMember(
+	ctx context.Context,
+	orgID, userID, role, action string,
+	revision int64,
+) (bool, error) {
+	if revision < 1 {
+		return false, fmt.Errorf("revision must be positive")
+	}
+	if role == "" {
+		role = "member"
+	}
+
+	applied := false
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
+			return err
+		}
+		var tombstoned bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM auth_organization_tombstones WHERE org_id = $1)`,
+			orgID,
+		).Scan(&tombstoned); err != nil {
+			return fmt.Errorf("check organization tombstone: %w", err)
+		}
+		if tombstoned {
+			return nil
+		}
+
+		result, err := tx.Exec(ctx, `
+INSERT INTO auth_membership_projection_versions (org_id, user_id, revision, desired_action)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (org_id, user_id) DO UPDATE SET
+  revision = EXCLUDED.revision,
+  desired_action = EXCLUDED.desired_action,
+  applied_at = NOW()
+WHERE auth_membership_projection_versions.revision < EXCLUDED.revision`,
+			orgID, userID, revision, action)
+		if err != nil {
+			return fmt.Errorf("record membership projection revision: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			return nil
+		}
+
+		switch action {
+		case "upsert":
+			_, err = tx.Exec(ctx, `
+INSERT INTO organization_members (id, org_id, user_id, role, status, joined_at)
+VALUES (gen_random_uuid()::TEXT, $1, $2, $3, 'active', NOW())
+ON CONFLICT (org_id, user_id) DO UPDATE SET
+  role = EXCLUDED.role, status = 'active', updated_at = NOW()`, orgID, userID, role)
+		case "remove":
+			_, err = tx.Exec(ctx, `
+UPDATE organization_members SET status = 'removed', updated_at = NOW()
+WHERE org_id = $1 AND user_id = $2`, orgID, userID)
+		}
+		if err != nil {
+			return fmt.Errorf("apply membership projection: %w", err)
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
+}
+
+// ReconcileOrganizationDeletion writes a permanent Auth tombstone and erases
+// the local projection in one transaction. The tombstone prevents any delayed
+// create/member delivery from resurrecting authorization.
+func (r *Repository) ReconcileOrganizationDeletion(
+	ctx context.Context,
+	orgID string,
+) (json.RawMessage, error) {
+	// Persist the anti-resurrection tombstone first and independently. If the
+	// downstream erasure reports a semantic failure, retries remain safe and no
+	// delayed create/member event can restore authorization in the meantime.
+	if err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO auth_organization_tombstones (org_id)
+VALUES ($1) ON CONFLICT (org_id) DO NOTHING`, orgID); err != nil {
+			return fmt.Errorf("record organization tombstone: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	var receipt []byte
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT gdpr_hard_delete_organization($1)`, orgID).Scan(&receipt); err != nil {
+			return fmt.Errorf("gdpr_hard_delete_organization: %w", err)
+		}
+		return validateDeletionReceipt(receipt)
+	})
+	return json.RawMessage(receipt), err
 }
 
 // ============================================

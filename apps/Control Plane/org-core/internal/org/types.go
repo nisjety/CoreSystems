@@ -128,6 +128,20 @@ type OrgTenantLink struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
+// OrganizationDomain is a separately verified company-domain claim. A Brreg
+// match or website URL is not proof of domain control.
+type OrganizationDomain struct {
+	OrgID              string     `json:"org_id"`
+	NormalizedDomain   string     `json:"normalized_domain"`
+	Status             string     `json:"status"` // pending | verified | revoked
+	VerificationMethod string     `json:"verification_method,omitempty"`
+	VerifiedAt         *time.Time `json:"verified_at,omitempty"`
+	VerifiedBy         string     `json:"verified_by,omitempty"`
+	AutoInviteEnabled  bool       `json:"auto_invite_enabled"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
 // OrgOnboardingState tracks zero-input onboarding progression for each org.
 type OrgOnboardingState struct {
 	OrgID         string         `json:"org_id"`

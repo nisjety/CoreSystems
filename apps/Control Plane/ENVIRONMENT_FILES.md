@@ -1,5 +1,17 @@
 # Environment Configuration Structure
 
+> **Verified 2026-07-10**: DB_PASSWORD single-source rule, the NATS token, and the
+> auth-core/user-core port numbers below were re-checked against `docker-compose.yml`
+> and live containers and are accurate. The "Infrastructure Services" hostnames
+> (`aquatiq-postgres-local` / `aquatiq-redis-local` / `aquatiq-nats-local`) were stale —
+> those names only survive today in `.env.example` comments and one unused
+> `org-core/.env.local`, not in `docker-compose.yml` or any `.env.docker` actually
+> referenced by compose — and have been corrected below. The service list and port
+> table were also missing `billing-core`, `session-core`, and `audit-core`; corrected
+> below (audit-core in particular has **no** `.env.docker`/`.env.example` — its env is
+> set inline in `docker-compose.yml`, so the "every service has 4 env files" framing
+> does not apply to it).
+
 ## Secrets: `DB_PASSWORD` has a single source of truth
 
 `DB_PASSWORD` lives **only** in the root Control Plane `.env` (the live value).
@@ -37,6 +49,11 @@ org-core/
 ├── .env.example         # Template showing all variables
 └── .env.production      # Production deployment (environment variable placeholders)
 ```
+
+Coverage is uneven for the services added after this doc was written (verified
+2026-07-10): `billing-core` only has `.env.docker` + `.env.example` (no `.env` or
+`.env.production` on disk); `session-core` only has `.env.docker`; `audit-core` has
+none of the four — see the audit-core note in Service Port Mappings below.
 
 ## File Purposes
 
@@ -144,35 +161,57 @@ npm start  # or `go run main.go` depending on service
 ### auth-core
 - HTTP API: `3011`
 - gRPC API: `50011`
-- Database: `auth_service` (Redis DB 3)
+- Database: `auth_service` (Dragonfly DB 3, addressed via `DRAGONFLY_URL`)
 
 ### user-core
 - HTTP API: `3012`
 - gRPC API: `50012`
-- Database: `user_service` (Redis DB 2)
+- Database: `user_service` (Dragonfly DB 2, addressed via `DRAGONFLY_HOST`/`DRAGONFLY_DB`)
 
 ### org-core
-- HTTP API: `8080`
-- gRPC API: `9090`
-- Metrics: `9091`
+- HTTP API (container): `8080` — published on host as `18080` in `docker-compose.yml`
+  (host `8080` is reserved for Model Plane's model-gateway)
+- gRPC API (container): `9090` — published on host as `19090`
+- Metrics (container): `9091` — published on host as `19091`
+- Also publishes a 4th port `6061:6061` (see `docker-compose.yml` for current use)
 - Database: `org_core`
+
+### billing-core
+- HTTP API: `3014` (metrics on `6062`; gRPC `50013`) — has its own `.env.docker`/`.env.example`
+  following the same pattern as auth-core/user-core/org-core.
+
+### session-core
+- HTTP API: `3017` (gRPC `50017`) — has its own `.env.docker`/`.env.example`.
+
+### audit-core
+- HTTP API: `8187`. Does **not** follow the 4-file pattern — there is no
+  `audit-core/.env.docker` or `.env.example`; `docker-compose.yml` sets its env
+  (`DATABASE_URL`, `NATS_URL`, `INTERNAL_API_KEY`, etc.) directly in the service's
+  `environment:` block.
 
 ---
 
 ## Infrastructure Services (Shared)
 
-Used by all control-plane services when running Docker Compose:
+Used by all control-plane services when running Docker Compose. These are the
+actual Docker network hostnames from `docker-compose.yml` (the older
+`aquatiq-*-local` names below only survive in `.env.example` comments/unused files
+and are not what compose or any live `.env.docker` actually points at):
 
-- **PostgreSQL**: `aquatiq-postgres-local:5432`
+- **PostgreSQL**: `controlplane-postgres:5432` (container `controlplane-postgres`)
   - User: `aquatiq`
-  - Password: `<redacted-rotate-and-set-locally>` (in `.env.docker`)
+  - Password: sourced from root `.env` `DB_PASSWORD` (see single-source-of-truth
+    note above) — never a per-service literal.
 
-- **Redis**: `aquatiq-redis-local:6379`
-  - Password: `change-me-redis-password` (in `.env.docker`)
+- **Dragonfly** (Redis-protocol-compatible; replaced first-party Redis fleet-wide):
+  `controlplane-dragonfly:6379` (container `controlplane-dragonfly`)
+  - Password: set via `DRAGONFLY_URL`/service-specific vars in each `.env.docker`
+    (not the literal `change-me-redis-password`).
   - Services use different DB numbers (2, 3, etc.)
 
-- **NATS**: `aquatiq-nats-local:4222`
-  - Token: `nats` (in `.env.docker`)
+- **NATS**: `controlplane-nats:4222` (container `controlplane-nats`)
+  - Token: `nats` (confirmed current in `auth-core`/`user-core`/`org-core`
+    `.env.docker`)
 
 ---
 

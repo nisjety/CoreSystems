@@ -1,7 +1,11 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { MicroserviceOptions, Transport } from '@nestjs/microservices';
+import {
+  MicroserviceOptions,
+  NatsOptions,
+  Transport,
+} from '@nestjs/microservices';
 import * as dotenv from 'dotenv';
 import { SecurityHeadersMiddleware } from './common/middleware/security-headers.middleware';
 import { join } from 'path';
@@ -10,6 +14,9 @@ import { toNodeHandler } from 'better-auth/node';
 import { auth } from './auth/auth';
 import { OrganizationEventMiddleware } from './middleware/organization-event.middleware';
 import { SharedPublisher } from './nats/shared-publisher';
+import type { Server } from '@grpc/grpc-js';
+import type { PackageDefinition } from '@grpc/proto-loader';
+import type { Express, NextFunction, Request, Response } from 'express';
 
 // Load environment variables
 dotenv.config();
@@ -46,7 +53,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   // Get SharedPublisher (will delegate to SharedNatsService which initializes via OnModuleInit)
-  const sharedPublisher = app.get(SharedPublisher);
+  app.get(SharedPublisher);
   console.log(
     '✅ SharedPublisher initialized (delegates to SharedNatsService)',
   );
@@ -57,14 +64,13 @@ async function bootstrap() {
   const natsPass = process.env.NATS_PASS;
 
   console.log('🔍 NATS Debug:', {
-    NATS_TOKEN: natsToken ? `${natsToken.substring(0, 5)}***` : 'undefined',
     NATS_URL: process.env.NATS_URL,
     hasToken: !!natsToken,
     hasUser: !!natsUser,
     hasPass: !!natsPass,
   });
 
-  const natsOptions: any = {
+  const natsOptions: NonNullable<NatsOptions['options']> = {
     servers: [process.env.NATS_URL || 'nats://nats:4222'],
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2000,
@@ -109,7 +115,10 @@ async function bootstrap() {
         defaults: true,
         oneofs: true,
       },
-      onLoadPackageDefinition: (pkg: any, server: any) => {
+      onLoadPackageDefinition: (
+        pkg: PackageDefinition,
+        server: Pick<Server, 'addService'>,
+      ) => {
         new ReflectionService(pkg).addToServer(server);
       },
     },
@@ -170,8 +179,9 @@ async function bootstrap() {
 
   // Manually register Better Auth handler for OAuth callbacks
   // This ensures Better Auth routes are accessible even if AuthModule.configure() doesn't run
-  const betterAuthHandler = toNodeHandler(auth);
-  const expressApp = app.getHttpAdapter().getInstance();
+  const typedAuth = auth as unknown as Parameters<typeof toNodeHandler>[0];
+  const betterAuthHandler = toNodeHandler(typedAuth);
+  const expressApp = app.getHttpAdapter().getInstance() as unknown as Express;
 
   // Register organization event middleware BEFORE Better Auth handler
   // This allows us to intercept responses from Better Auth organization endpoints
@@ -180,20 +190,21 @@ async function bootstrap() {
     console.log('🔍 Got middleware instance:', !!orgMiddleware);
 
     // Register middleware for organization endpoints (must come before Better Auth catch-all)
-    expressApp.use((req: any, res: any, next: any) => {
+    expressApp.use((req: Request, res: Response, next: NextFunction) => {
       if (req.path.startsWith('/api/auth/organization')) {
         console.log(
           `🔍 Organization middleware intercepting: ${req.method} ${req.path}`,
         );
-        return orgMiddleware.use(req, res, next);
+        orgMiddleware.use(req, res, next);
+        return;
       }
-      next();
+      return next();
     });
     console.log('✅ Organization event middleware registered');
   } catch (error) {
     console.warn(
       '⚠️  Failed to register organization middleware:',
-      error?.message || String(error),
+      error instanceof Error ? error.message : String(error),
     );
     console.warn('⚠️  Error details:', error);
   }
@@ -203,7 +214,7 @@ async function bootstrap() {
   // of /api/auth/*.
   expressApp.all(
     /^\/api\/auth\/(?!convex(?:\/|$)).*/,
-    (req: any, res: any, next: any) => {
+    (req: Request, res: Response) => {
       console.log(`🔵 Better Auth route hit: ${req.method} ${req.path}`);
       return betterAuthHandler(req, res);
     },

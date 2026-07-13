@@ -31,8 +31,9 @@ export function emailDomain(email: string): string | undefined {
 
 function blocklistEnabled(): boolean {
   return (
-    process.env.DISPOSABLE_EMAIL_BLOCKLIST_ENABLED ?? 'true'
-  ).toLowerCase() !== 'false';
+    (process.env.DISPOSABLE_EMAIL_BLOCKLIST_ENABLED ?? 'true').toLowerCase() !==
+    'false'
+  );
 }
 
 function parseDomainList(content: string): string[] {

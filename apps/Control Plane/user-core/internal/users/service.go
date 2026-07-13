@@ -107,6 +107,10 @@ func NewService(repo *Repository, betterAuthClient interface{}, eventPublisher i
 	return svc
 }
 
+func (s *Service) PurgeExpiredOnboardingDrafts(ctx context.Context) (int64, error) {
+	return s.repo.PurgeExpiredOnboardingDrafts(ctx)
+}
+
 // SetAuditPublisher wires the local control-plane bus publisher used to emit
 // velion.audit.v1.* events to audit-core. nil disables audit emission.
 func (s *Service) SetAuditPublisher(ap AuditPublisher) {
@@ -884,6 +888,20 @@ func (s *Service) EnsureMembership(ctx context.Context, params EnsureMembershipP
 		Role:   role,
 		Status: status,
 	})
+}
+
+// RemoveMembership marks one exact user-organization projection removed after
+// the canonical Auth Core authority has denied that membership.
+func (s *Service) RemoveMembership(ctx context.Context, userID, orgID string) error {
+	userID = strings.TrimSpace(userID)
+	orgID = strings.TrimSpace(orgID)
+	if userID == "" || orgID == "" {
+		return fmt.Errorf("user ID and org ID are required")
+	}
+	if s.repo == nil {
+		return fmt.Errorf("membership repository is unavailable")
+	}
+	return s.repo.RemoveUserOrgMembership(ctx, userID, orgID)
 }
 
 // ============================================

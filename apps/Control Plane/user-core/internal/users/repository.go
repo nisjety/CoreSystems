@@ -145,7 +145,7 @@ func (r *Repository) GetByEmail(ctx context.Context, email string) (*User, error
 	query := `
 		SELECT id, email, name, password_hash, avatar, status, email_verified, onboarding_complete, created_at, updated_at, last_login_at
 		FROM users
-		WHERE email = $1
+		WHERE LOWER(BTRIM(email)) = LOWER(BTRIM($1))
 	`
 
 	user := &User{}
@@ -834,7 +834,15 @@ func (r *Repository) GetUserByProviderID(ctx context.Context, provider, provider
 
 // MarkOnboardingComplete marks a user's onboarding as complete
 func (r *Repository) MarkOnboardingComplete(ctx context.Context, email string) error {
-	query := `UPDATE users SET onboarding_complete = true, updated_at = NOW() WHERE email = $1`
+	query := `
+		UPDATE users
+		SET onboarding_complete = true,
+		    onboarding_step = NULL,
+		    onboarding_state = NULL,
+		    onboarding_expires_at = NULL,
+		    onboarding_completed_at = NOW(),
+		    updated_at = NOW()
+		WHERE LOWER(BTRIM(email)) = LOWER(BTRIM($1))`
 
 	result, err := r.db.Pool.Exec(ctx, query, email)
 	if err != nil {
@@ -850,7 +858,15 @@ func (r *Repository) MarkOnboardingComplete(ctx context.Context, email string) e
 
 // MarkOnboardingCompleteByID marks a user's onboarding as complete by user ID
 func (r *Repository) MarkOnboardingCompleteByID(ctx context.Context, userID string) error {
-	query := `UPDATE users SET onboarding_complete = true, updated_at = NOW() WHERE id = $1`
+	query := `
+		UPDATE users
+		SET onboarding_complete = true,
+		    onboarding_step = NULL,
+		    onboarding_state = NULL,
+		    onboarding_expires_at = NULL,
+		    onboarding_completed_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1`
 
 	result, err := r.db.Pool.Exec(ctx, query, userID)
 	if err != nil {
@@ -873,7 +889,27 @@ func (r *Repository) MarkOnboardingCompleteByID(ctx context.Context, userID stri
 // Callers should treat both fields as advisory client cache (the canonical
 // "done?" flag remains `users.onboarding_complete`).
 func (r *Repository) GetOnboardingState(ctx context.Context, userID string) (string, []byte, error) {
-	query := `SELECT COALESCE(onboarding_step, ''), onboarding_state FROM users WHERE id = $1`
+	// Expire only the resumable draft. The canonical auth/user identity remains
+	// so a later OAuth sign-in resolves to the same audited account.
+	query := `
+		WITH expired AS (
+			UPDATE users
+			SET onboarding_step = NULL,
+			    onboarding_state = NULL,
+			    onboarding_started_at = NULL,
+			    onboarding_expires_at = NULL,
+			    onboarding_state_updated_at = NOW(),
+			    updated_at = NOW()
+			WHERE id = $1
+			  AND onboarding_complete = false
+			  AND onboarding_expires_at < NOW()
+			RETURNING id
+		)
+		SELECT CASE WHEN expired.id IS NOT NULL THEN '' ELSE COALESCE(users.onboarding_step, '') END,
+		       CASE WHEN expired.id IS NOT NULL THEN NULL ELSE users.onboarding_state END
+		FROM users
+		LEFT JOIN expired ON expired.id = users.id
+		WHERE users.id = $1`
 	var step string
 	var state []byte
 	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&step, &state)
@@ -895,8 +931,17 @@ func (r *Repository) UpsertOnboardingState(ctx context.Context, userID, step str
 		UPDATE users
 		SET onboarding_step  = NULLIF($2, ''),
 		    onboarding_state = $3::JSONB,
+		    onboarding_started_at = CASE
+		      WHEN onboarding_complete THEN onboarding_started_at
+		      ELSE COALESCE(onboarding_started_at, NOW())
+		    END,
+		    onboarding_expires_at = CASE
+		      WHEN onboarding_complete THEN NULL
+		      ELSE COALESCE(onboarding_expires_at, NOW() + INTERVAL '30 days')
+		    END,
+		    onboarding_state_updated_at = NOW(),
 		    updated_at       = NOW()
-		WHERE id = $1`
+		WHERE id = $1 AND onboarding_complete = false`
 	result, err := r.db.Pool.Exec(ctx, query, userID, step, state)
 	if err != nil {
 		return fmt.Errorf("failed to upsert onboarding state: %w", err)
@@ -905,6 +950,26 @@ func (r *Repository) UpsertOnboardingState(ctx context.Context, userID, step str
 		return fmt.Errorf("user not found with id: %s", userID)
 	}
 	return nil
+}
+
+// PurgeExpiredOnboardingDrafts removes abandoned draft payloads after their
+// fixed retention window. It intentionally preserves canonical user identities.
+func (r *Repository) PurgeExpiredOnboardingDrafts(ctx context.Context) (int64, error) {
+	query := `
+		UPDATE users
+		SET onboarding_step = NULL,
+		    onboarding_state = NULL,
+		    onboarding_started_at = NULL,
+		    onboarding_expires_at = NULL,
+		    onboarding_state_updated_at = NOW(),
+		    updated_at = NOW()
+		WHERE onboarding_complete = false
+		  AND onboarding_expires_at < NOW()`
+	result, err := r.db.Pool.Exec(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("purge expired onboarding drafts: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 // ============================================

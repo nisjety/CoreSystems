@@ -1,67 +1,50 @@
-# =================================================================
-# Multi-stage Dockerfile for NestJS Auth Service
-# Uses pnpm for efficient package management
-# =================================================================
+# syntax=docker/dockerfile:1.7
+# Canonical production-compatible auth-core image. This alternate filename is
+# retained for external build jobs; keep it behaviorally aligned with Dockerfile.
+FROM node:22.23.1-alpine3.23@sha256:8516dce0483394d5708d4b2ee6cacb79fb1d617ea4e2787c2120bcca92ce372e AS builder
+ENV PNPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    CI=true
 
-# Base image
-FROM node:20-alpine AS base
-
-# Build stage - install dependencies and compile TypeScript
-FROM base AS build
+RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 
 WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --loglevel=error
 
-# Install build dependencies
-RUN apk add --no-cache libc6-compat
-
-# Enable pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-# Copy package files
-COPY package.json pnpm-lock.yaml* ./
-
-# Install dependencies
-RUN pnpm install --frozen-lockfile
-
-# Copy source code
 COPY . .
+RUN pnpm exec nest build && test -f dist/src/main.js
+RUN pnpm prune --prod --ignore-scripts --loglevel=error
 
-# Build the application
-RUN pnpm run build
+FROM node:22.23.1-alpine3.23@sha256:8516dce0483394d5708d4b2ee6cacb79fb1d617ea4e2787c2120bcca92ce372e
+ARG SOURCE_REVISION=unverified
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
+      org.opencontainers.image.created=$BUILD_DATE
+ENV SOURCE_REVISION=$SOURCE_REVISION \
+    BUILD_DATE=$BUILD_DATE \
+    NODE_ENV=production
 
-# Production stage - minimal runtime image
-FROM base AS production
+RUN set -e; \
+    if ! apk add --no-cache --quiet postgresql-client > /tmp/apk-add.log 2>&1; then \
+        cat /tmp/apk-add.log; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/apk-add.log; \
+    addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
+COPY --chown=appuser:appgroup --from=builder /app/dist         ./dist
+COPY --chown=appuser:appgroup --from=builder /app/proto        ./proto
+COPY --chown=appuser:appgroup --from=builder /app/drizzle      ./drizzle
+COPY --chown=appuser:appgroup --from=builder /app/node_modules ./node_modules
+COPY --chown=appuser:appgroup --from=builder /app/package*.json ./
+COPY --chown=appuser:appgroup --from=builder /app/migrations   ./migrations
+COPY --chown=appuser:appgroup --chmod=755 docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# Create non-root user
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nestjs
-
-# Set environment
-ENV NODE_ENV=production
-
-# Enable pnpm for production
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-# Copy package files for production install
-COPY package.json pnpm-lock.yaml ./
-
-# Install only production dependencies
-RUN pnpm install --frozen-lockfile --prod && pnpm store prune
-
-# Copy built application and proto files
-COPY --from=build --chown=nestjs:nodejs /app/dist ./dist
-COPY --from=build --chown=nestjs:nodejs /app/proto ./proto
-
-# Change ownership
-RUN chown -R nestjs:nodejs /app
-
-# Switch to non-root user
-USER nestjs
-
-# Expose application port
-EXPOSE 3011
-
-# Start the application
+EXPOSE 3011 50011
+USER appuser
+ENTRYPOINT ["/bin/sh", "/app/docker-entrypoint.sh"]
 CMD ["node", "dist/src/main.js"]

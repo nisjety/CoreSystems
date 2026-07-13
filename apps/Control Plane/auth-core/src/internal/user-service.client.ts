@@ -27,6 +27,9 @@ export class UserServiceClient {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': 'auth-service/1.0.0',
+      'X-Service-Token':
+        this.configService.get<string>('USER_CORE_SERVICE_TOKEN') || '',
+      'X-Service-Id': 'auth-core',
     };
 
     const config: RequestInit = {

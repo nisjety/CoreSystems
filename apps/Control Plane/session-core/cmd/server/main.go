@@ -119,7 +119,7 @@ func main() {
 	sessionService := service.NewSessionService(repo, natsLocal, natsShared, cache, cfg.NATS.ModelPlaneV2RolloutPct, convexClient, orgClient)
 
 	// G10: Control Session aggregator clients + service.
-	userClient := clients.NewUserClient(cfg.UserCore.URL, cfg.Auth.InternalAPIKey)
+	userClient := clients.NewUserClient(cfg.UserCore.URL, cfg.UserCore.ServiceToken)
 	if userClient != nil {
 		log.Info().Str("url", cfg.UserCore.URL).Msg("user-core client enabled for Control Session aggregator")
 	}

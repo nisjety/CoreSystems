@@ -158,9 +158,12 @@ func (s *SessionService) CreateSession(ctx context.Context, userID string, req *
 	return session, nil
 }
 
-func (s *SessionService) SendMessage(ctx context.Context, sessionID string, req *domain.SendMessageRequest) (*domain.SessionEvent, error) {
+func (s *SessionService) SendMessage(ctx context.Context, sessionID, actorUserID string, req *domain.SendMessageRequest) (*domain.SessionEvent, error) {
 	session, err := s.getSession(ctx, sessionID)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireSessionOwner(session, actorUserID); err != nil {
 		return nil, err
 	}
 
@@ -203,9 +206,12 @@ func (s *SessionService) SendMessage(ctx context.Context, sessionID string, req 
 	return evt, nil
 }
 
-func (s *SessionService) GetSessionState(ctx context.Context, sessionID string) (*domain.SessionState, error) {
+func (s *SessionService) GetSessionState(ctx context.Context, sessionID, actorUserID string) (*domain.SessionState, error) {
 	session, err := s.getSession(ctx, sessionID)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireSessionOwner(session, actorUserID); err != nil {
 		return nil, err
 	}
 
@@ -236,9 +242,12 @@ func (s *SessionService) GetEventsSince(ctx context.Context, sessionID string, a
 	return s.repo.GetEventsSince(ctx, sessionID, afterSequence, limit)
 }
 
-func (s *SessionService) ResolveApproval(ctx context.Context, sessionID, approvalID string, req *domain.ApprovalDecisionRequest) error {
+func (s *SessionService) ResolveApproval(ctx context.Context, sessionID, approvalID, actorUserID string, req *domain.ApprovalDecisionRequest) error {
 	session, err := s.getSession(ctx, sessionID)
 	if err != nil {
+		return err
+	}
+	if err := requireSessionOwner(session, actorUserID); err != nil {
 		return err
 	}
 
@@ -278,9 +287,12 @@ func (s *SessionService) ResolveApproval(ctx context.Context, sessionID, approva
 	return nil
 }
 
-func (s *SessionService) ResumeSession(ctx context.Context, sessionID string) error {
+func (s *SessionService) ResumeSession(ctx context.Context, sessionID, actorUserID string) error {
 	session, err := s.getSession(ctx, sessionID)
 	if err != nil {
+		return err
+	}
+	if err := requireSessionOwner(session, actorUserID); err != nil {
 		return err
 	}
 
@@ -314,6 +326,13 @@ func (s *SessionService) getSession(ctx context.Context, sessionID string) (*dom
 	}
 
 	return session, nil
+}
+
+func requireSessionOwner(session *domain.Session, actorUserID string) error {
+	if session == nil || actorUserID == "" || session.UserID == "" || session.UserID != actorUserID {
+		return domain.ErrSessionAccessDenied
+	}
+	return nil
 }
 
 // G36-cutover Step D (2026-05-12): the Plans / Todos / Lineage service

@@ -11,7 +11,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound            = errors.New("not found")
+	ErrOrganizationDeleted = errors.New("billing organization is permanently deleted")
+)
 
 type Repository struct {
 	pool *pgxpool.Pool
@@ -76,7 +79,26 @@ func (r *Repository) UpsertAccount(ctx context.Context, account Account) error {
 			updated_at = now()
 	`
 
-	_, err = r.pool.Exec(
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin account upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, account.OrgID); err != nil {
+		return fmt.Errorf("lock billing organization lifecycle: %w", err)
+	}
+	var tombstoned bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM billing_organization_tombstones WHERE org_id = $1)`,
+		account.OrgID,
+	).Scan(&tombstoned); err != nil {
+		return fmt.Errorf("check billing organization tombstone: %w", err)
+	}
+	if tombstoned {
+		return ErrOrganizationDeleted
+	}
+
+	_, err = tx.Exec(
 		ctx,
 		query,
 		account.OrgID,
@@ -94,7 +116,53 @@ func (r *Repository) UpsertAccount(ctx context.Context, account Account) error {
 	if err != nil {
 		return fmt.Errorf("upsert account: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit account upsert: %w", err)
+	}
+	return nil
+}
 
+func (r *Repository) IsOrganizationTombstoned(ctx context.Context, orgID string) (bool, error) {
+	var tombstoned bool
+	if err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM billing_organization_tombstones WHERE org_id = $1)`,
+		orgID,
+	).Scan(&tombstoned); err != nil {
+		return false, fmt.Errorf("check billing organization tombstone: %w", err)
+	}
+	return tombstoned, nil
+}
+
+func (r *Repository) TombstoneOrganization(ctx context.Context, orgID, reason string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin organization deactivation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
+		return fmt.Errorf("lock billing organization lifecycle: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO billing_organization_tombstones (org_id, reason)
+VALUES ($1, $2)
+ON CONFLICT (org_id) DO UPDATE SET reason = EXCLUDED.reason`, orgID, reason); err != nil {
+		return fmt.Errorf("record billing organization tombstone: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE billing_accounts
+SET subscription_state = 'canceled',
+    trial_ends_at = NULL,
+    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+      'deactivated_reason', $2::text,
+      'deactivated_at', NOW()
+    ),
+    updated_at = NOW()
+WHERE org_id = $1`, orgID, reason); err != nil {
+		return fmt.Errorf("deactivate billing account: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit organization deactivation: %w", err)
+	}
 	return nil
 }
 

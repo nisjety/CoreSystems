@@ -42,6 +42,24 @@ func main() {
 	} else {
 		log.Printf("[user-core startup] internal API key OK (%s)", r.Resolved)
 	}
+	if r := internalkey.AssertFromEnv("USER_CORE_MEMBERSHIP_SERVICE_TOKEN"); !r.OK {
+		msg := "[user-core startup] canonical membership credential validation failed (" + string(r.Problem.Kind) + " on " + r.Problem.EnvVar + "): " + r.Problem.Detail
+		if internalkey.IsProduction() {
+			log.Fatalf("FATAL %s", msg)
+		}
+		log.Printf("WARN  %s — continuing because not production", msg)
+	} else {
+		log.Printf("[user-core startup] canonical membership credential OK (%s)", r.Resolved)
+	}
+	if err := httpserver.ValidateRequiredServiceCredentialRegistry(os.Getenv("USER_CORE_SERVICE_CREDENTIALS")); err != nil {
+		msg := "[user-core startup] service credential registry validation failed: " + err.Error()
+		if internalkey.IsProduction() {
+			log.Fatalf("FATAL %s", msg)
+		}
+		log.Printf("WARN  %s — continuing because not production", msg)
+	} else {
+		log.Printf("[user-core startup] required gateway service principal OK")
+	}
 
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6060
 	if os.Getenv("PPROF_ENABLED") == "true" {
@@ -277,6 +295,32 @@ func main() {
 
 	// Initialize user service (Phase 4: After NATS setup so publisher is available)
 	userService := users.NewService(userRepo, betterAuthClient, natsPublisher, redisClient)
+	go func() {
+		purge := func() {
+			purgeCtx, purgeCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer purgeCancel()
+			count, purgeErr := userService.PurgeExpiredOnboardingDrafts(purgeCtx)
+			if purgeErr != nil {
+				log.Printf("onboarding draft retention sweep failed: %v", purgeErr)
+				return
+			}
+			if count > 0 {
+				log.Printf("cleared %d expired onboarding drafts", count)
+			}
+		}
+
+		purge()
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				purge()
+			}
+		}
+	}()
 
 	// Wire shared cross-plane publisher to userService for domain events
 	if sharedPublisher != nil {

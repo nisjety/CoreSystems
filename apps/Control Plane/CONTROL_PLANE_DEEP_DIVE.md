@@ -2,6 +2,8 @@
 
 Generated: 2026-06-07
 
+Verified 2026-07-10: container/port topology and gRPC health-only claims re-checked live and still hold. Four items below were found stale and corrected in place — see the notes marked "Verified 2026-07-10" in the auth-core, user-core, and audit-core sections, and in Follow-Up Candidates.
+
 Scope: `/apps/Control Plane`
 
 This document maps what is in the Control Plane, how the services work together, which relationships are currently wired, and which surfaces appear stale, partial, placeholder, or intentionally unused.
@@ -130,10 +132,8 @@ Maturity notes:
 - Active and central.
 - Some live `auth/orpc-router.ts` logic has placeholder or fallback paths for consent persistence, OTP verification, passkeys, HIBP, OAuth provider URLs in development, OIDC client operations, API-key operations, bearer token listing, and admin stats/users. These are not dead files; they are live routes with partial backend implementation.
 - Email/SMS integrations have development mock fallbacks when `RESEND_API_KEY` or Twilio Verify config is unavailable. The SMS fallback approves verification in mock mode, so production config must prevent that path.
-- `src/orpc/consolidated-auth.controller.ts.unused` is intentionally inactive.
-- `src/orpc/unified-auth.controller.ts.unused` is intentionally inactive.
-- `src/auth/orpc-router.ts.backup` is backup material, not active source.
-- `src/internal/contracts/user-service.contract.ts` currently exports only `placeholder = true`.
+- Verified 2026-07-10: `src/orpc/consolidated-auth.controller.ts.unused`, `src/orpc/unified-auth.controller.ts.unused`, and `src/auth/orpc-router.ts.backup` no longer exist in the tree — they were deleted on 2026-06-07 per `apps/STALE_DOC_DELETION_REGISTER.md`, confirmed gone by directory listing. Treat prior mentions of these three files as historical.
+- `src/internal/contracts/user-service.contract.ts` currently exports only `placeholder = true` (still true as of 2026-07-10).
 
 ### user-core
 
@@ -180,7 +180,7 @@ Events:
 Maturity notes:
 
 - Active and relatively complete.
-- `DocumentAccessService` is registered, but the current construction passes `nil` for the shared publisher. That means document ACL gRPC changes do not emit shared cross-plane ACL-change events through that handler path.
+- Verified 2026-07-10 — STALE, now fixed: as of commit `596edfa4` (2026-06-21, "feat(ownership): per-user data ownership & sharing"), `cmd/server/main.go` wires the real `sharedPublisher` into `grpc.NewServer(...)` and `NewDocumentAclHandler` calls `sharedPublisher.PublishDocumentAclChanged(...)` on grant/revoke. Document ACL gRPC changes now do emit shared cross-plane ACL-change events; the prior "passes `nil`" claim no longer holds.
 - Device-management gRPC methods are deliberately unimplemented; comments direct callers to session `user_agent`/IP tracking instead.
 - Some user service TODOs remain around activity logging for block/suspend reasons, suspension expiry, and an admin-role check on `GET /api/v1/users/:id`.
 
@@ -337,7 +337,7 @@ Events:
 Maturity notes:
 
 - Active and intentionally narrow.
-- `internal/api/api.go` permits reads/writes if `INTERNAL_API_KEY` is empty. Compose defaults a development key, but production should enforce a real secret and avoid an empty value.
+- Verified 2026-07-10 — STALE, now fixed: `internal/api/api.go` (`internalAuth` middleware) fails closed with HTTP 500 "service auth not configured" when `INTERNAL_API_KEY` is empty, and otherwise does a constant-time compare against the provided `X-Internal-Api-Key`/`X-Api-Key` header. This has been fail-closed since commit `42d7fed7` (2026-06-17); the prior "permits reads/writes if empty" claim no longer holds. Compose still should supply a real secret in production.
 
 ## Storage and Migrations
 
@@ -374,15 +374,13 @@ Mapped but partial:
 - `session-core` gRPC is exposed but has no registered services.
 - `org-core` gRPC is health/reflection only.
 - `billing-core` gRPC is health/reflection only.
-- `user-core` document ACL gRPC is registered, but shared cross-plane publishing is not wired through the current handler construction.
+- Verified 2026-07-10 — STALE, now fixed: `user-core` document ACL gRPC shared cross-plane publishing was wired through the handler construction in commit `596edfa4` (2026-06-21); see the user-core Maturity notes above.
 - `session-core` org-only cache invalidation is bounded by TTL because there is no reverse index.
 - `auth-core` oRPC-style router exposes many advanced auth/admin endpoints with placeholder/fallback implementation paths.
 
 Unmapped or likely unused:
 
-- `auth-core/src/orpc/consolidated-auth.controller.ts.unused`: inactive by extension and by docs.
-- `auth-core/src/orpc/unified-auth.controller.ts.unused`: inactive by extension.
-- `auth-core/src/auth/orpc-router.ts.backup`: backup file; not part of runtime.
+- Verified 2026-07-10 — deleted, no longer present: `auth-core/src/orpc/consolidated-auth.controller.ts.unused`, `auth-core/src/orpc/unified-auth.controller.ts.unused`, and `auth-core/src/auth/orpc-router.ts.backup` were removed on 2026-06-07 per `apps/STALE_DOC_DELETION_REGISTER.md` and confirmed absent from the current tree.
 - `auth-core/src/internal/contracts/user-service.contract.ts`: placeholder-only export.
 - `session-core/scripts/smoke_test_api.sh`: still tests old todo endpoints even though `/v1/{plans,todos,lineage}` routes were decommissioned.
 - `session-core/API_REFERENCE.md`, `session-core/IMPLEMENTATION_SUMMARY.md`, and `session-core/90_PERCENT_COMPLETE.md`: still describe old plan/todo/lineage surfaces and should be treated as historical unless reconciled with the 2026-05-12 decommission.
@@ -447,9 +445,9 @@ Security checks that matter most for this plane:
 
 ## Follow-Up Candidates
 
-1. Decide whether `org-core` and `billing-core` gRPC ports should remain health/reflection only or get real service definitions.
-2. Wire shared publishing into `user-core` `DocumentAccessService` if document ACL changes need cross-plane event consumers.
-3. Remove or relocate `.backup`, `.unused`, and placeholder-only files if they are no longer useful for migration history.
+1. Decide whether `org-core` and `billing-core` gRPC ports should remain health/reflection only or get real service definitions. (Verified 2026-07-10: both still register health/reflection only in `internal/grpc/server.go`; no business service registered.)
+2. ~~Wire shared publishing into `user-core` `DocumentAccessService`~~ — done as of commit `596edfa4` (2026-06-21); verified 2026-07-10.
+3. ~~Remove or relocate `.backup`, `.unused`~~ files — done on 2026-06-07 (see `apps/STALE_DOC_DELETION_REGISTER.md`); verified 2026-07-10 they are absent from the tree. The one remaining placeholder-only file, `auth-core/src/internal/contracts/user-service.contract.ts`, is still just `export const placeholder = true;` as of 2026-07-10 and still a candidate for removal/relocation.
 4. Update or remove `session-core/scripts/smoke_test_api.sh` todo-route checks.
 5. Add a per-org reverse index for Control Session cache invalidation if org-wide entitlement changes need sub-30-second correctness.
 6. Normalize the event namespace migration plan so consumers know when to prefer `auth.*`/`organization.*` versus `aqencia.controlplane.*` subjects.

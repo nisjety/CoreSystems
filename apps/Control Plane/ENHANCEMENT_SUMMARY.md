@@ -1,5 +1,7 @@
 # Control Plane Enhancement Summary
 
+> **Verified 2026-07-10**: Tables (`org_quotas`, `org_billing`, `org_compliance`, `org_role_mappings`, `org_plan_history`), GDPR functions (`gdpr_hard_delete_user`, `gdpr_anonymize_user`, `gdpr_hard_delete_organization`, `soft_delete_organization`, `purge_old_deleted_organizations`), default-data seeding, and NATS event publishing (`organization.created/updated/plan.changed`, `user.created/updated`) were all confirmed present and live against the running `org_core`/`auth_service` Postgres databases and current source. The `POST /api/v2/auth/organization/create` example endpoint is correct (auth-core's oRPC controller is mounted at `api/v2/auth`; live-curled, returns 400 "Authentication required" as expected without a session). Two sections below have since drifted from the code and are annotated inline: the Step 3 service-wiring sample, and the "Next Steps" HTTP endpoint list (some of those endpoints now exist under different paths).
+
 ## What Was Added
 
 This enhancement ensures the Control Plane is the **single source of truth** for all critical organizational and user data, with clear event-driven architecture for downstream consumers like Convex.
@@ -287,14 +289,17 @@ SELECT org_id, role_name, permissions FROM org_role_mappings;
 
 If using the enhanced service layer:
 
+> **Correction (verified 2026-07-10)**: there is no `org.NewServiceEnhanced` constructor — `UpdatePlan` and `HardDelete` are methods directly on the existing `*org.Service` (see `org-core/internal/org/service_enhanced.go`). The real wiring in `org-core/cmd/server/main.go` is:
+
 ```go
 // In org-core main.go or server initialization
-publisher := nats.NewPublisher(natsClient)
-service := org.NewServiceEnhanced(repo, publisher)
+orgService := orgcore.NewService(repo, publisher, redisClient)
+orgService.SetSharedPublisher(sp)      // cross-plane velion-nats events
+orgService.SetAuditPublisher(natsClient) // local audit bus
 
 // Now you can use:
-service.UpdatePlan(ctx, orgID, "pro", adminUserID, "Upgrade request")
-service.HardDelete(ctx, orgID) // GDPR deletion
+orgService.UpdatePlan(ctx, orgID, "pro", adminUserID, "Upgrade request")
+orgService.HardDelete(ctx, orgID) // GDPR deletion
 ```
 
 ### Step 4: Test Event Publishing
@@ -411,6 +416,8 @@ GET    /organizations/:id/compliance     // Get compliance settings
 PUT    /organizations/:id/compliance     // Update compliance
 DELETE /organizations/:id/gdpr           // GDPR hard delete
 ```
+
+> **Update (verified 2026-07-10)**: plan update and GDPR erasure are already implemented in `org-core/internal/http/server.go`, under slightly different paths than sketched above: `POST /api/v1/organizations/:id/plan` (and the unprefixed `POST /orgs/:id/plan`), plus `DELETE /orgs/:id/gdpr/erase` and `DELETE /orgs/:id/gdpr/soft-delete` (both membership-guarded, hard erase requires `{"confirm": true}`). The quotas/billing/compliance GET/PUT endpoints listed above are **still not implemented** — no route or handler for them exists yet.
 
 ### Add Quota Enforcement
 

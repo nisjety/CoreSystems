@@ -13,6 +13,9 @@ README.md
 .idea
 coverage
 .nyc_output
+keys/
+*.key
+*.pem
 *.test.ts
 *.spec.ts
 jest.config*

@@ -16,14 +16,15 @@ import (
 )
 
 type Server struct {
-	router      *gin.Engine
-	httpServer  *http.Server
-	orgService  *orgcore.Service
-	rbacRepo    *rbac.Repository // U6-3 (ui-ux-velion-gap.md §10)
-	authService string
-	userService string
-	httpClient  *http.Client
-	brregClient *brreg.Client
+	router           *gin.Engine
+	httpServer       *http.Server
+	orgService       *orgcore.Service
+	rbacRepo         *rbac.Repository // U6-3 (ui-ux-velion-gap.md §10)
+	authService      string
+	userService      string
+	userServiceToken string
+	httpClient       *http.Client
+	brregClient      *brreg.Client
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -33,13 +34,14 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	router.Use(internalAuthMiddleware())
 
 	s := &Server{
-		router:      router,
-		orgService:  orgService,
-		rbacRepo:    rbacRepo,
-		authService: authServiceURL,
-		userService: userServiceURL,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		brregClient: brreg.NewClient(),
+		router:           router,
+		orgService:       orgService,
+		rbacRepo:         rbacRepo,
+		authService:      authServiceURL,
+		userService:      userServiceURL,
+		userServiceToken: strings.TrimSpace(os.Getenv("USER_CORE_SERVICE_TOKEN")),
+		httpClient:       &http.Client{Timeout: 10 * time.Second},
+		brregClient:      brreg.NewClient(),
 	}
 	s.setupRoutes()
 	s.httpServer = &http.Server{
@@ -99,17 +101,14 @@ func (s *Server) setupRoutes() {
 	s.router.POST("/orgs/:id/plan", guard, s.updatePlan)
 	s.router.PATCH("/orgs/:id/capabilities", guard, s.updateCapabilities)
 	s.router.GET("/orgs/:id/members", s.listMembers)
-	s.router.POST("/orgs/:id/members/invite", guard, s.inviteMember)
-	s.router.DELETE("/orgs/:id/members/:userId", guard, s.removeMember)
 	s.router.GET("/orgs/:id/members/search", s.searchMembers)
 
-	// U6-3 (ui-ux-velion-gap.md §10): RBAC editor surface.
+	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
+	// policy mutations are intentionally not mounted for the secure MVP: Auth
+	// Core is the sole membership authority, while fine-grained policy editing is
+	// deferred to the separately reviewed enterprise phase.
 	s.router.GET("/orgs/:id/roles/catalog", s.listCapabilityCatalog)
 	s.router.GET("/orgs/:id/roles", s.listRoles)
-	s.router.POST("/orgs/:id/roles", guard, s.createRole)
-	s.router.PATCH("/orgs/:id/roles/:roleName", guard, s.updateRole)
-	s.router.DELETE("/orgs/:id/roles/:roleName", guard, s.deleteRole)
-	s.router.PATCH("/orgs/:id/members/:userId/role", guard, s.assignMemberRole)
 
 	// GDPR erasure (owner/admin-gated; calls the gdpr_hard_delete_organization
 	// / soft_delete_organization stored procedures). Hard erasure is
@@ -129,6 +128,9 @@ func (s *Server) setupRoutes() {
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
 	internal.POST("/orgs/:orgId/onboarding/state", s.updateOnboardingState)
+	internal.POST("/orgs/:orgId/reconcile", s.reconcileOrganizationProjection)
+	internal.POST("/orgs/:orgId/members/reconcile", s.reconcileOrganizationMember)
+	internal.POST("/orgs/:orgId/reconcile-delete", s.reconcileOrganizationDeletion)
 }
 
 func internalAuthMiddleware() gin.HandlerFunc {

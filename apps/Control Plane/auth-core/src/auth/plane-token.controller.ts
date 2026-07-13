@@ -18,6 +18,7 @@
  *   POST /api/control-plane/internal-token → ...
  *   GET  /api/application-plane/token   → ...
  *   POST /api/application-plane/internal-token → ...
+ *   POST /api/control-policy/internal-token → Data policy caller (service only)
  *
  * The path slug is parsed back into a `PlaneAudience` and validated
  * against the configured set in `ConvexTokenService.isKnownPlaneAudience`
@@ -42,13 +43,21 @@ import {
   Param,
   Post,
   Req,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 
+import { DirectNatsService } from '../nats/direct-nats.service';
 import { auth } from './auth';
 import { ConvexTokenService, type PlaneAudience } from './convex-token.service';
+import {
+  authorizePlaneServicePrincipal,
+  ServicePrincipalConfigurationError,
+} from './plane-service-principal';
+import { resolveCanonicalTokenContext } from './plane-token-membership';
+import { planeScopesForRole } from './plane-token-scopes';
 
 function toWebHeaders(
   source: Record<string, string | string[] | undefined>,
@@ -72,15 +81,9 @@ function toWebHeaders(
 const ONBOARDING_ORG_SENTINEL = 'onboarding';
 
 interface PlaneInternalTokenBody {
-  userId?: string;
   orgId?: string;
-  email?: string;
   scopes?: readonly string[];
-}
-
-interface SessionContextResponse {
-  orgId?: string;
-  role?: string;
+  reason?: string;
 }
 
 @ApiTags('Plane Auth')
@@ -88,26 +91,22 @@ interface SessionContextResponse {
 export class PlaneTokenController {
   private readonly logger = new Logger(PlaneTokenController.name);
 
-  private readonly userServiceUrl = (
-    process.env.USER_SERVICE_URL || 'http://user-service:3012'
-  ).replace(/\/+$/, '');
-
-  private readonly internalApiKey =
-    process.env.INTERNAL_API_KEY ||
-    process.env.INTERNAL_SERVICE_SECRET ||
-    '';
-
-  constructor(private readonly convexTokenService: ConvexTokenService) {}
+  constructor(
+    private readonly convexTokenService: ConvexTokenService,
+    private readonly directNats: DirectNatsService,
+  ) {}
 
   /**
    * Mint a plane-scoped JWT from the active Better Auth session. The
    * audience comes from the URL path so the controller can serve every
    * non-Model-Plane plane without duplicate route handlers.
    *
-   * Routes registered: `/api/:audience/token` for any `audience` in
-   * `PlaneAudience`. Unknown audiences → 404, no session → 401, no active
-   * org → 400 (fail-closed; a token with empty `org_id` would be rejected
-   * downstream anyway, so surface it here as a clear error).
+   * Routes registered: `/api/:audience/token` for interactive audiences in
+   * `PlaneAudience`. The `control-policy` audience is deliberately excluded
+   * and available only through the scoped service-principal path. Unknown or
+   * service-only audiences → 404, no session → 401, no active org → 400
+   * (fail-closed; a token with empty `org_id` would be rejected downstream
+   * anyway, so surface it here as a clear error).
    */
   /**
    * Pre-org onboarding preview token. The onboarding website step runs BEFORE
@@ -155,7 +154,7 @@ export class PlaneTokenController {
     description: 'RS256-signed JWT for `Authorization: Bearer <token>`',
   })
   async getToken(@Param('audience') audience: string, @Req() request: Request) {
-    if (!this.convexTokenService.isKnownPlaneAudience(audience)) {
+    if (!this.convexTokenService.isInteractivePlaneAudience(audience)) {
       throw new NotFoundException(`Unknown plane audience: ${audience}`);
     }
 
@@ -167,11 +166,20 @@ export class PlaneTokenController {
       throw new UnauthorizedException('Authentication required');
     }
 
-    const sessionContext = await this.fetchSessionContext({
-      userId: session.user.id,
-      email: session.user.email ?? '',
-      name: session.user.name ?? null,
-    });
+    const activeOrganizationId = (
+      session.session as { activeOrganizationId?: string }
+    ).activeOrganizationId;
+    let sessionContext;
+    try {
+      sessionContext = await resolveCanonicalTokenContext(
+        session.user.id,
+        activeOrganizationId ?? '',
+      );
+    } catch {
+      throw new ServiceUnavailableException(
+        'Canonical membership authority unavailable',
+      );
+    }
 
     if (!sessionContext?.orgId) {
       throw new BadRequestException(
@@ -179,27 +187,17 @@ export class PlaneTokenController {
       );
     }
 
-    const role = (sessionContext.role ?? '').toLowerCase();
-    // Org owners/admins get the granular data-plane scopes that downstream
-    // services actually verify: retrieval-engine checks `org:data:read_all`
-    // (audited admin read-bypass, EXCLUDED from agent grounding) and
-    // documents-api checks `org:data:write_all` (create org-visible documents).
-    // `admin` is kept for any legacy coarse check. Non-admins get no scopes →
-    // strictly per-user ownership (private-until-shared).
-    const scopes =
-      role === 'owner' || role === 'admin'
-        ? ['admin', 'org:data:read_all', 'org:data:write_all']
-        : undefined;
+    // User-level scopes preserve ordinary document/wiki workflows, while
+    // tenant-wide/admin capabilities remain role-gated. Destructive search
+    // rebuild is intentionally absent from every interactive-user token.
+    const scopes = planeScopesForRole(sessionContext.role, audience);
 
-    const bundle = this.convexTokenService.issuePlaneToken(
-      audience as PlaneAudience,
-      {
-        userId: session.user.id,
-        orgId: sessionContext.orgId,
-        email: session.user.email ?? undefined,
-        scopes,
-      },
-    );
+    const bundle = this.convexTokenService.issuePlaneToken(audience, {
+      userId: session.user.id,
+      orgId: sessionContext.orgId,
+      email: session.user.email ?? undefined,
+      scopes,
+    });
 
     return {
       ...bundle,
@@ -210,86 +208,92 @@ export class PlaneTokenController {
   }
 
   /**
-   * Mint a plane-scoped JWT for a service-to-service caller. Caller must
-   * present a valid `X-Internal-Api-Key` header. Body must supply
-   * `userId` + `orgId` so the resulting token carries a real tenant
-   * identity (auth-core does not synthesise one — that would defeat the
-   * Wave 3 multi-tenant trust contract).
+   * Mint a plane-scoped JWT for a registered service principal. The caller's
+   * identity, audiences, tenants, and maximum scopes come from the deployment
+   * allowlist. Request fields can only narrow those bounds.
    */
   @Post(':audience/internal-token')
   @ApiOperation({
     summary:
-      'Mint a plane-scoped JWT for service-to-service traffic (internal key required)',
+      'Mint a bounded plane-scoped JWT for a registered service principal',
   })
   async issueInternalToken(
     @Param('audience') audience: string,
-    @NestHeaders('x-internal-api-key') apiKey: string | undefined,
+    @NestHeaders('x-service-id') serviceId: string | undefined,
+    @NestHeaders('x-service-api-key') credential: string | undefined,
     @Body() body: PlaneInternalTokenBody,
   ) {
     if (!this.convexTokenService.isKnownPlaneAudience(audience)) {
       throw new NotFoundException(`Unknown plane audience: ${audience}`);
     }
-    if (!this.internalApiKey) {
-      this.logger.error(
-        'INTERNAL_API_KEY / INTERNAL_SERVICE_SECRET not configured; refusing internal token issuance',
-      );
-      throw new ForbiddenException('Internal token issuance not configured');
-    }
-    if (!apiKey || apiKey !== this.internalApiKey) {
-      throw new ForbiddenException('Invalid internal API key');
-    }
-    const userId = (body.userId ?? '').trim();
     const orgId = (body.orgId ?? '').trim();
-    if (!userId || !orgId) {
-      throw new BadRequestException(
-        'userId and orgId are required for internal token issuance',
-      );
-    }
-    return this.convexTokenService.issuePlaneToken(
-      audience as PlaneAudience,
-      {
-        userId,
-        orgId,
-        email: body.email,
-        scopes: body.scopes,
-      },
-    );
-  }
-
-  private async fetchSessionContext(actor: {
-    userId: string;
-    email: string;
-    name: string | null;
-  }): Promise<SessionContextResponse | null> {
+    const scopes = Array.isArray(body.scopes) ? body.scopes : [];
+    const reason = (body.reason ?? '').trim();
+    let principal;
     try {
-      const response = await fetch(
-        `${this.userServiceUrl}/api/v1/me/session-context`,
+      principal = authorizePlaneServicePrincipal(
+        process.env.PLANE_SERVICE_PRINCIPALS_JSON ?? '',
         {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Internal-Api-Key': this.internalApiKey,
-            'X-User-Id': actor.userId,
-            'X-User-Email': actor.email,
-            ...(actor.name ? { 'X-User-Name': actor.name } : {}),
-          },
-          cache: 'no-store',
+          serviceId: serviceId ?? '',
+          credential: credential ?? '',
+          audience,
+          orgId,
+          requestedScopes: scopes,
+          reason,
         },
       );
-
-      if (!response.ok) {
-        this.logger.warn(
-          `Failed to resolve user-core session context for plane token: ${response.status}`,
-        );
-        return null;
-      }
-
-      return (await response.json()) as SessionContextResponse;
     } catch (error) {
-      this.logger.warn(
-        `Failed to resolve user-core session context for plane token: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
+      if (error instanceof ServicePrincipalConfigurationError) {
+        this.logger.error(
+          'Service-principal registry unavailable; refusing token issuance',
+        );
+        throw new ServiceUnavailableException(
+          'Service-principal issuance is unavailable',
+        );
+      }
+      throw new ForbiddenException('Service principal is not authorized');
     }
+    const response = this.convexTokenService.issuePlaneToken(audience, {
+      userId: principal.subject,
+      orgId: principal.orgId,
+      scopes: principal.scopes,
+      principalType: 'service',
+      serviceId: principal.serviceId,
+      reason: principal.reason,
+    });
+    const event = 'plane_service_token_issued';
+    let audited = false;
+    try {
+      await this.directNats.publishAuditDurable(
+        `velion.audit.v1.control.${event}`,
+        {
+          occurred_at: new Date().toISOString(),
+          org_id: principal.orgId,
+          actor_role: 'service',
+          plane: 'control',
+          event,
+          subject: principal.subject,
+          resource_id: audience,
+          outcome: 'ok',
+          details: {
+            audience,
+            scopes: principal.scopes,
+            reason: principal.reason,
+          },
+        },
+      );
+      audited = true;
+    } catch {
+      // Missing/failed PubAck preserves the endpoint's fail-closed contract.
+    }
+    if (!audited) {
+      this.logger.error(
+        'Durable audit unavailable; refusing service-token issuance',
+      );
+      throw new ServiceUnavailableException(
+        'Service-principal issuance audit is unavailable',
+      );
+    }
+    return response;
   }
 }

@@ -20,21 +20,32 @@ func TestMain(m *testing.M) {
 
 // newTestServer creates a Server with all external deps nil, suitable for
 // tests that do not reach service/NATS/Redis calls.
-func newTestServer() *Server {
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer valid-test-token" {
+			http.Error(w, "invalid session", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"user":{"id":"user-abc","role":"member"}}`))
+	}))
+	t.Cleanup(authServer.Close)
+	t.Setenv("AUTH_SERVICE_URL", authServer.URL)
 	return NewServer(nil, nil, nil, nil, "")
 }
 
-// addBearerAuth sets the headers required for Branch 2 of authContextMiddleware
-// to fire, ensuring getUserID(c) returns a non-empty string.
+// addBearerAuth supplies a token the test auth-core accepts. The userID header is
+// deliberately caller-controlled noise; middleware must use auth-core's subject.
 func addBearerAuth(req *http.Request, userID string) {
-	req.Header.Set("Authorization", "Bearer testtoken")
+	req.Header.Set("Authorization", "Bearer valid-test-token")
 	req.Header.Set("X-User-Id", userID)
 }
 
 // --- Health Check ---
 
 func TestHealthCheck_Returns200(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 
@@ -49,7 +60,7 @@ func TestHealthCheck_Returns200(t *testing.T) {
 }
 
 func TestHealthCheck_BodyContainsVersion(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 
@@ -63,7 +74,7 @@ func TestHealthCheck_BodyContainsVersion(t *testing.T) {
 // --- createSession: auth guard ---
 
 func TestCreateSession_NoAuthHeaders_Returns401(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -80,7 +91,7 @@ func TestCreateSession_NoAuthHeaders_Returns401(t *testing.T) {
 func TestCreateSession_BearerAuthMissingUserID_Returns401(t *testing.T) {
 	// Authorization header present but X-User-Id missing → middleware Branch 2
 	// condition fails → user_id never set → handler returns 401.
-	srv := newTestServer()
+	srv := newTestServer(t)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewBufferString(`{}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -95,7 +106,7 @@ func TestCreateSession_BearerAuthMissingUserID_Returns401(t *testing.T) {
 // --- createSession: validation ---
 
 func TestCreateSession_AuthWithMalformedJSON_Returns400(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewBufferString(`not-json`))
 	req.Header.Set("Content-Type", "application/json")
@@ -112,7 +123,7 @@ func TestCreateSession_AuthWithMalformedJSON_Returns400(t *testing.T) {
 }
 
 func TestCreateSession_AuthWithEmptyBody_Returns400(t *testing.T) {
-	srv := newTestServer()
+	srv := newTestServer(t)
 	w := httptest.NewRecorder()
 	// Empty body with content-type JSON is valid JSON null/empty → ShouldBindJSON
 	// fails because the body is truly empty (not even "{}").

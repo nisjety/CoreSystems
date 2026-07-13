@@ -12,11 +12,19 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// schemaVersion is the schema_migrations ledger key for the bundled baseline
-// schema. audit-core ships a single embedded schema file rather than a
-// migrations directory, so the ledger carries one baseline row; future schema
-// changes add new versioned entries alongside it.
-const schemaVersion = "001_init"
+//go:embed migrations/002_jetstream_inbox.sql
+var jetStreamInboxSQL string
+
+type migration struct {
+	version string
+	name    string
+	sql     string
+}
+
+var migrations = []migration{
+	{version: "001_init", name: "initial audit schema", sql: schemaSQL},
+	{version: "002_jetstream_inbox", name: "JetStream inbox idempotency", sql: jetStreamInboxSQL},
+}
 
 // Migrate applies the bundled SQL schema exactly once, tracking it in a
 // schema_migrations ledger (the Data Plane v2 migrator pattern, ported per
@@ -38,11 +46,20 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
 
+	for _, item := range migrations {
+		if err := applyMigration(ctx, pool, item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMigration(ctx context.Context, pool *pgxpool.Pool, item migration) error {
 	var applied bool
 	if err := pool.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)", schemaVersion,
+		"SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)", item.version,
 	).Scan(&applied); err != nil {
-		return fmt.Errorf("check schema migration %s: %w", schemaVersion, err)
+		return fmt.Errorf("check schema migration %s: %w", item.version, err)
 	}
 	if applied {
 		return nil
@@ -51,18 +68,18 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	start := time.Now()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin schema tx: %w", err)
+		return fmt.Errorf("begin schema migration %s: %w", item.version, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
 
-	if _, err := tx.Exec(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
+	if _, err := tx.Exec(ctx, item.sql); err != nil {
+		return fmt.Errorf("apply schema migration %s: %w", item.version, err)
 	}
 	if _, err := tx.Exec(ctx,
 		"INSERT INTO schema_migrations (version, name, duration_ms) VALUES ($1, $2, $3)",
-		schemaVersion, schemaVersion, int(time.Since(start).Milliseconds()),
+		item.version, item.name, int(time.Since(start).Milliseconds()),
 	); err != nil {
-		return fmt.Errorf("record schema migration %s: %w", schemaVersion, err)
+		return fmt.Errorf("record schema migration %s: %w", item.version, err)
 	}
 
 	return tx.Commit(ctx)

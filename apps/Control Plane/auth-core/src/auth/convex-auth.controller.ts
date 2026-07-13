@@ -46,8 +46,8 @@ export class ConvexAuthController {
   private readonly userServiceUrl = (
     process.env.USER_SERVICE_URL || 'http://user-service:3012'
   ).replace(/\/+$/, '');
-  private readonly internalApiKey =
-    process.env.INTERNAL_API_KEY || process.env.INTERNAL_SERVICE_SECRET || '';
+  private readonly userCoreServiceToken =
+    process.env.USER_CORE_SERVICE_TOKEN || '';
 
   constructor(private readonly convexTokenService: ConvexTokenService) {}
 
@@ -112,7 +112,8 @@ export class ConvexAuthController {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
-            'X-Internal-Api-Key': this.internalApiKey,
+            'X-Service-Token': this.userCoreServiceToken,
+            'X-Service-Id': 'auth-core',
             'X-User-Id': actor.userId,
             'X-User-Email': actor.email,
             ...(actor.name ? { 'X-User-Name': actor.name } : {}),

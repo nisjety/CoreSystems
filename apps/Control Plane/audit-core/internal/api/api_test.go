@@ -70,6 +70,40 @@ func TestIngestAudit_MissingKey_Returns401(t *testing.T) {
 	}
 }
 
+func TestReadyzFailsClosedWhenAConfiguredBusIsDisconnected(t *testing.T) {
+	r := chi.NewRouter()
+	api.New(store.New(nil), testKey, func(context.Context) api.Readiness {
+		return api.Readiness{
+			DatabaseConnected:    true,
+			PrimaryNATSConnected: true,
+			ExtraNATSConnected:   []bool{false},
+		}
+	}).Mount(r)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestReadyzReportsAllDependenciesConnected(t *testing.T) {
+	r := chi.NewRouter()
+	api.New(store.New(nil), testKey, func(context.Context) api.Readiness {
+		return api.Readiness{
+			DatabaseConnected:    true,
+			PrimaryNATSConnected: true,
+			ExtraNATSConnected:   []bool{true},
+		}
+	}).Mount(r)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestIngestAudit_WrongKey_Returns401(t *testing.T) {
 	srv := newRouter(t)
 

@@ -10,9 +10,9 @@ import (
 )
 
 type BridgeSubscriber struct {
-	client      *Client
-	publisher   *Publisher
-	orgService  *orgcore.Service
+	client     *Client
+	publisher  *Publisher
+	orgService *orgcore.Service
 }
 
 func NewBridgeSubscriber(client *Client, publisher *Publisher, orgService *orgcore.Service) *BridgeSubscriber {
@@ -56,15 +56,14 @@ func (s *BridgeSubscriber) handleAuthEvent(ctx context.Context, msg *nats.Msg) {
 	case "auth.session.ended", "auth.user.logout":
 		_ = s.publisher.Publish(ctx, SubjectSessionEnded, data)
 	case "auth.organization.created":
-		id, _ := data["organizationId"].(string)
-		name, _ := data["name"].(string)
-		slug, _ := data["slug"].(string)
-		if id != "" && name != "" {
-			if err := s.orgService.UpsertFromAuthEvent(ctx, id, name, slug, data); err != nil {
-				log.Printf("upsert org from auth event failed: %v", err)
-			} else {
-				_ = s.publisher.Publish(ctx, SubjectOrganizationCreated, data)
-			}
-		}
+		// Auth Core's transactional outbox reconciles canonical state directly
+		// through the internal HTTP API. NATS is notification-only: mutating here
+		// would create a second, unordered authority capable of restoring stale
+		// organization or membership state after a deletion.
+		_ = s.publisher.Publish(ctx, SubjectOrganizationCreated, data)
+	case "auth.organization.member_added":
+		_ = s.publisher.Publish(ctx, SubjectOrganizationMemberAdded, data)
+	case "auth.organization.member_removed":
+		_ = s.publisher.Publish(ctx, SubjectOrganizationMemberRemoved, data)
 	}
 }

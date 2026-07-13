@@ -57,7 +57,12 @@ func main() {
 
 	st := store.New(pool)
 
-	natsOpts := []nats.Option{nats.Name("audit-core")}
+	natsOpts := []nats.Option{
+		nats.Name("audit-core"),
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+	}
 	if cfg.NATSToken != "" {
 		natsOpts = append(natsOpts, nats.Token(cfg.NATSToken))
 	}
@@ -79,19 +84,30 @@ func main() {
 	// publishes velion.audit.v1.model.tool_action). Each extra bus is
 	// best-effort — an unreachable or token-less plane bus must never take down
 	// audit ingestion for the others, so failures are logged, not fatal.
-	for _, url := range cfg.ExtraNATSURLs {
-		extraNC, err := nats.Connect(url, nats.Name("audit-core-aggregator"))
+	extraConnections := make([]*nats.Conn, len(cfg.ExtraNATSURLs))
+	extraSubscribersReady := make([]bool, len(cfg.ExtraNATSURLs))
+	for index, url := range cfg.ExtraNATSURLs {
+		bus := fmt.Sprintf("extra-%d", index+1)
+		extraNC, err := nats.Connect(
+			url,
+			nats.Name("audit-core-aggregator-"+bus),
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(2*time.Second),
+		)
 		if err != nil {
-			log.Warn().Err(err).Str("nats_url", url).Msg("extra nats bus connect failed; skipping")
+			log.Warn().Err(err).Str("bus", bus).Msg("extra nats bus connect failed")
 			continue
 		}
+		extraConnections[index] = extraNC
 		conn := extraNC
 		defer func() { _ = conn.Drain() }()
-		if err := subscriber.New(conn, st).Start(ctx); err != nil {
-			log.Warn().Err(err).Str("nats_url", url).Msg("extra nats subscriber start failed; skipping")
+		if err := subscriber.New(conn, st, bus).Start(ctx); err != nil {
+			log.Warn().Err(err).Str("bus", bus).Msg("extra nats subscriber start failed")
 			continue
 		}
-		log.Info().Str("nats_url", url).Msg("audit-core aggregating extra plane bus")
+		extraSubscribersReady[index] = true
+		log.Info().Str("bus", bus).Msg("audit-core configured extra plane bus")
 	}
 
 	// Retention: enforce the AUDIT_RETENTION_DAYS window the velion settings
@@ -100,7 +116,28 @@ func main() {
 	go runRetention(ctx, st, cfg.RetentionDays)
 
 	r := chi.NewRouter()
-	api.New(st, cfg.InternalAPIKey).Mount(r)
+	api.New(st, cfg.InternalAPIKey, func(requestContext context.Context) api.Readiness {
+		checkContext, checkCancel := context.WithTimeout(requestContext, 2*time.Second)
+		defer checkCancel()
+		databaseConnected := pool.Ping(checkContext) == nil
+		primaryConnected := nc.IsConnected()
+		metricsserver.SetNATSConnected("primary", primaryConnected)
+		extraConnected := make([]bool, len(cfg.ExtraNATSURLs))
+		for index := range extraConnected {
+			connected := extraConnections[index] != nil &&
+				extraConnections[index].IsConnected() &&
+				extraSubscribersReady[index]
+			extraConnected[index] = connected
+			metricsserver.SetNATSConnected(fmt.Sprintf("extra-%d", index+1), connected)
+		}
+		return api.Readiness{
+			DatabaseConnected:    databaseConnected,
+			PrimaryNATSConnected: primaryConnected,
+			ExtraNATSConnected:   extraConnected,
+			DeliveryMode:         "jetstream_durable",
+			LagMetric:            "event_age_seconds",
+		}
+	}).Mount(r)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 5 * time.Second}

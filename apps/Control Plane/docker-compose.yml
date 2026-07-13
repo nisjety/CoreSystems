@@ -1,21 +1,34 @@
 name: control-plane
 
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
+x-core-security: &core-security
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
   # ==============================================
   # INFRASTRUCTURE (KUN controlplane-net)
   # ==============================================
 
   controlplane-postgres:
-    image: postgres:15-alpine
+    image: postgres:15.18-alpine3.24@sha256:3d0f7584ed7d04e27fa050d6683a74746608faf21f202be78460d679cc56461f
     container_name: controlplane-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER}
+      POSTGRES_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
       POSTGRES_DB: ${DB_NAME:-controlplane}
       POSTGRES_INITDB_ARGS: --encoding=UTF8
     ports:
-      - "5433:5432"
+      - "127.0.0.1:${CONTROL_POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -51,7 +64,7 @@ services:
         max-file: "3"
     healthcheck:
       # Viktig: pg_isready uten -d kan default-e til db=bruker. Her er det OK, men vi kan være eksplisitte.
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME:-controlplane}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?DB_USER must be set in Control Plane .env} -d ${DB_NAME:-controlplane}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -67,7 +80,7 @@ services:
       --proactor_threads=1
       --dir=/data
     ports:
-      - "6380:6379"
+      - "127.0.0.1:${CONTROL_DRAGONFLY_HOST_PORT:-6380}:6379"
     volumes:
       - dragonfly-data:/data
     networks:
@@ -91,13 +104,15 @@ services:
       retries: 5
 
   controlplane-nats:
-    image: nats:2.10-alpine
+    image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     container_name: controlplane-nats
     restart: unless-stopped
     command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
     ports:
-      - "4223:4222"
-      - "8223:8222"
+      - "127.0.0.1:${CONTROL_NATS_HOST_PORT:-4223}:4222"
+      - "127.0.0.1:${CONTROL_NATS_MONITOR_HOST_PORT:-8223}:8222"
     volumes:
       - nats-data:/data
       - ./nats.conf:/etc/nats/nats.conf:ro
@@ -128,9 +143,11 @@ services:
   # ==============================================
 
   auth-core:
+    <<: *core-security
     build:
       context: ./auth-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: auth-service
     init: true
     restart: unless-stopped
@@ -139,6 +156,19 @@ services:
     environment:
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      NATS_URL: nats://controlplane-nats:4222
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
+      ORG_CORE_URL: http://org-core:8080
+      BILLING_CORE_URL: http://billing-core:3014
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      DATA_PLANE_POLICY_AUTH_AUDIENCE: ${DATA_PLANE_POLICY_AUTH_AUDIENCE:-control-policy}
+      DATA_PLANE_POLICY_CALLER_SERVICE_ID: ${DATA_PLANE_POLICY_CALLER_SERVICE_ID:-retrieval-engine}
+      PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS: ${PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS:-300}
+      PLANE_SERVICE_PRINCIPALS_JSON: ${PLANE_SERVICE_PRINCIPALS_JSON:?PLANE_SERVICE_PRINCIPALS_JSON is required}
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}
+      # Dedicated read-only credential for user-core's exact Better Auth
+      # membership decision. It must not be reused as a general internal key.
+      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
       # Better Auth CSRF/origin trust for velionv3 via the Rust gateway (:3185)
       # plus SPA dev/Docker origins. auth.ts unions this with the built-in list
       # (incl velionv2 :3000) — additive, does not displace existing trust.
@@ -157,8 +187,8 @@ services:
       - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
       - ./auth-core/keys:/app/keys:ro
     ports:
-      - "3011:3011"
-      - "50011:50011"
+      - "127.0.0.1:${AUTH_CORE_HTTP_HOST_PORT:-3011}:3011"
+      - "127.0.0.1:${AUTH_CORE_GRPC_HOST_PORT:-50011}:50011"
     networks:
       - controlplane-net
       - inter-plane-bus
@@ -184,16 +214,21 @@ services:
     stop_signal: SIGTERM
     stop_grace_period: 15s
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3011/api/auth/get-session"]
+      # Probe an intentionally public 200 route. Better Auth correctly returns
+      # 401 for an anonymous get-session request, which made healthy instances
+      # permanently fail this container healthcheck.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3011/users/public"]
       interval: 60s
       timeout: 10s
       retries: 3
       start_period: 45s
 
   user-core:
+    <<: *core-security
     build:
       context: ./user-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: user-service
     init: true
     restart: unless-stopped 
@@ -201,19 +236,38 @@ services:
       - ./user-core/.env.docker
     environment:
       GOMAXPROCS: "1"
-      PPROF_ENABLED: "true"
+      PPROF_ENABLED: "false"
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      NATS_URL: nats://controlplane-nats:4222
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
+      DRAGONFLY_ENABLED: "true"
+      DRAGONFLY_HOST: controlplane-dragonfly
+      DRAGONFLY_PORT: "6379"
+      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
       # G26: silence gin's debug-mode banner + enable release-mode perf paths.
       GIN_MODE: release
       # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
       # user-core needs both its own DB and a secondary auth_service connection.
       DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
       AUTH_DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/auth_service?sslmode=disable
-    ports:
-      - "3012:3012"
-      - "50012:50012"
-      - "6060:6060"
+      # Self-scoped gateway/session calls carry an HMAC signature over caller,
+      # audience, timestamp, method, URI, verified subject/profile claims, and
+      # request-body digest. Plain X-User-* headers remain unauthorized.
+      # Data Plane authz visibility/grant stays disabled until its org/resource
+      # delegation contract is equivalently bound.
+      USER_CORE_SERVICE_CREDENTIALS: >-
+        [{"principal":"velion-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read"]}]
+      AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
+      AUTH_SERVICE_URL: http://auth-core:3011
+      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
+    volumes:
+      - ./auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
+    expose:
+      - "3012"
+      - "50012"
     networks:
       - controlplane-net
       - inter-plane-bus
@@ -251,9 +305,11 @@ services:
       start_period: 30s
 
   org-core:
+    <<: *core-security
     build:
       context: ./org-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: org-core-service
     init: true
     restart: unless-stopped
@@ -261,20 +317,26 @@ services:
       - ./org-core/.env.docker
     environment:
       GOMAXPROCS: "1"
-      PPROF_ENABLED: "true"
+      PPROF_ENABLED: "false"
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      NATS_URL: nats://controlplane-nats:4222
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
+      DRAGONFLY_ENABLED: "true"
+      DRAGONFLY_HOST: controlplane-dragonfly
+      DRAGONFLY_PORT: "6379"
+      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
       # G26: silence gin's debug-mode banner + enable release-mode perf paths.
       GIN_MODE: release
       # Single-source the DB password: assembled here from ${DB_PASSWORD} in .env
       # (compose `environment:` overrides env_file), so the credential lives in
       # exactly ONE place. No per-service .env.docker copy to drift out of sync.
       DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
     ports:
-      - "18080:8080"   # HTTP — host 18080 avoids collision with Model Plane model-gateway (host 8080)
-      - "19090:9090"   # gRPC — host 19090 avoids collision with Model Plane model-gateway gRPC (host 9090)
-      - "19091:9091"   # gRPC — host 19091 avoids collision with Model Plane session-core gRPC (host 9091)
-      - "6061:6061"
+      - "127.0.0.1:${ORG_CORE_HTTP_HOST_PORT:-18080}:8080"
+      - "127.0.0.1:${ORG_CORE_GRPC_HOST_PORT:-19090}:9090"
+      - "127.0.0.1:${ORG_CORE_METRICS_HOST_PORT:-19091}:9091"
     networks:
       - controlplane-net
       - inter-plane-bus
@@ -311,9 +373,11 @@ services:
       start_period: 30s
 
   billing-core:
+    <<: *core-security
     build:
       context: ./billing-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: billing-core-service
     init: true
     restart: unless-stopped
@@ -321,17 +385,22 @@ services:
       - ./billing-core/.env.docker
     environment:
       GOMAXPROCS: "1"
-      PPROF_ENABLED: "true"
+      PPROF_ENABLED: "false"
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
+      NATS_URL: nats://controlplane-nats:4222
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
+      DRAGONFLY_ENABLED: "true"
+      DRAGONFLY_HOST: controlplane-dragonfly
+      DRAGONFLY_PORT: "6379"
+      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
       # G26: silence gin's debug-mode banner + enable release-mode perf paths.
       GIN_MODE: release
       # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
       DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
     ports:
-      - "3014:3014"
-      - "50013:50013"
-      - "6062:6062"
+      - "127.0.0.1:${BILLING_CORE_HTTP_HOST_PORT:-3014}:3014"
+      - "127.0.0.1:${BILLING_CORE_GRPC_HOST_PORT:-50013}:50013"
     networks:
       - controlplane-net
       - inter-plane-bus
@@ -368,9 +437,11 @@ services:
   # ==============================================
 
   session-core:
+    <<: *core-security
     build:
       context: ./session-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: session-core-service
     init: true
     restart: unless-stopped
@@ -380,15 +451,21 @@ services:
       GOMAXPROCS: "1"
       VELION_NATS_URL: ${VELION_NATS_URL}
       VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
-      DB_USER: ${DB_USER}
+      DB_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
       PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
-      DATABASE_USER: ${DB_USER}
+      DATABASE_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
       DATABASE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
-      NATS_TOKEN: ${NATS_TOKEN}
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
+      NATS_LOCAL_URL: nats://controlplane-nats:4222
       NATS_SHARED_URL: ${VELION_NATS_URL}
       NATS_SHARED_TOKEN: ${VELION_NATS_TOKEN}
+      DRAGONFLY_ADDR: controlplane-dragonfly:6379
+      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET is required}
+      SESSION_CORE_SERVICE_CREDENTIALS: >-
+        [{"principal":"velion-gateway","audience":"session-core","token":"${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN is required}","scopes":["sessions:read","sessions:write"]}]
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}
       # Canary ramp: set to 0-100 to route that % of tenants to Model Plane v2
       MODEL_PLANE_V2_ROLLOUT_PCT: ${MODEL_PLANE_V2_ROLLOUT_PCT:-0}
       # Convex sync: mirrors session/message state into convex-core (Application Plane)
@@ -397,8 +474,8 @@ services:
       CONVEX_SERVICE_KEY: ${CONVEX_SERVICE_KEY:-}
       ORG_CORE_URL: http://org-core:8080
     ports:
-      - "3017:3017"
-      - "50017:50017"
+      - "127.0.0.1:${SESSION_CORE_HTTP_HOST_PORT:-3017}:3017"
+      - "127.0.0.1:${SESSION_CORE_GRPC_HOST_PORT:-50017}:50017"
     networks:
       - controlplane-net
       - inter-plane-bus
@@ -439,9 +516,11 @@ services:
   # internal-api-key required (replaced by auth-core JWT once Wave 3
   # enforce mode lands).
   audit-core:
+    <<: *core-security
     build:
       context: ./audit-core
       dockerfile: Dockerfile
+      args: *build-metadata
     container_name: audit-core-service
     init: true
     restart: unless-stopped
@@ -452,24 +531,27 @@ services:
       # cross-plane `velion-nats` bus (long token) and only survive because they
       # treat NATS as lazy/non-fatal. audit-core fatals on a bad primary connect,
       # so it must address the CP broker directly: controlplane-nats with the
-      # literal `nats` token that nats.conf actually requires (NATS_TOKEN=nats).
+      # configured broker token. The same required value is injected into both
+      # the broker and client; there is no embedded development fallback.
       NATS_URL: nats://controlplane-nats:4222
-      NATS_TOKEN: ${NATS_TOKEN:-nats}
+      NATS_TOKEN: ${NATS_TOKEN:?NATS_TOKEN must be set in Control Plane .env}
       # Aggregate the model-plane bus (reachable via inter-plane-bus) where
       # session-core publishes velion.audit.v1.model.tool_action — audit-core
       # is the single sink across planes. Comma-separate for more buses.
-      EXTRA_NATS_URLS: ${AUDIT_EXTRA_NATS_URLS:-nats://model-plane-nats-1:4222}
+      EXTRA_NATS_URLS: ${AUDIT_EXTRA_NATS_URLS:-}
       HTTP_PORT: "8187"
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
     ports:
       # Native HTTP port 8187 (host and container). Kept clear of Model
       # Plane's browser-broker so the two never collide on the host.
-      - "8187:8187"
+      - "127.0.0.1:${AUDIT_CORE_HTTP_HOST_PORT:-8187}:8187"
     networks:
       - controlplane-net
       - inter-plane-bus
     depends_on:
       controlplane-postgres:
+        condition: service_healthy
+      controlplane-nats:
         condition: service_healthy
     deploy:
       resources:
@@ -484,7 +566,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8187/healthz"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8187/readyz"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -503,7 +585,7 @@ services:
     volumes:
       - lago_postgres_data:/data/postgres
     ports:
-      - "5434:5432"
+      - "127.0.0.1:${LAGO_POSTGRES_HOST_PORT:-5434}:5432"
     networks:
       - controlplane-net
     shm_size: "64mb"
@@ -532,7 +614,7 @@ services:
     volumes:
       - lago_dragonfly_data:/data
     ports:
-      - "6381:6379"
+      - "127.0.0.1:${LAGO_DRAGONFLY_HOST_PORT:-6381}:6379"
     networks:
       - controlplane-net
     deploy:
@@ -582,7 +664,7 @@ services:
       - ./lago.env
     command: ["./scripts/start.api.sh"]
     ports:
-      - "3016:3000"
+      - "127.0.0.1:${LAGO_API_HOST_PORT:-3016}:3000"
     volumes:
       - lago_storage_data:/app/storage
     depends_on:
@@ -665,7 +747,7 @@ services:
     env_file:
       - ./lago.env
     ports:
-      - "3015:80"
+      - "127.0.0.1:${LAGO_FRONT_HOST_PORT:-3015}:80"
     depends_on:
       lago-api:
         condition: service_healthy
@@ -688,12 +770,11 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=15d
-      - --web.enable-lifecycle
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "19095:9090" # host 19095 avoids Model Plane browser-broker on host 9095
+      - "127.0.0.1:${CONTROL_PROMETHEUS_HOST_PORT:-19095}:9090"
     networks:
       - controlplane-net  # reach the cores by container name
       - inter-plane-bus   # reach the Frontend-Plane gateway
@@ -715,19 +796,20 @@ services:
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in Control Plane .env}
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3009:3000" # host 3009 for the Grafana UI
+      - "127.0.0.1:${CONTROL_GRAFANA_HOST_PORT:-3009}:3000"
     networks:
       - controlplane-net
     depends_on:
-      - controlplane-prometheus
+      controlplane-prometheus:
+        condition: service_healthy
     deploy:
       resources:
         limits:

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -74,12 +75,14 @@ func (s *Server) getUserOrganizations(c *gin.Context) {
 
 func (s *Server) createOrganization(c *gin.Context) {
 	var req struct {
-		ID        string         `json:"id,omitempty"`
-		Name      string         `json:"name" binding:"required"`
-		Slug      string         `json:"slug,omitempty"`
-		Plan      string         `json:"plan,omitempty"`
-		OrgNumber string         `json:"org_number,omitempty"`
-		BrregData map[string]any `json:"brreg_data,omitempty"`
+		ID            string         `json:"id,omitempty"`
+		Name          string         `json:"name" binding:"required"`
+		Slug          string         `json:"slug,omitempty"`
+		Plan          string         `json:"plan,omitempty"`
+		OrgNumber     string         `json:"org_number,omitempty"`
+		BrregData     map[string]any `json:"brreg_data,omitempty"`
+		Metadata      map[string]any `json:"metadata,omitempty"`
+		PrimaryDomain string         `json:"primary_domain,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -104,48 +107,36 @@ func (s *Server) createOrganization(c *gin.Context) {
 	}
 
 	newOrg := org.Organization{
-		ID:     orgID,
-		Name:   req.Name,
-		Slug:   req.Slug,
-		Plan:   "free",
-		Status: "active",
+		ID:            orgID,
+		Name:          req.Name,
+		Slug:          req.Slug,
+		Plan:          "free",
+		Status:        "active",
+		Metadata:      req.Metadata,
+		PrimaryDomain: strings.ToLower(strings.TrimSpace(req.PrimaryDomain)),
 	}
-	if req.Plan != "" {
-		newOrg.Plan = req.Plan
-	}
-
-	if err := s.orgService.UpsertFromAuthEvent(c.Request.Context(), newOrg.ID, newOrg.Name, newOrg.Slug, newOrg.Metadata); err != nil {
-		// Log the underlying cause — the client only gets a generic message, so
-		// without this the real error (e.g. DB auth failure) is invisible.
-		log.Printf("createOrganization: failed to upsert org id=%s: %v", newOrg.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
-		return
-	}
-
-	// Add creator as owner member
-	if err := s.orgService.AddOrganizationMember(c.Request.Context(), newOrg.ID, userID, "owner"); err != nil {
-		log.Printf("createOrganization: failed to add member org=%s user=%s: %v", newOrg.ID, userID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add organization member"})
-		return
-	}
-
-	// Optionally attach Brreg data if provided
 	if req.OrgNumber != "" {
-		verificationStatus := "verified"
-		if req.BrregData == nil {
-			verificationStatus = "unverified"
-		}
-		if err := s.orgService.UpdateBrregVerification(c.Request.Context(), newOrg.ID, req.OrgNumber, req.BrregData, verificationStatus); err != nil {
-			// Non-fatal: org is created; just log the partial failure
-			c.JSON(http.StatusCreated, gin.H{
-				"organization": newOrg,
-				"warning":      "organization created but brreg data could not be attached",
-			})
+		newOrg.OrgNumber = &req.OrgNumber
+		// Client-provided registry data is evidence for a later server-side
+		// lookup, never proof of legal-entity verification.
+		newOrg.VerificationStatus = "unverified"
+		newOrg.BrregData = req.BrregData
+	}
+
+	if err := s.orgService.ProvisionOrganizationWithOwner(c.Request.Context(), newOrg, userID); err != nil {
+		log.Printf("createOrganization: atomic provisioning failed org=%s user=%s: %v", newOrg.ID, userID, err)
+		if errors.Is(err, org.ErrOwnerConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{
+				"code":    "organization_owner_conflict",
+				"message": "organization already has a different owner",
+			}})
 			return
 		}
-		newOrg.OrgNumber = &req.OrgNumber
-		newOrg.VerificationStatus = verificationStatus
-		newOrg.BrregData = req.BrregData
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"code":    "organization_provisioning_failed",
+			"message": "failed to provision organization and owner",
+		}})
+		return
 	}
 
 	// Re-fetch from DB so the response includes server-generated timestamps
@@ -375,6 +366,7 @@ func (s *Server) inviteMember(c *gin.Context) {
 	if s.userService != "" {
 		lookupURL := strings.TrimRight(s.userService, "/") + "/api/v1/users/by-email/" + req.Email
 		lookupReq, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, lookupURL, nil)
+		s.applyUserServiceAuth(lookupReq)
 		if resp, err := s.httpClient.Do(lookupReq); err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -453,6 +445,7 @@ func (s *Server) ensureOrganizationFromTenant(c *gin.Context) {
 	var req struct {
 		Provider      string   `json:"provider"`
 		TenantID      string   `json:"tenantId" binding:"required"`
+		OwnerUserID   string   `json:"ownerUserId" binding:"required"`
 		DisplayName   string   `json:"displayName"`
 		PrimaryDomain string   `json:"primaryDomain"`
 		Domains       []string `json:"domains"`
@@ -469,6 +462,7 @@ func (s *Server) ensureOrganizationFromTenant(c *gin.Context) {
 		c.Request.Context(),
 		req.Provider,
 		req.TenantID,
+		req.OwnerUserID,
 		req.DisplayName,
 		req.PrimaryDomain,
 		req.Domains,
@@ -514,6 +508,98 @@ func (s *Server) updateOnboardingState(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// reconcileOrganizationProjection applies a monotonic Auth Core organization
+// snapshot. It is separate from the browser-facing create route so identity,
+// owner, and revision arrive in one authenticated machine contract.
+func (s *Server) reconcileOrganizationProjection(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("orgId"))
+	var req struct {
+		Name        string         `json:"name" binding:"required"`
+		Slug        string         `json:"slug"`
+		Metadata    map[string]any `json:"metadata"`
+		OwnerUserID string         `json:"ownerUserId" binding:"required"`
+		Revision    int64          `json:"revision" binding:"required"`
+	}
+	if orgID == "" || c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.OwnerUserID) == "" || req.Revision < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "orgId, name, ownerUserId, and positive revision are required"})
+		return
+	}
+
+	applied, err := s.orgService.ReconcileOrganizationProjection(
+		c.Request.Context(),
+		org.Organization{
+			ID:       orgID,
+			Name:     strings.TrimSpace(req.Name),
+			Slug:     strings.TrimSpace(req.Slug),
+			Plan:     "free",
+			Status:   "active",
+			Metadata: req.Metadata,
+		},
+		strings.TrimSpace(req.OwnerUserID),
+		req.Revision,
+	)
+	if err != nil {
+		if errors.Is(err, org.ErrOrganizationDeleted) || errors.Is(err, org.ErrOwnerConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "organization projection conflicts with local lifecycle state"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reconcile organization"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "applied": applied})
+}
+
+// reconcileOrganizationMember is the idempotent Auth Core projection endpoint.
+// It is internal-key protected and never trusts browser-supplied identity.
+func (s *Server) reconcileOrganizationMember(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("orgId"))
+	var req struct {
+		UserID   string `json:"userId" binding:"required"`
+		Role     string `json:"role"`
+		Action   string `json:"action" binding:"required"`
+		Revision int64  `json:"revision" binding:"required"`
+	}
+	if orgID == "" || c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.UserID) == "" || req.Revision < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "orgId, userId, action, and positive revision are required"})
+		return
+	}
+
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action != "upsert" && action != "remove" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be upsert or remove"})
+		return
+	}
+	role := strings.ToLower(strings.TrimSpace(req.Role))
+	if action == "upsert" && role != "owner" && role != "admin" && role != "member" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be owner, admin, or member"})
+		return
+	}
+	applied, err := s.orgService.ReconcileOrganizationMember(c.Request.Context(), orgID, req.UserID, role, action, req.Revision)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "failed to reconcile member"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true, "applied": applied})
+}
+
+// reconcileOrganizationDeletion is the idempotent Auth Core projection
+// endpoint. Authentication is enforced by the internal API-key middleware.
+func (s *Server) reconcileOrganizationDeletion(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("orgId"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "orgId is required"})
+		return
+	}
+
+	receipt, err := s.orgService.ReconcileOrganizationDeletion(c.Request.Context(), orgID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reconcile organization deletion"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "receipt": json.RawMessage(receipt)})
 }
 
 type loginRequest struct {
@@ -609,6 +695,7 @@ func (s *Server) getCurrentUser(c *gin.Context) {
 	}
 
 	userReq, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, strings.TrimRight(s.userService, "/")+"/api/v1/users/"+userID, nil)
+	s.applyUserServiceAuth(userReq)
 	userResp, err := s.httpClient.Do(userReq)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "user service unavailable"})
@@ -650,6 +737,7 @@ func (s *Server) fetchUserProfile(ctx context.Context, userID string) (*memberUs
 	if err != nil {
 		return nil, err
 	}
+	s.applyUserServiceAuth(req)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -663,6 +751,14 @@ func (s *Server) fetchUserProfile(ctx context.Context, userID string) (*memberUs
 		return nil, err
 	}
 	return &u, nil
+}
+
+func (s *Server) applyUserServiceAuth(req *http.Request) {
+	if req == nil || s.userServiceToken == "" {
+		return
+	}
+	req.Header.Set("X-Service-Token", s.userServiceToken)
+	req.Header.Set("X-Service-Id", "org-core")
 }
 
 // searchMembers returns member suggestions for @mention autocomplete.

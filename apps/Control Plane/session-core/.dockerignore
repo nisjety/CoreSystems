@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea
+.vscode
+*.log
+*.out
+coverage/
+bin/
+session-core
+tmp/
+*_test.go

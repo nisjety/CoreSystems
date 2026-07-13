@@ -2,11 +2,40 @@ package clients
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
+
+func signUserCoreDelegation(req *http.Request, token, userID string, now time.Time) {
+	timestamp := now.UTC().Format(time.RFC3339)
+	bodyDigestBytes := sha256.Sum256(nil)
+	bodyDigest := base64.RawURLEncoding.EncodeToString(bodyDigestBytes[:])
+	canonical := strings.Join([]string{
+		"v1",
+		"session-core",
+		"user-core",
+		timestamp,
+		req.Method,
+		req.URL.RequestURI(),
+		strings.TrimSpace(userID),
+		"",
+		"",
+		"",
+		"",
+		bodyDigest,
+	}, "\n")
+	mac := hmac.New(sha256.New, []byte(token))
+	_, _ = mac.Write([]byte(canonical))
+	req.Header.Set("X-Delegation-Timestamp", timestamp)
+	req.Header.Set("X-Delegation-Body-SHA256", bodyDigest)
+	req.Header.Set("X-Delegation-Signature", base64.RawURLEncoding.EncodeToString(mac.Sum(nil)))
+}
 
 // UserSessionContext mirrors user-core's GET /api/v1/me/session-context response.
 type UserSessionContext struct {
@@ -64,20 +93,20 @@ type userProfileResponse struct {
 // UserClient calls user-core to fetch routing context and full profile.
 // G10: used by the Control Session aggregator.
 type UserClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL      string
+	serviceToken string
+	httpClient   *http.Client
 }
 
 // NewUserClient returns nil when baseURL is empty (disables the call site).
-func NewUserClient(baseURL, internalAPIKey string) *UserClient {
+func NewUserClient(baseURL, serviceToken string) *UserClient {
 	if baseURL == "" {
 		return nil
 	}
 	return &UserClient{
-		baseURL:    baseURL,
-		apiKey:     internalAPIKey,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		baseURL:      baseURL,
+		serviceToken: serviceToken,
+		httpClient:   &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -87,11 +116,15 @@ func (c *UserClient) authedRequest(ctx context.Context, method, path, userID str
 	if err != nil {
 		return nil, err
 	}
-	if c.apiKey != "" {
-		req.Header.Set("X-Internal-Api-Key", c.apiKey)
+	if c.serviceToken != "" {
+		req.Header.Set("X-Service-Token", c.serviceToken)
+		req.Header.Set("X-Service-Id", "session-core")
 	}
 	if userID != "" {
 		req.Header.Set("X-User-Id", userID)
+		if c.serviceToken != "" {
+			signUserCoreDelegation(req, c.serviceToken, userID, time.Now())
+		}
 	}
 	req.Header.Set("Accept", "application/json")
 	return req, nil

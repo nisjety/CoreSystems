@@ -1,5 +1,30 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { connect, NatsConnection, StringCodec, Msg } from 'nats';
+import {
+  connect,
+  NatsConnection,
+  StringCodec,
+  Msg,
+  type ConnectionOptions,
+  type JetStreamClient,
+} from 'nats';
+
+type ServiceAuthenticationRequest = {
+  serviceId: string;
+  serviceSecret: string;
+};
+
+function isServiceAuthenticationRequest(
+  value: unknown,
+): value is ServiceAuthenticationRequest {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'serviceId' in value &&
+    typeof value.serviceId === 'string' &&
+    'serviceSecret' in value &&
+    typeof value.serviceSecret === 'string'
+  );
+}
 
 /**
  * Direct NATS Service for Request-Reply Pattern
@@ -12,6 +37,7 @@ import { connect, NatsConnection, StringCodec, Msg } from 'nats';
 @Injectable()
 export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
   private nc: NatsConnection;
+  private jetStream: JetStreamClient | null = null;
   private sc = StringCodec();
 
   async onModuleInit() {
@@ -22,7 +48,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
       const natsUser = process.env.NATS_USER;
       const natsPass = process.env.NATS_PASS;
 
-      const connectionOptions: any = {
+      const connectionOptions: ConnectionOptions = {
         servers: [process.env.NATS_URL || 'nats://nats:4222'],
         maxReconnectAttempts: -1,
         reconnectTimeWait: 2000,
@@ -40,11 +66,12 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
       }
 
       this.nc = await connect(connectionOptions);
+      this.jetStream = this.nc.jetstream();
 
       console.log('✅ Direct NATS connection established');
 
       // Set up service authentication handler
-      await this.setupServiceAuthentication();
+      this.setupServiceAuthentication();
     } catch (error) {
       console.error('❌ Failed to connect to NATS:', error);
     }
@@ -61,7 +88,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
    * Set up handler for service.authenticate requests
    * This allows Go services to authenticate via NATS request-reply
    */
-  private async setupServiceAuthentication() {
+  private setupServiceAuthentication(): void {
     const sub = this.nc.subscribe('service.authenticate');
 
     console.log('👂 Listening for service.authenticate requests...');
@@ -69,7 +96,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
     // Process messages
     void (async () => {
       for await (const msg of sub) {
-        await this.handleServiceAuthentication(msg);
+        this.handleServiceAuthentication(msg);
       }
     })();
   }
@@ -77,13 +104,25 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
   /**
    * Handle service authentication request
    */
-  private async handleServiceAuthentication(msg: Msg) {
+  private handleServiceAuthentication(msg: Msg): void {
     try {
-      const data = JSON.parse(this.sc.decode(msg.data));
+      const data: unknown = JSON.parse(this.sc.decode(msg.data));
 
       console.log('🔔 NATS: Received service.authenticate request');
-      console.log('🔑 Service ID:', data.serviceId);
       console.log('📬 Reply subject:', msg.reply);
+
+      if (!isServiceAuthenticationRequest(data)) {
+        msg.respond(
+          this.sc.encode(
+            JSON.stringify({
+              authenticated: false,
+              error: 'Invalid service authentication request',
+            }),
+          ),
+        );
+        return;
+      }
+      console.log('🔑 Service ID:', data.serviceId);
 
       // Validate service credentials
       const validServiceIds = (
@@ -154,7 +193,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
   /**
    * Publish a message to a subject (for future use)
    */
-  async publish(subject: string, data: any): Promise<void> {
+  publish(subject: string, data: unknown): void {
     if (!this.nc) {
       throw new Error('NATS not connected');
     }
@@ -171,21 +210,57 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
    * velion-nats bus. Never throws: a missing/closed connection silently no-ops,
    * matching SharedNatsService.publishPlain so callers stay fire-and-forget.
    */
-  publishPlain(subject: string, payload: Record<string, unknown>): void {
+  publishPlain(subject: string, payload: Record<string, unknown>): boolean {
     if (!this.nc || this.nc.isClosed()) {
-      return;
+      return false;
     }
     try {
       this.nc.publish(subject, this.sc.encode(JSON.stringify(payload)));
+      return true;
     } catch (error) {
       console.error(`❌ Failed to publish "${subject}" to local NATS:`, error);
+      return false;
     }
+  }
+
+  /**
+   * Persist an audit event to the local control-plane JetStream and wait for
+   * the server PubAck. Resolving this promise means the event is stored in the
+   * file-backed audit stream and can be retried by audit-core's durable
+   * consumer even if either service restarts immediately afterwards.
+   *
+   * Unlike publishPlain, this method intentionally throws on every unavailable
+   * or unacknowledged path so security-sensitive callers can fail closed.
+   */
+  async publishAuditDurable(
+    subject: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ stream: string; seq: number }> {
+    if (!subject.startsWith('velion.audit.v1.')) {
+      throw new Error('Invalid durable audit subject');
+    }
+    if (!this.nc || this.nc.isClosed() || !this.jetStream) {
+      throw new Error('Durable audit transport unavailable');
+    }
+
+    const ack = await this.jetStream.publish(
+      subject,
+      this.sc.encode(JSON.stringify(payload)),
+    );
+    if (!ack || !ack.stream || !Number.isSafeInteger(ack.seq) || ack.seq <= 0) {
+      throw new Error('Invalid durable audit PubAck');
+    }
+    return { stream: ack.stream, seq: ack.seq };
   }
 
   /**
    * Request-reply pattern (for future use)
    */
-  async request(subject: string, data: any, timeout = 5000): Promise<any> {
+  async request(
+    subject: string,
+    data: unknown,
+    timeout = 5000,
+  ): Promise<unknown> {
     if (!this.nc) {
       throw new Error('NATS not connected');
     }
@@ -195,6 +270,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
       timeout,
     });
 
-    return JSON.parse(this.sc.decode(response.data));
+    const decoded: unknown = JSON.parse(this.sc.decode(response.data));
+    return decoded;
   }
 }

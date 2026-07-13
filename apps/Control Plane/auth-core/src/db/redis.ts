@@ -43,6 +43,22 @@ const connectRedis = async () => {
   return redis;
 };
 
+type SessionMetadata = {
+  lastActivity: number;
+  rememberMe: boolean;
+};
+
+function isSessionMetadata(value: unknown): value is SessionMetadata {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'lastActivity' in value &&
+    typeof value.lastActivity === 'number' &&
+    'rememberMe' in value &&
+    typeof value.rememberMe === 'boolean'
+  );
+}
+
 // Secondary Storage implementation for Better Auth with enhanced state management
 export const redisSecondaryStorage = {
   get: async (key: string): Promise<string | null> => {
@@ -177,9 +193,13 @@ export const redisSecondaryStorage = {
       ]);
 
       if (sessionData && metaData) {
-        // Update last activity
-        const meta = JSON.parse(metaData);
-        meta.lastActivity = Date.now();
+        const parsedMetadata: unknown = JSON.parse(metaData);
+        if (!isSessionMetadata(parsedMetadata)) {
+          return sessionData;
+        }
+        // Preserve the existing activity-window behavior while constructing a
+        // validated immutable metadata value instead of mutating parsed JSON.
+        const meta = { ...parsedMetadata, lastActivity: Date.now() };
 
         // Extend TTL based on activity and remember me setting
         const updateAge = parseInt(process.env.SESSION_UPDATE_AGE || '3600');

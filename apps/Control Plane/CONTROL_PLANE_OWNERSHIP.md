@@ -6,6 +6,8 @@ This document defines the **clear data boundaries** between the Control Plane (s
 
 Companion privacy contract: [`../GDPR_SUMMARY.md`](../GDPR_SUMMARY.md). This ownership map defines authority; the GDPR summary defines the cross-plane retention, deletion, anonymization, processor, and ZDR obligations that follow authority decisions.
 
+> **Verified 2026-07-10**: Ownership boundaries, NATS stream config (`USER_EVENTS`/`ORGANIZATION_EVENTS`), and the GDPR Erasure + DSAR endpoint table below were checked against current source and are accurate. The "Testing the Architecture" curl examples had stale ports/paths and the Convex references pointed at a non-existent path — both fixed in place; see corrections below.
+
 > **Secret single-source rule:** `DB_PASSWORD` lives only in the root Control Plane
 > `.env` and is injected via compose as `DATABASE_PASSWORD=${DB_PASSWORD}`. Service
 > code defaults `DATABASE_PASSWORD` to empty (fail-fast) and per-service `.env.docker`
@@ -369,8 +371,10 @@ users: defineTable({
 ### Test 1: Organization Plan Change
 
 ```bash
-# 1. Change plan in org-core
-curl -X POST http://localhost:8080/organizations/org_abc123/plan \
+# 1. Change plan in org-core (host port 18080, not 8080 — 8080 on the host is
+#    Model Plane's model-gateway; org-core's container port 8080 is mapped to
+#    host 18080 specifically to avoid that collision, see docker-compose.yml)
+curl -X POST http://localhost:18080/organizations/org_abc123/plan \
   -H "Content-Type: application/json" \
   -d '{"plan": "pro", "changed_by": "admin_user"}'
 
@@ -384,8 +388,12 @@ nats sub "organization.plan.changed"
 ### Test 2: User GDPR Deletion
 
 ```bash
-# 1. Request deletion in auth-core
-curl -X DELETE http://localhost:3011/api/admin/users/user_xyz789/gdpr
+# 1. Request deletion — this is a user-core endpoint (port 3012), not auth-core.
+#    auth-core has no /api/admin/users/:id/gdpr route; see the "GDPR Erasure +
+#    DSAR" section below for the current, verified endpoint table.
+curl -X DELETE http://localhost:3012/api/v1/users/user_xyz789/gdpr/erase \
+  -H "Content-Type: application/json" \
+  -d '{"confirm": true}'
 
 # 2. Verify PostgreSQL deletion
 psql -d auth_service -c "SELECT * FROM \"user\" WHERE id = 'user_xyz789';"
@@ -404,7 +412,7 @@ curl -X POST http://localhost:3011/api/v2/auth/organization/create \
   -d '{"name": "Test Org", "slug": "test-org"}'
 
 # 2. Verify org-core received event and initialized data
-curl http://localhost:8080/organizations/{org_id}
+curl http://localhost:18080/organizations/{org_id}
 # Should show quotas, billing, compliance defaults
 
 # 3. Verify Convex received sync event
@@ -499,5 +507,5 @@ Control Plane-side erasure (auth + user + org rows) is already complete.
 - [Org Core Migrations](../org-core/migrations/)
 - [NATS Events](../org-core/internal/nats/events.go)
 - [Event Publisher](../auth-core/src/internal/auth-event.publisher.ts)
-- [Convex Schema](../convex-gateway/convex/schema.ts)
-- [Convex NATS Integration](../convex-gateway/convex/nats.ts)
+- [Convex Schema](../Application%20Plane/convex-core/convex/schema.ts) — corrected 2026-07-10; no `convex-gateway` directory exists, the projection layer lives in `apps/Application Plane/convex-core`
+- [Convex NATS Integration](../Application%20Plane/convex-core/convex/nats.ts) — corrected 2026-07-10, see above

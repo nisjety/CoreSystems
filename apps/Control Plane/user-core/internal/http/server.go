@@ -21,14 +21,17 @@ import (
 // Phase 4 Refactor: Adding REST endpoints for frontend compatibility
 // while maintaining gRPC for internal service-to-service communication
 type Server struct {
-	router      *gin.Engine
-	server      *http.Server
-	userService *users.Service
-	aclRepo     *users.AclRepository
-	port        string
-	httpClient  *http.Client
-	orgService  string
-	internalKey string
+	router                     *gin.Engine
+	server                     *http.Server
+	userService                *users.Service
+	removeMembershipProjection func(context.Context, string, string) error
+	aclRepo                    *users.AclRepository
+	port                       string
+	httpClient                 *http.Client
+	orgService                 string
+	internalKey                string
+	authMembershipService      string
+	authMembershipToken        string
 	// publisher emits aqencia.controlplane.acl.resource_grants.changed on
 	// grant/revoke so the Data Plane retrieval visibility cache evicts the
 	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
@@ -52,14 +55,27 @@ func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedP
 		userService: userService,
 		aclRepo:     aclRepo,
 		port:        port,
-		httpClient:  &http.Client{Timeout: 10 * time.Second},
-		orgService:  strings.TrimRight(strings.TrimSpace(os.Getenv("ORG_SERVICE_URL")), "/"),
-		internalKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		publisher:   sharedPublisher,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		orgService:            strings.TrimRight(strings.TrimSpace(os.Getenv("ORG_SERVICE_URL")), "/"),
+		internalKey:           strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
+		authMembershipService: strings.TrimRight(strings.TrimSpace(os.Getenv("AUTH_SERVICE_URL")), "/"),
+		authMembershipToken:   strings.TrimSpace(os.Getenv("USER_CORE_MEMBERSHIP_SERVICE_TOKEN")),
+		publisher:             sharedPublisher,
+	}
+	if userService != nil {
+		s.removeMembershipProjection = userService.RemoveMembership
 	}
 
 	if s.orgService == "" {
 		s.orgService = "http://org-core:8080"
+	}
+	if s.authMembershipService == "" {
+		s.authMembershipService = "http://auth-core:3011"
 	}
 
 	if s.internalKey == "" {
@@ -225,28 +241,28 @@ func (s *Server) setupRoutes() {
 		}
 
 		// Internal orchestration endpoints (idempotent hooks from auth pipeline).
-		// Internal-key ONLY for the WHOLE group: these mutate org membership and
+		// Service-principal ONLY for the WHOLE group: these mutate org membership and
 		// user profile, so a plain user Bearer token must NEVER reach them — else
 		// any authenticated user could self-join an arbitrary org (privilege
-		// escalation). Matches the documented "internal key" auth for these hooks.
+		// escalation). Matches the scoped service-principal auth for these hooks.
 		internal := v1.Group("/internal")
-		internal.Use(s.requireInternalKeyOnly)
+		internal.Use(s.requireServicePrincipal)
 		{
 			internal.POST("/memberships/ensure", s.ensureMembership)
 			internal.POST("/users/enrich-from-provider", s.enrichUserFromProvider)
 
 			// Per-user authz facade — the single internal surface Data Plane
 			// services (documents-api, retrieval) call to resolve a viewer's
-			// explicit resource grants. Internal-key ONLY (a user Bearer token
-			// must not be able to enumerate another subject's grants).
+			// explicit resource grants. Static service credentials remain
+			// contained until signed tenant+subject delegation is implemented.
 			authz := internal.Group("/authz")
-			authz.Use(s.requireInternalKeyOnly)
+			authz.Use(s.requireVerifiedAuthzDelegation)
 			{
 				authz.GET("/visible", s.authzVisible)
 				authz.GET("/check", s.authzCheck)
 				// Grant write surface backing the velionv3 ShareDialog (PR-6).
-				// Same internal-key-only guard; resource_grants is the single
-				// authority retrieval + documents-api enforce against.
+				// Disabled until verified delegation exists; resource_grants remains
+				// the single authority retrieval + documents-api enforce against.
 				authz.POST("/grant", s.authzGrant)
 				authz.DELETE("/grant", s.authzRevoke)
 				authz.GET("/grants", s.authzGrantsByResource)
@@ -392,6 +408,9 @@ var bearerHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 type bearerIdentity struct {
 	userID string
+	email  string
+	name   string
+	avatar string
 	role   string
 }
 
@@ -425,115 +444,90 @@ func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string
 	// Better Auth get-session response: { "session": {...}, "user": { "id": "...", ... } }
 	var payload struct {
 		User *struct {
-			ID   string `json:"id"`
-			Role string `json:"role"`
+			ID    string `json:"id"`
+			Email string `json:"email"`
+			Name  string `json:"name"`
+			Image string `json:"image"`
+			Role  string `json:"role"`
 		} `json:"user"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.User == nil {
 		return bearerIdentity{}
 	}
-	return bearerIdentity{userID: payload.User.ID, role: payload.User.Role}
+	return bearerIdentity{
+		userID: strings.TrimSpace(payload.User.ID),
+		email:  strings.ToLower(strings.TrimSpace(payload.User.Email)),
+		name:   strings.TrimSpace(payload.User.Name),
+		avatar: strings.TrimSpace(payload.User.Image),
+		role:   strings.TrimSpace(payload.User.Role),
+	}
 }
 
 func authContextMiddleware() gin.HandlerFunc {
-	configuredKeys := make([]string, 0, 2)
-	if value := strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")); value != "" {
-		configuredKeys = append(configuredKeys, value)
+	serviceCredentials, credentialErr := parseServiceCredentials(os.Getenv("USER_CORE_SERVICE_CREDENTIALS"))
+	if credentialErr != nil {
+		log.Error().Err(credentialErr).Msg("Auth middleware: invalid service credential registry")
+		serviceCredentials = nil
 	}
-	if value := strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET")); value != "" {
-		alreadyPresent := false
-		for _, existing := range configuredKeys {
-			if existing == value {
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
-			configuredKeys = append(configuredKeys, value)
-		}
+	delegatedUserVerifier, delegatedUserVerifierErr := planeUserVerifierFromEnv()
+	if delegatedUserVerifierErr != nil {
+		log.Error().Err(delegatedUserVerifierErr).Msg("Auth middleware: delegated user proof verifier unavailable; v2 delegations fail closed")
 	}
+	delegationNonces := newDelegationNonceCache(100_000)
 	return func(c *gin.Context) {
 		if c.Request.URL.Path == "/health" || c.Request.Method == http.MethodOptions {
 			c.Next()
 			return
 		}
 
-		if len(configuredKeys) == 0 {
-			log.Error().Msg("Auth middleware: no internal API keys configured")
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-				"error": "service auth not configured",
-			})
-			return
-		}
-
-		requestInternalKey := c.GetHeader("X-Internal-Api-Key")
-
-		isMatch := false
-		for _, configuredKey := range configuredKeys {
-			if requestInternalKey != "" && requestInternalKey == configuredKey {
-				isMatch = true
-				break
+		if present, authorized := authenticateServicePrincipal(c, serviceCredentials); present {
+			if !authorized {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "service principal not authorized"})
+				return
 			}
-		}
-
-		if !isMatch {
-			// Try Authorization: Bearer <token> — validate against auth-service.
-			if bearer := strings.TrimPrefix(strings.TrimSpace(c.GetHeader("Authorization")), "Bearer "); bearer != "" {
-				authURL := strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/")
-				if authURL == "" {
-					authURL = "http://auth-service:3011"
-				}
-				if identity := resolveIdentityFromBearer(c.Request.Context(), bearer, authURL); identity.userID != "" {
-					// G9: never log raw user_id at info; debug only.
-					log.Debug().Str("auth_method", "bearer").Msg("Auth middleware: resolved user from Bearer")
-					c.Set("auth_method", "bearer")
-					c.Set("user_id", identity.userID)
-					if strings.TrimSpace(identity.role) != "" {
-						c.Set("user_role", identity.role)
-					}
-					c.Next()
+			if c.GetString("delegation_version") == "v2" {
+				proof, err := delegatedUserVerifier.VerifyAuthorization(strings.TrimSpace(c.GetHeader("Authorization")))
+				if err != nil || proof.UserID != c.GetString("user_id") || proof.OrgID != c.GetString("org_id") {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "verified delegated user proof required"})
 					return
 				}
+				nonceKey := c.GetString("service_id") + ":" + c.GetString("delegation_nonce")
+				nonceExpiry := time.Now().UTC().Add(serviceDelegationMaxAge + serviceDelegationFutureSkew)
+				if proof.Expiry.Before(nonceExpiry) {
+					nonceExpiry = proof.Expiry
+				}
+				if !delegationNonces.Consume(nonceKey, nonceExpiry, time.Now().UTC()) {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "delegation replay rejected"})
+					return
+				}
+				c.Set("delegated_user_proof_verified", true)
 			}
-			log.Warn().Msg("Auth middleware: API key mismatch or missing")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "unauthorized",
-			})
+			c.Next()
 			return
 		}
 
-		log.Debug().Str("auth_method", "internal_key").Msg("Auth middleware: API key matched")
-		c.Set("auth_method", "internal_key")
-
-		userID := strings.TrimSpace(c.GetHeader("X-User-Id"))
-		if userID != "" {
-			// G9: never log raw user_id at info; debug only.
-			log.Debug().Msg("Auth middleware: user_id set from forwarded header")
-			c.Set("user_id", userID)
+		// User traffic is authorized only by a token Auth Core verifies.
+		if bearer := strings.TrimPrefix(strings.TrimSpace(c.GetHeader("Authorization")), "Bearer "); bearer != "" {
+			authURL := strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/")
+			if authURL == "" {
+				authURL = "http://auth-service:3011"
+			}
+			if identity := resolveIdentityFromBearer(c.Request.Context(), bearer, authURL); identity.userID != "" {
+				log.Debug().Str("auth_method", "bearer").Msg("Auth middleware: resolved user from Bearer")
+				c.Set("auth_method", "bearer")
+				c.Set("user_id", identity.userID)
+				c.Set("user_email", identity.email)
+				c.Set("user_name", identity.name)
+				c.Set("user_avatar", identity.avatar)
+				if strings.TrimSpace(identity.role) != "" {
+					c.Set("user_role", identity.role)
+				}
+				c.Next()
+				return
+			}
 		}
 
-		// Also extract email and name for auto-provisioning
-		email := strings.TrimSpace(c.GetHeader("X-User-Email"))
-		if email != "" {
-			c.Set("user_email", email)
-		}
-
-		name := strings.TrimSpace(c.GetHeader("X-User-Name"))
-		if name != "" {
-			c.Set("user_name", name)
-		}
-
-		role := strings.TrimSpace(c.GetHeader("X-User-Role"))
-		if role == "" {
-			role = strings.TrimSpace(c.GetHeader("X-Auth-Role"))
-		}
-		if role == "" {
-			role = strings.TrimSpace(c.GetHeader("X-User-Roles"))
-		}
-		if role != "" {
-			c.Set("user_role", role)
-		}
-
-		c.Next()
+		log.Warn().Msg("Auth middleware: verified bearer or service principal required")
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 	}
 }

@@ -14,6 +14,14 @@ export interface MicrosoftGraphProfile {
   photo?: string;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isUnknownArray(value: unknown): value is unknown[] {
+  return Array.isArray(value);
+}
+
 @Injectable()
 export class MicrosoftGraphService {
   private readonly logger = new Logger(MicrosoftGraphService.name);
@@ -36,7 +44,7 @@ export class MicrosoftGraphService {
     } catch (error) {
       this.logger.error(
         'Error fetching Microsoft Graph profile:',
-        error.message,
+        error instanceof Error ? error.message : String(error),
       );
       throw error;
     }
@@ -126,36 +134,34 @@ export class MicrosoftGraphService {
   /**
    * Check if user has a valid Microsoft account with access token
    */
-  hasValidMicrosoftAccount(user: any): {
+  hasValidMicrosoftAccount(user: unknown): {
     valid: boolean;
     accessToken?: string;
   } {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    if (!user || !user.accounts || !Array.isArray(user.accounts)) {
+    if (!isRecord(user) || !isUnknownArray(user.accounts)) {
       return { valid: false };
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
     const msAccount = user.accounts.find(
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      (account: any) => account.providerId === 'microsoft',
+      (account) => isRecord(account) && account.providerId === 'microsoft',
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    if (!msAccount || !msAccount.accessToken) {
+    if (!isRecord(msAccount) || typeof msAccount.accessToken !== 'string') {
       return { valid: false };
     }
 
     // Check if token is expired
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument
-    if (msAccount.expiresAt && new Date(msAccount.expiresAt) < new Date()) {
+    const expiresAt = msAccount.expiresAt;
+    if (
+      (typeof expiresAt === 'string' || typeof expiresAt === 'number') &&
+      new Date(expiresAt) < new Date()
+    ) {
       this.logger.warn('Microsoft access token expired');
       return { valid: false };
     }
 
     return {
       valid: true,
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
       accessToken: msAccount.accessToken,
     };
   }

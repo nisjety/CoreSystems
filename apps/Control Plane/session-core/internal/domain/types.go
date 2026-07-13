@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-var ErrOrgMembershipDenied = errors.New("org membership denied")
+var (
+	ErrOrgMembershipDenied = errors.New("org membership denied")
+	ErrSessionAccessDenied = errors.New("session access denied")
+)
 
 // SessionStatus represents the lifecycle state of a session.
 type SessionStatus string

@@ -15,6 +15,15 @@ import type { UserSession } from '@thallesp/nestjs-better-auth';
 import type { Request } from 'express';
 import { auth } from '../auth/auth';
 
+const typedPasswordAuth = auth as unknown as {
+  api: {
+    setPassword(input: {
+      body: { newPassword: string };
+      headers: { cookie: string };
+    }): Promise<unknown>;
+  };
+};
+
 @ApiTags('users')
 @Controller('users')
 export class UsersController {
@@ -87,7 +96,7 @@ export class UsersController {
     if (!newPassword || typeof newPassword !== 'string') {
       return { ok: false, error: 'NEW_PASSWORD_REQUIRED' };
     }
-    await auth.api.setPassword({
+    await typedPasswordAuth.api.setPassword({
       body: { newPassword },
       headers: { cookie: req.headers.cookie ?? '' },
     });

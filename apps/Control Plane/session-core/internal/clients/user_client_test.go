@@ -15,8 +15,13 @@ func TestUserClientGetProfileDecodesUserCoreEnvelope(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/api/v1/users/me", r.URL.Path)
-		require.Equal(t, "secret", r.Header.Get("X-Internal-Api-Key"))
+		require.Equal(t, "secret", r.Header.Get("X-Service-Token"))
+		require.Equal(t, "session-core", r.Header.Get("X-Service-Id"))
+		require.Empty(t, r.Header.Get("X-Internal-Api-Key"))
 		require.Equal(t, "auth-user-1", r.Header.Get("X-User-Id"))
+		require.NotEmpty(t, r.Header.Get("X-Delegation-Timestamp"))
+		require.Equal(t, "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU", r.Header.Get("X-Delegation-Body-SHA256"))
+		require.NotEmpty(t, r.Header.Get("X-Delegation-Signature"))
 
 		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 			"user": map[string]any{

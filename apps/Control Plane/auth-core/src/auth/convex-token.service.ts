@@ -3,6 +3,7 @@ import {
   createPrivateKey,
   createPublicKey,
   createSign,
+  createVerify,
   generateKeyPairSync,
   type KeyObject,
 } from 'crypto';
@@ -41,8 +42,13 @@ type ConvexTokenBundle = {
 type ModelPlaneJwtClaims = {
   userId: string;
   orgId: string;
+  /** Secure-MVP fallback until Control owns an authoritative org ZDR policy. */
+  zdr: true;
   email?: string;
   scopes?: readonly string[];
+  principalType?: 'user' | 'service';
+  serviceId?: string;
+  reason?: string;
 };
 
 type ModelPlaneTokenBundle = {
@@ -66,7 +72,17 @@ type ModelPlaneTokenBundle = {
  *   PLANE_TOKEN_TTL_QUARRY_SECONDS             (default 300s)
  *   PLANE_TOKEN_TTL_INGESTION_SECONDS          (default 300s)
  *   PLANE_TOKEN_TTL_CONTROL_PLANE_SECONDS      (default 300s)
+ *   PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS     (default 300s, service-only)
  *   PLANE_TOKEN_TTL_APPLICATION_PLANE_SECONDS  (default 300s)
+ *   PLANE_TOKEN_TTL_SESSION_CORE_SECONDS       (default 300s)
+ *   PLANE_TOKEN_TTL_INFERENCE_CORE_SECONDS     (default 300s)
+ *   PLANE_TOKEN_TTL_EXECUTION_CORE_SECONDS     (default 300s)
+ *   PLANE_TOKEN_TTL_COST_CORE_SECONDS          (default 300s)
+ *   PLANE_TOKEN_TTL_CAPABILITY_CORE_SECONDS    (default 300s)
+ *   PLANE_TOKEN_TTL_LETTA_BRIDGE_SECONDS       (default 300s)
+ *   PLANE_TOKEN_TTL_BROWSER_BROKER_SECONDS     (default 300s)
+ *   PLANE_TOKEN_TTL_SANDBOX_MANAGER_SECONDS    (default 300s)
+ *   PLANE_TOKEN_TTL_BRIDGE_CORE_SECONDS        (default 300s)
  *
  * Audience names match the path slug (and the velion `PlaneAudience`
  * union) for symmetry with the per-audience endpoints.
@@ -76,13 +92,29 @@ export type PlaneAudience =
   | 'quarry'
   | 'ingestion'
   | 'control-plane'
-  | 'application-plane';
+  | 'control-policy'
+  | 'application-plane'
+  | 'session-core'
+  | 'inference-core'
+  | 'execution-core'
+  | 'cost-core'
+  | 'capability-core'
+  | 'letta-bridge'
+  | 'browser-broker'
+  | 'sandbox-manager'
+  | 'bridge-core';
+
+export type AuthCoreAudience = 'model-gateway' | PlaneAudience;
+export type InteractivePlaneAudience = Exclude<PlaneAudience, 'control-policy'>;
 
 type PlaneJwtClaims = {
   userId: string;
   orgId: string;
   email?: string;
   scopes?: readonly string[];
+  principalType?: 'user' | 'service';
+  serviceId?: string;
+  reason?: string;
 };
 
 type PlaneTokenBundle = {
@@ -98,6 +130,16 @@ interface PlaneAudienceConfig {
   ttlSeconds: number;
 }
 
+export type VerifiedPlaneServicePrincipal = {
+  subject: string;
+  serviceId: string;
+  orgId: string;
+  scopes: readonly string[];
+  reason: string;
+};
+
+export class PlaneTokenVerificationError extends Error {}
+
 /**
  * Parse a TTL env var with a sane floor (60s) and fallback default. Used
  * by both the Convex- and the per-plane audience configs so a misconfigured
@@ -110,6 +152,14 @@ function parsePositiveTtl(envName: string, fallback: number): number {
     return fallback;
   }
   return Math.max(60, raw);
+}
+
+function exactAudience(envName: string, expected: string): string {
+  const configured = (process.env[envName] ?? '').trim();
+  if (configured && configured !== expected) {
+    throw new Error(`${envName} must be ${expected}`);
+  }
+  return expected;
 }
 
 @Injectable()
@@ -133,14 +183,14 @@ export class ConvexTokenService {
     process.env.MODEL_PLANE_AUTH_ISSUER ||
     process.env.CONVEX_AUTH_ISSUER ||
     `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/convex-auth`;
-  private readonly modelPlaneAudience =
-    process.env.MODEL_PLANE_AUTH_AUDIENCE || 'model-gateway';
+  private readonly modelPlaneAudience = exactAudience(
+    'MODEL_PLANE_AUTH_AUDIENCE',
+    'model-gateway',
+  );
   private readonly modelPlaneTtlSeconds = Math.max(
     60,
-    parseInt(
-      process.env.MODEL_PLANE_AUTH_TOKEN_TTL_SECONDS || '900',
-      10,
-    ) || 900,
+    parseInt(process.env.MODEL_PLANE_AUTH_TOKEN_TTL_SECONDS || '900', 10) ||
+      900,
   );
 
   // Phase A · A1.1 — non-Model-Plane audience config. Default TTL of 5 min
@@ -151,35 +201,119 @@ export class ConvexTokenService {
     process.env.CONVEX_AUTH_ISSUER ||
     `${process.env.BETTER_AUTH_URL || 'http://localhost:3011'}/api/convex-auth`;
 
-  private readonly planeAudiences: Record<PlaneAudience, PlaneAudienceConfig> = {
-    'data-plane': {
-      audience: process.env.DATA_PLANE_AUTH_AUDIENCE || 'data-plane',
-      ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_DATA_PLANE_SECONDS', 300),
-    },
-    quarry: {
-      audience: process.env.QUARRY_AUTH_AUDIENCE || 'quarry',
-      ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_QUARRY_SECONDS', 300),
-    },
-    ingestion: {
-      audience: process.env.INGESTION_AUTH_AUDIENCE || 'ingestion',
-      ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_INGESTION_SECONDS', 300),
-    },
-    'control-plane': {
-      audience: process.env.CONTROL_PLANE_AUTH_AUDIENCE || 'control-plane',
-      ttlSeconds: parsePositiveTtl(
-        'PLANE_TOKEN_TTL_CONTROL_PLANE_SECONDS',
-        300,
-      ),
-    },
-    'application-plane': {
-      audience:
-        process.env.APPLICATION_PLANE_AUTH_AUDIENCE || 'application-plane',
-      ttlSeconds: parsePositiveTtl(
-        'PLANE_TOKEN_TTL_APPLICATION_PLANE_SECONDS',
-        300,
-      ),
-    },
-  };
+  private readonly planeAudiences: Record<PlaneAudience, PlaneAudienceConfig> =
+    {
+      'data-plane': {
+        audience: process.env.DATA_PLANE_AUTH_AUDIENCE || 'data-plane',
+        ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_DATA_PLANE_SECONDS', 300),
+      },
+      quarry: {
+        audience: process.env.QUARRY_AUTH_AUDIENCE || 'quarry',
+        ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_QUARRY_SECONDS', 300),
+      },
+      ingestion: {
+        audience: process.env.INGESTION_AUTH_AUDIENCE || 'ingestion',
+        ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_INGESTION_SECONDS', 300),
+      },
+      'control-plane': {
+        audience: process.env.CONTROL_PLANE_AUTH_AUDIENCE || 'control-plane',
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_CONTROL_PLANE_SECONDS',
+          300,
+        ),
+      },
+      'control-policy': {
+        audience:
+          process.env.DATA_PLANE_POLICY_AUTH_AUDIENCE || 'control-policy',
+        ttlSeconds: Math.min(
+          300,
+          parsePositiveTtl('PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS', 300),
+        ),
+      },
+      'application-plane': {
+        audience:
+          process.env.APPLICATION_PLANE_AUTH_AUDIENCE || 'application-plane',
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_APPLICATION_PLANE_SECONDS',
+          300,
+        ),
+      },
+      'session-core': {
+        audience: exactAudience('SESSION_CORE_AUTH_AUDIENCE', 'session-core'),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_SESSION_CORE_SECONDS',
+          300,
+        ),
+      },
+      'inference-core': {
+        audience: exactAudience(
+          'INFERENCE_CORE_AUTH_AUDIENCE',
+          'inference-core',
+        ),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_INFERENCE_CORE_SECONDS',
+          300,
+        ),
+      },
+      'execution-core': {
+        audience: exactAudience(
+          'EXECUTION_CORE_AUTH_AUDIENCE',
+          'execution-core',
+        ),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_EXECUTION_CORE_SECONDS',
+          300,
+        ),
+      },
+      'cost-core': {
+        audience: exactAudience('COST_CORE_AUTH_AUDIENCE', 'cost-core'),
+        ttlSeconds: parsePositiveTtl('PLANE_TOKEN_TTL_COST_CORE_SECONDS', 300),
+      },
+      'capability-core': {
+        audience: exactAudience(
+          'CAPABILITY_CORE_AUTH_AUDIENCE',
+          'capability-core',
+        ),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_CAPABILITY_CORE_SECONDS',
+          300,
+        ),
+      },
+      'letta-bridge': {
+        audience: exactAudience('LETTA_BRIDGE_AUTH_AUDIENCE', 'letta-bridge'),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_LETTA_BRIDGE_SECONDS',
+          300,
+        ),
+      },
+      'browser-broker': {
+        audience: exactAudience(
+          'BROWSER_BROKER_AUTH_AUDIENCE',
+          'browser-broker',
+        ),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_BROWSER_BROKER_SECONDS',
+          300,
+        ),
+      },
+      'sandbox-manager': {
+        audience: exactAudience(
+          'SANDBOX_MANAGER_AUTH_AUDIENCE',
+          'sandbox-manager',
+        ),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_SANDBOX_MANAGER_SECONDS',
+          300,
+        ),
+      },
+      'bridge-core': {
+        audience: exactAudience('BRIDGE_CORE_AUTH_AUDIENCE', 'bridge-core'),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_BRIDGE_CORE_SECONDS',
+          300,
+        ),
+      },
+    };
 
   private readonly privateKey: KeyObject;
   private readonly publicKey: KeyObject;
@@ -256,6 +390,16 @@ export class ConvexTokenService {
    *  - Model Plane token (`aud=model-gateway`) → only valid for gateway.
    */
   issueModelPlaneToken(claims: ModelPlaneJwtClaims): ModelPlaneTokenBundle {
+    const principalType = claims.principalType ?? 'user';
+    if (
+      principalType === 'service' &&
+      (!claims.serviceId || claims.userId !== `service:${claims.serviceId}`)
+    ) {
+      throw new Error('Service token identity is ambiguous');
+    }
+    if (principalType === 'user' && claims.serviceId) {
+      throw new Error('User token cannot carry a service identity');
+    }
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.modelPlaneIssuer,
@@ -267,12 +411,19 @@ export class ConvexTokenService {
       // The gateway's `Claims` struct (auth.rs) reads these snake_case fields
       // as required top-level claims.
       org_id: claims.orgId,
-      user_id: claims.userId,
+      ...(principalType === 'user' ? { user_id: claims.userId } : {}),
+      principal_type: principalType,
+      ...(principalType === 'service' ? { service_id: claims.userId } : {}),
+      ...(claims.reason ? { reason: claims.reason } : {}),
       // Optional extras — accepted by the gateway but not required.
       ...(claims.email ? { email: claims.email } : {}),
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
+      // Control Plane has no authoritative org-level ZDR policy source yet.
+      // Fail closed for every Model token. This is deliberately not copied from
+      // caller input so untyped/runtime false values cannot downgrade posture.
+      zdr: true,
     };
 
     const encodedHeader = this.encodeSegment({
@@ -322,6 +473,16 @@ export class ConvexTokenService {
     if (!config) {
       throw new Error(`Unknown plane audience: ${audience}`);
     }
+    const principalType = claims.principalType ?? 'user';
+    if (
+      principalType === 'service' &&
+      (!claims.serviceId || claims.userId !== `service:${claims.serviceId}`)
+    ) {
+      throw new Error('Service token identity is ambiguous');
+    }
+    if (principalType === 'user' && claims.serviceId) {
+      throw new Error('User token cannot carry a service identity');
+    }
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -331,11 +492,19 @@ export class ConvexTokenService {
       nbf: now - 5,
       exp: now + config.ttlSeconds,
       org_id: claims.orgId,
-      user_id: claims.userId,
+      ...(principalType === 'user' ? { user_id: claims.userId } : {}),
+      principal_type: principalType,
+      ...(principalType === 'service' ? { service_id: claims.userId } : {}),
+      ...(claims.reason ? { reason: claims.reason } : {}),
       ...(claims.email ? { email: claims.email } : {}),
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
+      // Control Plane does not yet have an authoritative per-org retention
+      // policy. The secure-MVP posture is therefore issuer-selected ZDR for
+      // every delegated audience. Caller input is deliberately ignored so a
+      // request cannot weaken the policy between services.
+      zdr: true,
     };
 
     const encodedHeader = this.encodeSegment({
@@ -350,9 +519,7 @@ export class ConvexTokenService {
     signer.end();
 
     const signature = signer.sign(this.privateKey).toString('base64url');
-    const expiresAt = new Date(
-      (now + config.ttlSeconds) * 1000,
-    ).toISOString();
+    const expiresAt = new Date((now + config.ttlSeconds) * 1000).toISOString();
 
     return {
       token: `${signingInput}.${signature}`,
@@ -364,13 +531,128 @@ export class ConvexTokenService {
   }
 
   /**
+   * Verify a service-principal token issued by this authority. This is used by
+   * sensitive Control Plane callbacks that must not trust shared keys or
+   * caller-selected identity headers. Signature, algorithm, key id, issuer,
+   * audience, lifetime, and canonical service-identity claims are all required.
+   */
+  verifyPlaneServiceToken(
+    audience: PlaneAudience,
+    token: string,
+  ): VerifiedPlaneServicePrincipal {
+    const config = this.planeAudiences[audience];
+    if (!config || !token) {
+      throw new PlaneTokenVerificationError('Plane token is not verifiable');
+    }
+
+    try {
+      const segments = token.split('.');
+      if (
+        segments.length !== 3 ||
+        segments.some(
+          (segment) => !segment || !/^[A-Za-z0-9_-]+$/.test(segment),
+        )
+      ) {
+        throw new PlaneTokenVerificationError('Plane token is malformed');
+      }
+      const [encodedHeader, encodedPayload, encodedSignature] = segments;
+      const protectedHeader = JSON.parse(
+        Buffer.from(encodedHeader, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      const payload = JSON.parse(
+        Buffer.from(encodedPayload, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      const signature = Buffer.from(encodedSignature, 'base64url');
+      const verifier = createVerify('RSA-SHA256');
+      verifier.update(`${encodedHeader}.${encodedPayload}`);
+      verifier.end();
+
+      if (
+        protectedHeader.alg !== 'RS256' ||
+        protectedHeader.typ !== 'JWT' ||
+        protectedHeader.kid !== this.kid ||
+        !verifier.verify(this.publicKey, signature)
+      ) {
+        throw new PlaneTokenVerificationError('Plane token key is not trusted');
+      }
+
+      const subject = payload.sub;
+      const orgId = payload.org_id;
+      const serviceId = payload.service_id;
+      const scopes = payload.scopes;
+      const reason = payload.reason;
+      const numericDates = [payload.iat, payload.nbf, payload.exp];
+      const now = Math.floor(Date.now() / 1000);
+      if (
+        payload.iss !== this.planeIssuer ||
+        payload.aud !== config.audience ||
+        payload.principal_type !== 'service' ||
+        payload.user_id !== undefined ||
+        typeof subject !== 'string' ||
+        !subject.startsWith('service:') ||
+        subject.trim() !== subject ||
+        typeof serviceId !== 'string' ||
+        serviceId !== subject ||
+        typeof orgId !== 'string' ||
+        !orgId.trim() ||
+        orgId.trim() !== orgId ||
+        !Array.isArray(scopes) ||
+        scopes.length === 0 ||
+        scopes.some(
+          (scope) =>
+            typeof scope !== 'string' ||
+            !scope.trim() ||
+            scope.trim() !== scope,
+        ) ||
+        typeof reason !== 'string' ||
+        reason.trim() !== reason ||
+        reason.length < 3 ||
+        reason.length > 500 ||
+        numericDates.some(
+          (value) => !Number.isSafeInteger(value) || (value as number) <= 0,
+        ) ||
+        (payload.nbf as number) > now ||
+        (payload.iat as number) > now + 5 ||
+        (payload.exp as number) <= now ||
+        (payload.nbf as number) > (payload.iat as number) ||
+        (payload.iat as number) >= (payload.exp as number)
+      ) {
+        throw new PlaneTokenVerificationError(
+          'Plane service principal claims are invalid',
+        );
+      }
+
+      return {
+        subject,
+        serviceId,
+        orgId,
+        scopes: [...new Set(scopes as string[])],
+        reason,
+      };
+    } catch (error) {
+      if (error instanceof PlaneTokenVerificationError) {
+        throw error;
+      }
+      throw new PlaneTokenVerificationError('Plane token verification failed');
+    }
+  }
+
+  /**
    * Phase A · A1.1 — guard exposed to controllers so they can validate
    * the audience slug from the request path against the configured set
    * before touching the keypair. Returns `null` if the audience is
    * unknown, allowing the controller to surface a clean 404/400.
    */
   isKnownPlaneAudience(value: string): value is PlaneAudience {
-    return Object.prototype.hasOwnProperty.call(this.planeAudiences, value);
+    return Object.hasOwn(this.planeAudiences, value);
+  }
+
+  isKnownAuthAudience(value: string): value is AuthCoreAudience {
+    return value === 'model-gateway' || this.isKnownPlaneAudience(value);
+  }
+
+  isInteractivePlaneAudience(value: string): value is InteractivePlaneAudience {
+    return this.isKnownPlaneAudience(value) && value !== 'control-policy';
   }
 
   getJwks() {
@@ -399,13 +681,21 @@ export class ConvexTokenService {
       };
     }
 
+    if (privatePem || publicPem) {
+      throw new Error(
+        'A complete stable RS256 signing keypair is required; both private and public keys must be configured',
+      );
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'A stable RS256 signing keypair is required in production',
+      );
+    }
+
     const message =
       'CONVEX_AUTH_PRIVATE_KEY_FILE/PEM + CONVEX_AUTH_PUBLIC_KEY_FILE/PEM not set; generating ephemeral RSA keypair for local development (JWKS rotates on every restart — set a stable key for production).';
-    if (process.env.NODE_ENV === 'production') {
-      this.logger.warn(message);
-    } else {
-      this.logger.log(message);
-    }
+    this.logger.log(message);
 
     const generated = generateKeyPairSync('rsa', {
       modulusLength: 2048,

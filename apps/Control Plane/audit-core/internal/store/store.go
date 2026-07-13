@@ -7,9 +7,12 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/controlplane/audit-core/internal/events"
@@ -30,41 +33,92 @@ func New(pool *pgxpool.Pool) *Store {
 // callers (e.g. integration tests) can chain reads against the freshly
 // inserted row.
 func (s *Store) InsertAudit(ctx context.Context, ev *events.AuditEvent) (int64, error) {
+	id, _, err := s.insertAudit(ctx, ev, "", 0)
+	return id, err
+}
+
+func (s *Store) InsertAuditFromStream(ctx context.Context, ev *events.AuditEvent, sourceBus string, streamSequence uint64) (bool, error) {
+	sequence, err := validateStreamIdentity(sourceBus, streamSequence)
+	if err != nil {
+		return false, err
+	}
+	_, inserted, err := s.insertAudit(ctx, ev, sourceBus, sequence)
+	return inserted, err
+}
+
+func (s *Store) insertAudit(ctx context.Context, ev *events.AuditEvent, sourceBus string, streamSequence int64) (int64, bool, error) {
 	details, err := marshalJSON(ev.Details)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var id int64
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO audit_events (
 			occurred_at, org_id, user_id, actor_role, plane, event, subject,
-			resource_id, outcome, details, request_id, ip_address, user_agent
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::inet, $13)
+			resource_id, outcome, details, request_id, ip_address, user_agent,
+			source_bus, source_stream_sequence
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::inet, $13,
+			NULLIF($14, ''), NULLIF($15, 0))
+		ON CONFLICT (source_bus, source_stream_sequence)
+			WHERE source_bus IS NOT NULL AND source_stream_sequence IS NOT NULL
+		DO NOTHING
 		RETURNING id
 	`, ev.OccurredAt, ev.OrgID, nilIfEmpty(ev.UserID), nilIfEmpty(ev.ActorRole),
 		ev.Plane, ev.Event, nilIfEmpty(ev.Subject), nilIfEmpty(ev.ResourceID),
 		ev.Outcome, details, nilIfEmpty(ev.RequestID), ev.IPAddress,
-		nilIfEmpty(ev.UserAgent)).Scan(&id)
-	return id, err
+		nilIfEmpty(ev.UserAgent), sourceBus, streamSequence).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return id, err == nil, err
 }
 
 // InsertUsage appends a single usage event.
 func (s *Store) InsertUsage(ctx context.Context, ev *events.UsageEvent) (int64, error) {
+	id, _, err := s.insertUsage(ctx, ev, "", 0)
+	return id, err
+}
+
+func (s *Store) InsertUsageFromStream(ctx context.Context, ev *events.UsageEvent, sourceBus string, streamSequence uint64) (bool, error) {
+	sequence, err := validateStreamIdentity(sourceBus, streamSequence)
+	if err != nil {
+		return false, err
+	}
+	_, inserted, err := s.insertUsage(ctx, ev, sourceBus, sequence)
+	return inserted, err
+}
+
+func (s *Store) insertUsage(ctx context.Context, ev *events.UsageEvent, sourceBus string, streamSequence int64) (int64, bool, error) {
 	metadata, err := marshalJSON(ev.Metadata)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var id int64
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO usage_events (
 			occurred_at, org_id, user_id, plane, op, tokens_in, tokens_out,
-			bytes_in, bytes_out, cost_cents, request_id, metadata
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			bytes_in, bytes_out, cost_cents, request_id, metadata,
+			source_bus, source_stream_sequence
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+			NULLIF($13, ''), NULLIF($14, 0))
+		ON CONFLICT (source_bus, source_stream_sequence)
+			WHERE source_bus IS NOT NULL AND source_stream_sequence IS NOT NULL
+		DO NOTHING
 		RETURNING id
 	`, ev.OccurredAt, ev.OrgID, nilIfEmpty(ev.UserID), ev.Plane, ev.Op,
 		ev.TokensIn, ev.TokensOut, ev.BytesIn, ev.BytesOut, ev.CostCents,
-		nilIfEmpty(ev.RequestID), metadata).Scan(&id)
-	return id, err
+		nilIfEmpty(ev.RequestID), metadata, sourceBus, streamSequence).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	return id, err == nil, err
+}
+
+func validateStreamIdentity(sourceBus string, streamSequence uint64) (int64, error) {
+	if sourceBus == "" || streamSequence == 0 || streamSequence > math.MaxInt64 {
+		return 0, fmt.Errorf("invalid JetStream source identity")
+	}
+	return int64(streamSequence), nil
 }
 
 // PurgeResult reports how many rows each append-only table shed during a
@@ -122,19 +176,19 @@ type AuditFilter struct {
 }
 
 type AuditRow struct {
-	ID         int64                  `json:"id"`
-	IngestedAt time.Time              `json:"ingested_at"`
-	OccurredAt time.Time              `json:"occurred_at"`
-	OrgID      string                 `json:"org_id"`
-	UserID     string                 `json:"user_id,omitempty"`
-	ActorRole  string                 `json:"actor_role,omitempty"`
-	Plane      string                 `json:"plane"`
-	Event      string                 `json:"event"`
-	Subject    string                 `json:"subject,omitempty"`
-	ResourceID string                 `json:"resource_id,omitempty"`
-	Outcome    string                 `json:"outcome"`
-	Details    map[string]any         `json:"details,omitempty"`
-	RequestID  string                 `json:"request_id,omitempty"`
+	ID         int64          `json:"id"`
+	IngestedAt time.Time      `json:"ingested_at"`
+	OccurredAt time.Time      `json:"occurred_at"`
+	OrgID      string         `json:"org_id"`
+	UserID     string         `json:"user_id,omitempty"`
+	ActorRole  string         `json:"actor_role,omitempty"`
+	Plane      string         `json:"plane"`
+	Event      string         `json:"event"`
+	Subject    string         `json:"subject,omitempty"`
+	ResourceID string         `json:"resource_id,omitempty"`
+	Outcome    string         `json:"outcome"`
+	Details    map[string]any `json:"details,omitempty"`
+	RequestID  string         `json:"request_id,omitempty"`
 }
 
 func (s *Store) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error) {
@@ -197,20 +251,20 @@ type UsageFilter struct {
 }
 
 type UsageRow struct {
-	ID         int64                  `json:"id"`
-	IngestedAt time.Time              `json:"ingested_at"`
-	OccurredAt time.Time              `json:"occurred_at"`
-	OrgID      string                 `json:"org_id"`
-	UserID     string                 `json:"user_id,omitempty"`
-	Plane      string                 `json:"plane"`
-	Op         string                 `json:"op"`
-	TokensIn   int64                  `json:"tokens_in"`
-	TokensOut  int64                  `json:"tokens_out"`
-	BytesIn    int64                  `json:"bytes_in"`
-	BytesOut   int64                  `json:"bytes_out"`
-	CostCents  float64                `json:"cost_cents"`
-	RequestID  string                 `json:"request_id,omitempty"`
-	Metadata   map[string]any         `json:"metadata,omitempty"`
+	ID         int64          `json:"id"`
+	IngestedAt time.Time      `json:"ingested_at"`
+	OccurredAt time.Time      `json:"occurred_at"`
+	OrgID      string         `json:"org_id"`
+	UserID     string         `json:"user_id,omitempty"`
+	Plane      string         `json:"plane"`
+	Op         string         `json:"op"`
+	TokensIn   int64          `json:"tokens_in"`
+	TokensOut  int64          `json:"tokens_out"`
+	BytesIn    int64          `json:"bytes_in"`
+	BytesOut   int64          `json:"bytes_out"`
+	CostCents  float64        `json:"cost_cents"`
+	RequestID  string         `json:"request_id,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 func (s *Store) ListUsage(ctx context.Context, f UsageFilter) ([]UsageRow, error) {
@@ -285,18 +339,18 @@ func (s *Store) SummariseUsage(ctx context.Context, orgID string, since, until t
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT plane, op,
-		       COUNT(*)            AS events,
+		       COUNT(*)            AS event_count,
 		       COALESCE(SUM(tokens_in),  0),
 		       COALESCE(SUM(tokens_out), 0),
 		       COALESCE(SUM(bytes_in),   0),
 		       COALESCE(SUM(bytes_out),  0),
-		       COALESCE(SUM(cost_cents), 0)
+		       COALESCE(SUM(cost_cents), 0) AS total_cost_cents
 		FROM usage_events
 		WHERE org_id = $1
 		  AND ingested_at >= $2
 		  AND ingested_at <= $3
 		GROUP BY plane, op
-		ORDER BY cost_cents DESC NULLS LAST, events DESC
+		ORDER BY total_cost_cents DESC, event_count DESC
 	`, orgID, since, until)
 	if err != nil {
 		return nil, err

@@ -1,0 +1,20 @@
+# Production override for the Control Plane.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build
+
+x-build-metadata-required:
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+
+services:
+  auth-core:
+    environment:
+      # NODE_ENV activates Auth Core's production-only fail-closed checks,
+      # secure cookies, and non-development error handling.
+      NODE_ENV: production
+      RATE_LIMIT_ENABLED: "true"
+      # Never inherit the localhost defaults from .env.docker in production.
+      # Operators must provide the externally reachable canonical URLs and the
+      # exact browser origins trusted by Better Auth and Nest CORS.
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required in production}
+      FRONTEND_URL: ${FRONTEND_URL:?FRONTEND_URL is required in production}
+      BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:?BETTER_AUTH_TRUSTED_ORIGINS is required in production}

@@ -20,6 +20,7 @@ import {
   JetStreamClient,
   RetentionPolicy,
   StorageType,
+  type ConnectionOptions,
 } from 'nats';
 import { SharedNatsService } from '../nats/shared-nats.service';
 
@@ -265,7 +266,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     const natsUser = this.configService.get<string>('NATS_USER');
     const natsPass = this.configService.get<string>('NATS_PASS');
 
-    const connectionOptions: any = {
+    const connectionOptions: ConnectionOptions = {
       servers: [natsUrl],
       name: 'auth-service-publisher',
       maxReconnectAttempts: 10,

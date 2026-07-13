@@ -5,6 +5,7 @@ import {
   boolean,
   integer,
   bigint,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 export const user = pgTable('user', {
@@ -135,17 +136,26 @@ export const organization = pgTable('organization', {
 });
 
 // Organization members
-export const member = pgTable('member', {
-  id: text('id').primaryKey(),
-  organizationId: text('organization_id')
-    .notNull()
-    .references(() => organization.id, { onDelete: 'cascade' }),
-  userId: text('user_id')
-    .notNull()
-    .references(() => user.id, { onDelete: 'cascade' }),
-  role: text('role').default('member').notNull(),
-  createdAt: timestamp('created_at').notNull(),
-});
+export const member = pgTable(
+  'member',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organization.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    role: text('role').default('member').notNull(),
+    createdAt: timestamp('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('member_organization_user_unique').on(
+      table.organizationId,
+      table.userId,
+    ),
+  ],
+);
 
 // Organization invitations
 export const invitation = pgTable('invitation', {
