@@ -472,10 +472,17 @@ pub async fn invoke_stream_sse(
         &session_run.run_id,
         &req.content,
         &user_content,
+        &model_bearer,
     )
     .await;
-    let recent_thread_messages =
-        load_recent_thread_messages(&state, &org_id, &session_run.thread_id, &user_content).await;
+    let recent_thread_messages = load_recent_thread_messages(
+        &state,
+        &org_id,
+        &session_run.thread_id,
+        &user_content,
+        &model_bearer,
+    )
+    .await;
     let (mut messages, used_context_assembly) = match context_assembly_messages {
         Some(assembly_messages) => {
             let mut combined: Vec<ChatMessage> = assembly_messages
@@ -983,18 +990,33 @@ async fn load_context_assembly_messages(
     run_id: &str,
     raw_user_content: &str,
     current_user_content: &str,
+    bearer: &VerifiedModelBearer,
 ) -> Option<Vec<ChatMessage>> {
-    let response = match state
-        .session_client
-        .clone()
-        .get_context_assembly(GetContextAssemblyRequest {
+    // session-core's gRPC interceptor requires the caller's verified session
+    // bearer as `authorization` metadata (auth.rs extract_bearer); a bare call
+    // 401s "verified caller credential required", silently dropping durable
+    // context. Forward the session bearer just like create_thread/start_run.
+    let request = match authenticated_session_request(
+        GetContextAssemblyRequest {
             thread_id: thread_id.to_owned(),
             run_id: run_id.to_owned(),
             max_tokens: context_assembly_budget(),
             policy_id: String::new(),
             workspace_id: String::new(),
             agent_id: String::new(),
-        })
+        },
+        bearer,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%error, %thread_id, %run_id, "session-core context assembly credential unavailable; using recent thread messages");
+            return None;
+        }
+    };
+    let response = match state
+        .session_client
+        .clone()
+        .get_context_assembly(request)
         .await
     {
         Ok(response) => response.into_inner(),
@@ -1096,16 +1118,30 @@ async fn load_recent_thread_messages(
     org_id: &str,
     thread_id: &str,
     current_user_content: &str,
+    bearer: &VerifiedModelBearer,
 ) -> Vec<ChatMessage> {
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
+    // Forward the verified session bearer — session-core's interceptor rejects
+    // an unauthenticated ListConversation, which would silently strip all prior
+    // turns and leave the model with no conversation memory.
+    let request = match authenticated_session_request(
+        ListConversationRequest {
+            org_id: org_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+        },
+        bearer,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%error, %thread_id, "session-core list_conversation credential unavailable; using current turn only");
+            return Vec::new();
+        }
+    };
     let mut messages: Vec<ChatMessage> = match state
         .session_client
         .clone()
-        .list_conversation(ListConversationRequest {
-            org_id: org_id.to_owned(),
-            thread_id: thread_id.to_owned(),
-        })
+        .list_conversation(request)
         .await
     {
         Ok(response) => response
@@ -1952,15 +1988,28 @@ pub async fn run_events_sse(
 
 /// Read the latest assistant message in a thread (the run's answer, if it
 /// appended one). Reuses session-core `ListConversation`.
-async fn read_latest_assistant(state: &AppState, org_id: &str, thread_id: &str) -> Option<String> {
+async fn read_latest_assistant(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Option<String> {
     use mp_contracts::model_plane::v1::ListConversationRequest;
+    // Authenticated read: session-core rejects a bare ListConversation, so the
+    // agentic run could never recover its own appended answer and always fell
+    // back to direct_infer.
+    let request = authenticated_session_request(
+        ListConversationRequest {
+            org_id: org_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+        },
+        bearer,
+    )
+    .ok()?;
     let resp = state
         .session_client
         .clone()
-        .list_conversation(ListConversationRequest {
-            org_id: org_id.to_owned(),
-            thread_id: thread_id.to_owned(),
-        })
+        .list_conversation(request)
         .await
         .ok()?;
     resp.into_inner()
@@ -2386,7 +2435,7 @@ fn agentic_run_stream(
 
         // 3. The answer: the run's appended assistant message, else a direct
         //    inference fallback (always reply).
-        let answer = read_latest_assistant(&state, &org_id, &run.thread_id)
+        let answer = read_latest_assistant(&state, &org_id, &run.thread_id, &model_bearer)
             .await
             .filter(|a| !a.trim().is_empty());
         let final_text = match answer {
