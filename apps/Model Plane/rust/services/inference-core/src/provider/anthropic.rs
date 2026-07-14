@@ -132,9 +132,24 @@ fn is_cheap_claude(model: &str) -> bool {
 
 /// Build the Anthropic messages API request body.
 fn build_request_body(req: &InferRequest) -> serde_json::Value {
+    // The Anthropic Messages API takes the system prompt as a TOP-LEVEL `system`
+    // parameter, not as a message with role "system" — sending it inline 400s:
+    // "messages.0: use the top-level 'system' parameter for the initial system
+    // prompt". Split the OpenAI-style flat message list: system turns are joined
+    // into `system`; only user/assistant turns are forwarded as `messages`.
+    let system: String = req
+        .messages
+        .iter()
+        .filter(|m| m.role.eq_ignore_ascii_case("system"))
+        .map(|m| m.content.trim())
+        .filter(|content| !content.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
     let messages: Vec<serde_json::Value> = req
         .messages
         .iter()
+        .filter(|m| !m.role.eq_ignore_ascii_case("system"))
         .map(|m| {
             serde_json::json!({
                 "role": m.role,
@@ -147,8 +162,16 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         "model": req.model,
         "messages": messages,
         "max_tokens": req.max_tokens,
-        "temperature": req.temperature,
     });
+    // `temperature` is deliberately omitted. Anthropic constrains it to [0, 1]
+    // (vs OpenAI's [0, 2]) and the newest Claude models reject it outright
+    // ("`temperature` is deprecated for this model" — e.g. claude-opus-4-8), so
+    // forwarding a chat temperature 400s on those. Anthropic's own default
+    // sampling is used instead; structured output is steered via the prompt
+    // (see the response_format note above), not the temperature.
+    if !system.is_empty() {
+        body["system"] = serde_json::Value::String(system);
+    }
 
     // The Anthropic Messages API has no OpenAI-style json-schema `response_format`
     // and rejects unknown `metadata` keys (it 400s with
@@ -521,6 +544,37 @@ mod tool_tests {
         assert_eq!(calls[0].id, "tu_1");
         assert_eq!(calls[0].name, "get_weather");
         assert!(calls[0].arguments_json.contains("Oslo"));
+    }
+
+    #[test]
+    fn build_request_body_hoists_system_and_omits_temperature() {
+        use crate::provider::ChatMessage;
+        let req = InferRequest {
+            model: "claude-opus-4-8".to_owned(),
+            max_tokens: 256,
+            // Newest Claude models reject `temperature` — it must not be sent.
+            temperature: 0.7,
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: "You are Velion.".to_owned(),
+                    name: String::new(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "Hi".to_owned(),
+                    name: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let body = build_request_body(&req);
+        // System prompt hoisted to the top-level parameter, removed from messages.
+        assert_eq!(body["system"], "You are Velion.");
+        assert_eq!(body["messages"].as_array().expect("messages").len(), 1);
+        assert_eq!(body["messages"][0]["role"], "user");
+        // temperature is never forwarded to Anthropic.
+        assert!(body.get("temperature").is_none());
     }
 }
 
