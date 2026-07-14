@@ -3,6 +3,8 @@ import {
   Body,
   Controller,
   Headers,
+  HttpCode,
+  HttpStatus,
   Post,
   ServiceUnavailableException,
   UnauthorizedException,
@@ -131,7 +133,11 @@ export class MembershipAuthorityController {
     ],
   );
 
+  // This is a membership *decision* lookup, not a resource creation. NestJS
+  // defaults @Post to 201; user-core's canonical-authority client treats any
+  // non-200 as "authority unavailable" (-> 503), so pin it to 200.
   @Post('decision')
+  @HttpCode(HttpStatus.OK)
   async decide(
     @Headers('x-user-core-membership-token') callerToken: string | undefined,
     @Body() body: unknown,

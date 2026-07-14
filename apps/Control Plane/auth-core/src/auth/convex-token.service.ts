@@ -421,9 +421,13 @@ export class ConvexTokenService {
         ? { scopes: claims.scopes }
         : {}),
       // Control Plane has no authoritative org-level ZDR policy source yet.
-      // Fail closed for every Model token. This is deliberately not copied from
-      // caller input so untyped/runtime false values cannot downgrade posture.
-      zdr: true,
+      // Historically this failed closed (unconditional zdr:true) for every Model
+      // token. Operator decision 2026-07-14: with no org ZDR policy and no
+      // ZDR-attested provider configured, forcing ZDR blocked ALL chat
+      // (zdr_inference_failed). Default is now relaxed but env-gated — set
+      // AUTH_CORE_DEFAULT_MODEL_ZDR=true to restore the fail-closed posture.
+      // Still not copied from caller input, so a client can never downgrade it.
+      zdr: process.env.AUTH_CORE_DEFAULT_MODEL_ZDR === 'true',
     };
 
     const encodedHeader = this.encodeSegment({

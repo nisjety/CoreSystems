@@ -14,7 +14,10 @@ RUN apk add --no-cache curl \
     && chown node:node /app
 
 USER node
-COPY --chown=node:node package.json pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the `overrides` (security pins) that pnpm v11 reads
+# instead of the package.json "pnpm" field; without it `--frozen-lockfile` fails
+# with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH against the lockfile's recorded overrides.
+COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN --mount=type=cache,target=/home/node/.local/share/pnpm/store,uid=1000,gid=1000 \
     pnpm install --frozen-lockfile
 

@@ -247,6 +247,66 @@ ensure_event_keypair() {
   esac
 }
 
+# ensure_ed25519_attestation_key — provision the conversation provider-write
+# Ed25519 signing key as base64(64-byte Go ed25519.PrivateKey) = base64(seed||pub),
+# the exact format conversation-core's config parser expects (ed25519.PrivateKey,
+# len == PrivateKeySize). The matching public key + key id are recorded for
+# integration-corev2's runtime verification (not a startup requirement there).
+# openssl-only: the last 32 bytes of the PKCS8 DER are the raw seed; the last 32
+# bytes of the SPKI DER are the raw public key.
+ensure_ed25519_attestation_key() {
+  local current decoded_len
+  current="$(dotenv_get "$APPLICATION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY 2>/dev/null || true)"
+  decoded_len="$(printf '%s' "$current" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ' || true)"
+  if [[ "$decoded_len" == "64" ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log "would generate conversation provider-write Ed25519 attestation key"
+    return 0
+  fi
+
+  local priv_b64 pub_b64 check_len
+  if openssl genpkey -algorithm ED25519 -out /dev/null >/dev/null 2>&1; then
+    # OpenSSL 3+: last 32 bytes of the PKCS8 DER are the raw seed; last 32 of the
+    # SPKI DER are the raw public key. seed||pub == Go's 64-byte ed25519.PrivateKey.
+    local pem seed_bin pub_bin
+    pem="$(mktemp)"; seed_bin="$(mktemp)"; pub_bin="$(mktemp)"
+    openssl genpkey -algorithm ED25519 -out "$pem" >/dev/null 2>&1
+    openssl pkey -in "$pem" -outform DER 2>/dev/null | tail -c 32 > "$seed_bin"
+    openssl pkey -in "$pem" -pubout -outform DER 2>/dev/null | tail -c 32 > "$pub_bin"
+    priv_b64="$(cat "$seed_bin" "$pub_bin" | openssl base64 -A)"
+    pub_b64="$(openssl base64 -A -in "$pub_bin")"
+    rm -f "$pem" "$seed_bin" "$pub_bin"
+  elif command -v go >/dev/null 2>&1; then
+    # macOS ships LibreSSL, which lacks ED25519 genpkey. Fall back to Go's
+    # crypto/ed25519 — the exact library conversation-core parses the key with.
+    local godir gen
+    godir="$(mktemp -d)"
+    cat > "$godir/main.go" <<'GOEOF'
+package main
+import ("crypto/ed25519";"crypto/rand";"encoding/base64";"fmt";"os")
+func main(){pub,priv,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)};fmt.Println(base64.StdEncoding.EncodeToString(priv));fmt.Println(base64.StdEncoding.EncodeToString(pub))}
+GOEOF
+    gen="$(cd "$godir" && GO111MODULE=off go run main.go 2>/dev/null || true)"
+    rm -rf "$godir"
+    priv_b64="$(printf '%s\n' "$gen" | sed -n '1p')"
+    pub_b64="$(printf '%s\n' "$gen" | sed -n '2p')"
+  else
+    printf '[runtime-env] ERROR: need OpenSSL 3 (ED25519) or Go to generate the attestation key\n' >&2
+    return 1
+  fi
+
+  check_len="$(printf '%s' "$priv_b64" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ' || true)"
+  if [[ "$check_len" != "64" ]]; then
+    printf '[runtime-env] ERROR: generated Ed25519 attestation key is %s bytes, expected 64\n' "$check_len" >&2
+    return 1
+  fi
+  upsert_env "$APPLICATION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY "$priv_b64"
+  upsert_env "$INGESTION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY "$pub_b64"
+  upsert_env "$INGESTION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID "conversation-provider-write-v1"
+}
+
 if [[ "$DRY_RUN" == "false" ]]; then
   acquire_lock
 fi
@@ -292,6 +352,9 @@ user_org_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_ORG_TOKEN)"
 user_auth_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_AUTH_TOKEN)"
 user_documents_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_DOCUMENTS_TOKEN)"
 user_retrieval_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_RETRIEVAL_TOKEN)"
+# Dedicated per-caller token for the auth-core -> user-core membership projection
+# endpoint (consumed by both auth-core and user-core in the Control Plane .env).
+ensure_secret "$CONTROL_ENV" USER_CORE_MEMBERSHIP_SERVICE_TOKEN >/dev/null
 control_policy_key="$(ensure_secret "$CONTROL_ENV" CONTROL_POLICY_SERVICE_API_KEY)"
 
 sync_value USER_CORE_DOCUMENTS_TOKEN "$user_documents_token" "$DATA_ENV"
@@ -349,6 +412,32 @@ ensure_secret "$APPLICATION_ENV" CONVEX_INSTANCE_SECRET >/dev/null
 ensure_secret "$APPLICATION_ENV" JWT_SECRET >/dev/null
 ensure_secret "$APPLICATION_ENV" GRAFANA_ADMIN_PASSWORD >/dev/null
 sync_value MODEL_PLANE_NATS_TOKEN "$model_nats_token" "$APPLICATION_ENV"
+
+# Model Plane inference gRPC signed-audience contract (restored :9092 auth). The
+# gateway/execution callers forward an aud=inference-core delegated bearer, so
+# inference-core must verify against this exact audience string.
+ensure_value "$MODEL_ENV" INFERENCE_CORE_AUTH_AUDIENCE "inference-core" >/dev/null
+
+# Application Plane conversation/notification service tokens. conversation-core
+# and notification-core VALIDATE these inbound; the Frontend gateway PRESENTS the
+# gateway tokens and the Ingestion email worker PRESENTS the email-ingest token,
+# so each value must match across the issuing and consuming planes.
+conversation_gateway_token="$(ensure_secret "$APPLICATION_ENV" CONVERSATION_GATEWAY_SERVICE_TOKEN)"
+sync_value CONVERSATION_GATEWAY_SERVICE_TOKEN "$conversation_gateway_token" "$FRONTEND_ENV"
+notification_gateway_token="$(ensure_secret "$APPLICATION_ENV" NOTIFICATION_GATEWAY_SERVICE_TOKEN)"
+sync_value NOTIFICATION_GATEWAY_SERVICE_TOKEN "$notification_gateway_token" "$FRONTEND_ENV"
+conversation_email_ingest_token="$(ensure_secret "$APPLICATION_ENV" CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN)"
+sync_value CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN "$conversation_email_ingest_token" "$INGESTION_ENV"
+ensure_secret "$APPLICATION_ENV" CONVERSATION_CORE_INGEST_SERVICE_TOKEN >/dev/null
+# conversation-core authenticates to integration-corev2 with integration's own
+# service key; Application->integration internal calls use the fleet internal key.
+sync_value CONVERSATION_INTEGRATION_SERVICE_API_KEY "$integration_service_key" "$APPLICATION_ENV"
+sync_value INTEGRATION_INTERNAL_API_KEY "$internal_api_key" "$APPLICATION_ENV"
+
+# Conversation provider-write attestation (Ed25519): conversation-core signs
+# provider-write receipts; integration-corev2 verifies them at runtime.
+ensure_value "$APPLICATION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID "conversation-provider-write-v1" >/dev/null
+ensure_ed25519_attestation_key
 
 # Deployment-owned registry. Each identity has its own credential and bounded
 # audience/scopes; allowAnyOrg permits internal workers to serve newly-created
