@@ -331,6 +331,21 @@ impl InferenceCore for InferenceService {
                 .map(pb::ModelInfo::from),
         );
 
+        // Several providers enumerate the same Azure deployment under different
+        // modalities — the chat chain lists `model-router`/`gpt-4o-mini` as
+        // `chat` (with full features), while the translation/language/vision/OCR
+        // providers re-list those same chat deployments as `translation`,
+        // `language_analytics`, `vision`, `ocr` (LLM-prompted fallbacks, with no
+        // features). That surfaces the same id several times in the catalog. The
+        // SPA fetches this list unfiltered and filters modality client-side, so
+        // collapse to one entry per id, keeping the first-seen — the chat chain
+        // is aggregated first, so each model keeps its primary (chat) entry with
+        // the richest metadata. Dedicated single-modality deployments
+        // (gpt-image-1, sora, whisper, azure-translator-v3, prebuilt-*) have
+        // distinct ids and are unaffected.
+        let mut seen = std::collections::HashSet::new();
+        models.retain(|model| seen.insert(model.id.clone()));
+
         Ok(Response::new(pb::ListModelsResponse { models }))
     }
 
