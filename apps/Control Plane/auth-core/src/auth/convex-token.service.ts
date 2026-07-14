@@ -505,10 +505,16 @@ export class ConvexTokenService {
         ? { scopes: claims.scopes }
         : {}),
       // Control Plane does not yet have an authoritative per-org retention
-      // policy. The secure-MVP posture is therefore issuer-selected ZDR for
-      // every delegated audience. Caller input is deliberately ignored so a
-      // request cannot weaken the policy between services.
-      zdr: true,
+      // policy. ZDR remains issuer-selected for every delegated audience —
+      // caller input is deliberately ignored so a request cannot weaken the
+      // policy between services. The default is env-gated to match
+      // issueModelPlaneToken (operator decision 2026-07-14): with no org ZDR
+      // policy and no ZDR-attested provider, an unconditional zdr:true here
+      // makes session-core reject `session:write` (authorize_operation) and
+      // inference-core deny the provider call, blocking ALL chat. Set
+      // AUTH_CORE_DEFAULT_MODEL_ZDR=true to restore the fail-closed posture
+      // across both the model-gateway and delegated-audience mints at once.
+      zdr: process.env.AUTH_CORE_DEFAULT_MODEL_ZDR === 'true',
     };
 
     const encodedHeader = this.encodeSegment({
