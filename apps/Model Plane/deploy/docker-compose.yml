@@ -360,6 +360,12 @@ services:
       RUST_LOG: info
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      # Base URL for minting the aud=session-core service token used by the
+      # background routing-policy read (defaults to the host-published auth-core
+      # like the other Model cores' JWKS URL). Empty key → the read stays
+      # unauthenticated and fail-soft (keeps the default routing policy).
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://host.docker.internal:3011}
+      INFERENCE_ROUTING_SERVICE_API_KEY: ${INFERENCE_ROUTING_SERVICE_API_KEY:-}
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
       NATS_URL: nats://model-nats:4222
       NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}

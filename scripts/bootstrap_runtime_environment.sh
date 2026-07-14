@@ -402,6 +402,9 @@ ensure_secret "$MODEL_ENV" MODEL_BRIDGE_JWT_SECRET >/dev/null
 model_ingestion_key="$(ensure_secret "$MODEL_ENV" MODEL_EXECUTION_SERVICE_API_KEY)"
 model_gateway_service_key="$(ensure_secret "$MODEL_ENV" MODEL_GATEWAY_SERVICE_API_KEY)"
 execution_core_service_key="$(ensure_secret "$MODEL_ENV" EXECUTION_CORE_SERVICE_API_KEY)"
+# inference-core reads Velion's routing policy from session-core in the
+# background; this credential lets it mint an aud=session-core service token.
+inference_routing_key="$(ensure_secret "$MODEL_ENV" INFERENCE_ROUTING_SERVICE_API_KEY)"
 
 # Application and Frontend consumers.
 ensure_secret "$APPLICATION_ENV" APPLICATION_NATS_TOKEN >/dev/null
@@ -450,6 +453,7 @@ principal_registry="$(jq -cn \
   --arg quarry "$quarry_service_key" \
   --arg model_gateway "$model_gateway_service_key" \
   --arg execution_core "$execution_core_service_key" \
+  --arg inference_routing "$inference_routing_key" \
   --arg integration "$integration_service_key" \
   --arg finspo "$finspo_service_key" \
   '{
@@ -515,6 +519,13 @@ principal_registry="$(jq -cn \
       orgIds: [],
       allowAnyOrg: true,
       scopes: ["documents:write"]
+    },
+    "inference-core": {
+      credential: $inference_routing,
+      audiences: ["session-core"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["routing:read"]
     }
   }')"
 upsert_env "$CONTROL_ENV" PLANE_SERVICE_PRINCIPALS_JSON "$principal_registry"
