@@ -28,13 +28,22 @@ async fn proxy_speech(
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    // model-gateway's /v1/ai/speech (both TTS synthesis and STT transcription)
+    // proxies to inference-core and requires the delegated inference credential
+    // (VerifiedInferenceBearer). Forwarding only the model-gateway token 401s,
+    // so mint + forward the inference bearer like the chat / models paths.
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(detail) => return shared::delegated_auth_unavailable(detail),
+    };
     let url = format!("{}/v1/ai/speech", state.model_gateway_url);
-    shared::proxy_model_json(
+    shared::proxy_model_json_with_inference(
         &state,
         Method::POST,
         &url,
         Some(body),
         token.as_deref(),
+        Some(&inference_token),
         &user,
     )
     .await
