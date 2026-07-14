@@ -279,6 +279,32 @@ pub(crate) async fn proxy_model_json_with_session(
     .await
 }
 
+pub(crate) async fn proxy_model_json_with_inference(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    inference_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        inference_bearer,
+        None,
+        None,
+        None,
+        user,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn proxy_model_json_with_delegations(
     state: &AppState,

@@ -96,8 +96,25 @@ pub(super) async fn list_models(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    // model-gateway's /v1/models proxies to inference-core ListModels, whose
+    // handler requires the delegated inference credential (VerifiedInferenceBearer).
+    // Forwarding only the model-gateway token 401s the catalog, so the model
+    // selector renders empty for EVERY model. Mint + forward the inference bearer.
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(detail) => return shared::delegated_auth_unavailable(detail),
+    };
     let url = format!("{}/v1/models", state.model_gateway_url);
-    shared::proxy_model_json(&state, Method::GET, &url, None, token.as_deref(), &user).await
+    shared::proxy_model_json_with_inference(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&inference_token),
+        &user,
+    )
+    .await
 }
 
 pub(super) async fn submit_feedback(
