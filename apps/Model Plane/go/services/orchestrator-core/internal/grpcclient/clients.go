@@ -10,7 +10,44 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
+
+// withForwardedMetadata copies the inbound gRPC metadata (notably the caller's
+// verified `authorization` bearer) onto the outbound context. orchestrator-core
+// proxies these RPCs to session-core, whose interceptor requires that
+// credential; gRPC-Go does NOT propagate incoming metadata to outgoing calls
+// automatically, so without this the upstream rejects every proxied call with
+// "verified caller credential required" (breaking run-events streaming and
+// approval decisions through the gateway).
+func withForwardedMetadata(ctx context.Context) context.Context {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		return metadata.NewOutgoingContext(ctx, md)
+	}
+	return ctx
+}
+
+func forwardMetadataUnaryInterceptor(
+	ctx context.Context,
+	method string,
+	req, reply any,
+	cc *grpc.ClientConn,
+	invoker grpc.UnaryInvoker,
+	opts ...grpc.CallOption,
+) error {
+	return invoker(withForwardedMetadata(ctx), method, req, reply, cc, opts...)
+}
+
+func forwardMetadataStreamInterceptor(
+	ctx context.Context,
+	desc *grpc.StreamDesc,
+	cc *grpc.ClientConn,
+	method string,
+	streamer grpc.Streamer,
+	opts ...grpc.CallOption,
+) (grpc.ClientStream, error) {
+	return streamer(withForwardedMetadata(ctx), desc, cc, method, opts...)
+}
 
 // Clients holds gRPC connections to sibling services.
 type Clients struct {
@@ -45,6 +82,9 @@ func Dial(ctx context.Context, opts Options) (*Clients, error) {
 
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// Proxy the caller's verified credential to upstream session-core.
+		grpc.WithChainUnaryInterceptor(forwardMetadataUnaryInterceptor),
+		grpc.WithChainStreamInterceptor(forwardMetadataStreamInterceptor),
 	}
 
 	clients := &Clients{}
