@@ -8,8 +8,9 @@
 //!    size, code, reasoning keywords, tool use, conversation depth), and
 //! 2. the org's **budget posture**, queried best-effort from cost-core.
 //!
-//! `model-router` (Azure's server-side cost-optimizing auto-router) is the
-//! designated **cheap fallback** — used when the budget is exhausted.
+//! `gpt-4o-mini` is the designated **cheap fallback** — used when the budget is
+//! exhausted. (Azure's `model-router` is a *quality* router that resolves to the
+//! newest flagship gpt-5.x, so it is deliberately NOT the cheap fallback.)
 //!
 //! It runs once at the top of [`crate::provider::fallback::FallbackChain`],
 //! before any provider is tried. A pinned model id (e.g. `gpt-4o-mini`,
@@ -177,10 +178,12 @@ pub enum BudgetPosture {
     Unknown,
 }
 
-/// Azure's server-side cost-optimizing auto-router — the default cheap
-/// fallback. Kept as a named const for the default policy and tests; the live
-/// value is `RoutingPolicy::cheap_fallback`.
-pub const CHEAP_FALLBACK: &str = "model-router";
+/// The default cheap fallback used when the budget is exhausted — a genuinely
+/// cheap, reliable, tool-capable model. NOT `model-router`: that router resolves
+/// to the newest flagship gpt-5.x (expensive), which would defeat the point of a
+/// budget-exhausted fallback. Kept as a named const for the default policy and
+/// tests; the live value is `RoutingPolicy::cheap_fallback`.
+pub const CHEAP_FALLBACK: &str = "gpt-4o-mini";
 
 /// Resolve a `(mode, complexity, posture)` triple to a concrete model id using
 /// the supplied policy. Pure and deterministic for unit testing.
@@ -495,7 +498,7 @@ mod tests {
                 Complexity::Simple,
                 BudgetPosture::Healthy
             ),
-            "gpt-4o-mini"
+            "gpt-5-nano"
         );
         assert_eq!(
             choose(
@@ -504,7 +507,7 @@ mod tests {
                 Complexity::Complex,
                 BudgetPosture::Healthy
             ),
-            "model-router"
+            "gpt-5-mini"
         );
     }
 
@@ -527,7 +530,7 @@ mod tests {
                 Complexity::Moderate,
                 BudgetPosture::Healthy
             ),
-            "model-router"
+            "gpt-5-mini"
         );
         assert_eq!(
             choose(
@@ -593,7 +596,7 @@ mod tests {
             ),
             "claude-sonnet-4-6"
         );
-        // Balance+Complex normally → sonnet; constrained → Budget+Complex → router.
+        // Balance+Complex normally → sonnet; constrained → Budget+Complex → gpt-5-mini.
         assert_eq!(
             choose(
                 &p,
@@ -601,7 +604,7 @@ mod tests {
                 Complexity::Complex,
                 BudgetPosture::Constrained
             ),
-            "model-router"
+            "gpt-5-mini"
         );
     }
 

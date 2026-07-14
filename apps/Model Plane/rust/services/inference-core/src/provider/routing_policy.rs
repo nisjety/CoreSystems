@@ -99,22 +99,29 @@ impl Default for RoutingPolicy {
             constrained_fraction: 0.8,
             cheap_fallback: CHEAP_FALLBACK.to_owned(),
             complexity: ComplexityWeights::default(),
+            // Ladder over the deployed roster, ascending cost/capability:
+            //   gpt-5-nano < gpt-4o-mini < gpt-5-mini < claude-sonnet-4-6 < claude-opus-4-8.
+            // Each mode owns a distinct cost/quality identity; complexity climbs
+            // the row. A `Constrained` budget shifts one mode cheaper (Genius→
+            // Balance→Budget), and an `Exhausted` budget forces `cheap_fallback`.
             table: ModeTable {
-                // choose(): Budget{Simple:mini, Moderate/Complex:router}
+                // Budget — cheapest capable model at every tier.
                 budget: ComplexityModels {
-                    simple: "gpt-4o-mini".to_owned(),
-                    moderate: "model-router".to_owned(),
-                    complex: "model-router".to_owned(),
+                    simple: "gpt-5-nano".to_owned(),
+                    moderate: "gpt-4o-mini".to_owned(),
+                    complex: "gpt-5-mini".to_owned(),
                 },
-                // choose(): Balance{Simple:mini, Moderate:router, Complex:sonnet}
+                // Balance — cost/quality sweet spot; reaches a strong reasoner
+                // (Claude Sonnet) only for genuinely complex work.
                 balance: ComplexityModels {
                     simple: "gpt-4o-mini".to_owned(),
-                    moderate: "model-router".to_owned(),
+                    moderate: "gpt-5-mini".to_owned(),
                     complex: "claude-sonnet-4-6".to_owned(),
                 },
-                // choose(): Genius{Simple:mini, Moderate:sonnet, Complex:opus}
+                // Genius — best/smartest; tops out at Claude Opus for complex
+                // work, but stays efficient on trivial turns.
                 genius: ComplexityModels {
-                    simple: "gpt-4o-mini".to_owned(),
+                    simple: "gpt-5-mini".to_owned(),
                     moderate: "claude-sonnet-4-6".to_owned(),
                     complex: "claude-opus-4-8".to_owned(),
                 },
@@ -208,11 +215,11 @@ mod tests {
         // The table must (de)serialize as {"budget":{"simple":...},...}.
         let policy = RoutingPolicy::default();
         let value = serde_json::to_value(&policy).expect("to_value");
-        assert_eq!(value["table"]["budget"]["simple"], "gpt-4o-mini");
+        assert_eq!(value["table"]["budget"]["simple"], "gpt-5-nano");
         assert_eq!(value["table"]["balance"]["complex"], "claude-sonnet-4-6");
         assert_eq!(value["table"]["genius"]["complex"], "claude-opus-4-8");
         assert_eq!(value["budget_cap_usd"], 50.0);
-        assert_eq!(value["cheap_fallback"], "model-router");
+        assert_eq!(value["cheap_fallback"], "gpt-4o-mini");
         assert_eq!(value["complexity"]["large_total_chars"], 4000);
     }
 
@@ -273,38 +280,41 @@ mod tests {
         }
     }
 
-    /// Spot-check the Default cells against the literal model ids that were in
-    /// the old `choose()` table.
+    /// Spot-check every Default cell against the designed ladder — Budget
+    /// cheapest, Balance mid, Genius smartest; complexity climbs each row.
     #[test]
     fn default_cells_match_documented_values() {
         let policy = RoutingPolicy::default();
+        // Budget — cheapest tier.
         assert_eq!(
             policy.cell(VelionMode::Budget, Complexity::Simple),
-            "gpt-4o-mini"
+            "gpt-5-nano"
         );
         assert_eq!(
             policy.cell(VelionMode::Budget, Complexity::Moderate),
-            "model-router"
+            "gpt-4o-mini"
         );
         assert_eq!(
             policy.cell(VelionMode::Budget, Complexity::Complex),
-            "model-router"
+            "gpt-5-mini"
         );
+        // Balance — rises to a strong reasoner only when complex.
         assert_eq!(
             policy.cell(VelionMode::Balance, Complexity::Simple),
             "gpt-4o-mini"
         );
         assert_eq!(
             policy.cell(VelionMode::Balance, Complexity::Moderate),
-            "model-router"
+            "gpt-5-mini"
         );
         assert_eq!(
             policy.cell(VelionMode::Balance, Complexity::Complex),
             "claude-sonnet-4-6"
         );
+        // Genius — tops out at Opus, efficient on trivial turns.
         assert_eq!(
             policy.cell(VelionMode::Genius, Complexity::Simple),
-            "gpt-4o-mini"
+            "gpt-5-mini"
         );
         assert_eq!(
             policy.cell(VelionMode::Genius, Complexity::Moderate),
