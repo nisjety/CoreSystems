@@ -40,7 +40,7 @@ import {
 } from 'lucide-solid'
 import { batch, createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, Show, Switch, untrack, type Component, type JSX } from 'solid-js'
 import { Dynamic, Portal } from 'solid-js/web'
-import { transcribeAudioBlob } from '@/shared/api/audio-client'
+import { dictateAudioBlob } from '@/shared/api/audio-client'
 import {
   actionKey,
   BUILTIN_ACTIONS,
@@ -623,14 +623,25 @@ export function DashboardComposer(props: {
         audioChunks = []
         stream.getTracks().forEach((track) => track.stop())
         mediaRecorder = undefined
-        setVoiceRecording(false)
 
-        void transcribeAudioBlob(audio, voiceLang)
-          .then((transcript) => {
-            if (transcript) onTranscript(transcript)
+        // Velion Flow: STT + LLM cleanup in one round trip (fillers stripped,
+        // punctuation fixed, self-corrections applied). Keep `voiceRecording`
+        // on through the cleanup so the textarea stays locked and the loading
+        // bar covers the processing phase; APPEND to the draft (the voice-modal
+        // pattern) instead of overwriting whatever was already typed.
+        void dictateAudioBlob(audio, voiceLang, 'chat message')
+          .then((dictation) => {
+            const text = dictation.text || dictation.rawText
+            if (!text) return
+            const trimmed = props.message.trim()
+            onTranscript(trimmed ? `${trimmed} ${text}` : text)
+            focusTextareaAtNextFrame()
           })
           .catch(() => {
-            setModeAnnouncement(i18n.tr('Transkribering er utilgjengelig.', 'Voice transcription is unavailable.'))
+            setModeAnnouncement(i18n.tr('Diktering er utilgjengelig.', 'Dictation is unavailable.'))
+          })
+          .finally(() => {
+            setVoiceRecording(false)
           })
       }
       recorder.onerror = () => {

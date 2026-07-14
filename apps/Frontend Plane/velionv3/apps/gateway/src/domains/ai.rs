@@ -18,7 +18,35 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/ai/speech", post(proxy_speech))
         .route("/api/v1/ai/transcribe", post(proxy_speech))
+        .route("/api/v1/ai/dictate", post(proxy_dictate))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+/// Velion Flow dictation: STT + LLM cleanup in one round trip. Proxies to
+/// model-gateway /v1/ai/dictate, which chains inference-core TranscribeSpeech
+/// and a cleanup Infer pass; both hops need the delegated inference credential.
+async fn proxy_dictate(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(detail) => return shared::delegated_auth_unavailable(detail),
+    };
+    let url = format!("{}/v1/ai/dictate", state.model_gateway_url);
+    shared::proxy_model_json_with_inference(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&inference_token),
+        &user,
+    )
+    .await
 }
 
 async fn proxy_speech(
