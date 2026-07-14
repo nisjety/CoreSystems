@@ -416,6 +416,21 @@ pub async fn invoke_stream_sse(
                 false,
             );
         };
+        // chat-parity: forward the client's declared tools onto the agentic
+        // run. execution-core merges them with its built-in + MCP tool set and
+        // gates every call through the same governed execute_step path, so this
+        // widens what the autonomous run can attempt without bypassing HITL.
+        // Unlike the inline loop, MCP tools are allowed here (execution-core
+        // owns the MCP approval workflow).
+        let agentic_tools: Vec<ToolDefinition> = req
+            .tools
+            .iter()
+            .map(|t| ToolDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters_json: t.parameters_json.clone(),
+            })
+            .collect();
         return agentic_run_stream(
             state.clone(),
             request_id,
@@ -424,6 +439,7 @@ pub async fn invoke_stream_sse(
             model,
             req.content.clone(),
             features,
+            agentic_tools,
             effective_zdr,
             execution_bearer,
             data_plane_bearer,
@@ -2243,6 +2259,7 @@ fn authenticated_run_agent_request(
 // Dispatch requires both Model and Data authorization contexts plus the
 // immutable run/request fields; keep them explicit at this security boundary.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // cohesive dispatch — all are run context
 fn spawn_run_dispatch(
     state: &AppState,
     run: &crate::session_flow::SessionRun,
@@ -2250,6 +2267,7 @@ fn spawn_run_dispatch(
     user_id: &str,
     model: &str,
     content: &str,
+    tools: &[ToolDefinition],
     zdr: bool,
     execution_bearer: &VerifiedExecutionBearer,
     data_plane_bearer: &VerifiedBearer,
@@ -2274,6 +2292,9 @@ fn spawn_run_dispatch(
         // threaded into execution-core so every inference round + tool audit
         // detail honors it.
         zdr,
+        // chat-parity: the client's declared tools, merged server-side with the
+        // built-in + MCP set under the same governed execute_step path.
+        tools: tools.to_vec(),
     };
     let dispatch_run_id = run.run_id.clone();
     let run_agent_req = match authenticated_run_agent_request(
@@ -2322,6 +2343,7 @@ fn agentic_run_stream(
     model: String,
     content: String,
     features: Vec<String>,
+    tools: Vec<ToolDefinition>,
     zdr: bool,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
@@ -2394,6 +2416,7 @@ fn agentic_run_stream(
             &user_id,
             &model,
             &content,
+            &tools,
             zdr,
             &execution_bearer,
             &data_plane_bearer,

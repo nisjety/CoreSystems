@@ -5,6 +5,7 @@ package model_plane.v1;
 option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
 
 import "model_plane/v1/runs.proto";
+import "model_plane/v1/inference.proto";
 
 // ExecutionCore — runtime loop ownership for agent execution.
 // Owns: tool planning/selection, permission checkpoints, tool execution,
@@ -66,6 +67,16 @@ message RunAgentRequest {
   // no run content is retained durably. Sourced from the chat request's `zdr`
   // flag (model-gateway), OR'd with any org-level ZDR default.
   bool zdr = 9;
+
+  // Client-supplied tool definitions for this turn (chat-parity: the same
+  // ToolSpec[] the inline chat loop accepts). Merged with execution-core's
+  // built-in read/action tools and the org's registered MCP tools, then
+  // offered to the model AND admitted into the purpose-lock allowlist. Every
+  // client tool still executes through the SAME governed execute_step path
+  // (permission gate + HITL), so forwarding them cannot bypass approval; a
+  // client tool that resolves to no executor returns a graceful error the
+  // ReAct loop feeds back. Empty → only the server-side set is offered.
+  repeated ToolDefinition tools = 10;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.

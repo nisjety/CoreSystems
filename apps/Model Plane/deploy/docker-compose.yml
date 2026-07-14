@@ -494,6 +494,11 @@ services:
       - "127.0.0.1:18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
     environment:
       RUST_LOG: info
+      # Autonomous tool-using runs route through Azure's model-router deployment,
+      # which selects the best model per turn (tool-calling model selection is
+      # handled by the router, cost-aware). Overridable per deployment; empty →
+      # honor the caller's requested model. Plain chat is unaffected.
+      EXECUTION_AGENT_MODEL: ${EXECUTION_AGENT_MODEL:-model-router}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       NATS_URL: nats://model-nats:4222
       NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}

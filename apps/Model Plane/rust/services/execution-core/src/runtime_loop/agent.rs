@@ -71,8 +71,13 @@ access your accounts' or offer copy-paste text instead, and do not ask the user 
 unless the tool call itself reports that it cannot proceed (e.g. no connected account). Risky \
 action tools require human approval before they run; that pause is expected and is not a reason \
 to avoid calling the tool — say what you are attempting and let the approval step do its job. \
-Only use the tools you have been given. When you have enough information or have taken the \
-requested action, answer the user's request directly and clearly.";
+Prefer calling a tool over answering from memory whenever a listed tool could give a more \
+current, accurate, or actionable result — even when the user phrases the request casually, \
+indirectly, or as a question rather than a command. Do not ask whether the user wants you to \
+proceed before making a read-only tool call, and do not reply that you 'cannot' do something a \
+listed tool covers; call the tool and let its result (or the approval step for an action tool) \
+decide the outcome. Only use the tools you have been given. When you have enough information or \
+have taken the requested action, answer the user's request directly and clearly.";
 
 /// Temperature for each inference round.
 const TEMPERATURE: f32 = 0.7;
@@ -139,7 +144,7 @@ pub async fn run_agent(
     session_bearer: Option<String>,
     inference_bearer: String,
 ) -> pb::RunAgentResponse {
-    let tools = merged_tool_defs(&req.org_id, &req.user_id).await;
+    let tools = merged_tool_defs(&req.org_id, &req.user_id, &req.tools).await;
     run_agent_with_tools(
         state,
         session_channel,
@@ -159,13 +164,33 @@ pub async fn run_agent(
 /// the model AND admits them into the purpose-lock allowlist (derived from this
 /// Vec at ~line 154), so the `runtime_loop` dispatch arm can route them. A
 /// built-in name always wins a (vanishingly unlikely) collision.
-async fn merged_tool_defs(org_id: &str, user_id: &str) -> Vec<pb::ToolDefinition> {
+async fn merged_tool_defs(
+    org_id: &str,
+    user_id: &str,
+    client_tools: &[pb::ToolDefinition],
+) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
     if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
         for tool in client.list_tools(org_id, user_id).await {
             if !tools.iter().any(|existing| existing.name == tool.name) {
                 tools.push(tool);
             }
+        }
+    }
+    // chat-parity: fold in the caller's declared tools (RunAgentRequest.tools),
+    // so a client can widen the agentic run's scope with its own or MCP tools.
+    // A built-in or org MCP tool of the same name wins (the governed server
+    // definition is authoritative and non-overridable); any NEW client tool
+    // name is admitted into both the offered set and the purpose-lock allowlist.
+    // Execution still flows through the gated execute_step dispatch, so this
+    // never bypasses the permission/HITL gate; a name with no resolvable
+    // executor returns a graceful error the loop feeds back to the model.
+    for tool in client_tools {
+        if tool.name.trim().is_empty() {
+            continue;
+        }
+        if !tools.iter().any(|existing| existing.name == tool.name) {
+            tools.push(tool.clone());
         }
     }
     tools
@@ -212,11 +237,20 @@ async fn run_agent_with_tools(
     // which the gateway populates from the chat request's `zdr` flag.
     let zdr = req.zdr;
 
+    // Autonomous, tool-using runs need a tool-following model. A weak chat-tier
+    // model (e.g. gpt-4o-mini) under-elects tools unless the prompt is forceful,
+    // so `EXECUTION_AGENT_MODEL` (e.g. "velion-balance") lets the deployment
+    // route the agentic loop through inference-core's intent layer, which
+    // upgrades the model when tools are offered. Empty env → honor the
+    // requested model unchanged (no behaviour change).
+    let agent_model = resolve_agent_model(&req.model);
+
     info!(
         run_id = %req.run_id,
         mode = %permission_wire,
         max_rounds,
         tools = ?allowlist,
+        model = %agent_model,
         goal = %req.goal,
         "run_agent: purpose-locked governed multi-tool run starting"
     );
@@ -255,7 +289,7 @@ async fn run_agent_with_tools(
         let mut infer_request = tonic::Request::new(pb::InferRequest {
             request_id: req.run_id.clone(),
             org_id: req.org_id.clone(),
-            model: req.model.clone(),
+            model: agent_model.clone(),
             provider_hint: String::new(),
             messages: messages.clone(),
             temperature: TEMPERATURE,
@@ -425,6 +459,19 @@ async fn run_agent_with_tools(
         session_bearer.as_deref(),
     )
     .await
+}
+
+/// Resolve the model the agentic loop drives. Autonomous, tool-using runs need
+/// a tool-following model; a weak chat-tier model under-elects tools. When
+/// `EXECUTION_AGENT_MODEL` is set (e.g. "velion-balance"), it becomes the
+/// agentic run's model so inference-core's intent layer picks a tool-capable
+/// model (the classifier upgrades complexity when tools are offered). Empty /
+/// unset → the requested model is honored unchanged.
+fn resolve_agent_model(requested: &str) -> String {
+    match std::env::var("EXECUTION_AGENT_MODEL") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+        _ => requested.to_owned(),
+    }
 }
 
 /// Resolve the request's wire mode into a posture. Deployed agents default to
@@ -1497,6 +1544,7 @@ mod tests {
             mode: "execute".to_owned(),
             max_rounds: 4,
             zdr: false,
+            tools: Vec::new(),
         }
     }
 
