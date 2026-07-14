@@ -615,7 +615,21 @@ impl SpeechProvider for OpenAiSpeechProvider {
             form = form.text("model", model.clone());
         }
         if !req.language.trim().is_empty() {
-            form = form.text("language", req.language.clone());
+            // The OpenAI-shaped transcription API takes ISO-639-1 codes ("en",
+            // "nb") and 400s on BCP-47 region tags ("en-US" -> "Language code
+            // 'en-US' is not recognized"). Clients send BCP-47 because the
+            // azure-speech provider requires it, so normalize to the primary
+            // subtag here.
+            let language = req
+                .language
+                .trim()
+                .split(['-', '_'])
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !language.is_empty() {
+                form = form.text("language", language);
+            }
         }
 
         let resp = self

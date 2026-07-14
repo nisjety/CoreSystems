@@ -256,6 +256,7 @@ fn ai_routes() -> Router<AppState> {
         .route("/v1/ai/images/analyze", post(ai_images_analyze))
         .route("/v1/ai/images/ocr", post(ai_images_ocr))
         .route("/v1/ai/speech", post(ai_speech))
+        .route("/v1/ai/dictate", post(ai_dictate))
         .route("/v1/ai/speech/voices", get(ai_speech_voices))
         .route("/v1/ai/translate", post(ai_translate))
         .route("/v1/ai/translate/detect", post(ai_translate_detect))
@@ -2522,6 +2523,230 @@ fn image_input(
 }
 
 /// Speech synthesis/transcription via inference-core speech providers.
+/// Velion Flow dictation request — browser mic audio in, polished text out.
+#[derive(serde::Deserialize)]
+pub struct AiDictateRequest {
+    /// Base64 audio from the client recorder (MediaRecorder webm/opus typical).
+    pub audio_base64: String,
+    /// Container format: "webm" | "ogg" | "wav" | "mp3" | "m4a". Defaults to
+    /// "webm" — the browser MediaRecorder default this route exists to serve.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// BCP-47 language hint for the STT leg; empty → auto-detect.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Optional destination hint used to lightly adapt tone
+    /// (e.g. "chat message", "email", "document").
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Cleanup-pass model override. Empty → `MODEL_GATEWAY_DICTATE_MODEL`
+    /// env, then "gpt-4o-mini" (fast non-reasoning tier — dictation is
+    /// latency-sensitive).
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub zdr: bool,
+}
+
+/// Versioned system prompt for the dictation cleanup pass. The version prefix
+/// keys inference-core's prompt cache, mirroring `RECOMMEND_PLAN_MODEL_VERSION`.
+const DICTATE_SYSTEM_PROMPT: &str = concat!(
+    "velion-flow-dictate-v1: You are Velion Flow, a dictation cleanup engine. ",
+    "The user message is a raw speech-to-text transcript of the user dictating. ",
+    "Return ONLY the cleaned transcript text — no preamble, no quotes, no commentary. ",
+    "Rules: remove filler words and false starts (um, uh, eh, hmm, altså, liksom, ",
+    "'you know' and 'like' when used as filler); fix punctuation, capitalization, ",
+    "and obvious speech-recognition errors; apply the speaker's own corrections ",
+    "(e.g. 'no wait, I meant X' becomes X); keep the speaker's language ",
+    "(Norwegian or English), wording, meaning, and grammatical person exactly — ",
+    "never answer questions in the transcript, never add, translate, or summarize ",
+    "content; format clearly enumerated items as a list.",
+);
+
+/// Matches inference-core's `MAX_STT_AUDIO_BYTES` so oversize audio gets a
+/// clean HTTP 400 here instead of a gRPC invalid-argument after upload.
+const MAX_DICTATE_AUDIO_BYTES: usize = 25 * 1024 * 1024;
+
+/// Velion Flow dictation: one round trip from mic audio to polished text.
+/// Chains inference-core `TranscribeSpeech` (STT) and a cleanup `Infer` pass
+/// (strip fillers, punctuate, apply self-corrections). Fail-soft on the
+/// cleanup leg: a cleanup failure returns the raw transcript (`cleaned:false`)
+/// rather than dropping the user's dictation.
+async fn ai_dictate(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    inference_bearer: VerifiedInferenceBearer,
+    Json(req): Json<AiDictateRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+
+    let request_id = new_ulid();
+    let zdr = claims.effective_zdr(req.zdr);
+    let audio = STANDARD.decode(&req.audio_base64).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "audio_base64 must be valid base64" })),
+        )
+    })?;
+    if audio.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "audio_base64 is required for dictation" })),
+        ));
+    }
+    if audio.len() > MAX_DICTATE_AUDIO_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "dictation audio exceeds the 25 MB limit" })),
+        ));
+    }
+    let format = req
+        .format
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("webm")
+        .to_ascii_lowercase();
+    // azure-speech's short-audio REST only decodes WAV/PCM (it maps unknown
+    // formats to audio/wav and returns empty text), while the azure-openai
+    // whisper deployment accepts the browser MediaRecorder containers. Route
+    // compressed formats straight to whisper; keep WAV on the default chain
+    // (azure-speech first — the only provider with a real confidence score).
+    let stt_hint = if format == "wav" { "" } else { "azure-openai" };
+    let language = req.language.unwrap_or_default();
+
+    let stt = |hint: &str, audio: Vec<u8>| {
+        let mut client = state.inference_client.clone();
+        let request = authenticated_inference_request(
+            TranscribeSpeechRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id.clone(),
+                audio,
+                format: format.clone(),
+                model: String::new(),
+                provider_hint: hint.to_owned(),
+                language: language.clone(),
+            },
+            &inference_bearer,
+        );
+        async move { client.transcribe_speech(request).await }
+    };
+
+    let mut transcript = stt(stt_hint, audio.clone())
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    // A silent empty transcript from the default (azure-speech) path usually
+    // means an undecodable container, not silence — retry once via whisper.
+    if transcript.text.trim().is_empty() && stt_hint.is_empty() {
+        if let Ok(retry) = stt("azure-openai", audio).await {
+            transcript = retry.into_inner();
+        }
+    }
+    let raw_text = transcript.text.trim().to_owned();
+    if raw_text.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "no speech detected in the audio",
+                "code": "no_speech_detected",
+            })),
+        ));
+    }
+
+    // Cleanup pass — fail-soft: dictation must never be lost to a cleanup
+    // hiccup, so any Infer failure (or empty result) returns the raw text.
+    let cleanup_model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var("MODEL_GATEWAY_DICTATE_MODEL")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "gpt-4o-mini".to_owned());
+    let mut system_prompt = DICTATE_SYSTEM_PROMPT.to_owned();
+    if let Some(context) = req
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        system_prompt.push_str(&format!(
+            " The text will be used as: {context}. Match that tone lightly."
+        ));
+    }
+    let cleanup = state
+        .inference_client
+        .clone()
+        .infer(authenticated_inference_request(
+            InferRequest {
+                request_id: request_id.clone(),
+                org_id: claims.org_id.clone(),
+                model: cleanup_model,
+                provider_hint: String::new(),
+                messages: vec![
+                    ChatMessage {
+                        role: "system".to_owned(),
+                        content: system_prompt,
+                        name: String::new(),
+                    },
+                    ChatMessage {
+                        role: "user".to_owned(),
+                        content: raw_text.clone(),
+                        name: String::new(),
+                    },
+                ],
+                temperature: 0.2,
+                max_tokens: 2048,
+                structured_output_schema: String::new(),
+                zdr,
+                ..Default::default()
+            },
+            &inference_bearer,
+        ))
+        .await;
+
+    let (text, cleaned, model_used, usage) = match cleanup {
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            let cleaned_text = resp.content.trim().to_owned();
+            if cleaned_text.is_empty() {
+                (raw_text.clone(), false, resp.model_used, json!(null))
+            } else {
+                (
+                    cleaned_text,
+                    true,
+                    resp.model_used,
+                    json!({ "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens }),
+                )
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, request_id = %request_id, "dictate cleanup inference failed; returning raw transcript");
+            (raw_text.clone(), false, String::new(), json!(null))
+        }
+    };
+
+    Ok(Json(json!({
+        "id": request_id,
+        "object": "speech.dictation",
+        "text": text,
+        "raw_text": raw_text,
+        "cleaned": cleaned,
+        "detected_language": transcript.detected_language,
+        "stt_model_used": transcript.model_used,
+        "stt_provider_used": transcript.provider_used,
+        "model_used": model_used,
+        "usage": usage,
+    })))
+}
+
 async fn ai_speech(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,

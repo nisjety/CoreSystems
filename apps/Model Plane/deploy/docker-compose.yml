@@ -365,6 +365,11 @@ services:
       # like the other Model cores' JWKS URL). Empty key → the read stays
       # unauthenticated and fail-soft (keeps the default routing policy).
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://host.docker.internal:3011}
+      # STT deployment on the Azure OpenAI resource. The provider default
+      # ("whisper") does not exist on this resource — the deployed
+      # transcription models are gpt-4o-transcribe / gpt-4o-mini-transcribe.
+      # mini is the dictation default: fast, cheap, accepts webm/opus.
+      AZURE_OPENAI_STT_DEPLOYMENT: ${AZURE_OPENAI_STT_DEPLOYMENT:-gpt-4o-mini-transcribe}
       INFERENCE_ROUTING_SERVICE_API_KEY: ${INFERENCE_ROUTING_SERVICE_API_KEY:-}
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
       NATS_URL: nats://model-nats:4222
