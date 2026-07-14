@@ -94,10 +94,13 @@ impl RoutingPolicyService {
 impl RoutingPolicy for RoutingPolicyService {
     async fn get_policy(
         &self,
-        _request: Request<pb::GetRoutingPolicyRequest>,
+        request: Request<pb::GetRoutingPolicyRequest>,
     ) -> Result<Response<pb::RoutingPolicyMessage>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::RoutingPolicyMessage>, Status> = async {
+            // Read is platform-global (no tenant data), but still requires a
+            // verified identity — never an anonymous fetch.
+            let _caller = crate::auth::identity(&request)?;
             let row: RoutingPolicyRow = sqlx::query_as(
                 "SELECT
                     config,
@@ -124,6 +127,15 @@ impl RoutingPolicy for RoutingPolicyService {
     ) -> Result<Response<pb::RoutingPolicyMessage>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::RoutingPolicyMessage>, Status> = async {
+            // The routing policy is platform-global: only an admin-scoped user
+            // or a service principal may overwrite it. A regular member token
+            // must not be able to change every org's model routing.
+            let caller = crate::auth::identity(&request)?;
+            if !caller.is_service() && !caller.has_scope("admin") {
+                return Err(Status::permission_denied(
+                    "changing the routing policy requires the admin scope",
+                ));
+            }
             let req = request.into_inner();
             let config = parse_config(&req.config_json)?;
 

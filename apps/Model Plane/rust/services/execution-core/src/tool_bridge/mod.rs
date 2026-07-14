@@ -32,9 +32,15 @@ pub fn execute(tool_name: &str, tool_input: &str) -> ToolExecution {
         // dispatched from the async `runtime_loop::execute_step`, not here.
         "wiki_propose_edit" => execute_wiki_propose_edit(tool_input),
         "wiki_lint" => execute_wiki_lint(tool_input),
+        // A tool that reached the fallback has no executor (e.g. a client-
+        // declared tool the model elected, or a typo'd name). Return an honest
+        // error so the ReAct loop can adapt — NEVER a fabricated success echo,
+        // which made the model believe an un-run tool had succeeded.
         _ => ToolExecution {
-            output: format!("tool={tool_name} input={tool_input}"),
-            error: None,
+            output: String::new(),
+            error: Some(format!(
+                "tool '{tool_name}' is not implemented by execution-core"
+            )),
         },
     }
 }

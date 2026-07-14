@@ -337,6 +337,16 @@ func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.OrgID = principal.OrganizationID
+		// Cross-user guard: a user token may only read its OWN cost rows within
+		// the org (mirrors the record path). Service principals — e.g. the
+		// budget checker — may still aggregate org-wide.
+		if principal.PrincipalType == "user" {
+			if f.UserID != "" && f.UserID != principal.ActorID {
+				httpError(w, http.StatusForbidden, "user scope does not match verified token")
+				return
+			}
+			f.UserID = principal.ActorID
+		}
 	}
 
 	usage, err := s.ledger.Aggregate(r.Context(), f)
@@ -368,6 +378,16 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.OrgID = principal.OrganizationID
+		// Cross-user guard: a user token may only read its OWN cost rows within
+		// the org (mirrors the record path). Service principals — e.g. the
+		// budget checker — may still aggregate org-wide.
+		if principal.PrincipalType == "user" {
+			if f.UserID != "" && f.UserID != principal.ActorID {
+				httpError(w, http.StatusForbidden, "user scope does not match verified token")
+				return
+			}
+			f.UserID = principal.ActorID
+		}
 	}
 	limit := parseLimit(r.URL.Query().Get("limit"))
 

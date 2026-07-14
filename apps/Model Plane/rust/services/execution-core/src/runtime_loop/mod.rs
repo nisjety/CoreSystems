@@ -229,7 +229,7 @@ pub async fn execute_step(
         )
         .await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
-        execute_mcp(tool_name, tool_input, org_id).await
+        execute_mcp(tool_name, tool_input, org_id, user_id).await
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };
@@ -348,6 +348,7 @@ async fn execute_mcp(
     tool_name: &str,
     tool_input: &str,
     org_id: &str,
+    user_id: &str,
 ) -> tool_bridge::ToolExecution {
     let Some((server_id, remote_tool)) = crate::mcp_gateway::parse_mcp_tool_name(tool_name) else {
         return tool_error(format!(
@@ -358,7 +359,7 @@ async fn execute_mcp(
         return tool_error("MCP gateway not configured (MODEL_GATEWAY_ADDR)".to_owned());
     };
     match client
-        .proxy_tool(org_id, server_id, remote_tool, tool_input)
+        .proxy_tool(org_id, user_id, server_id, remote_tool, tool_input)
         .await
     {
         Ok(output) => tool_bridge::ToolExecution {

@@ -170,7 +170,7 @@ impl InferenceCore for InferenceService {
             .chain
             .infer(&internal_req)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(provider_error_to_status)?;
 
         Ok(Response::new(pb::InferResponse {
             request_id: result.request_id,
@@ -209,7 +209,7 @@ impl InferenceCore for InferenceService {
             .chain
             .infer_stream(&internal_req)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(provider_error_to_status)?;
 
         let grpc_rx = streaming::bridge_to_grpc(rx);
 

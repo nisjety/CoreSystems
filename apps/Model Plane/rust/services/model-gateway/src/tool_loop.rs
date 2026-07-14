@@ -471,12 +471,28 @@ fn knowledge_search_request(org_id: &str, query: &str, top_k: i32, zdr: bool) ->
 }
 
 #[allow(clippy::too_many_lines)] // cohesive tool dispatcher — one arm per tool
+/// Attach a delegated bearer as `authorization` metadata so the receiving
+/// service's JWT interceptor accepts the call. The inline tool loop previously
+/// issued bare gRPC requests to inference-core / session-core, which reject
+/// them Unauthenticated — killing every model-decided tool round in prod.
+fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(value);
+    if bearer.is_empty() {
+        return request;
+    }
+    if let Ok(header) = format!("Bearer {bearer}").parse() {
+        request.metadata_mut().insert("authorization", header);
+    }
+    request
+}
+
 pub async fn dispatch_tool(
     state: &AppState,
     org_id: &str,
     _user_id: &str,
     thread_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
+    session_bearer: &str,
     zdr: bool,
     call: &ToolCall,
 ) -> ToolOutcome {
@@ -630,14 +646,17 @@ pub async fn dispatch_tool(
             }
             let mut client = state.memory_client.clone();
             match client
-                .search_memory(tonic::Request::new(SearchMemoryRequest {
-                    thread_id: thread_id.to_owned(),
-                    query,
-                    topic_filter: Vec::new(),
-                    limit: 5,
-                    org_id: org_id.to_owned(),
-                    updated_after: None,
-                }))
+                .search_memory(with_authorization(
+                    SearchMemoryRequest {
+                        thread_id: thread_id.to_owned(),
+                        query,
+                        topic_filter: Vec::new(),
+                        limit: 5,
+                        org_id: org_id.to_owned(),
+                        updated_after: None,
+                    },
+                    session_bearer,
+                ))
                 .await
             {
                 Ok(resp) => {
@@ -684,12 +703,15 @@ pub async fn dispatch_tool(
             };
             let mut client = state.memory_client.clone();
             match client
-                .index_memory(tonic::Request::new(IndexMemoryRequest {
-                    thread_id: thread_id.to_owned(),
-                    topic,
-                    content,
-                    org_id: org_id.to_owned(),
-                }))
+                .index_memory(with_authorization(
+                    IndexMemoryRequest {
+                        thread_id: thread_id.to_owned(),
+                        topic,
+                        content,
+                        org_id: org_id.to_owned(),
+                    },
+                    session_bearer,
+                ))
                 .await
             {
                 Ok(resp) => ToolOutcome {
@@ -861,7 +883,8 @@ pub async fn run_forced_web_search(
         name: "web_search".to_owned(),
         arguments_json: args.to_string(),
     };
-    let outcome = dispatch_tool(state, org_id, user_id, thread_id, None, false, &call).await;
+    // web_search does not touch session-core memory, so no session bearer needed.
+    let outcome = dispatch_tool(state, org_id, user_id, thread_id, None, "", false, &call).await;
     let mut events = vec![
         ChatEvent::ToolCall {
             id: call.id,
@@ -936,6 +959,7 @@ fn web_search_citations(outcome: &ToolOutcome) -> Vec<ChatEvent> {
 /// withheld) to produce the final answer. Inference errors stop the loop
 /// gracefully (the normal stream path then handles the request).
 #[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
+#[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
 pub async fn run_tool_rounds(
     state: &AppState,
     request_id: &str,
@@ -943,6 +967,8 @@ pub async fn run_tool_rounds(
     user_id: &str,
     thread_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
+    inference_bearer: &str,
+    session_bearer: &str,
     zdr: bool,
     model: &str,
     base_messages: Vec<ChatMessage>,
@@ -954,19 +980,24 @@ pub async fn run_tool_rounds(
 
     for _round in 0..MAX_TOOL_ROUNDS {
         let mut client = state.inference_client.clone();
-        let infer = client.infer(tonic::Request::new(InferRequest {
-            request_id: request_id.to_owned(),
-            org_id: org_id.to_owned(),
-            model: model.to_owned(),
-            provider_hint: String::new(),
-            messages: messages.clone(),
-            temperature: 0.7,
-            max_tokens: 1024,
-            structured_output_schema: String::new(),
-            zdr,
-            tools: tools.clone(),
-            tool_choice: tool_choice.clone(),
-        }));
+        // Forward the delegated inference bearer — inference-core rejects a bare
+        // Infer, which silently killed every model-decided tool round in prod.
+        let infer = client.infer(with_authorization(
+            InferRequest {
+                request_id: request_id.to_owned(),
+                org_id: org_id.to_owned(),
+                model: model.to_owned(),
+                provider_hint: String::new(),
+                messages: messages.clone(),
+                temperature: 0.7,
+                max_tokens: 1024,
+                structured_output_schema: String::new(),
+                zdr,
+                tools: tools.clone(),
+                tool_choice: tool_choice.clone(),
+            },
+            inference_bearer,
+        ));
         let resp = match infer.await {
             Ok(r) => r.into_inner(),
             Err(e) => {
@@ -994,6 +1025,7 @@ pub async fn run_tool_rounds(
                 user_id,
                 thread_id,
                 data_plane_bearer,
+                session_bearer,
                 zdr,
                 call,
             )
@@ -1031,6 +1063,29 @@ pub async fn run_tool_rounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_authorization_attaches_bearer_for_non_empty_credential() {
+        // Regression guard for the headline fix: the inline tool loop must
+        // forward a delegated bearer to inference-core / session-core, or the
+        // receiving JWT interceptor rejects the call Unauthenticated and every
+        // model-decided tool round dies.
+        let request = with_authorization((), "delegated-token-123");
+        let header = request
+            .metadata()
+            .get("authorization")
+            .expect("authorization metadata must be attached");
+        assert_eq!(header.to_str().unwrap(), "Bearer delegated-token-123");
+    }
+
+    #[test]
+    fn with_authorization_skips_empty_credential() {
+        // The forced web_search path passes an empty session bearer because it
+        // never touches memory; attaching `Bearer ` (empty token) would only
+        // invite a downstream rejection, so it must be omitted entirely.
+        let request = with_authorization((), "");
+        assert!(request.metadata().get("authorization").is_none());
+    }
 
     #[test]
     fn knowledge_search_is_claim_scoped_and_zdr_aware() {

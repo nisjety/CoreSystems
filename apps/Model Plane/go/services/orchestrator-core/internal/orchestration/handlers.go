@@ -100,6 +100,33 @@ func (h *Handlers) DecideApproval(ctx context.Context, req *mpv1.DecideApprovalR
 	return h.client.DecideApproval(ctx, req)
 }
 
+// CreateApproval / ListPendingApprovals / RecordOrchestrationEvent are the
+// HITL-durability RPCs. They were previously left to the embedded
+// UnimplementedOrchestrationCoreServiceServer (returning codes.Unimplemented),
+// which broke minting/listing approvals and recording run events through the
+// gateway. Proxy them to session-core like the other RPCs; the dial-site
+// interceptor forwards the caller's credential.
+func (h *Handlers) CreateApproval(ctx context.Context, req *mpv1.CreateApprovalRequest) (*mpv1.CreateApprovalResponse, error) {
+	if err := h.requireClient(); err != nil {
+		return nil, err
+	}
+	return h.client.CreateApproval(ctx, req)
+}
+
+func (h *Handlers) ListPendingApprovals(ctx context.Context, req *mpv1.OrgPendingApprovalsRequest) (*mpv1.OrgPendingApprovalsResponse, error) {
+	if err := h.requireClient(); err != nil {
+		return nil, err
+	}
+	return h.client.ListPendingApprovals(ctx, req)
+}
+
+func (h *Handlers) RecordOrchestrationEvent(ctx context.Context, req *mpv1.RecordOrchestrationEventRequest) (*mpv1.RecordOrchestrationEventResponse, error) {
+	if err := h.requireClient(); err != nil {
+		return nil, err
+	}
+	return h.client.RecordOrchestrationEvent(ctx, req)
+}
+
 func (h *Handlers) GetSubagentLineage(ctx context.Context, req *mpv1.GetSubagentLineageRequest) (*mpv1.GetSubagentLineageResponse, error) {
 	if err := h.requireClient(); err != nil {
 		return nil, err

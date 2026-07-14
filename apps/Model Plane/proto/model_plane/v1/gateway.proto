@@ -1100,6 +1100,11 @@ message ProxyMcpToolRequest {
   string tool_name = 4;
   // JSON-encoded tool input.
   string input_json = 5;
+  // Acting user — the gateway re-authorizes that this user may USE the target
+  // server (org-wide / owned / shared-to-them), mirroring the per-user filter
+  // ListMcpTools applies at discovery. Without it, a client-declared
+  // mcp__<other-users-server>__<tool> name bypasses the per-user allowlist.
+  string user_id = 6;
 }
 
 message ProxyMcpToolResponse {

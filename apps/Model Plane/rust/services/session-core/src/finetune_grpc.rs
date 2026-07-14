@@ -159,7 +159,13 @@ impl FinetuneJobs for FinetuneJobsService {
     ) -> Result<Response<pb::FinetuneJob>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::FinetuneJob>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
             let req = request.into_inner();
+            // Cross-tenant guard: a user token may only act on its own org;
+            // trusted service workers (allowAnyOrg) may span orgs.
+            if !caller.is_service() {
+                caller.authorize_org(&req.org_id)?;
+            }
             if req.job_id.is_empty() {
                 return Err(Status::invalid_argument("job_id required"));
             }
@@ -219,7 +225,11 @@ impl FinetuneJobs for FinetuneJobsService {
     ) -> Result<Response<pb::FinetuneJob>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::FinetuneJob>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
             let req = request.into_inner();
+            if !caller.is_service() {
+                caller.authorize_org(&req.org_id)?;
+            }
             if req.job_id.is_empty() || req.org_id.is_empty() {
                 return Err(Status::invalid_argument("job_id and org_id required"));
             }
@@ -255,7 +265,11 @@ impl FinetuneJobs for FinetuneJobsService {
     ) -> Result<Response<pb::ListFinetuneJobsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::ListFinetuneJobsResponse>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
             let req = request.into_inner();
+            if !caller.is_service() {
+                caller.authorize_org(&req.org_id)?;
+            }
             if req.org_id.is_empty() {
                 return Err(Status::invalid_argument("org_id required"));
             }
@@ -321,6 +335,14 @@ impl FinetuneJobs for FinetuneJobsService {
     ) -> Result<Response<pb::ListActiveFinetuneJobsResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::ListActiveFinetuneJobsResponse>, Status> = async {
+            // Cross-org worker scan (no org filter) — restricted to service
+            // principals (the polling worker); never a user token.
+            let caller = crate::auth::identity(&request)?;
+            if !caller.is_service() {
+                return Err(Status::permission_denied(
+                    "list_active_jobs is restricted to the finetune polling worker",
+                ));
+            }
             let req = request.into_inner();
             let limit = if req.limit <= 0 {
                 LIST_ACTIVE_LIMIT_MAX
@@ -366,7 +388,11 @@ impl FinetuneJobs for FinetuneJobsService {
     ) -> Result<Response<pb::GetOrgMonthlySpendResponse>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::GetOrgMonthlySpendResponse>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
             let req = request.into_inner();
+            if !caller.is_service() {
+                caller.authorize_org(&req.org_id)?;
+            }
             if req.org_id.is_empty() {
                 return Err(Status::invalid_argument("org_id required"));
             }
@@ -410,7 +436,11 @@ impl FinetuneJobs for FinetuneJobsService {
     ) -> Result<Response<pb::FinetuneJob>, Status> {
         let started = Instant::now();
         let result: Result<Response<pb::FinetuneJob>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
             let req = request.into_inner();
+            if !caller.is_service() {
+                caller.authorize_org(&req.org_id)?;
+            }
             if req.job_id.is_empty() || req.org_id.is_empty() {
                 return Err(Status::invalid_argument("job_id and org_id required"));
             }

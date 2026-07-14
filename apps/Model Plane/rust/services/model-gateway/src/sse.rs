@@ -608,6 +608,8 @@ pub async fn invoke_stream_sse(
             &user_id,
             &thread_scope,
             data_plane_bearer.as_ref(),
+            inference_bearer.as_str(),
+            model_bearer.as_str(),
             effective_zdr,
             &model,
             messages,

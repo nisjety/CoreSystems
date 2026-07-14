@@ -74,6 +74,7 @@ impl McpGatewayClient {
     pub async fn proxy_tool(
         &self,
         org_id: &str,
+        user_id: &str,
         server_id: &str,
         tool_name: &str,
         input_json: &str,
@@ -86,6 +87,8 @@ impl McpGatewayClient {
                 server_id: server_id.to_owned(),
                 tool_name: tool_name.to_owned(),
                 input_json: input_json.to_owned(),
+                // Re-authorized per-user gateway-side (defense in depth).
+                user_id: user_id.to_owned(),
             })
             .await
             .map_err(|e| format!("mcp proxy transport: {e}"))?

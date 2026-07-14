@@ -1220,9 +1220,13 @@ impl ModelGateway for GatewayService {
                 "MCP execution is restricted to the governed execution service",
             ));
         }
-        runtime_registries::handle_proxy_mcp_tool(&self.state.mcp, request.into_inner())
-            .await
-            .map(Response::new)
+        runtime_registries::handle_proxy_mcp_tool(
+            &self.state.mcp,
+            &self.state.ownership,
+            request.into_inner(),
+        )
+        .await
+        .map(Response::new)
     }
 
     /// Agent-facing tool defs for the org's enabled MCP servers, namespaced

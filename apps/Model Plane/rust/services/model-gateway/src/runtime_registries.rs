@@ -849,8 +849,27 @@ pub fn handle_list_mcp_servers(
 /// response's `error_message` rather than as an `Err`.
 pub async fn handle_proxy_mcp_tool(
     reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
     req: ProxyMcpToolRequest,
 ) -> Result<ProxyMcpToolResponse, Status> {
+    // Re-authorize per-user, mirroring the ListMcpTools discovery filter: a
+    // client-declared mcp__<server>__<tool> name must not let a caller invoke a
+    // server they cannot see (another user's private server in the same org).
+    // Reported as not_found (not permission_denied) so server existence within
+    // the org is not leaked.
+    if !req.user_id.trim().is_empty()
+        && !ownership.usable(
+            &req.org_id,
+            crate::ownership::KIND_MCP,
+            &req.server_id,
+            &req.user_id,
+        )
+    {
+        return Err(Status::not_found(format!(
+            "mcp server not found: {}",
+            req.server_id
+        )));
+    }
     let server = reg
         .inner
         .get(&(req.org_id.clone(), req.server_id.clone()))

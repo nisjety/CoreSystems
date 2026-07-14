@@ -349,7 +349,9 @@ impl ProviderRouter for AnthropicProvider {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1000);
+                // Default 1s (matches the OpenAI provider), NOT 1000s — the old
+                // unwrap_or(1000) then *1000 stalled retries for ~17 minutes.
+                .unwrap_or(1);
             return Err(ProviderError::RateLimited {
                 retry_after_ms: retry_after * 1000,
             });
@@ -397,7 +399,9 @@ impl ProviderRouter for AnthropicProvider {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1000);
+                // Default 1s (matches the OpenAI provider), NOT 1000s — the old
+                // unwrap_or(1000) then *1000 stalled retries for ~17 minutes.
+                .unwrap_or(1);
             return Err(ProviderError::RateLimited {
                 retry_after_ms: retry_after * 1000,
             });
