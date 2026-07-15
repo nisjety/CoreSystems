@@ -12,6 +12,7 @@ export const workspaceSettingsSectionIds = [
   'mcp',
   'skills',
   'plugins',
+  'cron',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -116,6 +117,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Plugin-pakker',
     description: 'Registrer plugin-manifester som kan bidra med verktøy, ferdigheter og hooks. Inaktiv til en administrator aktiverer dem.',
     saveLabel: 'Lagre plugins',
+  },
+  {
+    id: 'cron',
+    label: 'Planlagte kjøringer',
+    title: 'Planlagte kjøringer',
+    description: 'Tidsstyrte oppgaver agenten kjører automatisk via cron-uttrykk. Sweeperen fyrer forfalte planer og beregner neste kjøring.',
+    saveLabel: 'Lagre planer',
   },
 ]
 

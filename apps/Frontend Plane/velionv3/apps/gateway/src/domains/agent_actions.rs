@@ -42,6 +42,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/plugins/:plugin_id",
             post(update_plugin).delete(delete_plugin),
         )
+        .route("/api/v1/cron", get(list_cron).post(create_cron))
+        .route(
+            "/api/v1/cron/:cron_id",
+            post(update_cron).delete(delete_cron),
+        )
         .route("/api/v1/capabilities", get(list_capabilities))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -355,6 +360,141 @@ async fn delete_plugin(
         "{}/v1/plugins/{}",
         state.model_gateway_url,
         urlencoding::encode(&plugin_id)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::DELETE,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// List the org's cron schedules (open to members).
+async fn list_cron(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let url = format!("{}/v1/cron{}", state.model_gateway_url, build_query(&params));
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+}
+
+/// Create a cron schedule (`name`, `schedule_expr`, `timezone`, `task_template`,
+/// `enabled`). Admin-gated; proxied to model-gateway `/v1/cron` → capability-core.
+/// capability-core validates the cron expression and seeds next_fire_at.
+async fn create_cron(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !can_author_skills(&state, &user).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Only organization admins can create cron schedules.")),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!("{}/v1/cron", state.model_gateway_url);
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// Update a cron schedule (enable/disable, edit expression). Admin-gated.
+async fn update_cron(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(cron_id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !can_author_skills(&state, &user).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Only organization admins can change cron schedules.")),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!(
+        "{}/v1/cron/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&cron_id)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::PATCH,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// Delete a cron schedule. Admin-gated.
+async fn delete_cron(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(cron_id): Path<String>,
+) -> impl IntoResponse {
+    if !can_author_skills(&state, &user).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Only organization admins can delete cron schedules.")),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!(
+        "{}/v1/cron/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&cron_id)
     );
     shared::proxy_model_json_with_capability(
         &state,

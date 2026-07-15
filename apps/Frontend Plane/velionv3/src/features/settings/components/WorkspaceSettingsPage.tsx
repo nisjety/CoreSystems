@@ -5,6 +5,7 @@ import { TrustCenterSection } from '@/features/settings/components/TrustCenterSe
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
+import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
@@ -183,6 +184,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   skills: [],
   // Plugins renders its own live list + form, so it carries no shared status grid.
   plugins: [],
+  // Cron schedules render their own live list + form, so no shared status grid.
+  cron: [],
 }
 
 const businessHourRows = [
@@ -420,6 +423,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'plugins'}>
         <PluginsSection />
+      </Match>
+      <Match when={props.section === 'cron'}>
+        <CronSchedulesSection />
       </Match>
     </Switch>
   )
