@@ -41,7 +41,7 @@ pub mod sse_events;
 pub mod state;
 pub mod stream_buffer;
 pub mod tool_loop;
-pub mod verbosity;
 pub mod tools;
 pub mod trajectory;
+pub mod verbosity;
 pub mod vision;

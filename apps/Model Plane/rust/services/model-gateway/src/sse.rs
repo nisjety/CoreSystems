@@ -550,6 +550,27 @@ pub async fn invoke_stream_sse(
             },
         );
     }
+    // Verbosity / response-style directive (token-efficiency layer): inject the
+    // selected profile's directive as system context so the model trades
+    // thoroughness for tokens on request. `normal`/unset injects nothing.
+    if let Some(directive) = req
+        .verbosity
+        .as_deref()
+        .and_then(crate::verbosity::directive)
+    {
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(
+            insert_at,
+            ChatMessage {
+                role: "system".to_owned(),
+                content: directive.to_owned(),
+                name: String::new(),
+            },
+        );
+    }
     if crate::tool_loop::asks_about_conversation_state(&req.content) {
         if let Some(message) = generated_image_state_message(&messages) {
             let insert_at = messages
@@ -609,13 +630,24 @@ pub async fn invoke_stream_sse(
             let forced = crate::tool_loop::run_forced_web_search(
                 &state,
                 &request_id,
+                &session_run.run_id,
                 &org_id,
                 &user_id,
                 &thread_scope,
+                model_bearer.as_str(),
+                effective_zdr,
                 messages,
                 &req.content,
             )
             .await;
+            let Ok(forced) = forced else {
+                return error_stream(
+                    &request_id,
+                    "audit_persistence_failed",
+                    "Tool action could not be durably audited",
+                    true,
+                );
+            };
             messages = forced.messages;
             tool_events.extend(forced.events);
         }
@@ -626,6 +658,7 @@ pub async fn invoke_stream_sse(
         let rounds = crate::tool_loop::run_tool_rounds(
             &state,
             &request_id,
+            &session_run.run_id,
             &org_id,
             &user_id,
             &thread_scope,
@@ -639,38 +672,16 @@ pub async fn invoke_stream_sse(
             "auto".to_owned(),
         )
         .await;
+        let Ok(rounds) = rounds else {
+            return error_stream(
+                &request_id,
+                "audit_persistence_failed",
+                "Tool action could not be durably audited",
+                true,
+            );
+        };
         messages = rounds.messages;
         tool_events.extend(rounds.events);
-    }
-
-    // E5 — audit every inline tool call. The governed agentic path audits via
-    // execution-core → session-core; the inline chat tool loop must too, so ALL
-    // AI tool use is auditable (publishes velion.audit.v1.model.tool_action,
-    // which audit-core records). Best-effort — never blocks the turn.
-    if !tool_events.is_empty() {
-        use crate::sse_events::ChatEvent;
-        let mut tool_names: std::collections::HashMap<&str, &str> =
-            std::collections::HashMap::new();
-        for evt in &tool_events {
-            if let ChatEvent::ToolCall { id, name, .. } = evt {
-                tool_names.insert(id.as_str(), name.as_str());
-            }
-        }
-        for evt in &tool_events {
-            if let ChatEvent::ToolResult { id, status, .. } = evt {
-                let tool = tool_names.get(id.as_str()).copied().unwrap_or(id.as_str());
-                crate::audit::publish_inline_tool_action(
-                    &org_id,
-                    &user_id,
-                    &request_id,
-                    id,
-                    tool,
-                    status,
-                    effective_zdr,
-                )
-                .await;
-            }
-        }
     }
 
     let grpc_req = InferRequest {
@@ -1254,7 +1265,12 @@ async fn fetch_skill_context(
             },
             bearer,
         ) {
-            match state.session_client.clone().list_agent_skills(request).await {
+            match state
+                .session_client
+                .clone()
+                .list_agent_skills(request)
+                .await
+            {
                 Ok(resp) => {
                     for a in resp.into_inner().skills {
                         state
@@ -1269,7 +1285,7 @@ async fn fetch_skill_context(
             }
         }
     }
-    let matched = match crate::skills::handle_match_skills(
+    let Ok(matched) = crate::skills::handle_match_skills(
         &state.skills,
         MatchSkillsRequest {
             request_id: String::new(),
@@ -1278,9 +1294,8 @@ async fn fetch_skill_context(
             limit: MAX_INJECTED_SKILLS,
             min_score: 0.0,
         },
-    ) {
-        Ok(resp) => resp,
-        Err(_) => return Vec::new(),
+    ) else {
+        return Vec::new();
     };
     matched
         .matches
@@ -2349,7 +2364,6 @@ fn authenticated_run_agent_request(
 
 // Dispatch requires both Model and Data authorization contexts plus the
 // immutable run/request fields; keep them explicit at this security boundary.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)] // cohesive dispatch — all are run context
 fn spawn_run_dispatch(
     state: &AppState,

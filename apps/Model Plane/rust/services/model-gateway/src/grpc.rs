@@ -1763,12 +1763,13 @@ mod tests {
         CreateRealtimeSessionResponse, CreateThreadRequest, CreateThreadResponse,
         CreateVideoGenerationJobRequest, CreateVideoGenerationJobResponse,
         DetectTextLanguageRequest, DetectTextLanguageResponse, Event, ExtractImageTextRequest,
-        ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse, GeneratedImage,
-        GetContextAssemblyRequest, GetContextAssemblyResponse, GetVideoGenerationJobRequest,
-        GetVideoGenerationJobResponse, InferChunk, InferResponse, LanguageAnalysisResult,
-        ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse,
-        ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ModelInfo,
-        ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SpeechVoiceInfo,
+        ExtractImageTextResponse, FinalizeToolActionRequest, FinalizeToolActionResponse,
+        GenerateImageRequest, GenerateImageResponse, GeneratedImage, GetContextAssemblyRequest,
+        GetContextAssemblyResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse,
+        InferChunk, InferResponse, LanguageAnalysisResult, ListModelsRequest, ListModelsResponse,
+        ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListTranslationLanguagesRequest,
+        ListTranslationLanguagesResponse, ModelInfo, ReplayThreadRequest, ReserveToolActionRequest,
+        ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SpeechVoiceInfo,
         StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
         StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
         TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest,
@@ -2308,6 +2309,24 @@ mod tests {
             _: Request<CompleteStepRequest>,
         ) -> Result<Response<CompleteStepResponse>, Status> {
             Err(Status::unimplemented("complete_step not needed in test"))
+        }
+
+        async fn reserve_tool_action(
+            &self,
+            _: Request<ReserveToolActionRequest>,
+        ) -> Result<Response<ReserveToolActionResponse>, Status> {
+            Err(Status::unimplemented(
+                "reserve_tool_action not needed in test",
+            ))
+        }
+
+        async fn finalize_tool_action(
+            &self,
+            _: Request<FinalizeToolActionRequest>,
+        ) -> Result<Response<FinalizeToolActionResponse>, Status> {
+            Err(Status::unimplemented(
+                "finalize_tool_action not needed in test",
+            ))
         }
 
         async fn save_checkpoint(

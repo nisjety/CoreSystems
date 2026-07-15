@@ -150,12 +150,12 @@ async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Ur
     // co-located bridge sidecar. Everything else stays public-HTTPS-only + SSRF
     // guarded. We still pin the connection to the resolved addresses below so an
     // allowlisted hostname cannot be rebound to an arbitrary target.
-    let host_allowed = endpoint
-        .host_str()
-        .is_some_and(host_in_internal_allowlist);
+    let host_allowed = endpoint.host_str().is_some_and(host_in_internal_allowlist);
     let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
     if !scheme_ok || (!host_allowed && endpoint_host_is_forbidden(&endpoint)) {
-        return Err("MCP endpoint must use public HTTPS (or be an allowlisted internal host)".to_owned());
+        return Err(
+            "MCP endpoint must use public HTTPS (or be an allowlisted internal host)".to_owned(),
+        );
     }
     let host = endpoint
         .host_str()
@@ -375,9 +375,7 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
     // over plain HTTP on a private address (the bundled bridge sidecar); all other
     // servers stay public-HTTPS-only + SSRF-guarded. Credential/query/fragment
     // hygiene is enforced for every server regardless.
-    let host_allowed = endpoint
-        .host_str()
-        .is_some_and(host_in_internal_allowlist);
+    let host_allowed = endpoint.host_str().is_some_and(host_in_internal_allowlist);
     let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
     if !scheme_ok
         || endpoint.host().is_none()
@@ -632,7 +630,10 @@ mod mcp_secure_registration_tests {
     #[test]
     fn internal_host_allowlist_is_case_and_dot_insensitive_and_fails_closed_when_empty() {
         assert!(host_in_allowlist("mcp-bridge", "mcp-bridge"));
-        assert!(host_in_allowlist("MCP-Bridge.", " mcp-bridge , other-host "));
+        assert!(host_in_allowlist(
+            "MCP-Bridge.",
+            " mcp-bridge , other-host "
+        ));
         assert!(!host_in_allowlist("evil.example", "mcp-bridge"));
         // Empty / whitespace-only allowlist opts nothing in (SSRF guard intact).
         assert!(!host_in_allowlist("mcp-bridge", ""));

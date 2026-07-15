@@ -13,8 +13,8 @@ use std::fmt::Write as _;
 
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, IndexMemoryRequest, InferRequest, SearchMemoryRequest, ToolCall, ToolDefinition,
-    WebSearchRequest,
+    ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
+    ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
 };
 use serde_json::Value;
 
@@ -36,6 +36,11 @@ pub struct ToolOutcome {
     pub error: Option<String>,
 }
 
+fn inline_tool_action_id(run_id: &str, call_id: &str) -> String {
+    let digest = blake3::hash(format!("{run_id}\0{call_id}").as_bytes());
+    format!("inline-{}", digest.to_hex())
+}
+
 fn arg_str(args_json: &str, key: &str) -> String {
     serde_json::from_str::<serde_json::Value>(args_json)
         .ok()
@@ -54,7 +59,7 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
 /// contract is available on this path.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
-    !name.starts_with("mcp__")
+    !name.starts_with("mcp__") && !matches!(name, "save_memory" | "browser_agent")
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -486,6 +491,7 @@ fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
     request
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn dispatch_tool(
     state: &AppState,
     org_id: &str,
@@ -499,7 +505,7 @@ pub async fn dispatch_tool(
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
             call,
-            "MCP tools require governed agentic execution and approval",
+            "side-effecting tools require governed agentic execution and approval",
         );
     }
 
@@ -786,6 +792,67 @@ pub async fn dispatch_tool(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_audited_tool(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    session_bearer: &str,
+    zdr: bool,
+    call: &ToolCall,
+) -> Result<ToolOutcome, &'static str> {
+    if session_bearer.is_empty() {
+        return Err("tool audit credential unavailable");
+    }
+    let action_id = inline_tool_action_id(run_id, &call.id);
+    let reserve = ReserveToolActionRequest {
+        run_id: run_id.to_owned(),
+        action_id: action_id.clone(),
+        request_id: request_id.to_owned(),
+        tool: call.name.clone(),
+        data_category: crate::audit::tool_data_category(&call.name).to_owned(),
+        zdr,
+    };
+    state
+        .session_client
+        .clone()
+        .reserve_tool_action(with_authorization(reserve, session_bearer))
+        .await
+        .map_err(|_| "tool audit reservation failed")?;
+
+    let outcome = dispatch_tool(
+        state,
+        org_id,
+        user_id,
+        thread_id,
+        data_plane_bearer,
+        session_bearer,
+        zdr,
+        call,
+    )
+    .await;
+    let finalize = FinalizeToolActionRequest {
+        run_id: run_id.to_owned(),
+        action_id,
+        outcome: if outcome.error.is_some() {
+            "failed".to_owned()
+        } else {
+            "completed".to_owned()
+        },
+    };
+    state
+        .session_client
+        .clone()
+        .finalize_tool_action(with_authorization(finalize, session_bearer))
+        .await
+        .map_err(|_| "tool audit finalization failed")?;
+    Ok(outcome)
+}
+
 /// Built-in tool specs the gateway always advertises when function-calling is
 /// enabled, so the model can use the agent's core capabilities without the
 /// client having to declare them. Names MUST match [`dispatch_tool`] arms.
@@ -866,12 +933,15 @@ pub struct ToolRounds {
 pub async fn run_forced_web_search(
     state: &AppState,
     request_id: &str,
+    run_id: &str,
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    session_bearer: &str,
+    zdr: bool,
     base_messages: Vec<ChatMessage>,
     query: &str,
-) -> ToolRounds {
+) -> Result<ToolRounds, &'static str> {
     let search_query = resolve_forced_web_search_query(&base_messages, query);
     let args = serde_json::json!({
         "query": search_query,
@@ -883,8 +953,19 @@ pub async fn run_forced_web_search(
         name: "web_search".to_owned(),
         arguments_json: args.to_string(),
     };
-    // web_search does not touch session-core memory, so no session bearer needed.
-    let outcome = dispatch_tool(state, org_id, user_id, thread_id, None, "", false, &call).await;
+    let outcome = dispatch_audited_tool(
+        state,
+        request_id,
+        run_id,
+        org_id,
+        user_id,
+        thread_id,
+        None,
+        session_bearer,
+        zdr,
+        &call,
+    )
+    .await?;
     let mut events = vec![
         ChatEvent::ToolCall {
             id: call.id,
@@ -911,7 +992,7 @@ pub async fn run_forced_web_search(
         name: String::new(),
     });
 
-    ToolRounds { messages, events }
+    Ok(ToolRounds { messages, events })
 }
 
 fn web_search_citations(outcome: &ToolOutcome) -> Vec<ChatEvent> {
@@ -959,10 +1040,10 @@ fn web_search_citations(outcome: &ToolOutcome) -> Vec<ChatEvent> {
 /// withheld) to produce the final answer. Inference errors stop the loop
 /// gracefully (the normal stream path then handles the request).
 #[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
-#[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
 pub async fn run_tool_rounds(
     state: &AppState,
     request_id: &str,
+    run_id: &str,
     org_id: &str,
     user_id: &str,
     thread_id: &str,
@@ -974,7 +1055,7 @@ pub async fn run_tool_rounds(
     base_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
     tool_choice: String,
-) -> ToolRounds {
+) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
     let mut events = Vec::new();
 
@@ -1019,8 +1100,10 @@ pub async fn run_tool_rounds(
                 name: call.name.clone(),
                 args,
             });
-            let outcome = dispatch_tool(
+            let outcome = dispatch_audited_tool(
                 state,
+                request_id,
+                run_id,
                 org_id,
                 user_id,
                 thread_id,
@@ -1029,7 +1112,7 @@ pub async fn run_tool_rounds(
                 zdr,
                 call,
             )
-            .await;
+            .await?;
             events.push(ChatEvent::ToolResult {
                 id: outcome.call_id.clone(),
                 status: if outcome.error.is_some() {
@@ -1057,12 +1140,22 @@ pub async fn run_tool_rounds(
         });
     }
 
-    ToolRounds { messages, events }
+    Ok(ToolRounds { messages, events })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_tool_action_identity_is_stable_and_collision_resistant() {
+        let first = inline_tool_action_id("run-1", "call/a");
+        assert_eq!(first, inline_tool_action_id("run-1", "call/a"));
+        assert_ne!(first, inline_tool_action_id("run-1", "call?a"));
+        assert_ne!(first, inline_tool_action_id("run-2", "call/a"));
+        assert!(first.starts_with("inline-"));
+        assert_eq!(first.len(), 71);
+    }
 
     #[test]
     fn with_authorization_attaches_bearer_for_non_empty_credential() {
@@ -1117,9 +1210,11 @@ mod tests {
     }
 
     #[test]
-    fn inline_loop_rejects_mcp_tools_that_require_governed_agentic_approval() {
+    fn inline_loop_rejects_side_effects_that_require_governed_agentic_approval() {
         assert!(!inline_tool_allowed("mcp__github__create_issue"));
         assert!(!inline_tool_allowed("mcp__srv__a__b"));
+        assert!(!inline_tool_allowed("save_memory"));
+        assert!(!inline_tool_allowed("browser_agent"));
         assert!(inline_tool_allowed("web_search"));
         assert!(inline_tool_allowed("knowledge_search"));
     }
