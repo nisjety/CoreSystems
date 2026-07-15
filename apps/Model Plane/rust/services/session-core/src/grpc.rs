@@ -510,6 +510,17 @@ async fn start_run_inner(
     .await
     {
         tracing::warn!(error = %error, run_id = %run_id, "durable plan create failed (best-effort)");
+    } else if let Err(error) = crate::orchestration_store::update_plan_status(
+        pool,
+        &format!("plan_{run_id}"),
+        "executing",
+    )
+    .await
+    {
+        // The run is executing now, so advance its just-created plan out of
+        // draft — record_run_terminal drives it to completed/failed at run end.
+        // Best-effort and scoped to this run's own plan id.
+        tracing::warn!(error = %error, run_id = %run_id, "durable plan executing-transition failed (best-effort)");
     }
 
     Ok(Response::new(pb::StartRunResponse {
@@ -573,6 +584,22 @@ async fn record_run_terminal(
         .execute(&mut **tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+
+    // Drive the run's durable plan to its terminal state. `start_run` creates a
+    // plan keyed `plan_{run_id}` in `draft`; without this it never left draft
+    // ("plans never leave draft"). Only advance a plan that is still open
+    // (draft/proposed/approved/executing) so a human decision (rejected/
+    // superseded) is never overwritten. Same tx as the run flip => atomic.
+    let plan_status = if run_status == "failed" { "failed" } else { "completed" };
+    sqlx::query(
+        "UPDATE plans SET status = $1, updated_at = now()
+         WHERE id = $2 AND status IN ('draft','proposed','approved','executing')",
+    )
+    .bind(plan_status)
+    .bind(format!("plan_{}", &req.run_id))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
     Ok(())
 }
 
