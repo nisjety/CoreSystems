@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
+	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -181,6 +182,16 @@ func main() {
 	if os.Getenv("CRON_SWEEPER_ENABLED") != "false" {
 		go cron.NewSweeper(pool).Start(ctx)
 		slog.Info("cron sweeper started")
+	}
+
+	// Task executor: claims `created` tasks (single-flight), marks them running,
+	// and dispatches each to a runner via NATS (mp.v1.capability.task.dispatched).
+	// Default OFF: until a Model-Plane runner consumes the dispatch event and
+	// completes the task, enabling this would strand tasks in `running`. Turn on
+	// with TASK_EXECUTOR_ENABLED=true once that runner exists.
+	if os.Getenv("TASK_EXECUTOR_ENABLED") == "true" {
+		go taskexec.NewExecutor(pool, taskexec.NewNatsDispatcher(recPub)).Start(ctx)
+		slog.Info("task executor started")
 	}
 	// /models delegates to inference-core ListModels, /compact to session-core
 	// CompactNow (nil-safe: unwired → honest "unavailable").

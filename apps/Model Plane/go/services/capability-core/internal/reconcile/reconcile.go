@@ -33,6 +33,7 @@ const (
 	KindRoutingPolicy = "routing_policy"
 	KindSafetyPolicy  = "safety_policy"
 	KindModel         = "model"
+	KindTask          = "task"
 )
 
 // Mutation actions.
@@ -40,6 +41,8 @@ const (
 	ActionRegistered = "registered"
 	ActionUpdated    = "updated"
 	ActionRemoved    = "removed"
+	// ActionDispatched hands a claimed task to a downstream runner (task executor).
+	ActionDispatched = "dispatched"
 )
 
 // Subject builds the reconcile subject for a kind+action, e.g.
