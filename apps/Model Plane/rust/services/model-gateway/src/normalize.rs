@@ -155,6 +155,7 @@ mod tests {
             max_cost_usd: None,
             max_tokens: None,
             profile: None,
+            verbosity: None,
             features: Vec::new(),
             idempotency_key: None,
             attachments: Vec::new(),

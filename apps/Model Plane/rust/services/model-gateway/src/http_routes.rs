@@ -3,6 +3,8 @@
 //! Public routes: /healthz, /readyz, /metrics
 //! Auth-gated routes: invoke endpoints, orchestration read endpoints, run-event SSE
 
+use std::fmt::Write as _;
+
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
@@ -2537,10 +2539,10 @@ fn image_input(
 /// Velion Flow dictation request — browser mic audio in, polished text out.
 #[derive(serde::Deserialize)]
 pub struct AiDictateRequest {
-    /// Base64 audio from the client recorder (MediaRecorder webm/opus typical).
+    /// Base64 audio from the client recorder (`MediaRecorder` webm/opus typical).
     pub audio_base64: String,
     /// Container format: "webm" | "ogg" | "wav" | "mp3" | "m4a". Defaults to
-    /// "webm" — the browser MediaRecorder default this route exists to serve.
+    /// "webm" — the browser `MediaRecorder` default this route exists to serve.
     #[serde(default)]
     pub format: Option<String>,
     /// BCP-47 language hint for the STT leg; empty → auto-detect.
@@ -2583,6 +2585,7 @@ const MAX_DICTATE_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 /// (strip fillers, punctuate, apply self-corrections). Fail-soft on the
 /// cleanup leg: a cleanup failure returns the raw transcript (`cleaned:false`)
 /// rather than dropping the user's dictation.
+#[allow(clippy::too_many_lines)]
 async fn ai_dictate(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -2688,9 +2691,10 @@ async fn ai_dictate(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        system_prompt.push_str(&format!(
+        let _ = write!(
+            system_prompt,
             " The text will be used as: {context}. Match that tone lightly."
-        ));
+        );
     }
     let cleanup = state
         .inference_client
@@ -4426,6 +4430,11 @@ pub struct InvokeRequest {
     /// posture (`HARNESS_PHASE1` §1). Absent → "chat" (auto, non-gating).
     #[serde(default)]
     pub profile: Option<String>,
+    /// Response-style / verbosity profile (token-efficiency layer):
+    /// `concise` | `detailed` | `minimal` | `normal`. `normal`/unset/unknown
+    /// injects no directive. See `crate::verbosity`.
+    #[serde(default)]
+    pub verbosity: Option<String>,
     /// Opt-in rich SSE event families the client understands (chat-parity §2:
     /// "reasoning", "tools", "citations", "artifacts", "steps", "usage"). EMPTY
     /// → plain stream (connected/chunk/done/error only); protects profile:"chat".
