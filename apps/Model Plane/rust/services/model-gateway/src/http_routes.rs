@@ -242,6 +242,17 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_skill_proxy)
                 .delete(delete_skill_proxy),
         )
+        // Plugins
+        .route(
+            "/v1/plugins",
+            get(list_plugins_proxy).post(create_plugin_proxy),
+        )
+        .route(
+            "/v1/plugins/:id",
+            get(get_plugin_proxy)
+                .patch(patch_plugin_proxy)
+                .delete(delete_plugin_proxy),
+        )
 }
 
 /// `/v1/ai/*` modality routes (chat, embeddings, images, speech, translate,
@@ -4077,6 +4088,52 @@ async fn delete_skill_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "DELETE", None).await
+}
+
+async fn list_plugins_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &bearer,
+        &format!("plugins?org_id={}", c.org_id),
+        "GET",
+        None,
+    )
+    .await
+}
+async fn create_plugin_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(mut b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    b["org_id"] = json!(c.org_id);
+    proxy_to_capability_core(&s, &bearer, "plugins", "POST", Some(&b)).await
+}
+async fn get_plugin_proxy(
+    State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &bearer, &format!("plugins/{id}"), "GET", None).await
+}
+async fn patch_plugin_proxy(
+    State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &bearer, &format!("plugins/{id}"), "PATCH", Some(&b)).await
+}
+async fn delete_plugin_proxy(
+    State(s): State<AppState>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &bearer, &format!("plugins/{id}"), "DELETE", None).await
 }
 
 pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {

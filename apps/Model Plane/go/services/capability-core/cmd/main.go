@@ -166,6 +166,7 @@ func main() {
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMCPHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
@@ -216,11 +217,17 @@ func main() {
 }
 
 func natsAuthOptions() []nats.Option {
-	token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN"))
-	if token == "" {
-		return nil
+	options := []nats.Option{nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME")}
+	user := strings.TrimSpace(os.Getenv("NATS_USER"))
+	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
+	if user != "" || password != "" {
+		return append(options, nats.UserInfo(user, password))
 	}
-	return []nats.Option{nats.Token(token)}
+	token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN"))
+	if token == "" || os.Getenv("NATS_ALLOW_TOKEN_FALLBACK") != "1" {
+		return options
+	}
+	return append(options, nats.Token(token))
 }
 
 func authConfigFromEnv() (authctx.Config, error) {
