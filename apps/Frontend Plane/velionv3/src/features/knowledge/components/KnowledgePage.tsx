@@ -2,12 +2,23 @@ import { A } from '@solidjs/router'
 import {
   ArrowUpRight,
   Blocks,
+  Bookmark,
   ChevronDown,
+  Clock3,
+  Download,
   FilePlus2,
   FileText,
+  Filter,
+  Folder,
+  Grid2X2,
+  List,
+  Mail,
+  MoreHorizontal,
+  Pencil,
+  Sparkles,
+  Trash2,
   GitBranch,
   Globe2,
-  Grid2X2,
   Link2,
   Map as MapIcon,
   Network,
@@ -19,7 +30,6 @@ import {
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
-import { KnowledgeDiagnosticsPanel } from '@/features/knowledge/components/KnowledgeDiagnosticsPanel'
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
@@ -31,7 +41,6 @@ import {
   type LiveKnowledgeFile,
   type LiveKnowledgeFolder,
   type LiveKnowledgeGraphNode,
-  type LiveKnowledgeIntegration,
   type LiveKnowledgeMetric,
   type LiveKnowledgePayload,
   type LiveKnowledgeSource,
@@ -56,6 +65,7 @@ import { VelionSelect } from '@/shared/ui/velion/VelionSelect'
 import { cn } from '@/shared/lib/cn'
 
 type KnowledgeView = 'overview' | 'operating-map' | 'graph' | 'chunks'
+type KnowledgeLayout = 'grid' | 'list'
 type KnowledgeIcon = Component<LucideProps>
 
 type Notice = {
@@ -115,16 +125,10 @@ const graphToneClass: Record<LiveKnowledgeGraphNode['tone'], string> = {
 }
 
 const folderToneClass: Record<LiveKnowledgeFolder['tone'], string> = {
-  blue: 'knowledge-folder-card__art--blue',
-  gray: 'knowledge-folder-card__art--gray',
-  green: 'knowledge-folder-card__art--green',
-  warm: 'knowledge-folder-card__art--warm',
-}
-
-const integrationStatusClass: Record<LiveKnowledgeIntegration['status'], string> = {
-  Connected: 'knowledge-status--connected',
-  Review: 'knowledge-status--review',
-  Syncing: 'knowledge-status--syncing',
+  blue: 'knowledge-folder-card__visual--blue',
+  gray: 'knowledge-folder-card__visual--gray',
+  green: 'knowledge-folder-card__visual--green',
+  warm: 'knowledge-folder-card__visual--warm',
 }
 
 function filterKnowledgePayload(
@@ -203,6 +207,7 @@ function filterKnowledgePayload(
 
 export default function KnowledgePage() {
   const [activeView, setActiveView] = createSignal<KnowledgeView>('overview')
+  const [overviewLayout, setOverviewLayout] = createSignal<KnowledgeLayout>('grid')
   const [selectedCollectionId, setSelectedCollectionId] = createSignal('all')
   const [selectedSourceId, setSelectedSourceId] = createSignal<string | null>(null)
   const [selectedGraphNodeId, setSelectedGraphNodeId] = createSignal<string | null>(null)
@@ -239,6 +244,15 @@ export default function KnowledgePage() {
   })
 
   onMount(() => {
+    const requestedSourceId = new URLSearchParams(window.location.search).get('source')?.trim() ?? ''
+    if (
+      requestedSourceId.length > 0 &&
+      requestedSourceId.length <= 256 &&
+      /^[A-Za-z0-9_-]+$/.test(requestedSourceId)
+    ) {
+      setSelectedSourceId(requestedSourceId)
+      setActiveView('chunks')
+    }
     const controller = new AbortController()
     void (async () => {
       try {
@@ -542,16 +556,20 @@ export default function KnowledgePage() {
   }
 
   return (
-    <div class="knowledge-page-surface">
+    <div class="knowledge-page-surface knowledge-page-surface--docs">
       <div class="knowledge-page-container">
         <WorkspaceHeader
           activeView={activeView()}
           collections={liveKnowledge()?.collections ?? []}
+          layout={overviewLayout()}
+          searchQuery={searchQuery()}
           selectedCollectionId={selectedCollectionId()}
           syncing={busyAction() === 'sync'}
           onActiveViewChange={setActiveView}
           onAddSource={() => setAddSourceOpen(true)}
           onCollectionChange={setSelectedCollectionId}
+          onLayoutChange={setOverviewLayout}
+          onSearchChange={setSearchQuery}
           onSync={() => void handleSync()}
         />
 
@@ -573,8 +591,10 @@ export default function KnowledgePage() {
         <Show when={visibleKnowledge()}>
           <Show when={activeView() === 'overview'}>
             <OverviewCanvas
+              layout={overviewLayout()}
               liveKnowledge={visibleKnowledge()!}
               searchQuery={searchQuery()}
+              onAddSource={() => setAddSourceOpen(true)}
               onSearchChange={setSearchQuery}
             />
           </Show>
@@ -626,35 +646,87 @@ export default function KnowledgePage() {
 function WorkspaceHeader(props: {
   activeView: KnowledgeView
   collections: LiveKnowledgeCollection[]
+  layout: KnowledgeLayout
+  searchQuery: string
   selectedCollectionId: string
   syncing: boolean
   onActiveViewChange: (view: KnowledgeView) => void
   onAddSource: () => void
   onCollectionChange: (collectionId: string) => void
+  onLayoutChange: (layout: KnowledgeLayout) => void
+  onSearchChange: (query: string) => void
   onSync: () => void
 }) {
+  let collectionSelect: HTMLSelectElement | undefined
+
   return (
-    <header class="knowledge-header">
+    <header class="knowledge-header knowledge-header--docs">
       <div class="knowledge-header__main">
-        <div class="knowledge-header__select-wrap">
-          <VelionSelect
-            aria-label="Select knowledge collection"
-            value={props.selectedCollectionId}
-            onChange={(event) => props.onCollectionChange(event.currentTarget.value)}
-            class="knowledge-header__select"
-          >
-            <For each={props.collections}>
-              {(collection) => <option value={collection.id}>{collection.label}</option>}
-            </For>
-          </VelionSelect>
-          <ChevronDown class="knowledge-header__chevron" strokeWidth={2} />
+        <span class="knowledge-header__eyebrow">Knowledge base</span>
+        <div class="knowledge-header__title-row">
+          <h1 class="knowledge-header__title">Knowledge</h1>
+          <div class="knowledge-header__select-wrap">
+            <VelionSelect
+              ref={(element) => { collectionSelect = element }}
+              aria-label="Select knowledge collection"
+              value={props.selectedCollectionId}
+              onChange={(event) => props.onCollectionChange(event.currentTarget.value)}
+              class="knowledge-header__select"
+            >
+              <For each={props.collections}>
+                {(collection) => <option value={collection.id}>{collection.label}</option>}
+              </For>
+            </VelionSelect>
+            <ChevronDown class="knowledge-header__chevron" strokeWidth={2} />
+          </div>
+          <span class="knowledge-header__scope">Workspace library</span>
         </div>
         <p class="knowledge-header__copy">
-          Overview of folders, integrations, files, and retrieval health for this knowledge space.
+          One calm place for source collections, shared files, and the evidence Velion uses to answer.
         </p>
       </div>
 
       <div class="knowledge-header__actions">
+        <label class="knowledge-toolbar-search">
+          <Search class="size-4" aria-hidden="true" />
+          <VelionInput
+            aria-label="Search knowledge base"
+            value={props.searchQuery}
+            onInput={(event) => props.onSearchChange(event.currentTarget.value)}
+            placeholder="Search"
+          />
+          <kbd>⌘ K</kbd>
+        </label>
+        <button
+          type="button"
+          class="knowledge-toolbar-button"
+          aria-label="Filter knowledge"
+          title="Filter by collection"
+          onClick={() => collectionSelect?.focus()}
+        >
+          <Filter class="size-4" />
+          <span>Filter</span>
+        </button>
+        <div class="knowledge-toolbar-view" role="group" aria-label="Knowledge view style">
+          <button
+            type="button"
+            class={cn('knowledge-toolbar-view__button', props.layout === 'grid' && 'knowledge-toolbar-view__button--active')}
+            aria-label="Grid view"
+            aria-pressed={props.layout === 'grid'}
+            onClick={() => props.onLayoutChange('grid')}
+          >
+            <Grid2X2 class="size-4" />
+          </button>
+          <button
+            type="button"
+            class={cn('knowledge-toolbar-view__button', props.layout === 'list' && 'knowledge-toolbar-view__button--active')}
+            aria-label="List view"
+            aria-pressed={props.layout === 'list'}
+            onClick={() => props.onLayoutChange('list')}
+          >
+            <List class="size-4" />
+          </button>
+        </div>
         <SegmentedView activeView={props.activeView} onActiveViewChange={props.onActiveViewChange} />
         <A href="/ingestions" class="button button--secondary button--md knowledge-link-button">
           <ArrowUpRight class="size-4" />
@@ -702,55 +774,67 @@ function SegmentedView(props: {
 }
 
 function OverviewCanvas(props: {
+  layout: KnowledgeLayout
   liveKnowledge: LiveKnowledgePayload
+  onAddSource: () => void
   onSearchChange: (query: string) => void
   searchQuery: string
 }) {
+  const collectionCards = createMemo(() => buildKnowledgeCollectionCards(props.liveKnowledge))
+
   return (
-    <main class="knowledge-main-stack">
-      <section>
-        <SectionHeader title="Folders" description="Browse the strongest source groups and where their files come from." />
-        <div class="knowledge-folder-grid">
-          <Show
-            when={props.liveKnowledge.folders.length > 0}
-            fallback={<EmptyPanel title="No source groups yet" description="Connect an integration or import files to start building grouped knowledge folders." />}
-          >
-            <For each={props.liveKnowledge.folders}>
-              {(folder) => <FolderCard folder={folder} />}
-            </For>
+    <main class={cn('knowledge-main-stack knowledge-dashboard', props.layout === 'list' && 'knowledge-dashboard--list')}>
+      <div class="knowledge-dashboard__body">
+        <div class="knowledge-dashboard__primary">
+          <Show when={props.liveKnowledge.dataPlane.documentsTruncated}>
+            <div class="knowledge-muted-copy" role="status">
+              Showing {props.liveKnowledge.dataPlane.loadedDocumentCount ?? props.liveKnowledge.files.length} of{' '}
+              {props.liveKnowledge.dataPlane.documentCount} workspace documents. Use search or a folder to narrow the view.
+            </div>
+          </Show>
+
+          <section class="knowledge-dashboard-section knowledge-dashboard-section--collections">
+            <SectionHeader title="Integrations" description="Connected source systems feeding this knowledge space." />
+            <div class="knowledge-doc-card-grid">
+              <Show
+                when={collectionCards().length > 0}
+                fallback={<EmptyPanel title="No integrations connected" description="Start a workspace connection from Add source to pull in live knowledge." />}
+              >
+                <For each={collectionCards()}>
+                  {(collection) => <KnowledgeCollectionCard collection={collection} onConnect={props.onAddSource} />}
+                </For>
+              </Show>
+            </div>
+          </section>
+
+          <section class="knowledge-dashboard-section knowledge-dashboard-section--shortcuts">
+            <SectionHeader title="Folders" description="Shortcuts into the source groups your workspace uses most." />
+            <div class="knowledge-shortcut-grid">
+              <Show
+                when={props.liveKnowledge.folders.length > 0}
+                fallback={<EmptyPanel title="No source groups yet" description="Connect an integration or import files to start building grouped knowledge folders." />}
+              >
+                <For each={props.liveKnowledge.folders}>
+                  {(folder) => <FolderCard folder={folder} />}
+                </For>
+              </Show>
+            </div>
+          </section>
+
+          <KnowledgePulsePanel dataPlane={props.liveKnowledge.dataPlane} />
+
+          <WebSourcesPanel webSources={props.liveKnowledge.webSources} />
+
+          <Show when={props.liveKnowledge.sources.length > 0}>
+            <LiveSourceInspector liveKnowledge={props.liveKnowledge} />
           </Show>
         </div>
-      </section>
 
-      <section>
-        <SectionHeader title="Integrations" description="Connected source systems feeding this knowledge space." />
-        <div class="knowledge-integration-grid">
-          <Show
-            when={props.liveKnowledge.integrations.length > 0}
-            fallback={<EmptyPanel title="No integrations connected" description="Start a workspace connection from Add source to pull in live knowledge." />}
-          >
-            <For each={props.liveKnowledge.integrations}>
-              {(integration) => <IntegrationCard integration={integration} />}
-            </For>
-          </Show>
-        </div>
-      </section>
-
-      <WebSourcesPanel webSources={props.liveKnowledge.webSources} />
-
-      <KnowledgeDiagnosticsPanel
-        dataPlane={props.liveKnowledge.dataPlane}
-        diagnostics={props.liveKnowledge.diagnostics}
-      />
-
-      <Show when={props.liveKnowledge.sources.length > 0}>
-        <LiveSourceInspector liveKnowledge={props.liveKnowledge} />
-      </Show>
-
-      <section class="knowledge-files-metrics-grid">
-        <FilesTable files={props.liveKnowledge.files} searchQuery={props.searchQuery} onSearchChange={props.onSearchChange} />
-        <MetricPanel metrics={props.liveKnowledge.metricCards} />
-      </section>
+        <aside class="knowledge-dashboard__aside">
+          <FilesTable files={props.liveKnowledge.files} searchQuery={props.searchQuery} onSearchChange={props.onSearchChange} />
+          <MetricPanel metrics={props.liveKnowledge.metricCards} />
+        </aside>
+      </div>
     </main>
   )
 }
@@ -773,7 +857,7 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
         <span>
           {props.liveKnowledge.graph.available
             ? `${props.liveKnowledge.graph.nodeCount} nodes · ${props.liveKnowledge.graph.edgeCount} edges`
-            : `${props.liveKnowledge.dataPlane.documentCount} Data Plane documents`}
+            : `${props.liveKnowledge.dataPlane.documentCount} workspace documents`}
         </span>
       </div>
       <div class="knowledge-source-evidence-grid">
@@ -839,63 +923,178 @@ function SectionHeader(props: { title: string; description: string }) {
   )
 }
 
-function FolderCard(props: { folder: LiveKnowledgeFolder }) {
+type DashboardCollection = {
+  description: string
+  Icon: KnowledgeIcon
+  id: string
+  meta: string
+  actionLabel?: string
+  title: string
+  tone: 'ink' | 'soft' | 'warm'
+}
+
+function buildKnowledgeCollectionCards(payload: LiveKnowledgePayload): DashboardCollection[] {
+  const integrationCards = payload.integrations.map((integration, index) => ({
+    description: integration.detail || `${integration.documents} available to retrieval.`,
+    Icon: providerIcon(integration.providerKey),
+    id: integration.id,
+    meta: `${integration.documents} · ${integration.freshness}`,
+    actionLabel: 'Manage',
+    title: integration.name,
+    tone: index % 3 === 1 ? 'soft' : index % 3 === 2 ? 'warm' : 'ink',
+  } satisfies DashboardCollection))
+  const sourceCards = payload.sources.slice(0, 6).map((source, index) => ({
+    description: source.description || `${source.provider} source connected to Knowledge.`,
+    Icon: sourceTypeIcon[source.type],
+    id: source.id,
+    meta: `${source.provider} · ${source.chunks} chunks`,
+    actionLabel: undefined,
+    title: source.title,
+    tone: index % 3 === 1 ? 'soft' : index % 3 === 2 ? 'warm' : 'ink',
+  } satisfies DashboardCollection))
+
+  return [...integrationCards, ...sourceCards].slice(0, 6)
+}
+
+function providerIcon(providerKey: string): KnowledgeIcon {
+  if (providerKey === 'web') return Globe2
+  if (providerKey === 'notion') return Blocks
+  if (providerKey === 'microsoft') return FileText
+  if (providerKey === 'google') return Grid2X2
+  return Sparkles
+}
+
+function KnowledgeCollectionCard(props: {
+  collection: DashboardCollection
+  onConnect: () => void
+}) {
   return (
-    <button type="button" class="knowledge-folder-card">
-      <div class={cn('knowledge-folder-card__art', folderToneClass[props.folder.tone])}>
-        <div class="knowledge-folder-card__shine" />
-        <div class="knowledge-folder-card__label">
-          {props.folder.connections[0] ?? 'Velion'}
-          <br />
-          Source Group
-        </div>
+    <article class={cn('knowledge-doc-card', `knowledge-doc-card--${props.collection.tone}`)}>
+      <div class="knowledge-doc-card__icon" aria-hidden="true">
+        <props.collection.Icon class="size-4" strokeWidth={1.8} />
       </div>
-
-      <div class="knowledge-folder-card__base">
-        <div class="knowledge-folder-card__tab" />
-        <div class="knowledge-folder-card__tab-angle" />
+      <div class="knowledge-doc-card__body">
+        <h3>{props.collection.title}</h3>
+        <p>{props.collection.description}</p>
       </div>
-
-      <div class="knowledge-folder-card__title">
-        <h3>{props.folder.title}</h3>
-        <p>{props.folder.subtitle}</p>
+      <div class="knowledge-doc-card__footer">
+        <span>{props.collection.meta}</span>
+        <Show when={props.collection.actionLabel}>
+          <button type="button" onClick={() => props.onConnect()}>{props.collection.actionLabel}</button>
+        </Show>
       </div>
-
-      <div class="knowledge-folder-card__stats">
-        <div>
-          <strong>{props.folder.primaryValue}</strong>
-          <span>{props.folder.primaryLabel}</span>
-        </div>
-        <p>{props.folder.secondaryValue} {props.folder.secondaryLabel}</p>
-      </div>
-    </button>
+    </article>
   )
 }
 
-function IntegrationCard(props: { integration: LiveKnowledgeIntegration }) {
+function FolderCard(props: { folder: LiveKnowledgeFolder }) {
+  const linkedSources = () => props.folder.connections.length
+
   return (
-    <article class="velion-panel knowledge-integration-card">
-      <div class="knowledge-integration-card__top">
-        <span>{props.integration.name.slice(0, 1)}</span>
-        <small class={cn('knowledge-status-pill', integrationStatusClass[props.integration.status])}>
-          {props.integration.status}
-        </small>
-      </div>
-      <h3>{props.integration.name}</h3>
-      <div class="knowledge-integration-card__stats">
-        <div>
-          <p>Coverage</p>
-          <strong>{props.integration.documents}</strong>
+    <article class="knowledge-folder-card">
+      <div class={cn('knowledge-folder-card__visual', folderToneClass[props.folder.tone])}>
+        <div class="knowledge-folder-card__visual-glow" aria-hidden="true" />
+        <div class="knowledge-folder-card__sheet-stack" aria-hidden="true">
+          <span />
+          <span />
+          <span />
         </div>
-        <div>
-          <p>Freshness</p>
-          <strong>{props.integration.freshness}</strong>
+        <div class="knowledge-folder-card__folder-shape" aria-hidden="true">
+          <span class="knowledge-folder-card__folder-tab" />
+          <span class="knowledge-folder-card__folder-face" />
+        </div>
+        <div class="knowledge-folder-card__connection-badges" aria-label={`${linkedSources()} linked sources`}>
+          <For each={props.folder.connections.slice(0, 3)}>
+            {(connection) => <span title={connection}>{connection.slice(0, 1).toUpperCase()}</span>}
+          </For>
         </div>
       </div>
-      <Show when={props.integration.detail}>
-        <p class="knowledge-integration-card__detail">{props.integration.detail}</p>
-      </Show>
+
+      <div class="knowledge-folder-card__body">
+        <div class="knowledge-folder-card__heading">
+          <div>
+            <h3>{props.folder.title}</h3>
+            <p>{props.folder.subtitle}</p>
+          </div>
+          <span class="knowledge-folder-card__arrow" aria-hidden="true">↗</span>
+        </div>
+
+        <div class="knowledge-folder-card__stats">
+          <span class="knowledge-folder-card__stat-primary">
+            <Folder class="size-4" strokeWidth={1.7} />
+            <strong>{props.folder.primaryValue}</strong>
+            <small>{props.folder.primaryLabel}</small>
+          </span>
+          <span class="knowledge-folder-card__stat-secondary">
+            {props.folder.secondaryValue} {props.folder.secondaryLabel}
+          </span>
+        </div>
+
+        <div class="knowledge-folder-card__linked-meter" aria-label={`${linkedSources()} linked sources`}>
+          <span>Linked sources</span>
+          <div>
+            <For each={[0, 1, 2, 3, 4]}>
+              {(segment) => <i class={segment < linkedSources() ? 'knowledge-folder-card__meter-segment--active' : ''} />}
+            </For>
+          </div>
+        </div>
+      </div>
     </article>
+  )
+}
+
+function KnowledgePulsePanel(props: {
+  dataPlane: LiveKnowledgePayload['dataPlane']
+}) {
+  const coverage = () => {
+    if (props.dataPlane.documentCount <= 0) return 0
+    return Math.min(100, Math.round((props.dataPlane.indexedCount / props.dataPlane.documentCount) * 100))
+  }
+
+  return (
+    <section class="knowledge-pulse-grid" aria-label="Knowledge pulse">
+      <article class="velion-panel knowledge-pulse-card knowledge-pulse-card--activity">
+        <div class="knowledge-pulse-card__header">
+          <div>
+            <span class="knowledge-card-eyebrow">Workspace pulse</span>
+            <h2>Documentation engagement</h2>
+          </div>
+          <span class="knowledge-pulse-card__status"><span /> Live snapshot</span>
+        </div>
+        <div class="knowledge-pulse-card__activity">
+          <div class="knowledge-pulse-card__activity-copy">
+            <strong>{props.dataPlane.indexedCount}</strong>
+            <span>documents ready for retrieval</span>
+            <p>Historical view and edit telemetry will appear here once the activity feed is connected.</p>
+          </div>
+          <div class="knowledge-pulse-card__empty-graph" aria-label="No activity telemetry available">
+            <span>No activity telemetry yet</span>
+          </div>
+        </div>
+        <div class="knowledge-pulse-card__axis" aria-hidden="true">
+          <span>Sources</span><span>Sync</span><span>Index</span><span>Answers</span>
+        </div>
+      </article>
+
+      <article class="velion-panel knowledge-pulse-card knowledge-pulse-card--coverage">
+        <div class="knowledge-pulse-card__header">
+          <div>
+            <span class="knowledge-card-eyebrow">Coverage</span>
+            <h2>Index coverage</h2>
+          </div>
+          <MoreHorizontal class="size-4" aria-hidden="true" />
+        </div>
+        <div class="knowledge-pulse-donut" style={{ background: `conic-gradient(#171717 ${coverage()}%, #e7e6e1 0)` }}>
+          <div>
+            <strong>{coverage()}%</strong>
+            <span>indexed</span>
+          </div>
+        </div>
+        <p class="knowledge-pulse-card__footnote">
+          {props.dataPlane.indexedCount} of {props.dataPlane.documentCount} documents are ready.
+        </p>
+      </article>
+    </section>
   )
 }
 
@@ -939,11 +1138,18 @@ function FilesTable(props: {
   searchQuery: string
 }) {
   return (
-    <section class="velion-panel knowledge-files-panel">
+    <section class="velion-panel knowledge-files-panel knowledge-files-panel--archive">
       <div class="knowledge-files-panel__header">
         <div>
-          <h2>Files</h2>
+          <h2><span class="sr-only">Files</span><span aria-hidden="true">Sprint Archives</span></h2>
           <p>Latest files available to retrieval.</p>
+        </div>
+        <div class="knowledge-archive-actions" aria-hidden="true">
+          <span><Bookmark class="size-4" /></span>
+          <span><Pencil class="size-4" /></span>
+          <span><Trash2 class="size-4" /></span>
+          <span><Mail class="size-4" /></span>
+          <span><Download class="size-4" /></span>
         </div>
         <label class="knowledge-files-search">
           <Search class="size-4" />
@@ -956,46 +1162,28 @@ function FilesTable(props: {
         </label>
       </div>
 
-      <div class="knowledge-table-scroll">
-        <table class="knowledge-files-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Added By</th>
-              <th>Source</th>
-              <th>Updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            <Show
-              when={props.files.length > 0}
-              fallback={(
-                <tr>
-                  <td colSpan={4}>No retrieval files match the current filters.</td>
-                </tr>
-              )}
-            >
-              <For each={props.files}>
-                {(file) => {
-                  const Icon = sourceTypeIcon[file.type]
-                  return (
-                    <tr>
-                      <td>
-                        <span class="knowledge-file-name">
-                          <Dynamic component={Icon} class="size-4" />
-                          {file.name}
-                        </span>
-                      </td>
-                      <td>{file.addedBy}</td>
-                      <td>{file.source}</td>
-                      <td>{file.updated}</td>
-                    </tr>
-                  )
-                }}
-              </For>
-            </Show>
-          </tbody>
-        </table>
+      <div class="knowledge-archive-list">
+        <Show
+          when={props.files.length > 0}
+          fallback={<p class="knowledge-archive-empty">No retrieval files match the current filters.</p>}
+        >
+          <For each={props.files}>
+            {(file) => {
+              const Icon = sourceTypeIcon[file.type]
+              return (
+                <article class="knowledge-archive-file">
+                  <div class="knowledge-archive-file__icon"><Dynamic component={Icon} class="size-4" /></div>
+                  <div class="knowledge-archive-file__body">
+                    <h3>{file.name}</h3>
+                    <p>Shared by {file.addedBy}</p>
+                    <p>{file.source} · Updated {file.updated}</p>
+                  </div>
+                  <Clock3 class="knowledge-archive-file__clock size-4" aria-hidden="true" />
+                </article>
+              )
+            }}
+          </For>
+        </Show>
       </div>
     </section>
   )

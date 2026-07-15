@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -178,6 +179,21 @@ func TestShopifyAuthorizationURLRequiresShopContext(t *testing.T) {
 	}
 	if !strings.HasPrefix(rawURL, "https://velion.myshopify.com/admin/oauth/authorize?") {
 		t.Fatalf("url = %s, want shop scoped auth URL", rawURL)
+	}
+}
+
+func TestProvidersWithoutRemoteRevocationReturnTypedUnsupportedSentinel(t *testing.T) {
+	clients := map[string]ProviderOAuthClient{
+		"generic": NewOAuth2Client(OAuth2ClientConfig{ProviderKey: "unsupported"}),
+		"notion":  NewNotionOAuthClient(OAuth2ClientConfig{ProviderKey: "notion"}),
+		"shopify": NewShopifyOAuthClient("client", "secret", nil),
+	}
+	for name, client := range clients {
+		t.Run(name, func(t *testing.T) {
+			if err := client.Revoke(t.Context(), "token", nil); !errors.Is(err, ErrRevocationUnsupported) {
+				t.Fatalf("Revoke error = %v, want ErrRevocationUnsupported", err)
+			}
+		})
 	}
 }
 

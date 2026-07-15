@@ -25,25 +25,16 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/database"
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/grpc"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/http"
-	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/internalkey"
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/metrics"
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/redis"
 )
 
 func main() {
-	// G40 (velion-gap.md §8.29): refuse to start in production with a
-	// placeholder / missing / drifted internal API key. Mirrors velion's
-	// boot-time gate (§8.27).
-	if r := internalkey.AssertFromEnv("INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"); !r.OK {
-		msg := "[billing-core startup] internal API key validation failed (" + string(r.Problem.Kind) + " on " + r.Problem.EnvVar + "): " + r.Problem.Detail
-		if internalkey.IsProduction() {
-			log.Fatalf("FATAL %s", msg)
-		}
-		log.Printf("WARN  %s — continuing because not production", msg)
-	} else {
-		log.Printf("[billing-core startup] internal API key OK (%s)", r.Resolved)
+	if err := httpserver.ValidateRequiredServiceCredentialRegistry(os.Getenv("BILLING_CORE_SERVICE_CREDENTIALS")); err != nil {
+		log.Fatalf("[billing-core startup] service credential registry validation failed: %v", err)
 	}
+	log.Printf("[billing-core startup] scoped service credential registry OK")
 
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6062
 	if os.Getenv("PPROF_ENABLED") == "true" {
@@ -111,8 +102,11 @@ func main() {
 	// Wire shared cross-plane publisher (velion-nats) independently from
 	// local controlplane-nats so cross-plane propagation still works if the
 	// local broker is temporarily unavailable.
-	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, cfg.NATSSharedToken, cfg.ServiceName); spErr != nil {
-		log.Printf("warning: shared NATS unavailable: %v", spErr)
+	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, nats.SharedCredentials{
+		User: cfg.NATSSharedUser, Password: cfg.NATSSharedPass,
+		Token: cfg.NATSSharedToken, AllowTokenFallback: cfg.NATSSharedAllowTokenFallback,
+	}, cfg.ServiceName); spErr != nil {
+		log.Fatalf("shared NATS unavailable: %v", spErr)
 	} else if sp != nil {
 		defer sp.Close()
 		billingService.SetSharedPublisher(sp)
@@ -164,9 +158,6 @@ func main() {
 
 	if natsClient != nil {
 		defer natsClient.Close()
-		if err := natsClient.EnsureStream(ctx, "CONTROL_PLANE_EVENTS", []string{"user.>", "organization.>", "session.>", "billing.>", "usage.>"}); err != nil {
-			log.Printf("warning: ensure nats stream failed: %v", err)
-		}
 		publisher = nats.NewPublisher(natsClient)
 		billingService.SetPublisher(publisher)
 

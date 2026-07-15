@@ -1876,18 +1876,11 @@ func (s *Server) fetchAuthCoreTokenByRef(ctx context.Context, tokenRef string) (
 		authServiceURL = "http://localhost:3011"
 	}
 
-	internalAPIKey := strings.TrimSpace(os.Getenv("INTERNAL_API_KEY"))
-	if internalAPIKey == "" {
-		internalAPIKey = strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET"))
-	}
-	if internalAPIKey == "" {
-		return nil, fmt.Errorf("INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET must be set")
+	if strings.TrimSpace(s.authInternalCredential.Token) == "" {
+		return nil, fmt.Errorf("scoped Auth internal service credential must be configured")
 	}
 
-	body, err := json.Marshal(map[string]string{
-		"tokenRef":       tokenRef,
-		"internalApiKey": internalAPIKey,
-	})
+	body, err := json.Marshal(map[string]string{"tokenRef": tokenRef})
 	if err != nil {
 		return nil, fmt.Errorf("marshal auth-core token request: %w", err)
 	}
@@ -1897,6 +1890,9 @@ func (s *Server) fetchAuthCoreTokenByRef(ctx context.Context, tokenRef string) (
 		return nil, fmt.Errorf("build auth-core token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Service-Credential-Id", s.authInternalCredential.CredentialID)
+	req.Header.Set("X-Service-Principal", s.authInternalCredential.Principal)
+	req.Header.Set("X-Service-Auth", s.authInternalCredential.Token)
 
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)

@@ -27,10 +27,14 @@ type SharedPublisher struct {
 	sourceName string
 }
 
-// NewSharedPublisher connects to shared NATS and ensures the
-// AQENCIA_CONTROLPLANE stream exists. Returns nil without error when
-// sharedURL is empty (shared publishing safely disabled).
-func NewSharedPublisher(sharedURL, token, clientName string) (*SharedPublisher, error) {
+type SharedCredentials struct {
+	User, Password, Token string
+	AllowTokenFallback    bool
+}
+
+// NewSharedPublisher connects to shared NATS. Deployment tooling owns stream
+// and consumer topology; this runtime principal can only publish.
+func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientName string) (*SharedPublisher, error) {
 	if sharedURL == "" {
 		log.Println("ℹ️  VELION_NATS_URL not set — cross-plane publishing disabled (billing-core)")
 		return nil, nil
@@ -48,11 +52,24 @@ func NewSharedPublisher(sharedURL, token, clientName string) (*SharedPublisher, 
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Printf("🔄 Shared NATS reconnected (billing-core): %s", nc.ConnectedUrl())
 		}),
+		nats.CustomInboxPrefix("_INBOX.BILLING_SHARED"),
 	}
-
-	if token != "" {
+	user, password, token := strings.TrimSpace(credentials.User), strings.TrimSpace(credentials.Password), strings.TrimSpace(credentials.Token)
+	if (user == "") != (password == "") {
+		return nil, fmt.Errorf("shared NATS user/password must be configured together")
+	}
+	if user != "" {
+		if len(password) < 32 {
+			return nil, fmt.Errorf("shared NATS password must contain at least 32 characters")
+		}
+		opts = append(opts, nats.UserInfo(user, password))
+	} else if token != "" {
+		if !credentials.AllowTokenFallback {
+			return nil, fmt.Errorf("shared NATS token fallback requires explicit enablement")
+		}
 		opts = append(opts, nats.Token(token))
-		log.Println("🔐 Shared NATS (billing-core): using token authentication")
+	} else {
+		return nil, fmt.Errorf("shared NATS scoped credentials are required")
 	}
 
 	conn, err := nats.Connect(sharedURL, opts...)
@@ -67,43 +84,14 @@ func NewSharedPublisher(sharedURL, token, clientName string) (*SharedPublisher, 
 	}
 
 	sp := &SharedPublisher{conn: conn, js: js, sourceName: clientName}
-
-	if err := sp.ensureStream(context.Background()); err != nil {
-		log.Printf("⚠️  Shared NATS (billing-core): stream setup: %v", err)
-	}
-
 	log.Printf("✅ Connected to shared NATS (billing-core): %s", sharedURL)
 	return sp, nil
 }
 
-func (sp *SharedPublisher) ensureStream(ctx context.Context) error {
-	_, err := sp.js.CreateStream(ctx, jetstream.StreamConfig{
-		Name:       "AQENCIA_CONTROLPLANE",
-		Subjects:   []string{"aqencia.controlplane.>"},
-		Retention:  jetstream.LimitsPolicy,
-		MaxMsgs:    100_000,
-		MaxAge:     14 * 24 * time.Hour,
-		Storage:    jetstream.FileStorage,
-		Duplicates: 60 * time.Second,
-	})
-	if err != nil {
-		lower := strings.ToLower(err.Error())
-		if strings.Contains(lower, "stream name already in use") ||
-			strings.Contains(lower, "subjects overlap") ||
-			strings.Contains(lower, "err_code=10058") ||
-			strings.Contains(lower, "err_code=10065") {
-			return nil
-		}
-		return err
-	}
-	log.Println("✅ Shared NATS (billing-core): AQENCIA_CONTROLPLANE stream ready")
-	return nil
-}
-
-// Publish sends a cross-plane event. Fire-and-forget: never fails caller.
-func (sp *SharedPublisher) Publish(ctx context.Context, subject string, payload map[string]any) {
+// Publish sends a cross-plane event and returns only after a JetStream PubAck.
+func (sp *SharedPublisher) Publish(ctx context.Context, subject string, payload map[string]any, opts ...jetstream.PublishOpt) error {
 	if sp == nil || sp.conn == nil || !sp.conn.IsConnected() {
-		return
+		return fmt.Errorf("shared NATS publisher unavailable")
 	}
 
 	enriched := make(map[string]any, len(payload)+2)
@@ -115,16 +103,19 @@ func (sp *SharedPublisher) Publish(ctx context.Context, subject string, payload 
 
 	data, err := json.Marshal(enriched)
 	if err != nil {
-		log.Printf("❌ SharedPublisher (billing-core): marshal failed for %s: %v", subject, err)
-		return
+		return fmt.Errorf("marshal shared NATS event %s: %w", subject, err)
 	}
 
-	if _, err := sp.js.Publish(ctx, subject, data); err != nil {
-		log.Printf("❌ SharedPublisher (billing-core): publish %s failed: %v", subject, err)
-		return
+	ack, err := sp.js.Publish(ctx, subject, data, opts...)
+	if err != nil {
+		return fmt.Errorf("publish shared NATS event %s: %w", subject, err)
+	}
+	if ack == nil || ack.Stream == "" || ack.Sequence == 0 {
+		return fmt.Errorf("invalid shared NATS PubAck for %s", subject)
 	}
 
 	log.Printf("📡 SharedNATS (billing-core) → %s", subject)
+	return nil
 }
 
 // Close drains and closes the shared NATS connection.
@@ -140,7 +131,7 @@ func (sp *SharedPublisher) Close() {
 // PublishAccountUpdated fires when an org's billing account is created or updated.
 // Data Plane and Reasoning Plane subscribe to adjust feature quotas.
 func (sp *SharedPublisher) PublishAccountUpdated(ctx context.Context, orgID, plan string, seats int) {
-	sp.Publish(ctx, "aqencia.controlplane.billing.account_updated", map[string]any{
+	_ = sp.Publish(ctx, "aqencia.controlplane.billing.account_updated", map[string]any{
 		"org_id": orgID,
 		"plan":   plan,
 		"seats":  seats,
@@ -149,7 +140,7 @@ func (sp *SharedPublisher) PublishAccountUpdated(ctx context.Context, orgID, pla
 
 // PublishQuotaExceeded fires when an org exceeds a usage quota.
 func (sp *SharedPublisher) PublishQuotaExceeded(ctx context.Context, orgID, metric string, limit, current int64) {
-	sp.Publish(ctx, "aqencia.controlplane.billing.quota_exceeded", map[string]any{
+	_ = sp.Publish(ctx, "aqencia.controlplane.billing.quota_exceeded", map[string]any{
 		"org_id":  orgID,
 		"metric":  metric,
 		"limit":   limit,
@@ -159,7 +150,7 @@ func (sp *SharedPublisher) PublishQuotaExceeded(ctx context.Context, orgID, metr
 
 // PublishInvoiceCreated fires when a new invoice is generated.
 func (sp *SharedPublisher) PublishInvoiceCreated(ctx context.Context, orgID, invoiceID string, amountCents int64, currency string) {
-	sp.Publish(ctx, "aqencia.controlplane.billing.invoice_created", map[string]any{
+	_ = sp.Publish(ctx, "aqencia.controlplane.billing.invoice_created", map[string]any{
 		"org_id":       orgID,
 		"invoice_id":   invoiceID,
 		"amount_cents": amountCents,
@@ -168,12 +159,27 @@ func (sp *SharedPublisher) PublishInvoiceCreated(ctx context.Context, orgID, inv
 }
 
 // PublishPlanChanged fires when a subscription plan changes.
-func (sp *SharedPublisher) PublishPlanChanged(ctx context.Context, orgID, previousPlan, newPlan string) {
-	sp.Publish(ctx, "aqencia.controlplane.billing.plan_changed", map[string]any{
+func (sp *SharedPublisher) PublishPlanChanged(ctx context.Context, orgID, previousPlan, newPlan string, revisions ...int64) error {
+	payload := map[string]any{
 		"org_id":        orgID,
 		"previous_plan": previousPlan,
 		"new_plan":      newPlan,
-	})
+	}
+	if len(revisions) == 0 || revisions[0] < 1 {
+		return sp.Publish(ctx, "aqencia.controlplane.billing.plan_changed", payload)
+	}
+	revision := revisions[0]
+	payload["revision"] = revision
+	return sp.Publish(
+		ctx,
+		"aqencia.controlplane.billing.plan_changed",
+		payload,
+		jetstream.WithMsgID(billingPlanChangeMessageID(orgID, revision)),
+	)
+}
+
+func billingPlanChangeMessageID(orgID string, revision int64) string {
+	return fmt.Sprintf("billing-plan:%s:%d", orgID, revision)
 }
 
 // PublishPlain sends a plain NATS core message (not JetStream) to a subject.

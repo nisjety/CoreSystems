@@ -2,12 +2,9 @@ package grpc
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"log"
 	"net"
-	"os"
-	"strings"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/config"
@@ -17,13 +14,8 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 	pb "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/proto/user/v1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
-	"google.golang.org/grpc/status"
 )
-
-const internalAPIKeyMetadataKey = "x-internal-api-key"
 
 // Server represents the gRPC server
 type Server struct {
@@ -35,7 +27,8 @@ type Server struct {
 	betterAuthClient *clients.BetterAuthClient
 	userRepo         *users.Repository
 	grpcServer       *grpc.Server
-	internalKeys     []string
+	grpcCredentials  []grpcServiceCredential
+	grpcAuthError    error
 }
 
 // NewServer creates a new gRPC server instance. sharedPublisher (may be nil)
@@ -48,6 +41,7 @@ func NewServer(cfg *config.Config, db *database.DB, publisher *nats.Publisher, s
 	// Create services - Phase 4: Updated to support both gRPC and HTTP
 	userService := users.NewService(userRepo, betterAuthClient, publisher)
 
+	grpcCredentials, grpcAuthError := loadGRPCServiceCredentials(configuredGRPCCredentialEnvironment())
 	return &Server{
 		config:           cfg,
 		db:               db,
@@ -56,12 +50,22 @@ func NewServer(cfg *config.Config, db *database.DB, publisher *nats.Publisher, s
 		sharedPublisher:  sharedPublisher,
 		betterAuthClient: betterAuthClient,
 		userRepo:         userRepo,
-		internalKeys:     configuredInternalKeys(),
+		grpcCredentials:  grpcCredentials,
+		grpcAuthError:    grpcAuthError,
 	}
 }
 
 // Start starts the gRPC server
 func (s *Server) Start(ctx context.Context) error {
+	if s.grpcAuthError != nil {
+		return fmt.Errorf("configure User Core gRPC service auth: %w", s.grpcAuthError)
+	}
+	transportCredentials, err := loadGRPCServerTransportCredentials(
+		configuredGRPCTLSEnvironment(s.config.Server.Environment),
+	)
+	if err != nil {
+		return fmt.Errorf("configure User Core gRPC transport security: %w", err)
+	}
 	address := fmt.Sprintf(":%d", s.config.Server.GRPCPort)
 
 	listener, err := net.Listen("tcp", address)
@@ -69,8 +73,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to listen on %s: %w", address, err)
 	}
 
-	// Create gRPC server with options
-	s.grpcServer = grpc.NewServer(
+	serverOptions := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(
 			s.requireInternalKeyUnaryInterceptor,
 			s.loggingInterceptor,
@@ -78,7 +81,11 @@ func (s *Server) Start(ctx context.Context) error {
 		grpc.ChainStreamInterceptor(
 			s.requireInternalKeyStreamInterceptor,
 		),
-	)
+	}
+	if transportCredentials != nil {
+		serverOptions = append(serverOptions, grpc.Creds(transportCredentials))
+	}
+	s.grpcServer = grpc.NewServer(serverOptions...)
 
 	// Register services
 	pb.RegisterUserServiceServer(s.grpcServer, &userServiceHandler{
@@ -115,32 +122,13 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func configuredInternalKeys() []string {
-	values := make([]string, 0, 2)
-	seen := map[string]struct{}{}
-
-	for _, name := range []string{"INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"} {
-		value := strings.TrimSpace(os.Getenv(name))
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		values = append(values, value)
-	}
-
-	return values
-}
-
 func (s *Server) requireInternalKeyUnaryInterceptor(
 	ctx context.Context,
 	req interface{},
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
 ) (interface{}, error) {
-	if err := s.validateInternalGRPCKey(ctx); err != nil {
+	if err := authorizeGRPCServiceCredential(ctx, info.FullMethod, s.grpcCredentials); err != nil {
 		log.Printf("gRPC auth denied: %s - %v", info.FullMethod, err)
 		return nil, err
 	}
@@ -153,39 +141,11 @@ func (s *Server) requireInternalKeyStreamInterceptor(
 	info *grpc.StreamServerInfo,
 	handler grpc.StreamHandler,
 ) error {
-	if err := s.validateInternalGRPCKey(stream.Context()); err != nil {
+	if err := authorizeGRPCServiceCredential(stream.Context(), info.FullMethod, s.grpcCredentials); err != nil {
 		log.Printf("gRPC stream auth denied: %s - %v", info.FullMethod, err)
 		return err
 	}
 	return handler(srv, stream)
-}
-
-func (s *Server) validateInternalGRPCKey(ctx context.Context) error {
-	if len(s.internalKeys) == 0 {
-		return status.Error(codes.FailedPrecondition, "service auth not configured")
-	}
-
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return status.Error(codes.Unauthenticated, "internal API key is required")
-	}
-
-	for _, candidate := range md.Get(internalAPIKeyMetadataKey) {
-		for _, configured := range s.internalKeys {
-			if constantTimeEqual(candidate, configured) {
-				return nil
-			}
-		}
-	}
-
-	return status.Error(codes.Unauthenticated, "invalid internal API key")
-}
-
-func constantTimeEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // Stop stops the gRPC server

@@ -11,6 +11,7 @@ import { AuthFormPanel } from '@/features/auth/components/sections/AuthFormPanel
 import { AuthVisualPanel } from '@/features/auth/components/sections/AuthVisualPanel'
 import { AuthScreen } from '@/features/auth/components/shared/AuthScreen'
 import { SOCIAL_PROVIDERS, getAuthCopy, type AuthMode, type Locale, type SocialProvider } from '@/features/auth/lib/model'
+import { safeReturnTo } from '@/features/auth/lib/return-to'
 import { gatewayBaseUrl } from '@/shared/api/config'
 import {
   sendEmailVerificationOtp,
@@ -103,6 +104,12 @@ export default function AuthPage() {
   let contentRef: HTMLDivElement | undefined
 
   const nb = () => locale() === 'nb'
+  const returnTo = createMemo(() => {
+    const params = new URLSearchParams(window.location.search)
+    return safeReturnTo(params.get('returnTo'))
+  })
+  const postAuthDestination = () =>
+    returnTo() ?? (getSession().onboardingStatus === 'COMPLETED' ? '/dashboard' : '/onboarding')
   const captchaSiteKey = createMemo(() => import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim() ?? '')
   const clearAuthFeedback = () => {
     setAuthError(null)
@@ -200,6 +207,11 @@ export default function AuthPage() {
           : 'The reset link is invalid or expired. Request a new link.',
       )
     }
+    if (window.location.pathname === '/reset-password' && (resetToken || resetError)) {
+      // Reset tokens are bearer credentials. Keep the captured value only in
+      // component memory and remove it from the address bar/history immediately.
+      window.history.replaceState(null, '', '/reset-password')
+    }
 
     const updateViewport = () => setViewportHeight(window.innerHeight)
     updateViewport()
@@ -271,7 +283,7 @@ export default function AuthPage() {
       // Load the full session (org + onboarding status). Routing is onboarding-gated:
       // finished users land on /dashboard, everyone else resumes onboarding.
       await loadSession()
-      navigate(getSession().onboardingStatus === 'COMPLETED' ? '/dashboard' : '/onboarding', { replace: true })
+      navigate(postAuthDestination(), { replace: true })
     } catch (err) {
       if (err instanceof ApiError && err.code === 'EMAIL_NOT_VERIFIED') {
         setEmailVerificationCode('')
@@ -480,7 +492,7 @@ export default function AuthPage() {
       setPendingSignInCredentials(null)
       setSessionUser(result.user)
       await loadSession()
-      navigate(getSession().onboardingStatus === 'COMPLETED' ? '/dashboard' : '/onboarding', { replace: true })
+      navigate(postAuthDestination(), { replace: true })
     } catch (err) {
       if (emailVerified) {
         setVerifyEmailFor(null)
@@ -519,7 +531,7 @@ export default function AuthPage() {
       if (result.user) setSessionUser(result.user)
       setPendingSignInCredentials(null)
       await loadSession()
-      navigate(getSession().onboardingStatus === 'COMPLETED' ? '/dashboard' : '/onboarding', { replace: true })
+      navigate(postAuthDestination(), { replace: true })
     } catch (err) {
       setAuthFailure(err instanceof Error ? err.message : nb() ? 'Ugyldig eller utløpt SMS-kode.' : 'Invalid or expired SMS code.')
     } finally {
@@ -554,7 +566,7 @@ export default function AuthPage() {
         trustDevice: trustDevice(),
       })
       await loadSession()
-      navigate(getSession().onboardingStatus === 'COMPLETED' ? '/dashboard' : '/onboarding', { replace: true })
+      navigate(postAuthDestination(), { replace: true })
     } catch (err) {
       setAuthFailure(err instanceof Error ? err.message : nb() ? 'Ugyldig to-faktorkode.' : 'Invalid two-factor code.')
     } finally {
@@ -589,7 +601,7 @@ export default function AuthPage() {
     // callbackURL is where Better Auth lands the user after the provider round-trip;
     // keep it on the SPA origin so the session cookie stays first-party and the
     // onboarding-gated router decides /onboarding vs /dashboard.
-    const callbackURL = `${window.location.origin}/onboarding`
+    const callbackURL = `${window.location.origin}${returnTo() ?? '/onboarding'}`
     window.location.href = `${gatewayBaseUrl()}/api/v1/auth/oauth/${provider.id}?callbackURL=${encodeURIComponent(callbackURL)}`
   }
 
@@ -605,7 +617,7 @@ export default function AuthPage() {
     }
     clearAuthFeedback()
     setSsoSubmitting(true)
-    const callbackURL = `${window.location.origin}/onboarding`
+    const callbackURL = `${window.location.origin}${returnTo() ?? '/onboarding'}`
     window.location.href = ssoInitiateUrl(target, callbackURL)
   }
 

@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
@@ -189,6 +189,7 @@ async fn navbar(
 async fn navbar_search(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let org_id = authorized_org_id(&state, &user).await;
@@ -199,13 +200,14 @@ async fn navbar_search(
 
     // Knowledge-scoped quick search → retrieval-engine. Degrade to an empty
     // (real) result set if retrieval is unavailable rather than erroring the navbar.
-    let (status, Json(body)) = proxy_json(
+    let (status, Json(body)) = crate::domains::knowledge::shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::POST,
-        &format!("{}/v1/search", state.retrieval_engine_url),
-        Some(json!({ "query": query, "limit": 6 })),
+        &format!("{}/v1/knowledge/search", state.retrieval_engine_url),
+        Some(json!({ "org_id": org_id, "query": query, "top_k": 6, "filters": {} })),
         Some(&org_id),
-        Some(&actor_for(&user)),
         None,
     )
     .await;
@@ -214,19 +216,46 @@ async fn navbar_search(
         return Json(ok(json!({ "results": [] })));
     }
 
+    let source_titles = body
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|source| {
+                    Some((
+                        first_str(source, &["document_id"])?.to_owned(),
+                        (
+                            first_str(source, &["title"])
+                                .unwrap_or("Knowledge result")
+                                .to_owned(),
+                            first_str(source, &["source"])
+                                .unwrap_or("knowledge")
+                                .to_owned(),
+                        ),
+                    ))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
     let results: Vec<Value> = body
-        .get("results")
+        .get("candidates")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
                 .map(|r| {
+                    let document_id = first_str(r, &["document_id"]).unwrap_or("");
+                    let (title, source) = source_titles
+                        .get(document_id)
+                        .map(|(title, source)| (title.as_str(), source.as_str()))
+                        .unwrap_or(("Knowledge result", "knowledge"));
                     json!({
-                        "id": first_str(r, &["id", "chunkId", "documentId"]).unwrap_or(""),
-                        "label": first_str(r, &["title", "label", "name"]).unwrap_or("Resultat"),
-                        "excerpt": first_str(r, &["snippet", "excerpt", "text"]).unwrap_or(""),
-                        "href": first_str(r, &["href", "url", "path"]).unwrap_or("/knowledge"),
-                        "source": first_str(r, &["source", "collection"]).unwrap_or("knowledge"),
+                        "id": first_str(r, &["knowledge_id"]).unwrap_or(document_id),
+                        "label": title,
+                        "excerpt": first_str(r, &["text"]).unwrap_or(""),
+                        "href": format!("/knowledge?source={}", urlencoding::encode(document_id)),
+                        "source": source,
                     })
                 })
                 .collect()

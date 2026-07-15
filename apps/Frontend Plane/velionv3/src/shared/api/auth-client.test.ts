@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  acceptOrganizationInvitation,
+  getAuthSession,
   resetPassword,
   sendEmailVerificationOtp,
   sendPasswordReset,
@@ -129,5 +131,36 @@ describe('auth client email verification OTP', () => {
       token: 'reset-token',
       newPassword: 'NewPassword!2026',
     })
+  })
+
+  it('accepts an organization invitation through the canonical gateway route', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({
+      invitation: { id: 'invite_123-abc', organizationId: 'org_1', status: 'accepted' },
+      member: { id: 'member_1', organizationId: 'org_1', role: 'member' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(acceptOrganizationInvitation('invite_123-abc')).resolves.toMatchObject({
+      invitation: { organizationId: 'org_1', status: 'accepted' },
+    })
+
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/orgs/invitations/invite_123-abc/accept')
+    expect(init.method).toBe('POST')
+    expect(init.credentials).toBe('include')
+  })
+
+  it('can bypass Better Auth session cookie cache after an authority transition', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      void input
+      return jsonResponse({ user: { id: 'user_1' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getAuthSession({ disableCookieCache: true })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      '/api/v1/auth/session?disableCookieCache=true',
+    )
   })
 })

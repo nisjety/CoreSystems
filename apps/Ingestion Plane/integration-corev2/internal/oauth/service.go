@@ -264,19 +264,6 @@ func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code
 	if err := s.repo.MarkConnectSessionConsumed(ctx, session.ID, "", ""); err != nil {
 		return result, err
 	}
-	_ = s.repo.InsertAuditEvent(ctx, store.AuditEvent{
-		ID:             "audit_" + uuid.NewString(),
-		OrganizationID: session.OrganizationID,
-		UserID:         session.UserID,
-		ConnectionID:   connection.ID,
-		EventType:      "connection.created",
-		ProviderKey:    session.ProviderKey,
-		Metadata: map[string]any{
-			"capabilities": session.Capabilities,
-			"scopes":       redactScopes(session.Scopes),
-		},
-		CreatedAt: s.now(),
-	})
 	_ = s.publisher.Publish(ctx, events.Event{
 		Type:           "integration.connected",
 		OrganizationID: connection.OrganizationID,
@@ -312,7 +299,7 @@ func (s *Service) AccessTokenForConnection(ctx context.Context, connectionID str
 	if err != nil {
 		return AccessTokenResult{}, err
 	}
-	if connection.DeletedAt != nil || connection.Status == "deleted" {
+	if connection.DeletedAt != nil || (connection.Status != "active" && connection.Status != "needs_refresh") {
 		return AccessTokenResult{}, store.ErrNotFound
 	}
 	return s.accessTokenForConnection(ctx, connection)
@@ -323,43 +310,112 @@ func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason
 	if err != nil {
 		return store.Connection{}, err
 	}
-	revokeStatus := "not_supported"
-	revokeError := ""
+	if connection.DeletedAt != nil || connection.Status == "deleted" {
+		return connection, nil
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "user_requested"
+	}
+
+	// Provider revocation is an external side effect and cannot participate in
+	// the database transaction. Persist a resumable saga stage first so a crash
+	// or database failure never produces an untracked revocation attempt.
+	pending := connection
+	pending.Status = "disconnecting"
+	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		var stageErr error
+		pending, stageErr = tx.UpsertConnection(ctx, pending)
+		if stageErr != nil {
+			return stageErr
+		}
+		return tx.InsertAuditEvent(ctx, store.AuditEvent{
+			ID:             "audit:integration:connection-delete-requested:" + pending.ID,
+			OrganizationID: pending.OrganizationID,
+			UserID:         pending.UserID,
+			ConnectionID:   pending.ID,
+			EventType:      "connection.delete.requested",
+			ProviderKey:    pending.ProviderKey,
+			Metadata:       map[string]any{"reason": reason},
+			CreatedAt:      s.now(),
+		})
+	})
+	if err != nil {
+		return store.Connection{}, err
+	}
+	connection = pending
+
+	revokeStatus := "not_required"
+	var revokeErr error
 	if connection.DeletedAt == nil && connection.EncryptedAccessToken != "" {
 		if client, ok := s.clients[connection.ProviderKey]; ok {
 			accessToken, decryptErr := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
 			if decryptErr != nil {
 				revokeStatus = "token_decrypt_failed"
-				revokeError = decryptErr.Error()
-			} else if err := client.Revoke(ctx, accessToken, connection.ProviderContext); err != nil {
-				revokeStatus = "failed"
-				revokeError = err.Error()
+				revokeErr = fmt.Errorf("decrypt provider credential for revocation: %w", decryptErr)
+			} else if err := client.Revoke(ctx, accessToken, connection.ProviderContext); errors.Is(err, ErrRevocationUnsupported) {
+				revokeStatus = "unsupported_provider_policy"
+			} else if err != nil {
+				revokeStatus = "revocation_failed"
+				revokeErr = fmt.Errorf("revoke provider credential: %w", err)
 			} else {
 				revokeStatus = "completed"
 			}
+		} else {
+			revokeStatus = "provider_client_unavailable"
+			revokeErr = fmt.Errorf("provider client %q is unavailable for revocation", connection.ProviderKey)
 		}
 	}
-	deleted, err := s.repo.MarkConnectionDeleted(ctx, connection.ID)
+	if revokeErr != nil {
+		failed := connection
+		failed.Status = "revocation_failed"
+		if err := s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+			var persistErr error
+			failed, persistErr = tx.UpsertConnection(ctx, failed)
+			if persistErr != nil {
+				return persistErr
+			}
+			return tx.InsertAuditEvent(ctx, store.AuditEvent{
+				ID:             "audit:integration:connection-revocation-failed:" + failed.ID,
+				OrganizationID: failed.OrganizationID,
+				UserID:         failed.UserID,
+				ConnectionID:   failed.ID,
+				EventType:      "connection.revocation.failed",
+				ProviderKey:    failed.ProviderKey,
+				Metadata: map[string]any{
+					"reason":        reason,
+					"revoke_status": revokeStatus,
+				},
+				CreatedAt: s.now(),
+			})
+		}); err != nil {
+			return store.Connection{}, errors.Join(revokeErr, err)
+		}
+		return failed, revokeErr
+	}
+	var deleted store.Connection
+	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		var deleteErr error
+		deleted, deleteErr = tx.MarkConnectionDeleted(ctx, connection.ID)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		return tx.InsertAuditEvent(ctx, store.AuditEvent{
+			ID:             "audit:integration:connection-deleted:" + deleted.ID,
+			OrganizationID: deleted.OrganizationID,
+			UserID:         deleted.UserID,
+			ConnectionID:   deleted.ID,
+			EventType:      "connection.deleted",
+			ProviderKey:    deleted.ProviderKey,
+			Metadata: map[string]any{
+				"reason":        reason,
+				"revoke_status": revokeStatus,
+			},
+			CreatedAt: s.now(),
+		})
+	})
 	if err != nil {
 		return store.Connection{}, err
 	}
-	if strings.TrimSpace(reason) == "" {
-		reason = "user_requested"
-	}
-	_ = s.repo.InsertAuditEvent(ctx, store.AuditEvent{
-		ID:             "audit_" + uuid.NewString(),
-		OrganizationID: deleted.OrganizationID,
-		UserID:         deleted.UserID,
-		ConnectionID:   deleted.ID,
-		EventType:      "connection.deleted",
-		ProviderKey:    deleted.ProviderKey,
-		Metadata: map[string]any{
-			"reason":        reason,
-			"revoke_status": revokeStatus,
-			"revoke_error":  revokeError,
-		},
-		CreatedAt: s.now(),
-	})
 	_ = s.publisher.Publish(ctx, events.Event{
 		Type:           "integration.disconnected",
 		OrganizationID: deleted.OrganizationID,
@@ -477,7 +533,31 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		CreatedAt:             createdAt,
 		UpdatedAt:             s.now(),
 	}
-	return s.repo.UpsertConnection(ctx, connection)
+	var saved store.Connection
+	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		var saveErr error
+		saved, saveErr = tx.UpsertConnection(ctx, connection)
+		if saveErr != nil {
+			return saveErr
+		}
+		return tx.InsertAuditEvent(ctx, store.AuditEvent{
+			ID:             "audit:integration:connection-created:" + saved.ID + ":" + session.ID,
+			OrganizationID: session.OrganizationID,
+			UserID:         session.UserID,
+			ConnectionID:   saved.ID,
+			EventType:      "connection.created",
+			ProviderKey:    session.ProviderKey,
+			Metadata: map[string]any{
+				"capabilities": append([]string(nil), session.Capabilities...),
+				"scopes":       redactScopes(session.Scopes),
+			},
+			CreatedAt: s.now(),
+		})
+	})
+	if err != nil {
+		return store.Connection{}, err
+	}
+	return saved, nil
 }
 
 func (s *Service) refresh(ctx context.Context, connection store.Connection, refreshToken string) (store.Connection, string, error) {

@@ -25,13 +25,23 @@ import (
 type SharedPublisher struct {
 	conn       *nats.Conn
 	js         jetstream.JetStream
+	gdprJS     gdprJetStreamPublisher
 	sourceName string
+}
+
+type gdprJetStreamPublisher interface {
+	PublishMsg(context.Context, *nats.Msg, ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+}
+
+type SharedCredentials struct {
+	User, Password, Token string
+	AllowTokenFallback    bool
 }
 
 // NewSharedPublisher connects to the shared NATS broker and ensures the
 // AQENCIA_CONTROLPLANE JetStream stream exists. Returns nil without error
 // when sharedURL is empty (shared publishing disabled).
-func NewSharedPublisher(sharedURL, token, clientName string) (*SharedPublisher, error) {
+func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientName string) (*SharedPublisher, error) {
 	if sharedURL == "" {
 		log.Println("ℹ️  VELION_NATS_URL not set — cross-plane publishing disabled")
 		return nil, nil
@@ -49,11 +59,24 @@ func NewSharedPublisher(sharedURL, token, clientName string) (*SharedPublisher, 
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			log.Printf("🔄 Shared NATS reconnected: %s", nc.ConnectedUrl())
 		}),
+		nats.CustomInboxPrefix("_INBOX.USER_SHARED"),
 	}
-
-	if token != "" {
+	user, password, token := strings.TrimSpace(credentials.User), strings.TrimSpace(credentials.Password), strings.TrimSpace(credentials.Token)
+	if (user == "") != (password == "") {
+		return nil, fmt.Errorf("shared NATS user/password must be configured together")
+	}
+	if user != "" {
+		if len(password) < 32 {
+			return nil, fmt.Errorf("shared NATS password must contain at least 32 characters")
+		}
+		opts = append(opts, nats.UserInfo(user, password))
+	} else if token != "" {
+		if !credentials.AllowTokenFallback {
+			return nil, fmt.Errorf("shared NATS token fallback requires explicit enablement")
+		}
 		opts = append(opts, nats.Token(token))
-		log.Println("🔐 Shared NATS: using token authentication")
+	} else {
+		return nil, fmt.Errorf("shared NATS scoped credentials are required")
 	}
 
 	conn, err := nats.Connect(sharedURL, opts...)
@@ -67,39 +90,9 @@ func NewSharedPublisher(sharedURL, token, clientName string) (*SharedPublisher, 
 		return nil, fmt.Errorf("shared NATS jetstream init failed: %w", err)
 	}
 
-	sp := &SharedPublisher{conn: conn, js: js, sourceName: clientName}
-
-	// Best-effort stream creation — auth-core may have already created it
-	if err := sp.ensureStream(context.Background()); err != nil {
-		log.Printf("⚠️  Shared NATS: AQENCIA_CONTROLPLANE stream setup: %v", err)
-	}
-
+	sp := &SharedPublisher{conn: conn, js: js, gdprJS: js, sourceName: clientName}
 	log.Printf("✅ Connected to shared NATS: %s", sharedURL)
 	return sp, nil
-}
-
-func (sp *SharedPublisher) ensureStream(ctx context.Context) error {
-	_, err := sp.js.CreateStream(ctx, jetstream.StreamConfig{
-		Name:       "AQENCIA_CONTROLPLANE",
-		Subjects:   []string{"aqencia.controlplane.>"},
-		Retention:  jetstream.LimitsPolicy,
-		MaxMsgs:    100_000,
-		MaxAge:     14 * 24 * time.Hour,
-		Storage:    jetstream.FileStorage,
-		Duplicates: 60 * time.Second,
-	})
-	if err != nil {
-		lower := strings.ToLower(err.Error())
-		if strings.Contains(lower, "stream name already in use") ||
-			strings.Contains(lower, "subjects overlap") ||
-			strings.Contains(lower, "err_code=10058") ||
-			strings.Contains(lower, "err_code=10065") {
-			return nil // already exists — not an error
-		}
-		return err
-	}
-	log.Println("✅ Shared NATS: AQENCIA_CONTROLPLANE stream ready")
-	return nil
 }
 
 // Publish sends a cross-plane event to the shared JetStream.
@@ -229,6 +222,31 @@ func (sp *SharedPublisher) PublishPlain(subject string, payload map[string]any) 
 		return
 	}
 	log.Printf("📡 SharedNATS (user-core) plain → %s", subject)
+}
+
+// PublishGDPRErasure publishes a locally outboxed erasure intent and waits
+// until the shared broker has accepted the write. The operation ledger keeps
+// retrying this method after transport failures; Nats-Msg-Id gives durable
+// stream configurations a stable deduplication key while plain subscribers
+// continue receiving the established subject.
+func (sp *SharedPublisher) PublishGDPRErasure(ctx context.Context, eventID string, payload []byte) error {
+	if sp == nil || sp.gdprJS == nil {
+		return fmt.Errorf("shared NATS is unavailable")
+	}
+	if strings.TrimSpace(eventID) == "" || !json.Valid(payload) {
+		return fmt.Errorf("invalid GDPR fan-out event")
+	}
+	message := nats.NewMsg("velion.gdpr.erasure.requested")
+	message.Header.Set("Nats-Msg-Id", eventID)
+	message.Data = append([]byte(nil), payload...)
+	ack, err := sp.gdprJS.PublishMsg(ctx, message)
+	if err != nil {
+		return fmt.Errorf("publish GDPR fan-out: %w", err)
+	}
+	if ack == nil || ack.Stream != "AQENCIA_CONTROLPLANE" || ack.Sequence == 0 {
+		return fmt.Errorf("publish GDPR fan-out: invalid JetStream PubAck")
+	}
+	return nil
 }
 
 // PublishProviderReadyForIntegration publishes aqencia.controlplane.user.provider_ready_for_integration.

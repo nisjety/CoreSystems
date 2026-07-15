@@ -25,6 +25,9 @@ export default defineSchema({
     // Sync tracking
     syncStatus: v.union(v.literal("syncing"), v.literal("synced"), v.literal("deleted")),
     lastSyncedAt: v.number(),
+    sourceRevision: v.optional(v.number()),
+    sourceEventId: v.optional(v.string()),
+    sourceFingerprint: v.optional(v.string()),
     
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -32,6 +35,14 @@ export default defineSchema({
   })
     .index("by_slug", ["slug"])
     .index("by_external_id", ["externalOrgId"]),
+
+  organizationTombstones: defineTable({
+    externalOrgId: v.string(),
+    sourceRevision: v.number(),
+    sourceEventId: v.string(),
+    sourceFingerprint: v.string(),
+    removedAt: v.number(),
+  }).index("by_external_org", ["externalOrgId"]),
 
   // Users - Connected to auth system
   users: defineTable({
@@ -47,6 +58,9 @@ export default defineSchema({
     syncStatus: v.union(v.literal("syncing"), v.literal("synced"), v.literal("deleted")),
     lastSyncedAt: v.number(),
     sourceUpdatedAt: v.optional(v.number()),
+    sourceRevision: v.optional(v.number()),
+    sourceEventId: v.optional(v.string()),
+    sourceFingerprint: v.optional(v.string()),
     
     createdAt: v.number(),
     lastSeenAt: v.number(),
@@ -63,6 +77,9 @@ export default defineSchema({
     externalOrgId: v.string(),
     externalAuthId: v.string(),
     sourceUpdatedAt: v.number(),
+    sourceRevision: v.optional(v.number()),
+    sourceEventId: v.optional(v.string()),
+    sourceFingerprint: v.optional(v.string()),
     removedAt: v.number(),
   })
     .index("by_external_org_and_user", ["externalOrgId", "externalAuthId"])

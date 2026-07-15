@@ -1,4 +1,9 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { createHash } from 'node:crypto';
 
 const mockGetSession = jest.fn();
 const mockResolveCanonicalTokenContext = jest.fn();
@@ -13,6 +18,14 @@ import { PlaneTokenController } from './plane-token.controller';
 
 describe('PlaneTokenController service issuance audit', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
+  const issuedAt = '2026-07-15T00:00:00.000Z';
+  const mintedToken = [
+    'header',
+    Buffer.from(
+      JSON.stringify({ iat: Math.floor(Date.parse(issuedAt) / 1000) }),
+    ).toString('base64url'),
+    'signature',
+  ].join('.');
 
   beforeEach(() => {
     process.env.PLANE_SERVICE_PRINCIPALS_JSON = JSON.stringify({
@@ -21,6 +34,7 @@ describe('PlaneTokenController service issuance audit', () => {
         audiences: ['data-plane'],
         orgIds: ['org-a'],
         scopes: ['documents:write'],
+        allowPersistentData: true,
       },
     });
   });
@@ -36,7 +50,7 @@ describe('PlaneTokenController service issuance audit', () => {
   it('publishes a durable bounded issuance event before returning the token', async () => {
     const tokens = {
       isKnownPlaneAudience: jest.fn().mockReturnValue(true),
-      issuePlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
     };
     const audit = {
       publishAuditDurable: jest
@@ -57,19 +71,35 @@ describe('PlaneTokenController service issuance audit', () => {
           orgId: 'org-a',
           scopes: ['documents:write'],
           reason: 'persist verified import',
+          zdr: false,
         },
       ),
-    ).resolves.toEqual({ token: 'bounded' });
+    ).resolves.toEqual({ token: mintedToken });
     expect(audit.publishAuditDurable).toHaveBeenCalledWith(
-      'velion.audit.v1.control.plane_service_token_issued',
+      'velion.audit.v2.control.auth-core.plane_service_token_issued',
       expect.objectContaining({
+        occurred_at: issuedAt,
+        event_id: `plane-token:${createHash('sha256')
+          .update(mintedToken)
+          .digest('hex')}`,
         org_id: 'org-a',
+        producer: 'auth-core',
         subject: 'service:worker',
         resource_id: 'data-plane',
         details: {
           audience: 'data-plane',
           scopes: ['documents:write'],
           reason: 'persist verified import',
+          zdr: false,
+        },
+      }),
+    );
+    expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
+      'data-plane',
+      expect.objectContaining({
+        retentionPosture: {
+          zdr: false,
+          authority: 'service-principal-policy',
         },
       }),
     );
@@ -87,7 +117,7 @@ describe('PlaneTokenController service issuance audit', () => {
     const controller = new PlaneTokenController(
       {
         isKnownPlaneAudience: jest.fn().mockReturnValue(true),
-        issuePlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+        issuePlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
       } as never,
       {
         publishAuditDurable: jest.fn().mockReturnValue(auditPending),
@@ -112,7 +142,7 @@ describe('PlaneTokenController service issuance audit', () => {
     expect(returned).toBe(false);
 
     acknowledge?.({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 42 });
-    await expect(issuance).resolves.toEqual({ token: 'bounded' });
+    await expect(issuance).resolves.toEqual({ token: mintedToken });
   });
 
   it.each([
@@ -132,7 +162,7 @@ describe('PlaneTokenController service issuance audit', () => {
       const controller = new PlaneTokenController(
         {
           isKnownPlaneAudience: jest.fn().mockReturnValue(true),
-          issuePlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+          issuePlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
         } as never,
         audit as never,
       );
@@ -147,6 +177,60 @@ describe('PlaneTokenController service issuance audit', () => {
       ).rejects.toBeInstanceOf(ServiceUnavailableException);
     },
   );
+
+  it('rejects unknown audiences before consulting the principal registry', async () => {
+    const controller = new PlaneTokenController(
+      { isKnownPlaneAudience: jest.fn().mockReturnValue(false) } as never,
+      {} as never,
+    );
+
+    await expect(
+      controller.issueInternalToken(
+        'unknown-plane',
+        'worker',
+        'test-only-worker-key',
+        { orgId: 'org-a', scopes: ['documents:write'], reason: 'test' },
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('distinguishes unavailable policy from an unauthorized persistence request', async () => {
+    const controller = new PlaneTokenController(
+      { isKnownPlaneAudience: jest.fn().mockReturnValue(true) } as never,
+      {} as never,
+    );
+    process.env.PLANE_SERVICE_PRINCIPALS_JSON = '';
+    await expect(
+      controller.issueInternalToken(
+        'data-plane',
+        'worker',
+        'test-only-worker-key',
+        { orgId: 'org-a', scopes: ['documents:write'], reason: 'test' },
+      ),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    process.env.PLANE_SERVICE_PRINCIPALS_JSON = JSON.stringify({
+      worker: {
+        credential: 'test-only-worker-key',
+        audiences: ['data-plane'],
+        orgIds: ['org-a'],
+        scopes: ['documents:write'],
+      },
+    });
+    await expect(
+      controller.issueInternalToken(
+        'data-plane',
+        'worker',
+        'test-only-worker-key',
+        {
+          orgId: 'org-a',
+          scopes: ['documents:write'],
+          reason: 'attempt persistence downgrade',
+          zdr: false,
+        },
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
 });
 
 describe('PlaneTokenController interactive capability scope issuance', () => {

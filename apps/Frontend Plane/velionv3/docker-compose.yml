@@ -51,14 +51,16 @@ services:
       # Ownership honesty gate (PR-6): the SAME value retrieval-engine reads. The
       # gateway reports gate_open = (this == strict) && identity_live at
       # /api/v1/ownership/status; the SPA renders no privacy affordance otherwise.
-      CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-off}
+      CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-strict}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      ORG_CORE_SERVICE_TOKEN: ${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN must match Control Plane configuration}
       SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:3017}
       SESSION_CORE_SERVICE_TOKEN: ${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN must match Control Plane configuration}
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN must match Control Plane configuration}
       BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
+      BILLING_CORE_SERVICE_TOKEN: ${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN must match Control Plane configuration}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
       NOTIFICATION_CORE_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must match Application Plane notification-core configuration}
@@ -71,6 +73,7 @@ services:
       # binds 3163. Both were omitted here, so the gateway silently fell back to
       # its config.rs default (audit) / left insight unwired. Pin them explicitly.
       AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:8187}
+      AUDIT_CORE_SERVICE_TOKEN: ${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN must match Control Plane configuration}
       INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
       GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}
       DOCUMENTS_API_URL: ${DOCUMENTS_API_URL:-http://dpv2-documents-api:8010}
@@ -108,6 +111,7 @@ services:
       ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
       RUST_LOG: ${RUST_LOG:-info}
       VELION_ALLOWED_ORIGINS: ${VELION_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
+      VELION_PUBLIC_ORIGIN: ${VELION_PUBLIC_ORIGIN:-http://localhost:5173}
     ports:
       - "${VELION_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use event_envelope_rs::EventVerifier;
 use quickwit_adapter_rs::{
     api,
     auth::AdminVerifier,
@@ -60,7 +61,55 @@ async fn main() -> anyhow::Result<()> {
         run_admin_job_worker(runner_store, runner_executor).await;
     });
 
-    if unverified_legacy_events_enabled(
+    if signed_event_consumers_enabled(
+        std::env::var("ENABLE_SIGNED_EVENT_CONSUMERS")
+            .as_deref()
+            .unwrap_or(""),
+    ) {
+        let required_paths = [
+            cfg.documents_event_public_key_path.as_str(),
+            cfg.index_event_public_key_path.as_str(),
+            cfg.embedding_event_public_key_path.as_str(),
+            cfg.wiki_event_public_key_path.as_str(),
+        ];
+        anyhow::ensure!(
+            required_paths.iter().all(|path| !path.trim().is_empty()),
+            "signed Quickwit consumers require all producer public key paths"
+        );
+        let documents = event_verifier(
+            &cfg.documents_event_public_key_path,
+            "service:documents-api-go",
+            "documents-events-v1",
+            &cfg.event_auth_audience,
+            "events:documents:publish",
+        )?;
+        let index = event_verifier(
+            &cfg.index_event_public_key_path,
+            "service:index-engine-rs",
+            "index-events-v1",
+            &cfg.event_auth_audience,
+            "events:index:publish",
+        )?;
+        let embedding = event_verifier(
+            &cfg.embedding_event_public_key_path,
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            &cfg.event_auth_audience,
+            "events:embedding:publish",
+        )?;
+        let wiki = event_verifier(
+            &cfg.wiki_event_public_key_path,
+            "service:wiki-store-go",
+            "wiki-events-v1",
+            &cfg.event_auth_audience,
+            "events:wiki:publish",
+        )?;
+        let security = Arc::new(stream::EventSecurity::new(
+            documents, index, embedding, wiki,
+        ));
+        let nats = nats_connection::connect(&cfg.nats_url).await?;
+        stream::spawn(nats, rebuild_ctx.clone(), security).await?;
+    } else if unverified_legacy_events_enabled(
         std::env::var("ALLOW_UNVERIFIED_LEGACY_EVENTS")
             .as_deref()
             .unwrap_or(""),
@@ -74,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     ) {
         tracing::warn!("unsigned legacy Quickwit event consumers enabled for insecure development");
         let nats = nats_connection::connect(&cfg.nats_url).await?;
-        stream::spawn(nats, rebuild_ctx.clone()).await?;
+        stream::spawn_unverified_legacy(nats, rebuild_ctx.clone()).await?;
     } else {
         tracing::warn!("Quickwit live mutation consumers disabled until signed producer-scoped envelopes are available");
     }
@@ -89,6 +138,27 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+fn event_verifier(
+    path: &str,
+    issuer: &str,
+    key_id: &str,
+    audience: &str,
+    scope: &str,
+) -> anyhow::Result<Arc<EventVerifier>> {
+    Ok(Arc::new(EventVerifier::from_rsa_pem(
+        &std::fs::read(path)?,
+        issuer,
+        key_id,
+        audience,
+        scope,
+        100_000,
+    )?))
+}
+
+fn signed_event_consumers_enabled(value: &str) -> bool {
+    value == "1"
 }
 
 async fn run_admin_job_worker(store: Arc<PgAdminJobStore>, executor: Arc<RebuildContext>) {
@@ -149,7 +219,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod event_containment_tests {
-    use super::unverified_legacy_events_enabled;
+    use super::{signed_event_consumers_enabled, unverified_legacy_events_enabled};
 
     #[test]
     fn unsigned_mutation_consumers_require_explicit_isolated_nonproduction_posture() {
@@ -171,5 +241,12 @@ mod event_containment_tests {
             "1",
             "isolated_e2e"
         ));
+    }
+
+    #[test]
+    fn signed_mutation_consumers_require_explicit_enablement() {
+        assert!(!signed_event_consumers_enabled(""));
+        assert!(!signed_event_consumers_enabled("true"));
+        assert!(signed_event_consumers_enabled("1"));
     }
 }

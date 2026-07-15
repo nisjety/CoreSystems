@@ -10,9 +10,11 @@ services:
     ports: !reset []
     environment:
       APP_ENV: production
+      CONTROL_PLANE_ENFORCEMENT: strict
       ALLOW_DEV_AUTH_BYPASS: "0"
       ALLOW_INSECURE_DEV_DEFAULTS: "0"
       MODEL_GATEWAY_DEV_BEARER: ""
+      VELION_PUBLIC_ORIGIN: ${VELION_PUBLIC_ORIGIN:?VELION_PUBLIC_ORIGIN is required in production}
 
   frontend:
     build:

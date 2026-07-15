@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use event_envelope_rs::EventSigner;
 use qdrant_client::Qdrant;
 use sqlx::PgPool;
 
@@ -34,6 +35,37 @@ fn text_rerank_allowed(zdr_mode: ZdrMode, requested: bool) -> bool {
     requested && !zdr_mode.restricts_egress()
 }
 
+fn encode_cost_event(
+    signer: &EventSigner,
+    org_id: &str,
+    user_id: Option<&str>,
+    zdr_mode: ZdrMode,
+    model: &str,
+    count: usize,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    if zdr_mode.restricts_egress() {
+        return Ok(None);
+    }
+    let event = serde_json::json!({
+        "event_type": "rerank",
+        "model": model,
+        "count": count,
+        "estimated_tokens": count as i64 * 32,
+        "org_id": org_id,
+        "user_id": user_id,
+        "zdr": false,
+        "idempotency_key": format!("rerank:{org_id}:{}", uuid::Uuid::new_v4()),
+    });
+    let raw = serde_json::to_vec(&event)?;
+    Ok(Some(signer.sign(
+        "dataplane.cost.ledger",
+        org_id,
+        user_id,
+        false,
+        &raw,
+    )?))
+}
+
 pub struct RetrievalPipeline {
     pub pool: PgPool,
     pub qdrant: Qdrant,
@@ -55,6 +87,10 @@ pub struct RetrievalPipeline {
     /// (embedding worker handles embeds). Optional: degrades silently when
     /// NATS isn't reachable.
     pub nats: Option<async_nats::Client>,
+    /// Producer-local signer for retrieval cost events. When absent, the
+    /// durable ledger publication is disabled; raw tenant-selected JSON is
+    /// never emitted as a fallback.
+    pub event_signer: Option<std::sync::Arc<EventSigner>>,
     /// Sparse lexical search backend. Postgres remains the canonical fallback;
     /// Quickwit is a rebuildable read model when enabled.
     pub sparse_backend: DynSparseSearchBackend,
@@ -516,18 +552,20 @@ impl RetrievalPipeline {
         // Wave 3.1 §15-G — publish per-query rerank cost event. Best-effort;
         // NATS unavailable does not fail the request.
         if rerank_used_count > 0 {
-            if let (Some(nats), Some(reranker)) = (self.nats.as_ref(), self.reranker.as_ref()) {
+            if let (Some(nats), Some(reranker), Some(signer)) = (
+                self.nats.as_ref(),
+                self.reranker.as_ref(),
+                self.event_signer.as_deref(),
+            ) {
                 let model = reranker.model_name().to_string();
-                let cost_event = serde_json::json!({
-                    "event_type": "rerank",
-                    "model": model,
-                    "count": rerank_used_count,
-                    "estimated_tokens": rerank_used_count as i64 * 32,
-                    "org_ids": [req.org_id.clone()],
-                    "user_id": req.user_id.clone().unwrap_or_default(),
-                    "idempotency_key": format!("rerank:{}:{}", req.org_id, uuid::Uuid::new_v4()),
-                });
-                if let Ok(payload) = serde_json::to_vec(&cost_event) {
+                if let Ok(Some(payload)) = encode_cost_event(
+                    signer,
+                    &req.org_id,
+                    req.user_id.as_deref(),
+                    zdr_mode,
+                    &model,
+                    rerank_used_count,
+                ) {
                     // §17.3.3 — named subject, lint-checked.
                     const SUBJECT_COST_LEDGER: &str = "dataplane.cost.ledger";
                     let _ = nats.publish(SUBJECT_COST_LEDGER, payload.into()).await;
@@ -932,7 +970,16 @@ struct SourceRow {
 
 #[cfg(test)]
 mod tests {
-    use super::{embed_zdr_for_mode, embedding_cache_allowed, text_rerank_allowed, ZdrMode};
+    use super::{
+        embed_zdr_for_mode, embedding_cache_allowed, encode_cost_event, text_rerank_allowed,
+        ZdrMode,
+    };
+    use event_envelope_rs::{EventSigner, EventVerifier};
+    use rsa::{
+        pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
+        rand_core::OsRng,
+        RsaPrivateKey, RsaPublicKey,
+    };
 
     #[test]
     fn ephemeral_mode_drives_embed_zdr_true() {
@@ -958,5 +1005,62 @@ mod tests {
     fn ephemeral_queries_bypass_embedding_cache_reads_and_writes() {
         assert!(!embedding_cache_allowed(true));
         assert!(embedding_cache_allowed(false));
+    }
+
+    #[test]
+    fn cost_events_are_signed_per_tenant_and_suppressed_for_restrictive_zdr() {
+        let private = RsaPrivateKey::new(&mut OsRng, 2048).expect("test RSA key");
+        let public = RsaPublicKey::from(&private);
+        let private_pem = private
+            .to_pkcs1_pem(Default::default())
+            .expect("private PEM");
+        let public_pem = public.to_pkcs1_pem(Default::default()).expect("public PEM");
+        let signer = EventSigner::from_rsa_pem(
+            private_pem.as_bytes(),
+            "service:retrieval-engine-rs",
+            "retrieval-events-v1",
+            "dataplane-events",
+            "events:retrieval:publish",
+        )
+        .expect("signer");
+        let verifier = EventVerifier::from_rsa_pem(
+            public_pem.as_bytes(),
+            "service:retrieval-engine-rs",
+            "retrieval-events-v1",
+            "dataplane-events",
+            "events:retrieval:publish",
+            16,
+        )
+        .expect("verifier");
+
+        let envelope = encode_cost_event(
+            &signer,
+            "org-test",
+            Some("user-test"),
+            ZdrMode::Disabled,
+            "rerank-test",
+            2,
+        )
+        .expect("cost event")
+        .expect("durable posture emits event");
+        let verified = verifier
+            .verify("dataplane.cost.ledger", &envelope)
+            .expect("verified cost event");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&verified.payload).expect("payload JSON");
+        assert_eq!(payload["org_id"], "org-test");
+        assert_eq!(payload["zdr"], false);
+        assert!(payload.get("org_ids").is_none());
+
+        assert!(encode_cost_event(
+            &signer,
+            "org-test",
+            Some("user-test"),
+            ZdrMode::Ephemeral,
+            "rerank-test",
+            2,
+        )
+        .expect("restricted event result")
+        .is_none());
     }
 }

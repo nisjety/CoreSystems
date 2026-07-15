@@ -1,5 +1,6 @@
 use axum::{
-    extract::{Path, Query, State},
+    body::to_bytes,
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     Json,
@@ -10,10 +11,130 @@ use serde_json::Value;
 
 use crate::{
     config::AppState,
-    upstream::{browser_origin, proxy_auth, proxy_auth_with_headers},
+    upstream::{browser_origin, proxy_auth, proxy_auth_callback, proxy_auth_with_headers},
 };
 
 use super::shared::cookie_header;
+
+const AUTH_CALLBACK_MAX_QUERY_BYTES: usize = 16 * 1024;
+const SAML_CALLBACK_MAX_BODY_BYTES: usize = 64 * 1024;
+const AUTH_PROVIDER_ID_MAX_BYTES: usize = 128;
+
+pub(super) async fn oauth_callback(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    request: Request,
+) -> Response {
+    proxy_get_callback(&state, &provider, "api/auth/callback", request).await
+}
+
+pub(super) async fn sso_oidc_callback(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    request: Request,
+) -> Response {
+    proxy_get_callback(&state, &provider, "api/auth/sso/callback", request).await
+}
+
+pub(super) async fn sso_saml_callback_get(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    request: Request,
+) -> Response {
+    proxy_get_callback(&state, &provider, "api/auth/sso/saml2/callback", request).await
+}
+
+pub(super) async fn sso_saml_callback_post(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let Some(url) = auth_callback_url(
+        &state.auth_core_url,
+        "api/auth/sso/saml2/callback",
+        &provider,
+        parts.uri.query(),
+    ) else {
+        return (StatusCode::BAD_REQUEST, "invalid auth callback").into_response();
+    };
+    let content_type = parts
+        .headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .unwrap_or_default();
+    if !content_type.split(';').next().is_some_and(|value| {
+        value
+            .trim()
+            .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    }) {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "invalid SAML callback content type",
+        )
+            .into_response();
+    }
+    let body = match to_bytes(body, SAML_CALLBACK_MAX_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "SAML callback body is too large",
+            )
+                .into_response()
+        }
+    };
+    let cookie = cookie_header(&parts.headers);
+    proxy_auth_callback(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        Some(&cookie),
+        Some("application/x-www-form-urlencoded"),
+    )
+    .await
+}
+
+async fn proxy_get_callback(
+    state: &AppState,
+    provider: &str,
+    path: &str,
+    request: Request,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    let Some(url) = auth_callback_url(&state.auth_core_url, path, provider, parts.uri.query())
+    else {
+        return (StatusCode::BAD_REQUEST, "invalid auth callback").into_response();
+    };
+    let cookie = cookie_header(&parts.headers);
+    proxy_auth_callback(state, Method::GET, &url, None, Some(&cookie), None).await
+}
+
+fn auth_callback_url(
+    auth_core_url: &str,
+    path: &str,
+    provider: &str,
+    query: Option<&str>,
+) -> Option<String> {
+    if provider.is_empty()
+        || provider.len() > AUTH_PROVIDER_ID_MAX_BYTES
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || query.is_some_and(|value| value.len() > AUTH_CALLBACK_MAX_QUERY_BYTES)
+    {
+        return None;
+    }
+
+    let mut url = format!("{}/{path}/{provider}", auth_core_url.trim_end_matches('/'));
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        url.push('?');
+        url.push_str(query);
+    }
+    Some(url)
+}
 
 pub(super) async fn sign_up(
     State(state): State<AppState>,

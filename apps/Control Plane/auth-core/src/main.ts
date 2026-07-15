@@ -12,11 +12,11 @@ import { join } from 'path';
 import { ReflectionService } from '@grpc/reflection';
 import { toNodeHandler } from 'better-auth/node';
 import { auth } from './auth/auth';
-import { OrganizationEventMiddleware } from './middleware/organization-event.middleware';
 import { SharedPublisher } from './nats/shared-publisher';
+import { selectNatsCredentials } from './nats/nats-credentials';
 import type { Server } from '@grpc/grpc-js';
 import type { PackageDefinition } from '@grpc/proto-loader';
-import type { Express, NextFunction, Request, Response } from 'express';
+import type { Express, Request, Response } from 'express';
 
 // Load environment variables
 dotenv.config();
@@ -59,32 +59,26 @@ async function bootstrap() {
   );
 
   // Connect NATS microservice for inter-service communication
-  const natsToken = process.env.NATS_TOKEN || process.env.NATS_AUTH_TOKEN;
-  const natsUser = process.env.NATS_USER;
-  const natsPass = process.env.NATS_PASS;
+  const natsCredentials = selectNatsCredentials(process.env);
 
   console.log('🔍 NATS Debug:', {
-    NATS_URL: process.env.NATS_URL,
-    hasToken: !!natsToken,
-    hasUser: !!natsUser,
-    hasPass: !!natsPass,
+    transport: 'nats',
+    credentialMode:
+      'user' in natsCredentials
+        ? 'scoped-user'
+        : 'token' in natsCredentials
+          ? 'migration-token'
+          : 'none',
   });
 
   const natsOptions: NonNullable<NatsOptions['options']> = {
     servers: [process.env.NATS_URL || 'nats://nats:4222'],
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2000,
+    inboxPrefix: '_INBOX.AUTH_CONTROL',
   };
 
-  // Token auth takes precedence (for production with aquatiq root container)
-  if (natsToken) {
-    natsOptions.token = natsToken;
-    console.log('🔐 NATS using token authentication');
-  } else if (natsUser && natsPass) {
-    natsOptions.user = natsUser;
-    natsOptions.pass = natsPass;
-    console.log('🔐 NATS using user/password authentication');
-  }
+  Object.assign(natsOptions, natsCredentials);
 
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.NATS,
@@ -182,32 +176,6 @@ async function bootstrap() {
   const typedAuth = auth as unknown as Parameters<typeof toNodeHandler>[0];
   const betterAuthHandler = toNodeHandler(typedAuth);
   const expressApp = app.getHttpAdapter().getInstance() as unknown as Express;
-
-  // Register organization event middleware BEFORE Better Auth handler
-  // This allows us to intercept responses from Better Auth organization endpoints
-  try {
-    const orgMiddleware = app.get(OrganizationEventMiddleware);
-    console.log('🔍 Got middleware instance:', !!orgMiddleware);
-
-    // Register middleware for organization endpoints (must come before Better Auth catch-all)
-    expressApp.use((req: Request, res: Response, next: NextFunction) => {
-      if (req.path.startsWith('/api/auth/organization')) {
-        console.log(
-          `🔍 Organization middleware intercepting: ${req.method} ${req.path}`,
-        );
-        orgMiddleware.use(req, res, next);
-        return;
-      }
-      return next();
-    });
-    console.log('✅ Organization event middleware registered');
-  } catch (error) {
-    console.warn(
-      '⚠️  Failed to register organization middleware:',
-      error instanceof Error ? error.message : String(error),
-    );
-    console.warn('⚠️  Error details:', error);
-  }
 
   // Reserve /api/auth/convex/* for Nest controllers that mint and expose
   // Convex JWT/JWKS material. Better Auth should continue owning the rest

@@ -1,8 +1,8 @@
 // Package subscriber wires NATS subscriptions for the two event
 // subject hierarchies that audit-core persists:
 //
-//   - `velion.audit.v1.<plane>.<event>` — security/operational events.
-//   - `velion.usage.v1.<plane>.<op>`    — billable resource usage.
+//   - `velion.audit.v2.<plane>.<producer>.<event>` — security/operational events.
+//   - `velion.usage.v2.<plane>.<producer>.<op>`    — billable resource usage.
 //
 // Both are durable JetStream consumers. Successful database writes are ACKed,
 // transient store failures are NAKed for bounded redelivery, and malformed or
@@ -11,8 +11,9 @@ package subscriber
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -23,53 +24,74 @@ import (
 )
 
 const (
-	auditSubject          = "velion.audit.v1.>"
-	usageSubject          = "velion.usage.v1.>"
+	auditSubject          = "velion.audit.v2.>"
+	usageSubject          = "velion.usage.v2.>"
 	dlqSubject            = "velion.dlq.audit-core.>"
 	streamName            = "VELION_CONTROL_OBSERVABILITY"
 	maxDeliveries         = 5
 	maxConsumerDeliveries = maxDeliveries
+	consumerHealthMaxWait = 250 * time.Millisecond
 )
 
 type Subscriber struct {
-	nc    *nats.Conn
-	js    nats.JetStreamContext
-	store eventStore
-	bus   string
+	nc                   *nats.Conn
+	js                   nats.JetStreamContext
+	store                eventStore
+	bus                  string
+	plane                string
+	auditLastAckUnixNano atomic.Int64
+	usageLastAckUnixNano atomic.Int64
+}
+
+type ConsumerHealth struct {
+	Consumer    string    `json:"consumer"`
+	Ready       bool      `json:"ready"`
+	Pending     uint64    `json:"pending"`
+	AckPending  int       `json:"ack_pending"`
+	Redelivered int       `json:"redelivered"`
+	LastAckAt   time.Time `json:"last_ack_at,omitempty"`
+}
+
+type Health struct {
+	Bus   string         `json:"bus"`
+	Audit ConsumerHealth `json:"audit"`
+	Usage ConsumerHealth `json:"usage"`
 }
 
 type eventStore interface {
-	InsertAuditFromStream(context.Context, *events.AuditEvent, string, uint64) (bool, error)
-	InsertUsageFromStream(context.Context, *events.UsageEvent, string, uint64) (bool, error)
+	InsertAuditFromStream(context.Context, *events.AuditEvent, string, string, uint64) (bool, error)
+	InsertUsageFromStream(context.Context, *events.UsageEvent, string, string, uint64) (bool, error)
 }
 
 func New(nc *nats.Conn, s eventStore, bus ...string) *Subscriber {
-	label := "primary"
+	label := "control"
+	plane := "control"
 	if len(bus) > 0 && bus[0] != "" {
 		label = bus[0]
+		plane = bus[0]
 	}
-	return &Subscriber{nc: nc, store: s, bus: label}
+	if len(bus) > 1 && bus[1] != "" {
+		plane = bus[1]
+	}
+	return &Subscriber{nc: nc, store: s, bus: label, plane: plane}
 }
 
-// Start creates or updates the owned stream and binds two durable queue
-// consumers. Caller is responsible for draining the underlying connection.
+// Start binds pre-provisioned durable queue consumers. Stream and consumer
+// administration belongs to the deployment-only provisioner; the runtime
+// principal intentionally cannot create, update, delete, or purge them.
 func (s *Subscriber) Start(ctx context.Context) error {
 	js, err := s.nc.JetStream()
 	if err != nil {
 		return fmt.Errorf("open JetStream context: %w", err)
 	}
-	if err := ensureStream(js); err != nil {
-		return err
-	}
 	s.js = js
 
 	auditConsumer := s.consumerName("audit")
 	if _, err := js.QueueSubscribe(
-		auditSubject,
+		planeSubject("audit", s.plane),
 		auditConsumer,
 		s.handleAudit(ctx),
-		nats.BindStream(streamName),
-		nats.Durable(auditConsumer),
+		nats.Bind(streamName, auditConsumer),
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.AckWait(30*time.Second),
@@ -80,11 +102,10 @@ func (s *Subscriber) Start(ctx context.Context) error {
 	}
 	usageConsumer := s.consumerName("usage")
 	if _, err := js.QueueSubscribe(
-		usageSubject,
+		planeSubject("usage", s.plane),
 		usageConsumer,
 		s.handleUsage(ctx),
-		nats.BindStream(streamName),
-		nats.Durable(usageConsumer),
+		nats.Bind(streamName, usageConsumer),
 		nats.ManualAck(),
 		nats.AckExplicit(),
 		nats.AckWait(30*time.Second),
@@ -94,8 +115,8 @@ func (s *Subscriber) Start(ctx context.Context) error {
 		return err
 	}
 	log.Info().
-		Str("audit_subject", auditSubject).
-		Str("usage_subject", usageSubject).
+		Str("audit_subject", planeSubject("audit", s.plane)).
+		Str("usage_subject", planeSubject("usage", s.plane)).
 		Str("stream", streamName).
 		Str("audit_consumer", auditConsumer).
 		Str("usage_consumer", usageConsumer).
@@ -103,33 +124,45 @@ func (s *Subscriber) Start(ctx context.Context) error {
 	return nil
 }
 
-func ensureStream(js nats.JetStreamContext) error {
-	config := &nats.StreamConfig{
-		Name:       streamName,
-		Subjects:   []string{auditSubject, usageSubject, dlqSubject},
-		Retention:  nats.LimitsPolicy,
-		Storage:    nats.FileStorage,
-		Discard:    nats.DiscardOld,
-		MaxAge:     30 * 24 * time.Hour,
-		Duplicates: 2 * time.Minute,
-	}
-	if _, err := js.StreamInfo(streamName); err != nil {
-		if !errors.Is(err, nats.ErrStreamNotFound) {
-			return fmt.Errorf("inspect JetStream stream: %w", err)
-		}
-		if _, err := js.AddStream(config); err != nil {
-			return fmt.Errorf("create JetStream stream: %w", err)
-		}
-		return nil
-	}
-	if _, err := js.UpdateStream(config); err != nil {
-		return fmt.Errorf("update JetStream stream: %w", err)
-	}
-	return nil
+func (s *Subscriber) consumerName(kind string) string {
+	return fmt.Sprintf("audit-core-%s-v3-%s", s.bus, kind)
 }
 
-func (s *Subscriber) consumerName(kind string) string {
-	return fmt.Sprintf("audit-core-%s-%s", s.bus, kind)
+func planeSubject(kind, plane string) string {
+	return fmt.Sprintf("velion.%s.v2.%s.>", strings.TrimSpace(kind), strings.TrimSpace(plane))
+}
+
+// Health reports stable durable identities and the JetStream backlog state.
+// A missing consumer is not treated as healthy; readiness callers can fail
+// closed while the connection supervisor retries subscriber creation.
+func (s *Subscriber) Health() Health {
+	return Health{
+		Bus:   s.bus,
+		Audit: s.consumerHealth("audit"),
+		Usage: s.consumerHealth("usage"),
+	}
+}
+
+func (s *Subscriber) consumerHealth(kind string) ConsumerHealth {
+	consumer := s.consumerName(kind)
+	result := ConsumerHealth{Consumer: consumer, LastAckAt: s.lastAckAt(kind)}
+	if s.js == nil {
+		return result
+	}
+	info, err := s.js.ConsumerInfo(
+		streamName,
+		consumer,
+		nats.MaxWait(consumerHealthMaxWait),
+	)
+	if err != nil {
+		return result
+	}
+	result.Ready = true
+	result.Pending = info.NumPending
+	result.AckPending = info.NumAckPending
+	result.Redelivered = info.NumRedelivered
+	metricsserver.SetConsumerState(s.bus, kind, result.Pending, result.AckPending, result.Redelivered)
+	return result
 }
 
 func (s *Subscriber) handleAudit(ctx context.Context) nats.MsgHandler {
@@ -147,13 +180,17 @@ func (s *Subscriber) handleAudit(ctx context.Context) nats.MsgHandler {
 			}
 			return
 		}
+		if !eventAuthorityMatches("audit", msg.Subject, ev.Plane, ev.Producer, ev.Event, s.plane) {
+			s.rejectPlaneMismatch(msg, "audit", ev.OccurredAt)
+			return
+		}
 		streamSequence, ok := messageStreamSequence(msg)
 		if !ok {
 			metricsserver.RecordEvent(s.bus, "audit", "metadata_error", ev.OccurredAt)
 			s.nak(msg)
 			return
 		}
-		inserted, err := s.store.InsertAuditFromStream(ctx, ev, s.bus, streamSequence)
+		inserted, err := s.store.InsertAuditFromStream(ctx, ev, s.bus, msg.Subject, streamSequence)
 		if err != nil {
 			metricsserver.RecordEvent(s.bus, "audit", "store_error", ev.OccurredAt)
 			log.Error().Err(err).Str("subject", msg.Subject).Str("org_id", ev.OrgID).
@@ -168,6 +205,8 @@ func (s *Subscriber) handleAudit(ctx context.Context) nats.MsgHandler {
 		}
 		if err := msg.Ack(); err != nil {
 			log.Error().Err(err).Str("subject", msg.Subject).Msg("audit: ack failed")
+		} else {
+			s.recordAck("audit")
 		}
 	}
 }
@@ -187,13 +226,17 @@ func (s *Subscriber) handleUsage(ctx context.Context) nats.MsgHandler {
 			}
 			return
 		}
+		if !eventAuthorityMatches("usage", msg.Subject, ev.Plane, ev.Producer, ev.Op, s.plane) {
+			s.rejectPlaneMismatch(msg, "usage", ev.OccurredAt)
+			return
+		}
 		streamSequence, ok := messageStreamSequence(msg)
 		if !ok {
 			metricsserver.RecordEvent(s.bus, "usage", "metadata_error", ev.OccurredAt)
 			s.nak(msg)
 			return
 		}
-		inserted, err := s.store.InsertUsageFromStream(ctx, ev, s.bus, streamSequence)
+		inserted, err := s.store.InsertUsageFromStream(ctx, ev, s.bus, msg.Subject, streamSequence)
 		if err != nil {
 			metricsserver.RecordEvent(s.bus, "usage", "store_error", ev.OccurredAt)
 			log.Error().Err(err).Str("subject", msg.Subject).Str("org_id", ev.OrgID).
@@ -208,7 +251,58 @@ func (s *Subscriber) handleUsage(ctx context.Context) nats.MsgHandler {
 		}
 		if err := msg.Ack(); err != nil {
 			log.Error().Err(err).Str("subject", msg.Subject).Msg("usage: ack failed")
+		} else {
+			s.recordAck("usage")
 		}
+	}
+}
+
+func (s *Subscriber) recordAck(kind string) {
+	now := time.Now().UTC()
+	switch kind {
+	case "audit":
+		s.auditLastAckUnixNano.Store(now.UnixNano())
+	case "usage":
+		s.usageLastAckUnixNano.Store(now.UnixNano())
+	default:
+		return
+	}
+	metricsserver.RecordAck(s.bus, kind, now)
+}
+
+func (s *Subscriber) lastAckAt(kind string) time.Time {
+	var unixNano int64
+	switch kind {
+	case "audit":
+		unixNano = s.auditLastAckUnixNano.Load()
+	case "usage":
+		unixNano = s.usageLastAckUnixNano.Load()
+	}
+	if unixNano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, unixNano).UTC()
+}
+
+func eventAuthorityMatches(kind, subject, payloadPlane, producer, event, authorityPlane string) bool {
+	parts := strings.Split(subject, ".")
+	return len(parts) == 6 &&
+		parts[0] == "velion" && parts[1] == kind && parts[2] == "v2" &&
+		parts[3] == strings.TrimSpace(payloadPlane) &&
+		parts[3] == strings.TrimSpace(authorityPlane) &&
+		parts[4] == strings.TrimSpace(producer) &&
+		parts[5] == strings.TrimSpace(event)
+}
+
+func (s *Subscriber) rejectPlaneMismatch(msg *nats.Msg, kind string, occurredAt time.Time) {
+	metricsserver.RecordEvent(s.bus, kind, "authority_mismatch", occurredAt)
+	log.Warn().Str("subject", msg.Subject).Str("bus", s.bus).Msg("event authority mismatch")
+	if !s.deadLetter(msg, kind, "authority_mismatch") {
+		s.nak(msg)
+		return
+	}
+	if err := msg.Term(); err != nil {
+		log.Error().Err(err).Str("subject", msg.Subject).Msg("terminate plane-mismatched event")
 	}
 }
 
@@ -234,10 +328,17 @@ func (s *Subscriber) nak(msg *nats.Msg) {
 }
 
 func (s *Subscriber) deadLetter(msg *nats.Msg, kind, reason string) bool {
+	streamSequence, ok := messageStreamSequence(msg)
+	if !ok {
+		log.Error().Str("subject", msg.Subject).Str("reason", reason).
+			Msg("dead-letter source metadata unavailable")
+		return false
+	}
 	dlq := nats.NewMsg("velion.dlq.audit-core." + kind)
 	dlq.Data = append([]byte(nil), msg.Data...)
 	dlq.Header.Set("Velion-Original-Subject", msg.Subject)
 	dlq.Header.Set("Velion-Dead-Letter-Reason", reason)
+	dlq.Header.Set(nats.MsgIdHdr, deadLetterMessageID(s.bus, kind, reason, streamSequence))
 	if _, err := s.js.PublishMsg(dlq); err != nil {
 		log.Error().Err(err).Str("subject", msg.Subject).Str("reason", reason).
 			Msg("dead-letter publish failed")
@@ -245,6 +346,10 @@ func (s *Subscriber) deadLetter(msg *nats.Msg, kind, reason string) bool {
 	}
 	metricsserver.RecordEvent(s.bus, kind, "dead_lettered", time.Time{})
 	return true
+}
+
+func deadLetterMessageID(bus, kind, reason string, streamSequence uint64) string {
+	return fmt.Sprintf("audit-core-dlq:%s:%s:%s:%d", bus, kind, reason, streamSequence)
 }
 
 func messageStreamSequence(msg *nats.Msg) (uint64, bool) {

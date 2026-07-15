@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -30,6 +31,9 @@ func main() {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Str("service", "data-orchestrator-go").Logger()
 
 	cfg := config.Load()
+	if err := cfg.ValidateSignedCostEvents(); err != nil {
+		log.Fatal().Err(err).Msg("signed cost event verification configuration invalid")
+	}
 	verifier, err := authctx.NewVerifier(authctx.Config{
 		Audience:      cfg.JWTAudience,
 		Issuer:        cfg.JWTIssuer,
@@ -62,8 +66,11 @@ func main() {
 	}
 
 	legacyEventsEnabled := unverifiedLegacyEventsEnabled()
+	if err := validateCostConsumerMode(cfg.SignedCostEventsEnabled, legacyEventsEnabled); err != nil {
+		log.Fatal().Err(err).Msg("cost event consumer mode invalid")
+	}
 	var nc *nats.Conn
-	if legacyEventsEnabled {
+	if cfg.SignedCostEventsEnabled || legacyEventsEnabled {
 		natsOptions := []nats.Option{nats.Name("data-orchestrator")}
 		if cfg.NatsToken != "" {
 			natsOptions = append(natsOptions, nats.Token(cfg.NatsToken))
@@ -79,19 +86,32 @@ func main() {
 	staleDetector := jobs.NewStaleDetector(pool)
 	orchHandler := handler.NewOrchestratorHandler(executor, staleDetector)
 
-	// Unsigned legacy cost events can select arbitrary tenants and values. Keep
-	// the mutation consumer fail-closed until producer-scoped signed envelopes
-	// and NATS subject ACLs are deployed.
-	if legacyEventsEnabled {
+	if cfg.SignedCostEventsEnabled {
+		registry, err := cost.LoadVerifierRegistryFromFiles(
+			cfg.EmbeddingEventPublicKeyPath,
+			cfg.RetrievalEventPublicKeyPath,
+			cost.DefaultReplayCapacity,
+		)
+		if err != nil {
+			log.Fatal().Err(err).Msg("signed cost event producer registry invalid")
+		}
+		costConsumer := cost.NewSignedConsumer(pool, nc, registry)
+		cleanup, err := costConsumer.Start(ctx)
+		if err != nil {
+			log.Fatal().Err(err).Msg("signed cost ledger consumer failed to start")
+		}
+		defer cleanup()
+		log.Info().Msg("producer-scoped signed cost ledger consumer enabled")
+	} else if legacyEventsEnabled {
 		log.Warn().Msg("unsigned cost ledger consumer enabled for insecure development")
-		costConsumer := cost.NewConsumer(pool, nc)
+		costConsumer := cost.NewLegacyConsumer(pool, nc)
 		if cleanup, err := costConsumer.Start(ctx); err != nil {
 			log.Warn().Err(err).Msg("cost ledger consumer failed to start; continuing without")
 		} else {
 			defer cleanup()
 		}
 	} else {
-		log.Warn().Msg("cost ledger consumer disabled until signed producer-scoped envelopes are available")
+		log.Info().Msg("cost ledger consumer disabled")
 	}
 
 	r := chi.NewRouter()
@@ -131,4 +151,11 @@ func unverifiedLegacyEventsEnabled() bool {
 	return os.Getenv("ALLOW_UNVERIFIED_LEGACY_EVENTS") == "1" &&
 		os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" &&
 		os.Getenv("ISOLATED_E2E") == "1"
+}
+
+func validateCostConsumerMode(signed, legacy bool) error {
+	if signed && legacy {
+		return errors.New("signed and unverified legacy cost consumers are mutually exclusive")
+	}
+	return nil
 }

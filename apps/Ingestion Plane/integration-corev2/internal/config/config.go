@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"net/url"
@@ -28,9 +29,12 @@ type Config struct {
 	ProviderWriteAttestationKeysJSON string
 	UserCoreURL                      string
 	OrgCoreURL                       string
+	OrgCoreServiceToken              string
 	SessionCoreURL                   string
 	BillingCoreURL                   string
+	BillingCoreServiceToken          string
 	AuditCoreURL                     string
+	AuditCoreServiceToken            string
 	FinspoCoreURL                    string
 	FinspoCoreAPIKey                 string
 	FinspoCoreAPIKeyHeader           string
@@ -204,9 +208,12 @@ func Load() (Config, error) {
 		ProviderWriteAttestationKeysJSON: strings.TrimSpace(os.Getenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON")),
 		UserCoreURL:                      envOr("USER_CORE_URL", "http://user-core:3012"),
 		OrgCoreURL:                       envOr("ORG_CORE_URL", "http://org-core:8080"),
+		OrgCoreServiceToken:              strings.TrimSpace(os.Getenv("ORG_CORE_SERVICE_TOKEN")),
 		SessionCoreURL:                   envOr("SESSION_CORE_URL", "http://session-core:9091"),
 		BillingCoreURL:                   envOr("BILLING_CORE_URL", "http://billing-core:3014"),
+		BillingCoreServiceToken:          strings.TrimSpace(os.Getenv("BILLING_CORE_SERVICE_TOKEN")),
 		AuditCoreURL:                     envOr("AUDIT_CORE_URL", "http://audit-core:8187"),
+		AuditCoreServiceToken:            strings.TrimSpace(os.Getenv("AUDIT_CORE_SERVICE_TOKEN")),
 		FinspoCoreURL:                    envOr("FINSPO_CORE_URL", envOr("FINSPO_API_URL", "http://finspo-api:3130")),
 		FinspoCoreAPIKey:                 strings.TrimSpace(os.Getenv("FINSPO_API_KEY")),
 		FinspoCoreAPIKeyHeader:           envOr("FINSPO_API_KEY_HEADER", "X-API-Key"),
@@ -356,6 +363,35 @@ func (c Config) ValidateRuntime() error {
 	if c.OrgCoreURL == "" {
 		return fmt.Errorf("ORG_CORE_URL is required")
 	}
+	if !validDedicatedServiceToken(c.OrgCoreServiceToken) {
+		return fmt.Errorf("ORG_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	if !validDedicatedServiceToken(c.BillingCoreServiceToken) {
+		return fmt.Errorf("BILLING_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	if !validDedicatedServiceToken(c.AuditCoreServiceToken) {
+		return fmt.Errorf("AUDIT_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	seenCredentials := make(map[[sha256.Size]byte]string, 5)
+	for name, value := range map[string]string{
+		"INTERNAL_API_KEY":           c.InternalAPIKey,
+		"AUTH_CORE_INTERNAL_API_KEY": c.AuthCoreInternalAPIKey,
+	} {
+		if strings.TrimSpace(value) != "" {
+			seenCredentials[sha256.Sum256([]byte(strings.TrimSpace(value)))] = name
+		}
+	}
+	for name, value := range map[string]string{
+		"ORG_CORE_SERVICE_TOKEN":     c.OrgCoreServiceToken,
+		"BILLING_CORE_SERVICE_TOKEN": c.BillingCoreServiceToken,
+		"AUDIT_CORE_SERVICE_TOKEN":   c.AuditCoreServiceToken,
+	} {
+		digest := sha256.Sum256([]byte(strings.TrimSpace(value)))
+		if reusedFrom, exists := seenCredentials[digest]; exists {
+			return fmt.Errorf("%s must not reuse %s", name, reusedFrom)
+		}
+		seenCredentials[digest] = name
+	}
 	if c.PublicBaseURL == "" {
 		return fmt.Errorf("INTEGRATION_PUBLIC_BASE_URL is required")
 	}
@@ -422,6 +458,8 @@ func validDedicatedServiceToken(token string) bool {
 	token = strings.TrimSpace(token)
 	lower := strings.ToLower(token)
 	return len(token) >= 32 &&
+		!strings.HasPrefix(lower, "test") &&
+		!strings.HasPrefix(lower, "placeholder") &&
 		!strings.HasPrefix(lower, "change-me") &&
 		!strings.HasPrefix(lower, "replace-with")
 }

@@ -3,6 +3,8 @@
 //! `async-nats` does not translate URL user-info into token authentication, so
 //! credentials are supplied explicitly through `ConnectOptions`.
 
+const NATS_INBOX_PREFIX: &str = "_INBOX.SESSION_CORE_RUNTIME";
+
 fn configured_token() -> Option<String> {
     normalize_token(std::env::var("NATS_AUTH_TOKEN").ok())
 }
@@ -13,20 +15,65 @@ fn normalize_token(value: Option<String>) -> Option<String> {
         .filter(|token| !token.is_empty())
 }
 
+#[derive(Debug, PartialEq)]
+enum NatsAuth {
+    UserPassword(String, String),
+    Token(String),
+    None,
+}
+
+fn select_auth(
+    user: Option<&str>,
+    password: Option<&str>,
+    token: Option<&str>,
+    allow_token: bool,
+) -> NatsAuth {
+    let user = user.map(str::trim).filter(|value| !value.is_empty());
+    let password = password.map(str::trim).filter(|value| value.len() >= 32);
+    match (user, password) {
+        (Some(user), Some(password)) => NatsAuth::UserPassword(user.into(), password.into()),
+        (None, None) if allow_token => token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or(NatsAuth::None, |value| NatsAuth::Token(value.into())),
+        (Some(_) | None, None) | (None, Some(_)) => NatsAuth::None,
+    }
+}
+
 pub async fn connect(url: &str) -> Result<async_nats::Client, async_nats::ConnectError> {
-    match configured_token() {
-        Some(token) => {
-            async_nats::ConnectOptions::with_token(token)
+    let user = std::env::var("NATS_USER").ok();
+    let password = std::env::var("NATS_PASSWORD").ok();
+    let token = configured_token();
+    match select_auth(
+        user.as_deref(),
+        password.as_deref(),
+        token.as_deref(),
+        std::env::var("NATS_ALLOW_TOKEN_FALLBACK").as_deref() == Ok("1"),
+    ) {
+        NatsAuth::UserPassword(user, password) => {
+            async_nats::ConnectOptions::with_user_and_password(user, password)
+                .custom_inbox_prefix(NATS_INBOX_PREFIX)
                 .connect(url)
                 .await
         }
-        None => async_nats::connect(url).await,
+        NatsAuth::Token(token) => {
+            async_nats::ConnectOptions::with_token(token)
+                .custom_inbox_prefix(NATS_INBOX_PREFIX)
+                .connect(url)
+                .await
+        }
+        NatsAuth::None => {
+            async_nats::ConnectOptions::new()
+                .custom_inbox_prefix(NATS_INBOX_PREFIX)
+                .connect(url)
+                .await
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_token;
+    use super::{normalize_token, select_auth, NatsAuth};
 
     #[test]
     fn empty_tokens_are_treated_as_unconfigured() {
@@ -39,6 +86,30 @@ mod tests {
         assert_eq!(
             normalize_token(Some("  configured  ".to_owned())),
             Some("configured".to_owned())
+        );
+    }
+
+    #[test]
+    fn scoped_credentials_are_preferred_and_tokens_are_migration_only() {
+        assert_eq!(
+            select_auth(
+                Some("session-core-runtime"),
+                Some("0123456789abcdef0123456789abcdef"),
+                Some("token"),
+                true
+            ),
+            NatsAuth::UserPassword(
+                "session-core-runtime".into(),
+                "0123456789abcdef0123456789abcdef".into()
+            )
+        );
+        assert_eq!(
+            select_auth(None, None, Some("token"), false),
+            NatsAuth::None
+        );
+        assert_eq!(
+            select_auth(None, None, Some("token"), true),
+            NatsAuth::Token("token".into())
         );
     }
 }

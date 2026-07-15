@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+mod service_auth;
 pub mod visual;
+
+use service_auth::{InferenceBearer, InferenceTokenClient};
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 200;
@@ -27,7 +30,7 @@ pub struct EmbeddingClient {
 
 #[derive(Clone)]
 enum EmbeddingBackend {
-    ModelPlane(ModelPlaneEmbeddingClient),
+    ModelPlane(Box<ModelPlaneEmbeddingClient>),
     AzureOpenAi(AzureOpenAiEmbeddingClient),
     DeterministicTest { dimension: usize },
 }
@@ -38,7 +41,18 @@ struct ModelPlaneEmbeddingClient {
     model: String,
     provider: String,
     timeout: Duration,
-    internal_api_key: Option<String>,
+    token_client: InferenceTokenClient,
+}
+
+struct ModelPlaneSettings<'a> {
+    grpc_url: &'a str,
+    model: &'a str,
+    provider: &'a str,
+    timeout_ms: u64,
+    token_url: &'a str,
+    token_issuer: &'a str,
+    service_id: &'a str,
+    service_api_key: &'a str,
 }
 
 #[derive(Clone)]
@@ -68,13 +82,16 @@ struct EmbedDatum {
 impl EmbeddingClient {
     pub fn from_config(cfg: &Config) -> anyhow::Result<Self> {
         match normalize_provider(&cfg.embedding_provider).as_str() {
-            "model_plane" => Self::model_plane(
-                &cfg.model_plane_ai_core_grpc_url,
-                &cfg.azure_openai_embedding_deployment,
-                &cfg.model_plane_embedding_provider,
-                cfg.model_plane_embedding_timeout_ms,
-                cfg.internal_api_key.clone(),
-            ),
+            "model_plane" => Self::model_plane(ModelPlaneSettings {
+                grpc_url: &cfg.model_plane_ai_core_grpc_url,
+                model: &cfg.azure_openai_embedding_deployment,
+                provider: &cfg.model_plane_embedding_provider,
+                timeout_ms: cfg.model_plane_embedding_timeout_ms,
+                token_url: &cfg.model_plane_inference_token_url,
+                token_issuer: &cfg.model_plane_inference_token_issuer,
+                service_id: &cfg.model_plane_inference_service_id,
+                service_api_key: &cfg.model_plane_inference_service_api_key,
+            }),
             "azure_openai" => Self::azure_openai(
                 &cfg.azure_openai_endpoint,
                 &cfg.azure_openai_api_key,
@@ -94,27 +111,32 @@ impl EmbeddingClient {
         }
     }
 
-    pub fn model_plane(
-        grpc_url: &str,
-        model: &str,
-        provider: &str,
-        timeout_ms: u64,
-        internal_api_key: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let timeout = Duration::from_millis(timeout_ms.max(1));
-        let channel = Endpoint::from_shared(grpc_url.to_string())
-            .with_context(|| format!("invalid MODEL_PLANE_AI_CORE_GRPC_URL `{grpc_url}`"))?
+    fn model_plane(settings: ModelPlaneSettings<'_>) -> anyhow::Result<Self> {
+        let timeout = Duration::from_millis(settings.timeout_ms.max(1));
+        let channel = Endpoint::from_shared(settings.grpc_url.to_string())
+            .with_context(|| {
+                format!(
+                    "invalid MODEL_PLANE_AI_CORE_GRPC_URL `{}`",
+                    settings.grpc_url
+                )
+            })?
             .connect_timeout(timeout)
             .timeout(timeout)
             .connect_lazy();
+        let token_client = InferenceTokenClient::new(
+            settings.token_url,
+            settings.token_issuer,
+            settings.service_id,
+            settings.service_api_key,
+        )?;
         Ok(Self {
-            inner: EmbeddingBackend::ModelPlane(ModelPlaneEmbeddingClient {
+            inner: EmbeddingBackend::ModelPlane(Box::new(ModelPlaneEmbeddingClient {
                 client: model_plane::v1::inference_core_client::InferenceCoreClient::new(channel),
-                model: model.to_string(),
-                provider: provider.to_string(),
+                model: settings.model.to_string(),
+                provider: settings.provider.to_string(),
                 timeout,
-                internal_api_key: internal_api_key.filter(|key| !key.is_empty()),
-            }),
+                token_client,
+            })),
         })
     }
 
@@ -246,9 +268,17 @@ impl ModelPlaneEmbeddingClient {
         texts: &[String],
         zdr: bool,
     ) -> anyhow::Result<Vec<Vec<f32>>> {
+        // Mint once per organization-scoped batch. The signed token is bounded
+        // to this tenant, exact inference scope, caller identity, short TTL and
+        // issuer-enforced ZDR. A mint/validation failure stops before gRPC.
+        let bearer = self
+            .token_client
+            .mint(org_id)
+            .await
+            .context("mint bounded inference credential")?;
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
-            vectors.push(self.embed_one(org_id, text, zdr).await?);
+            vectors.push(self.embed_one(&bearer, org_id, text, zdr).await?);
         }
         Ok(vectors)
     }
@@ -276,7 +306,29 @@ impl ModelPlaneEmbeddingClient {
         }
     }
 
-    async fn embed_one(&self, org_id: &str, text: &str, zdr: bool) -> anyhow::Result<Vec<f32>> {
+    fn build_authenticated_request(
+        &self,
+        bearer: &str,
+        org_id: &str,
+        text: &str,
+        zdr: bool,
+    ) -> anyhow::Result<tonic::Request<model_plane::v1::CreateEmbeddingRequest>> {
+        let mut request = tonic::Request::new(self.build_request(org_id, text, zdr));
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {bearer}"))
+                .context("bounded inference bearer is not valid gRPC metadata")?,
+        );
+        Ok(request)
+    }
+
+    async fn embed_one(
+        &self,
+        bearer: &InferenceBearer,
+        org_id: &str,
+        text: &str,
+        zdr: bool,
+    ) -> anyhow::Result<Vec<f32>> {
         let mut last_err = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -286,13 +338,7 @@ impl ModelPlaneEmbeddingClient {
                 tokio::time::sleep(backoff).await;
             }
 
-            let request = self.build_request(org_id, text, zdr);
-            let mut request = tonic::Request::new(request);
-            if let Some(key) = self.internal_api_key.as_deref() {
-                request
-                    .metadata_mut()
-                    .insert("x-api-key", MetadataValue::try_from(key)?);
-            }
+            let request = self.build_authenticated_request(bearer.as_str(), org_id, text, zdr)?;
 
             let mut client = self.client.clone();
             match tokio::time::timeout(self.timeout, client.create_embedding(request)).await {
@@ -459,13 +505,16 @@ mod tests {
 
     #[tokio::test]
     async fn model_plane_client_names_cache_by_plane_provider_and_model() {
-        let client = EmbeddingClient::model_plane(
-            "http://inference-core:9092",
-            "text-embedding-3-large",
-            "azure_openai",
-            30_000,
-            None,
-        )
+        let client = EmbeddingClient::model_plane(ModelPlaneSettings {
+            grpc_url: "http://inference-core:9092",
+            model: "text-embedding-3-large",
+            provider: "azure_openai",
+            timeout_ms: 30_000,
+            token_url: "http://auth-core:3011/api/inference-core/internal-token",
+            token_issuer: "http://localhost:3011/api/convex-auth",
+            service_id: "retrieval-engine",
+            service_api_key: "isolated-test-service-credential",
+        })
         .expect("model-plane client");
         assert_eq!(client.provider_name(), "model_plane");
         assert_eq!(
@@ -536,13 +585,16 @@ mod tests {
     /// (true and false both round-trip from the caller's argument).
     #[tokio::test]
     async fn model_plane_request_carries_zdr() {
-        let client = EmbeddingClient::model_plane(
-            "http://inference-core:9092",
-            "text-embedding-3-large",
-            "azure_openai",
-            30_000,
-            None,
-        )
+        let client = EmbeddingClient::model_plane(ModelPlaneSettings {
+            grpc_url: "http://inference-core:9092",
+            model: "text-embedding-3-large",
+            provider: "azure_openai",
+            timeout_ms: 30_000,
+            token_url: "http://auth-core:3011/api/inference-core/internal-token",
+            token_issuer: "http://localhost:3011/api/convex-auth",
+            service_id: "retrieval-engine",
+            service_api_key: "isolated-test-service-credential",
+        })
         .expect("model-plane client");
         let EmbeddingBackend::ModelPlane(inner) = &client.inner else {
             panic!("expected a model-plane backend");
@@ -555,5 +607,43 @@ mod tests {
             !inner.build_request("org-1", "hi", false).zdr,
             "zdr=false must propagate"
         );
+    }
+
+    #[tokio::test]
+    async fn model_plane_request_forwards_only_bounded_bearer_and_zdr() {
+        let client = EmbeddingClient::model_plane(ModelPlaneSettings {
+            grpc_url: "http://inference-core:9092",
+            model: "text-embedding-3-large",
+            provider: "azure_openai",
+            timeout_ms: 30_000,
+            token_url: "http://auth-core:3011/api/inference-core/internal-token",
+            token_issuer: "http://localhost:3011/api/convex-auth",
+            service_id: "retrieval-engine",
+            service_api_key: "isolated-test-service-credential",
+        })
+        .expect("model-plane client");
+        let EmbeddingBackend::ModelPlane(inner) = &client.inner else {
+            panic!("expected a model-plane backend");
+        };
+
+        let request = inner
+            .build_authenticated_request(
+                "header.payload.signature",
+                "org-1",
+                "restricted query",
+                true,
+            )
+            .expect("authenticated request");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer header.payload.signature")
+        );
+        assert!(request.metadata().get("x-api-key").is_none());
+        assert!(request.get_ref().zdr, "zdr=true must survive auth wrapping");
+        assert_eq!(request.get_ref().org_id, "org-1");
     }
 }

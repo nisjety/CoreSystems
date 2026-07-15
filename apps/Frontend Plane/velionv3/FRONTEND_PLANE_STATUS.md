@@ -1,5 +1,24 @@
 # Frontend Plane (velionv3) — Current Status
 
+> **2026-07-15 Data Plane/GraphRAG wiring update:** every interactive Knowledge,
+> document, retrieval, wiki, source, navbar-search, ingestion-source, onboarding
+> graph-preview, and Operating Map request now uses a session-minted
+> `aud=data-plane` bearer. Tenant identity is derived from canonical membership;
+> token issuance failure returns 503 and never falls back to a shared internal
+> key. The SPA normalizes the actual documents/wiki/retrieval response envelopes,
+> paginates the workspace document inventory with an explicit truncation signal,
+> and uses the real singular `document_id` chunk contract. Navbar search now
+> calls `/v1/knowledge/search` rather than the nonexistent `/v1/search`.
+> GraphRAG reads and onboarding preview use the verified tenant-bound graph API.
+> Source evidence: **272/272 gateway tests**, **360/360 frontend tests**,
+> TypeScript typecheck, production build, and lint (one pre-existing Solid
+> reactivity warning, zero errors) pass. An isolated Data checkpoint also passed
+> its seven-family HTTP auth matrix **28/28**, including authorized
+> retrieval and graph reads, but it did not run the Velion browser/gateway or
+> replace the shared deployment. That checkpoint also predates the final
+> Documents signed-ZDR/source-object guards. The shared running images predate
+> these source changes, so end-to-end deployment effectiveness is not yet claimed.
+
 > **2026-07-13 Model Plane handoff correction:** the 2026-07-11 chat-tool
 > findings below are retained as history, but their prescribed “advertise tools
 > on every turn” fix is not the current release policy. Plain chat is
@@ -15,8 +34,9 @@
 > [the handoff](docs/MODEL_PLANE_CAPABILITY_HANDOFF_2026-07-13.md) and
 > [Model Plane status](../../Model%20Plane/MODEL_PLANE_STATUS.md).
 
-Last verified: 2026-07-13 for the Model Plane credential/capability handoff;
-2026-07-11 for the historical full-plane source audit below.
+Last verified: 2026-07-15 for the Data Plane/GraphRAG source wiring;
+2026-07-13 for the Model Plane credential/capability handoff; 2026-07-11 for
+the historical full-plane source audit below.
 
 ## Headline: velionv3 is real and fully wired
 
@@ -36,7 +56,7 @@ the historical backend and plane-local findings below.
 
 | # | Severity | Item | Fix location |
 |---|---|---|---|
-| 1 | HIGH (IDOR) | `onboarding/graph-preview` trusts client `org_id` query param → reads any org's graph | `apps/gateway/src/onboarding/lookup/graph.rs` — derive org from session like sibling `translate_recommendation` |
+| 1 | **Fixed 2026-07-15** | `onboarding/graph-preview` previously trusted client `org_id`; it now derives tenant from the verified session and forwards a Data bearer | Regression-covered in gateway auth tests |
 | 2 | MEDIUM (IDOR) | onboarding connector actions trust client body `org_id` (no membership gate) | `apps/gateway/src/onboarding/actions/connectors.rs` |
 | 3 | Superseded policy finding | Plain chat sends no tools by design. Users need an explicit capability-backed Actions/Plan choice; do not default-advertise every tool. | Model-owned capability contract + Frontend action affordance |
 | 4 | Not reproduced as executable write bypass | The inline gateway path is bounded to known read tools and rejects unknown/write actions; approval-required capabilities must still select agentic mode and need cross-plane E2E. | Capability contract + agentic selection regression tests |

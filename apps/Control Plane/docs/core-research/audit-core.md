@@ -1,11 +1,49 @@
 # audit-core Research Dive
 
 Generated: 2026-06-07
-Updated: 2026-07-11 — production-readiness continuation. The 2026-07-10 SQL and network findings are fixed and live-verified; durable delivery remains open.
+Updated: 2026-07-15 — scoped three-bus current-image verification.
 
 Scope: `apps/Control Plane/audit-core`
 
-## 2026-07-11 production-readiness addendum (current)
+## 2026-07-15 final secure-MVP addendum (current)
+
+The extra-plane acceptance remains green: an isolated current image connected to scoped Control, Model, and Application brokers, reported all three consumers ready with lag visibility, persisted two audit plus two usage rows, denied the Audit consumer producer authority, and returned 401 for unauthenticated HTTP. Corrected usage-summary SQL remains covered on the live schema contract. Full `go test ./...` and `go vet ./...` pass; subscriber coverage remains 96.1%, `Start` 91.7%, handlers 96.7%, and consumer health 84.6%.
+
+The final release render removes Audit's developer `env_file`, disables token fallback for runtime producers, and reserves topology ownership for one-shot provisioners. The non-printing coordinated preflight now covers the complete 58-credential/10-file registry/key/TLS set. The pre-existing shared dev Audit container is restarting because NATS/credential inputs are absent; isolated current-image extra-plane consumers remain green. This is current-image isolated evidence, not a claim that production Model/Application brokers or their secret versions were rotated. That execution remains operator-owned.
+
+## 2026-07-15 Control-shared GDPR topology detail (superseded by final addendum above)
+
+The deployment-only provisioner now includes the GDPR request, Documents DLQ,
+and ownership receipt subjects in `AQENCIA_CONTROLPLANE` and converges the fixed
+`documents-api-gdpr-erasure-v1` explicit-ACK consumer (`MaxDeliver=20`). The
+broker config grants User Core only the request subject and grants Documents API
+only consumer-info/ACK for that durable, its private inbox/delivery subject, the
+single DLQ, and ownership receipt. Runtime stream/consumer administration and
+Documents request forgery are denied in the fresh-broker integration test.
+
+The temporary compatibility bridge ACKs but does not forward any
+`velion.gdpr.*` subject, preventing deletion/security evidence from reaching the
+legacy shared-token broker. Full Audit tests/vet and changed-package race tests
+pass. Provisioner package coverage is 83.2%, the GDPR consumer config is 100%,
+and the forwarder is 81.0%. This topology has not been rolled into the existing
+development broker; `DOCUMENTS_GDPR_NATS_PASSWORD` coordination and ordered
+provisioner -> consumer -> producer rollout remain required.
+
+## 2026-07-15 scoped three-bus detail (superseded by final addendum above)
+
+Audit HTTP now uses exact service principals: Gateway self-read and Integration ingest are separate `audit-core` audience/scope credentials, with Integration pinned to the ingestion plane. Control, Model, and Application NATS brokers each expose a plane runtime user, a least-privilege Audit consumer, and a deployment-only provisioner. Audit binds fixed v2 durable audit/usage consumers, validates bus/plane/subject/payload agreement, uses custom inbox ACLs, and reports per-bus readiness and consumer lag. Arbitrary generated passwords are syntax-quoted only for broker config expansion; clients receive the exact raw value.
+
+An isolated current Audit image with disposable Postgres and three scoped brokers reported Control/Model/Application ready, persisted two Model/Application audit plus two usage rows, denied the Audit principal a producer publish, and returned 401 for unauthenticated HTTP. The full Go test/vet/race suite passes. Subscriber package coverage is 96.1%; `Start` is 91.7%, handlers 96.7%, and consumer health 84.6%.
+
+The final source pass gives topology ownership only to the one-shot provisioner, adds logical `(source_bus,event_id)` persistence de-duplication, and bridges the temporary token-only bus with stable message IDs and ACK-after-target-confirmation semantics. Auth identity, Org plan, and Billing plan security-critical producers now use transactionally durable outbox/PubAck paths; release runtime producers use scoped user/password principals with token fallback disabled. The long-running dev Audit image still reflects the older deployment and was not recreated. Coordinated secret rotation and integration-image rollout remain operational evidence gaps; the source no longer has the previously inventoried Control runtime token-only/admin paths.
+
+## 2026-07-14 Velion/current-runtime addendum (historical deployment evidence)
+
+Audit Core is healthy and `/readyz` returns 200 with `database_connected=true`, `primary_nats_connected=true`, and `delivery_mode=jetstream_durable`. Unlike the earlier 2026-07-11 runtime, the current stack reports `extra_nats_connected=[]`: the primary Control bus is live, but no extra-plane consumer is configured or proven. Cross-plane aggregation is therefore degraded and acceptance G remains open.
+
+Velion now uses the shared Audit client instead of page-local raw parsing. It validates and normalizes the live snake_case row contract (`event`/`action`, actor/user/role, resource/subject, outcome, request ID, and occurrence timestamps), propagates abort signals, and distinguishes request failure from an empty event set. Its focused line coverage is 98.55%, and the settings rendering regression passes. No audit row was injected or mutated during this continuation. Shared-key replacement, extra-plane connectivity, producer outboxes, pending/lag visibility, and replay proof remain MVP work.
+
+## 2026-07-11 production-readiness addendum (historical)
 
 Both 2026-07-10 live defects are fixed and deployed. `/v1/usage/summary` executes the corrected aggregate query and returned 200 against the live schema. `/readyz` returned 200 with `database_connected=true`, `primary_nats_connected=true`, `extra_nats_connected=[true]`, and `delivery_mode="jetstream_durable"`. Prometheus exposes per-bus connectivity plus event result/age metrics.
 

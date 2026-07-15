@@ -221,10 +221,10 @@ async fn proxy_cost_json(
         .await
     {
         Ok(response) => response,
-        Err(request_error) => {
+        Err(_) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("upstream_unavailable", request_error.to_string())),
+                Json(crate::envelope::upstream_unavailable()),
             );
         }
     };

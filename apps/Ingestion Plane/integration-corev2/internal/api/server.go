@@ -43,6 +43,7 @@ type ServerConfig struct {
 	Org               auth.OrgPlanClient
 	Billing           *controlplane.BillingClient
 	Audit             *controlplane.AuditClient
+	AuditOutbox       AuditDispatcher
 	Events            events.Publisher
 	Discovery         *discovery.Service
 	Actions           *actions.Service
@@ -75,6 +76,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})
 	app.Use(requestIDMiddleware)
 	metrics := newRequestMetrics()
+	auditMonitor, _ := cfg.AuditOutbox.(AuditOutboxMonitor)
 	app.Use(metrics.middleware)
 	if cfg.Logger != nil {
 		app.Use(requestLogger(*cfg.Logger))
@@ -94,7 +96,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 	app.Get("/health/detailed", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
+		statusCode := fiber.StatusOK
+		response := fiber.Map{
 			"status":      "ok",
 			"service":     cfg.Config.ServiceName,
 			"environment": cfg.Config.Environment,
@@ -108,14 +111,61 @@ func NewServer(cfg ServerConfig) *fiber.App {
 				"actions":        cfg.Actions != nil,
 				"webhookHotPath": cfg.HotPath != nil,
 			},
-		})
+		}
+		if auditMonitor != nil {
+			auditStatus, err := auditMonitor.Status(c.UserContext())
+			if err != nil {
+				statusCode = fiber.StatusServiceUnavailable
+				response["status"] = "degraded"
+				response["auditOutbox"] = fiber.Map{"status": "unavailable"}
+			} else {
+				response["auditOutbox"] = fiber.Map{
+					"status":                map[bool]string{true: "degraded", false: "ok"}[auditStatus.Degraded],
+					"pending":               auditStatus.Pending,
+					"terminal":              auditStatus.Terminal,
+					"oldestPendingSeconds":  auditStatus.OldestPendingAge.Seconds(),
+					"oldestTerminalSeconds": auditStatus.OldestTerminalAge.Seconds(),
+				}
+				if auditStatus.Degraded {
+					statusCode = fiber.StatusServiceUnavailable
+					response["status"] = "degraded"
+				}
+			}
+		}
+		return c.Status(statusCode).JSON(response)
 	})
 
 	internalAuth := auth.InternalOnly(auth.Config{
 		APIKey:       cfg.Config.InternalAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
 	})
-	app.Get("/metrics", internalAuth, metrics.handler)
+	app.Get("/metrics", internalAuth, func(c *fiber.Ctx) error {
+		c.Set("Content-Type", "text/plain; version=0.0.4")
+		body := metrics.render()
+		if auditMonitor != nil {
+			body += renderAuditOutboxMetrics(c.UserContext(), auditMonitor)
+		}
+		return c.SendString(body)
+	})
+	app.Post("/internal/audit-outbox/requeue", internalAuth, func(c *fiber.Ctx) error {
+		if auditMonitor == nil {
+			return apiError(c, fiber.StatusServiceUnavailable, "audit_outbox_unavailable", "Audit outbox recovery is not configured.")
+		}
+		var body struct {
+			EventIDs []string `json:"eventIds"`
+		}
+		if err := c.BodyParser(&body); err != nil {
+			return apiError(c, fiber.StatusBadRequest, "invalid_request", "Request body is invalid.")
+		}
+		if _, err := validateTerminalAuditEventIDs(body.EventIDs); err != nil {
+			return apiError(c, fiber.StatusBadRequest, "invalid_event_ids", err.Error())
+		}
+		requeued, err := auditMonitor.RequeueTerminal(c.UserContext(), body.EventIDs)
+		if err != nil {
+			return apiError(c, fiber.StatusServiceUnavailable, "audit_outbox_requeue_failed", "Terminal audit events could not be requeued.")
+		}
+		return success(c, fiber.Map{"requeued": requeued})
+	})
 	internalOrBearerAuth := auth.InternalOrBearer(auth.Config{
 		APIKey:               cfg.Config.InternalAPIKey,
 		APIKeyHeader:         cfg.Config.InternalAPIKeyHeader,
@@ -173,23 +223,6 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		)
 		if err != nil && cfg.Logger != nil {
 			cfg.Logger.Warn().Err(err).Str("provider", c.Params("provider")).Msg("oauth callback failed")
-		}
-		if err == nil && result.Success && strings.TrimSpace(result.ConnectionID) != "" {
-			if connection, lookupErr := cfg.Repo.GetConnection(c.UserContext(), result.ConnectionID); lookupErr == nil {
-				forwardAuditEvent(c.UserContext(), cfg, store.AuditEvent{
-					OrganizationID: connection.OrganizationID,
-					UserID:         connection.UserID,
-					ConnectionID:   connection.ID,
-					EventType:      "connection.created",
-					ProviderKey:    connection.ProviderKey,
-					Metadata: map[string]any{
-						"capabilities": connection.Capabilities,
-						"scopes":       redactSensitiveStrings(connection.Scopes),
-					},
-				})
-			} else if cfg.Logger != nil {
-				cfg.Logger.Warn().Err(lookupErr).Str("connection_id", result.ConnectionID).Msg("oauth callback audit connection lookup")
-			}
 		}
 		c.Set("Content-Type", "text/html; charset=utf-8")
 		return c.SendString(callbackHTML(result))
@@ -292,18 +325,26 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return apiError(c, fiber.StatusBadRequest, "invalid_capabilities", err.Error())
 		}
-		updated, err := cfg.Repo.UpdateConnectionCapabilities(c.UserContext(), connection.ID, capabilities)
+		var updated store.Connection
+		err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			var updateErr error
+			updated, updateErr = tx.UpdateConnectionCapabilities(c.UserContext(), connection.ID, capabilities)
+			if updateErr != nil {
+				return updateErr
+			}
+			return persist(store.AuditEvent{
+				ID:             auditMutationID(c.UserContext(), "connection-capabilities", updated.ID),
+				OrganizationID: updated.OrganizationID,
+				UserID:         updated.UserID,
+				ConnectionID:   updated.ID,
+				EventType:      "connection.capabilities.updated",
+				ProviderKey:    updated.ProviderKey,
+				Metadata:       map[string]any{"capabilities": capabilities},
+			})
+		})
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
-			OrganizationID: updated.OrganizationID,
-			UserID:         updated.UserID,
-			ConnectionID:   updated.ID,
-			EventType:      "connection.capabilities.updated",
-			ProviderKey:    updated.ProviderKey,
-			Metadata:       map[string]any{"capabilities": capabilities},
-		})
 		publishIntegrationEvent(c.UserContext(), cfg, "velion.ingestion.integration.connection_updated", updated, map[string]any{
 			"capabilities": capabilities,
 			"change":       "capabilities",
@@ -342,7 +383,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			now := time.Now().UTC()
 			revokedAt = &now
 		}
-		consent, err := cfg.Repo.UpsertConnectionConsent(c.UserContext(), store.ConnectionConsent{
+		candidate := store.ConnectionConsent{
 			ID:             "consent_" + uuid.NewString(),
 			OrganizationID: connection.OrganizationID,
 			ConnectionID:   connection.ID,
@@ -354,18 +395,27 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			Metadata:       body.Metadata,
 			ExpiresAt:      body.ExpiresAt,
 			RevokedAt:      revokedAt,
+		}
+		var consent store.ConnectionConsent
+		err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			var consentErr error
+			consent, consentErr = tx.UpsertConnectionConsent(c.UserContext(), candidate)
+			if consentErr != nil {
+				return consentErr
+			}
+			return persist(store.AuditEvent{
+				ID:             "audit:integration:connection-consent:" + consent.ID,
+				OrganizationID: connection.OrganizationID,
+				UserID:         connection.UserID,
+				ConnectionID:   connection.ID,
+				EventType:      "connection.consent_changed",
+				ProviderKey:    connection.ProviderKey,
+				Metadata:       map[string]any{"source": source, "purpose": purpose, "granted": body.Granted},
+			})
 		})
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "consent_update_failed", err.Error())
 		}
-		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
-			OrganizationID: connection.OrganizationID,
-			UserID:         connection.UserID,
-			ConnectionID:   connection.ID,
-			EventType:      "connection.consent_changed",
-			ProviderKey:    connection.ProviderKey,
-			Metadata:       map[string]any{"source": source, "purpose": purpose, "granted": body.Granted},
-		})
 		publishIntegrationEvent(c.UserContext(), cfg, "velion.ingestion.integration.consent_changed", connection, map[string]any{
 			"source":  source,
 			"purpose": purpose,
@@ -442,18 +492,10 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 			return authAwareError(c, err)
 		}
-		deleted, err := cfg.OAuth.DisconnectConnection(c.UserContext(), c.Params("id"), "user_requested")
+		_, err = cfg.OAuth.DisconnectConnection(c.UserContext(), c.Params("id"), "user_requested")
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		forwardAuditEvent(c.UserContext(), cfg, store.AuditEvent{
-			OrganizationID: deleted.OrganizationID,
-			UserID:         deleted.UserID,
-			ConnectionID:   deleted.ID,
-			EventType:      "connection.deleted",
-			ProviderKey:    deleted.ProviderKey,
-			Metadata:       map[string]any{"reason": "user_requested"},
-		})
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 
@@ -767,7 +809,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if name == "" {
 			name = "SCIM token"
 		}
-		token, err := cfg.Repo.CreateSCIMToken(c.UserContext(), store.SCIMToken{
+		candidate := store.SCIMToken{
 			ID:             "scimtok_" + uuid.NewString(),
 			OrganizationID: organizationID,
 			Name:           name,
@@ -776,17 +818,27 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			ExpiresAt:      body.ExpiresAt,
 			CreatedAt:      now,
 			UpdatedAt:      now,
-		}, scimTokenHash(bearer))
+		}
+		var token store.SCIMToken
+		err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			var createErr error
+			token, createErr = tx.CreateSCIMToken(c.UserContext(), candidate, scimTokenHash(bearer))
+			if createErr != nil {
+				return createErr
+			}
+			return persist(store.AuditEvent{
+				ID:             "audit:integration:scim-token-created:" + token.ID,
+				OrganizationID: organizationID,
+				UserID:         createdBy,
+				EventType:      "scim.token.created",
+				ProviderKey:    "scim",
+				Metadata:       map[string]any{"tokenId": token.ID, "tokenPrefix": token.TokenPrefix},
+				CreatedAt:      now,
+			})
+		})
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "scim_token_create_failed", err.Error())
 		}
-		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
-			OrganizationID: organizationID,
-			UserID:         createdBy,
-			EventType:      "scim.token.created",
-			ProviderKey:    "scim",
-			Metadata:       map[string]any{"tokenId": token.ID, "tokenPrefix": token.TokenPrefix},
-		})
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 			"success": true,
 			"data": fiber.Map{
@@ -802,17 +854,27 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return authAwareError(c, err)
 		}
-		revoked, err := cfg.Repo.RevokeSCIMToken(c.UserContext(), organizationID, c.Params("id"), time.Now().UTC())
+		now := time.Now().UTC()
+		var revoked store.SCIMToken
+		err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			var revokeErr error
+			revoked, revokeErr = tx.RevokeSCIMToken(c.UserContext(), organizationID, c.Params("id"), now)
+			if revokeErr != nil {
+				return revokeErr
+			}
+			return persist(store.AuditEvent{
+				ID:             "audit:integration:scim-token-revoked:" + revoked.ID,
+				OrganizationID: organizationID,
+				UserID:         userIDForRequest(c),
+				EventType:      "scim.token.revoked",
+				ProviderKey:    "scim",
+				Metadata:       map[string]any{"tokenId": revoked.ID, "tokenPrefix": revoked.TokenPrefix},
+				CreatedAt:      now,
+			})
+		})
 		if err != nil {
 			return storeError(c, err, "scim_token_not_found")
 		}
-		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
-			OrganizationID: organizationID,
-			UserID:         userIDForRequest(c),
-			EventType:      "scim.token.revoked",
-			ProviderKey:    "scim",
-			Metadata:       map[string]any{"tokenId": revoked.ID, "tokenPrefix": revoked.TokenPrefix},
-		})
 		return success(c, fiber.Map{"token": revoked})
 	})...)
 
@@ -940,7 +1002,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			}
 			return apiError(c, fiber.StatusBadGateway, "token_broker_failed", "Could not resolve a provider access token.")
 		}
-		recordTokenLease(c.UserContext(), cfg, token, body.Consumer)
+		if err := recordTokenLease(c.UserContext(), cfg, token, body.Consumer); err != nil {
+			return apiError(c, fiber.StatusServiceUnavailable, "token_lease_audit_failed", "Token lease could not be persisted safely.")
+		}
 		return success(c, token)
 	})...)
 
@@ -1163,7 +1227,7 @@ func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conne
 		mode = "incremental"
 	}
 	now := time.Now().UTC()
-	job, err := cfg.Repo.CreateSyncJob(ctx, store.SyncJob{
+	candidate := store.SyncJob{
 		ID:             "sync_" + uuid.NewString(),
 		OrganizationID: connection.OrganizationID,
 		ConnectionID:   connection.ID,
@@ -1176,26 +1240,38 @@ func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conne
 		Metadata:       body.Metadata,
 		CreatedAt:      now,
 		UpdatedAt:      now,
+	}
+	var job store.SyncJob
+	err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		var createErr error
+		job, createErr = tx.CreateSyncJob(ctx, candidate)
+		if createErr != nil {
+			return createErr
+		}
+		if err := tx.InsertSyncEvent(ctx, store.SyncEvent{
+			ID:        "sync_evt_" + uuid.NewString(),
+			JobID:     job.ID,
+			Type:      "sync.queued",
+			Message:   "Sync job was queued.",
+			Metadata:  map[string]any{"reason": reason, "mode": mode},
+			CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             "audit:integration:sync-queued:" + job.ID,
+			OrganizationID: connection.OrganizationID,
+			UserID:         connection.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      "connection.sync.queued",
+			ProviderKey:    connection.ProviderKey,
+			Metadata:       map[string]any{"syncJobId": job.ID, "reason": reason, "mode": mode},
+			CreatedAt:      now,
+		})
 	})
 	if err != nil {
 		return store.SyncJob{}, err
 	}
-	_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
-		ID:        "sync_evt_" + uuid.NewString(),
-		JobID:     job.ID,
-		Type:      "sync.queued",
-		Message:   "Sync job was queued.",
-		Metadata:  map[string]any{"reason": reason, "mode": mode},
-		CreatedAt: now,
-	})
-	recordAuditEvent(ctx, cfg, store.AuditEvent{
-		OrganizationID: connection.OrganizationID,
-		UserID:         connection.UserID,
-		ConnectionID:   connection.ID,
-		EventType:      "connection.sync.queued",
-		ProviderKey:    connection.ProviderKey,
-		Metadata:       map[string]any{"syncJobId": job.ID, "reason": reason, "mode": mode},
-	})
 	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_started", connection, map[string]any{
 		"syncJobId": job.ID,
 		"status":    job.Status,
@@ -1264,36 +1340,60 @@ func advanceSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conn
 		"contentIngestion": "external_only",
 		"sourceContent":    "not_stored_by_integration_corev2",
 	})
-	running, err := cfg.Repo.UpdateSyncJob(ctx, job)
-	if err != nil {
-		return store.SyncJob{}, err
-	}
-	_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
-		ID:        "sync_evt_" + uuid.NewString(),
-		JobID:     running.ID,
-		Type:      "sync.running",
-		Message:   "Sync job is being prepared for provider handoff.",
-		Metadata:  map[string]any{"providerKey": connection.ProviderKey},
-		CreatedAt: now,
-	})
-
 	target := syncHandoffTarget(connection)
-	next := running
-	next.Status = target.status
-	next.Checkpoint = mergeMetadata(next.Checkpoint, target.checkpoint)
-	next.Metadata = mergeMetadata(next.Metadata, target.metadata)
-	updated, err := cfg.Repo.UpdateSyncJob(ctx, next)
+	var updated store.SyncJob
+	err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		running, updateErr := tx.UpdateSyncJob(ctx, job)
+		if updateErr != nil {
+			return updateErr
+		}
+		if err := tx.InsertSyncEvent(ctx, store.SyncEvent{
+			ID:        "sync_evt_" + uuid.NewString(),
+			JobID:     running.ID,
+			Type:      "sync.running",
+			Message:   "Sync job is being prepared for provider handoff.",
+			Metadata:  map[string]any{"providerKey": connection.ProviderKey},
+			CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+
+		next := running
+		next.Status = target.status
+		next.Checkpoint = mergeMetadata(next.Checkpoint, target.checkpoint)
+		next.Metadata = mergeMetadata(next.Metadata, target.metadata)
+		updated, updateErr = tx.UpdateSyncJob(ctx, next)
+		if updateErr != nil {
+			return updateErr
+		}
+		if err := tx.InsertSyncEvent(ctx, store.SyncEvent{
+			ID:        "sync_evt_" + uuid.NewString(),
+			JobID:     updated.ID,
+			Type:      target.eventType,
+			Message:   target.message,
+			Metadata:  target.metadata,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             auditMutationID(ctx, "sync-handoff", updated.ID),
+			OrganizationID: updated.OrganizationID,
+			UserID:         updated.UserID,
+			ConnectionID:   updated.ConnectionID,
+			EventType:      "connection.sync.handoff",
+			ProviderKey:    updated.ProviderKey,
+			Metadata: map[string]any{
+				"syncJobId":     updated.ID,
+				"status":        updated.Status,
+				"handoffTarget": target.metadata["handoffTarget"],
+			},
+			CreatedAt: now,
+		})
+	})
 	if err != nil {
 		return store.SyncJob{}, err
 	}
-	_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
-		ID:        "sync_evt_" + uuid.NewString(),
-		JobID:     updated.ID,
-		Type:      target.eventType,
-		Message:   target.message,
-		Metadata:  target.metadata,
-		CreatedAt: time.Now().UTC(),
-	})
 	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_handoff", connection, map[string]any{
 		"syncJobId": updated.ID,
 		"status":    updated.Status,
@@ -1368,18 +1468,37 @@ func cancelSyncJob(ctx context.Context, cfg ServerConfig, job store.SyncJob, rea
 	job.UpdatedAt = now
 	job.CompletedAt = &now
 	job.Metadata = mergeMetadata(job.Metadata, map[string]any{"cancelReason": reason})
-	updated, err := cfg.Repo.UpdateSyncJob(ctx, job)
+	var updated store.SyncJob
+	err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		var updateErr error
+		updated, updateErr = tx.UpdateSyncJob(ctx, job)
+		if updateErr != nil {
+			return updateErr
+		}
+		if err := tx.InsertSyncEvent(ctx, store.SyncEvent{
+			ID:        "sync_evt_" + uuid.NewString(),
+			JobID:     updated.ID,
+			Type:      "sync.cancelled",
+			Message:   "Sync job was cancelled.",
+			Metadata:  map[string]any{"reason": reason},
+			CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             auditMutationID(ctx, "sync-cancelled", updated.ID),
+			OrganizationID: updated.OrganizationID,
+			UserID:         updated.UserID,
+			ConnectionID:   updated.ConnectionID,
+			EventType:      "connection.sync.cancelled",
+			ProviderKey:    updated.ProviderKey,
+			Metadata:       map[string]any{"syncJobId": updated.ID, "reason": reason},
+			CreatedAt:      now,
+		})
+	})
 	if err != nil {
 		return store.SyncJob{}, err
 	}
-	_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
-		ID:        "sync_evt_" + uuid.NewString(),
-		JobID:     updated.ID,
-		Type:      "sync.cancelled",
-		Message:   "Sync job was cancelled.",
-		Metadata:  map[string]any{"reason": reason},
-		CreatedAt: now,
-	})
 	if cfg.Events != nil {
 		_ = cfg.Events.Publish(ctx, events.Event{
 			Type:           "velion.ingestion.integration.sync_cancelled",
@@ -1446,33 +1565,45 @@ func claimSyncJob(ctx context.Context, cfg ServerConfig, body syncClaimBody) (st
 		"claimedBy":     strings.TrimSpace(body.Consumer),
 		"handoffTarget": target,
 	})
-	job, err := cfg.Repo.ClaimSyncJob(ctx, store.SyncJobClaim{
+	claim := store.SyncJobClaim{
 		Consumer:       strings.TrimSpace(body.Consumer),
 		Target:         target,
 		OrganizationID: strings.TrimSpace(body.OrganizationID),
 		ProviderKey:    providers.NormalizeKey(body.ProviderKey),
 		Checkpoint:     checkpoint,
 		Metadata:       metadata,
+	}
+	var job store.SyncJob
+	err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		var claimErr error
+		job, claimErr = tx.ClaimSyncJob(ctx, claim)
+		if claimErr != nil {
+			return claimErr
+		}
+		if err := tx.InsertSyncEvent(ctx, store.SyncEvent{
+			ID:        "sync_evt_" + uuid.NewString(),
+			JobID:     job.ID,
+			Type:      "sync.claimed",
+			Message:   "Sync job was claimed by an internal worker.",
+			Metadata:  map[string]any{"consumer": body.Consumer, "target": target},
+			CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             "audit:integration:sync-claimed:" + job.ID,
+			OrganizationID: job.OrganizationID,
+			UserID:         job.UserID,
+			ConnectionID:   job.ConnectionID,
+			EventType:      "connection.sync.claimed",
+			ProviderKey:    job.ProviderKey,
+			Metadata:       map[string]any{"syncJobId": job.ID, "consumer": body.Consumer, "target": target},
+			CreatedAt:      now,
+		})
 	})
 	if err != nil {
 		return store.SyncJob{}, err
 	}
-	_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
-		ID:        "sync_evt_" + uuid.NewString(),
-		JobID:     job.ID,
-		Type:      "sync.claimed",
-		Message:   "Sync job was claimed by an internal worker.",
-		Metadata:  map[string]any{"consumer": body.Consumer, "target": target},
-		CreatedAt: now,
-	})
-	recordAuditEvent(ctx, cfg, store.AuditEvent{
-		OrganizationID: job.OrganizationID,
-		UserID:         job.UserID,
-		ConnectionID:   job.ConnectionID,
-		EventType:      "connection.sync.claimed",
-		ProviderKey:    job.ProviderKey,
-		Metadata:       map[string]any{"syncJobId": job.ID, "consumer": body.Consumer, "target": target},
-	})
 	if connection, lookupErr := cfg.Repo.GetConnection(ctx, job.ConnectionID); lookupErr == nil {
 		publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_claimed", connection, map[string]any{
 			"syncJobId": job.ID,
@@ -1518,27 +1649,39 @@ func advanceWorkerSyncJob(ctx context.Context, cfg ServerConfig, id string, body
 	if status == "completed" || status == "failed" || status == "cancelled" {
 		job.CompletedAt = &now
 	}
-	updated, err := cfg.Repo.UpdateSyncJob(ctx, job)
+	var updated store.SyncJob
+	err = withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		var updateErr error
+		updated, updateErr = tx.UpdateSyncJob(ctx, job)
+		if updateErr != nil {
+			return updateErr
+		}
+		eventType, message := workerSyncEvent(status, body.Message)
+		if err := tx.InsertSyncEvent(ctx, store.SyncEvent{
+			ID:        "sync_evt_" + uuid.NewString(),
+			JobID:     updated.ID,
+			Type:      eventType,
+			Message:   message,
+			Metadata:  map[string]any{"consumer": consumer, "status": status, "sourceRefs": syncSourceRefCount(updated.Checkpoint)},
+			CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             auditMutationID(ctx, "sync-"+status, updated.ID),
+			OrganizationID: updated.OrganizationID,
+			UserID:         updated.UserID,
+			ConnectionID:   updated.ConnectionID,
+			EventType:      "connection.sync." + status,
+			ProviderKey:    updated.ProviderKey,
+			Metadata:       map[string]any{"syncJobId": updated.ID, "consumer": consumer, "sourceRefs": syncSourceRefCount(updated.Checkpoint)},
+			CreatedAt:      now,
+		})
+	})
 	if err != nil {
 		return store.SyncJob{}, err
 	}
-	eventType, message := workerSyncEvent(status, body.Message)
-	_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
-		ID:        "sync_evt_" + uuid.NewString(),
-		JobID:     updated.ID,
-		Type:      eventType,
-		Message:   message,
-		Metadata:  map[string]any{"consumer": consumer, "status": status, "sourceRefs": syncSourceRefCount(updated.Checkpoint)},
-		CreatedAt: now,
-	})
-	recordAuditEvent(ctx, cfg, store.AuditEvent{
-		OrganizationID: updated.OrganizationID,
-		UserID:         updated.UserID,
-		ConnectionID:   updated.ConnectionID,
-		EventType:      "connection.sync." + status,
-		ProviderKey:    updated.ProviderKey,
-		Metadata:       map[string]any{"syncJobId": updated.ID, "consumer": consumer, "sourceRefs": syncSourceRefCount(updated.Checkpoint)},
-	})
+	eventType, _ := workerSyncEvent(status, body.Message)
 	if connection, lookupErr := cfg.Repo.GetConnection(ctx, updated.ConnectionID); lookupErr == nil {
 		publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration."+eventType, connection, map[string]any{
 			"syncJobId": updated.ID,
@@ -2132,13 +2275,13 @@ func scimError(c *fiber.Ctx, status int, scimType, detail string) error {
 	})
 }
 
-func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessTokenResult, consumer string) {
+func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessTokenResult, consumer string) error {
 	connection, err := cfg.Repo.GetConnection(ctx, token.ConnectionID)
 	if err != nil {
 		if cfg.Logger != nil {
 			cfg.Logger.Warn().Err(err).Str("connection_id", token.ConnectionID).Msg("record token lease connection lookup")
 		}
-		return
+		return err
 	}
 	lease := store.TokenLease{
 		ID:             "lease_" + uuid.NewString(),
@@ -2151,29 +2294,35 @@ func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessT
 		ExpiresAt:      token.ExpiresAt,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := cfg.Repo.InsertTokenLease(ctx, lease); err != nil {
-		if cfg.Logger != nil {
-			cfg.Logger.Warn().Err(err).Str("connection_id", connection.ID).Msg("record token lease")
+	if err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		if err := tx.InsertTokenLease(ctx, lease); err != nil {
+			return err
 		}
-		return
+		return persist(store.AuditEvent{
+			ID:             "audit:integration:token-lease:" + lease.ID,
+			OrganizationID: connection.OrganizationID,
+			UserID:         connection.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      "connection.token_leased",
+			ProviderKey:    connection.ProviderKey,
+			Metadata: map[string]any{
+				"consumer":  lease.Consumer,
+				"leaseId":   lease.ID,
+				"expiresAt": lease.ExpiresAt,
+			},
+		})
+	}); err != nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn().Err(err).Str("connection_id", connection.ID).Msg("record token lease with audit")
+		}
+		return err
 	}
-	recordAuditEvent(ctx, cfg, store.AuditEvent{
-		OrganizationID: connection.OrganizationID,
-		UserID:         connection.UserID,
-		ConnectionID:   connection.ID,
-		EventType:      "connection.token_leased",
-		ProviderKey:    connection.ProviderKey,
-		Metadata: map[string]any{
-			"consumer":  lease.Consumer,
-			"leaseId":   lease.ID,
-			"expiresAt": lease.ExpiresAt,
-		},
-	})
 	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.token_lease_created", connection, map[string]any{
 		"consumer":  lease.Consumer,
 		"leaseId":   lease.ID,
 		"expiresAt": lease.ExpiresAt,
 	})
+	return nil
 }
 
 func tokenLeaseConsumerAllowed(cfg config.Config, consumer string) bool {
@@ -2269,61 +2418,72 @@ func buildGDPRExport(ctx context.Context, cfg ServerConfig, organizationID, user
 func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) (fiber.Map, error) {
 	organizationID := strings.TrimSpace(body.OrganizationID)
 	userID := strings.TrimSpace(body.UserID)
-	connections, err := cfg.Repo.ListConnections(ctx, store.ConnectionFilter{
-		OrganizationID: organizationID,
-		UserID:         userID,
+	now := time.Now().UTC()
+	deletedIDs := []string{}
+	revokedConsentIDs := []string{}
+	err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		connections, err := tx.ListConnections(ctx, store.ConnectionFilter{
+			OrganizationID: organizationID,
+			UserID:         userID,
+		})
+		if err != nil {
+			return err
+		}
+		for _, connection := range connections {
+			consents, err := tx.ListConnectionConsents(ctx, connection.ID)
+			if err != nil {
+				return err
+			}
+			for _, consent := range consents {
+				consent.Granted = false
+				consent.RevokedAt = &now
+				updated, updateErr := tx.UpsertConnectionConsent(ctx, consent)
+				if updateErr != nil {
+					return updateErr
+				}
+				revokedConsentIDs = append(revokedConsentIDs, updated.ID)
+			}
+			if connection.DeletedAt != nil {
+				continue
+			}
+			deleted, deleteErr := tx.MarkConnectionDeleted(ctx, connection.ID)
+			if deleteErr != nil {
+				return deleteErr
+			}
+			deletedIDs = append(deletedIDs, deleted.ID)
+			if err := persist(store.AuditEvent{
+				ID:             "audit:integration:gdpr-connection-deleted:" + deleted.ID,
+				OrganizationID: deleted.OrganizationID,
+				UserID:         deleted.UserID,
+				ConnectionID:   deleted.ID,
+				EventType:      "gdpr.integration.connection_deleted",
+				ProviderKey:    deleted.ProviderKey,
+				Metadata: map[string]any{
+					"reason":          strings.TrimSpace(body.Reason),
+					"tokenPolicy":     "encrypted_tokens_cleared",
+					"consentsRevoked": len(consents),
+				},
+				CreatedAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		return persist(store.AuditEvent{
+			ID:             auditMutationID(ctx, "gdpr-delete-completed", organizationID, userID),
+			OrganizationID: organizationID,
+			UserID:         userID,
+			EventType:      "gdpr.integration.delete_completed",
+			Metadata: map[string]any{
+				"connectionCount": len(deletedIDs),
+				"consentCount":    len(revokedConsentIDs),
+				"reason":          strings.TrimSpace(body.Reason),
+			},
+			CreatedAt: now,
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
-	deletedIDs := []string{}
-	revokedConsentIDs := []string{}
-	for _, connection := range connections {
-		consents, err := cfg.Repo.ListConnectionConsents(ctx, connection.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, consent := range consents {
-			consent.Granted = false
-			consent.RevokedAt = &now
-			updated, err := cfg.Repo.UpsertConnectionConsent(ctx, consent)
-			if err != nil {
-				return nil, err
-			}
-			revokedConsentIDs = append(revokedConsentIDs, updated.ID)
-		}
-		if connection.DeletedAt != nil {
-			continue
-		}
-		deleted, err := cfg.Repo.MarkConnectionDeleted(ctx, connection.ID)
-		if err != nil {
-			return nil, err
-		}
-		deletedIDs = append(deletedIDs, deleted.ID)
-		recordAuditEvent(ctx, cfg, store.AuditEvent{
-			OrganizationID: deleted.OrganizationID,
-			UserID:         deleted.UserID,
-			ConnectionID:   deleted.ID,
-			EventType:      "gdpr.integration.connection_deleted",
-			ProviderKey:    deleted.ProviderKey,
-			Metadata: map[string]any{
-				"reason":          strings.TrimSpace(body.Reason),
-				"tokenPolicy":     "encrypted_tokens_cleared",
-				"consentsRevoked": len(consents),
-			},
-		})
-	}
-	recordAuditEvent(ctx, cfg, store.AuditEvent{
-		OrganizationID: organizationID,
-		UserID:         userID,
-		EventType:      "gdpr.integration.delete_completed",
-		Metadata: map[string]any{
-			"connectionCount": len(deletedIDs),
-			"consentCount":    len(revokedConsentIDs),
-			"reason":          strings.TrimSpace(body.Reason),
-		},
-	})
 	return fiber.Map{
 		"organizationId":      organizationID,
 		"userId":              userID,
@@ -2331,7 +2491,7 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 		"revokedConsents":     revokedConsentIDs,
 		"tokens":              "cleared",
 		"sourceContentAction": "orchestrate_data_plane_delete",
-		"completedAt":         time.Now().UTC(),
+		"completedAt":         now,
 	}, nil
 }
 
@@ -2388,6 +2548,7 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	}
 	requestSHA256 := ""
 	var verifiedAttestation attestation.Verified
+	var actionReceipt store.ActionReceipt
 	if writeAction {
 		var err error
 		requestSHA256, err = actionRequestSHA256(connection, body)
@@ -2398,7 +2559,7 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		if err != nil {
 			return actions.ExecuteResult{}, err
 		}
-		receipt, acquired, err := cfg.Repo.ClaimActionReceipt(ctx, store.ActionReceipt{
+		claimedReceipt, acquired, err := cfg.Repo.ClaimActionReceipt(ctx, store.ActionReceipt{
 			OrganizationID:    connection.OrganizationID,
 			IdempotencyKey:    idempotencyKey,
 			RequestSHA256:     requestSHA256,
@@ -2421,22 +2582,28 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 			}
 			return actions.ExecuteResult{}, err
 		}
+		actionReceipt = claimedReceipt
 		if !acquired {
-			if !actionReceiptMatchesAuthorization(receipt, connection, body, verifiedAttestation, requestSHA256) {
+			if !actionReceiptMatchesAuthorization(actionReceipt, connection, body, verifiedAttestation, requestSHA256) {
 				return actions.ExecuteResult{}, errActionIdempotencyConflict
 			}
-			if receipt.Status == "completed" {
+			if actionReceipt.Status == "completed" {
 				result := map[string]any{}
-				if receipt.ProviderMessageID != "" {
-					result["provider_message_id"] = receipt.ProviderMessageID
+				if actionReceipt.ProviderMessageID != "" {
+					result["provider_message_id"] = actionReceipt.ProviderMessageID
 				}
 				return actions.ExecuteResult{
-					ProviderKey: receipt.ProviderKey,
-					Operation:   receipt.Operation,
+					ProviderKey: actionReceipt.ProviderKey,
+					Operation:   actionReceipt.Operation,
 					Result:      result,
 				}, nil
 			}
-			if receipt.Status != "pending" {
+			if actionReceipt.Status == "executing" {
+				if reconcileErr := markActionOutcomeUnknown(ctx, cfg, connection, actionReceipt); reconcileErr != nil && cfg.Logger != nil {
+					cfg.Logger.Error().Err(reconcileErr).Str("connection_id", connection.ID).Msg("stale provider action could not be durably marked unknown")
+				}
+			}
+			if actionReceipt.Status != "pending" {
 				return actions.ExecuteResult{}, errActionOutcomeUnknown
 			}
 		}
@@ -2449,8 +2616,25 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		return actions.ExecuteResult{}, err
 	}
 	if writeAction {
-		if _, err := cfg.Repo.BeginActionReceiptExecution(ctx, connection.OrganizationID, idempotencyKey); err != nil {
-			return actions.ExecuteResult{}, errActionOutcomeUnknown
+		if err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			executingReceipt, err := tx.BeginActionReceiptExecution(ctx, connection.OrganizationID, idempotencyKey)
+			if err != nil {
+				return err
+			}
+			actionReceipt = executingReceipt
+			return persist(store.AuditEvent{
+				ID:             actionAuditEventID("requested", actionReceipt),
+				OrganizationID: connection.OrganizationID,
+				UserID:         connection.UserID,
+				ConnectionID:   connection.ID,
+				EventType:      "connection.action.requested",
+				ProviderKey:    connection.ProviderKey,
+				Metadata: map[string]any{
+					"operation": strings.TrimSpace(body.Operation),
+				},
+			})
+		}); err != nil {
+			return actions.ExecuteResult{}, errActionPreProviderRetryable
 		}
 	}
 	result, err := cfg.Actions.Execute(ctx, actions.ExecuteInput{
@@ -2462,28 +2646,99 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	})
 	if err != nil {
 		if writeAction {
-			_ = cfg.Repo.MarkActionReceiptUnknown(ctx, connection.OrganizationID, idempotencyKey)
+			unknownErr := markActionOutcomeUnknown(ctx, cfg, connection, actionReceipt)
+			if unknownErr != nil && cfg.Logger != nil {
+				cfg.Logger.Error().Err(unknownErr).Str("connection_id", connection.ID).Msg("provider action outcome could not be durably marked unknown")
+			}
 		}
 		return actions.ExecuteResult{}, err
 	}
 	if writeAction {
-		if _, err := cfg.Repo.CompleteActionReceipt(ctx, connection.OrganizationID, idempotencyKey, actionProviderMessageID(result.Result)); err != nil {
+		if err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			completedReceipt, err := tx.CompleteActionReceipt(ctx, connection.OrganizationID, idempotencyKey, actionProviderMessageID(result.Result))
+			if err != nil {
+				return err
+			}
+			actionReceipt = completedReceipt
+			return persist(store.AuditEvent{
+				ID:             actionAuditEventID("executed", actionReceipt),
+				OrganizationID: connection.OrganizationID,
+				UserID:         connection.UserID,
+				ConnectionID:   connection.ID,
+				EventType:      "connection.action.executed",
+				ProviderKey:    connection.ProviderKey,
+				Metadata: map[string]any{
+					"operation": result.Operation,
+				},
+			})
+		}); err != nil {
 			// The provider may already have accepted the action. Never turn a
 			// receipt persistence failure into a blind retry.
 			return actions.ExecuteResult{}, errActionOutcomeUnknown
 		}
+	} else {
+		recordAuditEvent(ctx, cfg, store.AuditEvent{
+			OrganizationID: connection.OrganizationID,
+			UserID:         connection.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      "connection.action.executed",
+			ProviderKey:    connection.ProviderKey,
+			Metadata: map[string]any{
+				"operation": result.Operation,
+			},
+		})
 	}
-	recordAuditEvent(ctx, cfg, store.AuditEvent{
-		OrganizationID: connection.OrganizationID,
-		UserID:         connection.UserID,
-		ConnectionID:   connection.ID,
-		EventType:      "connection.action.executed",
-		ProviderKey:    connection.ProviderKey,
-		Metadata: map[string]any{
-			"operation": result.Operation,
-		},
-	})
 	return result, nil
+}
+
+func markActionOutcomeUnknown(
+	ctx context.Context,
+	cfg ServerConfig,
+	connection store.Connection,
+	receipt store.ActionReceipt,
+) error {
+	return withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		if err := tx.MarkActionReceiptUnknown(ctx, connection.OrganizationID, receipt.IdempotencyKey); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             actionAuditEventID("unknown", receipt),
+			OrganizationID: connection.OrganizationID,
+			UserID:         connection.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      "connection.action.unknown",
+			ProviderKey:    connection.ProviderKey,
+			Metadata: map[string]any{
+				"operation": strings.TrimSpace(receipt.Operation),
+			},
+		})
+	})
+}
+
+func actionAuditEventID(stage string, receipt store.ActionReceipt) string {
+	fields := [...]string{
+		receipt.OrganizationID,
+		receipt.IdempotencyKey,
+		receipt.RequestSHA256,
+		receipt.ConnectionID,
+		receipt.ProviderKey,
+		receipt.Operation,
+		receipt.AttestationIssuer,
+		receipt.AuthorizationKind,
+		receipt.AuthorizationID,
+		receipt.ApprovalID,
+		receipt.ActionID,
+		receipt.ActorID,
+		receipt.PayloadSHA256,
+	}
+	var canonical strings.Builder
+	for _, field := range fields {
+		canonical.WriteString(strconv.Itoa(len(field)))
+		canonical.WriteByte(':')
+		canonical.WriteString(field)
+	}
+	digest := sha256.Sum256([]byte(canonical.String()))
+	return "audit:integration:action-" + strings.TrimSpace(stage) + ":" + hex.EncodeToString(digest[:])
 }
 
 func actionReceiptMatchesAuthorization(receipt store.ActionReceipt, connection store.Connection, body actionBody, verified attestation.Verified, payloadSHA256 string) bool {
@@ -2948,44 +3203,79 @@ func recordUsage(cfg ServerConfig, orgID, metric string, quantity float64, metad
 	}()
 }
 
-func recordAuditEvent(ctx context.Context, cfg ServerConfig, event store.AuditEvent) {
+func prepareAuditEvent(ctx context.Context, event store.AuditEvent) store.AuditEvent {
 	if strings.TrimSpace(event.ID) == "" {
 		event.ID = "audit_" + uuid.NewString()
 	}
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
-	if cfg.Repo != nil {
-		if err := cfg.Repo.InsertAuditEvent(ctx, event); err != nil && cfg.Logger != nil {
-			cfg.Logger.Warn().Err(err).Str("org_id", event.OrganizationID).Str("event_type", event.EventType).Msg("record local audit event")
-		}
+	if strings.TrimSpace(event.RequestID) == "" {
+		event.RequestID = requestIDFromContext(ctx)
 	}
-	forwardAuditEvent(ctx, cfg, event)
+	return event
 }
 
-func forwardAuditEvent(ctx context.Context, cfg ServerConfig, event store.AuditEvent) {
-	if cfg.Audit == nil {
+func auditMutationID(_ context.Context, operation string, resourceParts ...string) string {
+	// X-Request-ID is correlation data, not an idempotency credential. Include
+	// fresh server entropy so a caller cannot reuse a request ID to suppress the
+	// audit row for a distinct mutation.
+	identity := append([]string{strings.TrimSpace(operation), uuid.NewString()}, resourceParts...)
+	digest := sha256.Sum256([]byte(strings.Join(identity, "\x00")))
+	return "audit:integration:" + strings.TrimSpace(operation) + ":" + hex.EncodeToString(digest[:16])
+}
+
+func dispatchAuditOutbox(ctx context.Context, cfg ServerConfig, event store.AuditEvent) {
+	if cfg.AuditOutbox != nil {
+		forwardContext, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if _, err := cfg.AuditOutbox.DispatchOne(forwardContext); err != nil && cfg.Logger != nil {
+			cfg.Logger.Warn().Err(err).Str("org_id", event.OrganizationID).Str("event", event.EventType).Msg("audit event retained for retry")
+		}
+	}
+}
+
+func withAuditTransaction(
+	ctx context.Context,
+	cfg ServerConfig,
+	mutation func(store.AuditTransaction, func(store.AuditEvent) error) error,
+) error {
+	if cfg.Repo == nil {
+		return fmt.Errorf("repository is unavailable")
+	}
+	persisted := make([]store.AuditEvent, 0, 1)
+	err := cfg.Repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		persist := func(event store.AuditEvent) error {
+			event = prepareAuditEvent(ctx, event)
+			if err := tx.InsertAuditEvent(ctx, event); err != nil {
+				return err
+			}
+			persisted = append(persisted, event)
+			return nil
+		}
+		return mutation(tx, persist)
+	})
+	if err != nil {
+		return err
+	}
+	for _, event := range persisted {
+		dispatchAuditOutbox(ctx, cfg, event)
+	}
+	return nil
+}
+
+func recordAuditEvent(ctx context.Context, cfg ServerConfig, event store.AuditEvent) {
+	event = prepareAuditEvent(ctx, event)
+	if cfg.Repo == nil {
 		return
 	}
-	auditEvent := controlplane.AuditEvent{
-		OccurredAt: event.CreatedAt,
-		OrgID:      strings.TrimSpace(event.OrganizationID),
-		UserID:     strings.TrimSpace(event.UserID),
-		Plane:      cfg.Config.ServiceName,
-		Event:      strings.TrimSpace(event.EventType),
-		Subject:    auditSubject(event),
-		ResourceID: strings.TrimSpace(event.ConnectionID),
-		Outcome:    "ok",
-		Details:    auditDetails(event),
-		RequestID:  requestIDFromContext(ctx),
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := cfg.Audit.RecordAudit(ctx, auditEvent); err != nil && cfg.Logger != nil {
-			cfg.Logger.Warn().Err(err).Str("org_id", auditEvent.OrgID).Str("event", auditEvent.Event).Msg("forward audit event")
+	if err := cfg.Repo.InsertAuditEvent(ctx, event); err != nil {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn().Err(err).Str("org_id", event.OrganizationID).Str("event_type", event.EventType).Msg("record local audit event")
 		}
-	}()
+		return
+	}
+	dispatchAuditOutbox(ctx, cfg, event)
 }
 
 func auditSubject(event store.AuditEvent) string {
@@ -3289,6 +3579,30 @@ func (m *requestMetrics) render() string {
 		out.WriteString("integration_http_request_duration_seconds_total{" + labels + "} " + strconv.FormatFloat(value.durationSeconds, 'f', 6, 64) + "\n")
 	}
 	return out.String()
+}
+
+func renderAuditOutboxMetrics(ctx context.Context, monitor AuditOutboxMonitor) string {
+	status, err := monitor.Status(ctx)
+	if err != nil {
+		return "# HELP integration_audit_outbox_status_error Whether audit outbox status collection failed.\n" +
+			"# TYPE integration_audit_outbox_status_error gauge\n" +
+			"integration_audit_outbox_status_error 1\n"
+	}
+	return "# HELP integration_audit_outbox_pending Pending durable audit events.\n" +
+		"# TYPE integration_audit_outbox_pending gauge\n" +
+		"integration_audit_outbox_pending " + strconv.Itoa(status.Pending) + "\n" +
+		"# HELP integration_audit_outbox_terminal Terminal audit events requiring operator recovery.\n" +
+		"# TYPE integration_audit_outbox_terminal gauge\n" +
+		"integration_audit_outbox_terminal " + strconv.Itoa(status.Terminal) + "\n" +
+		"# HELP integration_audit_outbox_oldest_pending_seconds Age of the oldest pending audit event.\n" +
+		"# TYPE integration_audit_outbox_oldest_pending_seconds gauge\n" +
+		"integration_audit_outbox_oldest_pending_seconds " + strconv.FormatFloat(status.OldestPendingAge.Seconds(), 'f', -1, 64) + "\n" +
+		"# HELP integration_audit_outbox_oldest_terminal_seconds Age of the oldest terminal audit event.\n" +
+		"# TYPE integration_audit_outbox_oldest_terminal_seconds gauge\n" +
+		"integration_audit_outbox_oldest_terminal_seconds " + strconv.FormatFloat(status.OldestTerminalAge.Seconds(), 'f', -1, 64) + "\n" +
+		"# HELP integration_audit_outbox_status_error Whether audit outbox status collection failed.\n" +
+		"# TYPE integration_audit_outbox_status_error gauge\n" +
+		"integration_audit_outbox_status_error 0\n"
 }
 
 func prometheusLabel(input string) string {

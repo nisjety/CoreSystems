@@ -51,16 +51,20 @@ function requireEnvironment(environment, name) {
 
 async function run(argv = process.argv.slice(2), environment = process.env, fetchImpl = fetch) {
   const options = parseOptions(argv);
-  const controlBaseUrl = requireEnvironment(environment, 'CONTROL_PLANE_ORG_CORE_URL').replace(/\/$/, '');
+  const authBaseUrl = requireEnvironment(environment, 'CONTROL_PLANE_AUTH_CORE_URL').replace(/\/$/, '');
   const convexBaseUrl = requireEnvironment(environment, 'CONVEX_HTTP_ACTIONS_URL').replace(/\/$/, '');
-  const controlKey = requireEnvironment(environment, 'CONTROL_PLANE_INTERNAL_KEY');
+  const authToken = requireEnvironment(environment, 'APPLICATION_RECONCILER_AUTH_TOKEN');
   const convexKey = requireEnvironment(environment, 'CONVEX_RECONCILIATION_KEY');
   const signal = AbortSignal.timeout(10_000);
 
   const authorityResponse = await fetchImpl(
-    `${controlBaseUrl}/orgs/${encodeURIComponent(options.orgId)}/members`,
+    `${authBaseUrl}/api/v1/internal/membership/organizations/${encodeURIComponent(options.orgId)}/members`,
     {
-      headers: { 'X-Internal-Api-Key': controlKey },
+      headers: {
+        'X-Service-Id': 'application-reconciler',
+        'X-Service-Token': authToken,
+      },
+      redirect: 'manual',
       signal,
     },
   );
@@ -93,6 +97,7 @@ async function run(argv = process.argv.slice(2), environment = process.env, fetc
         'X-Reconciliation-Signature': signature,
       },
       body,
+      redirect: 'manual',
       signal,
     },
   );

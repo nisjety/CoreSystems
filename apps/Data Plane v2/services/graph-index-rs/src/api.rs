@@ -50,6 +50,11 @@ fn require_org<'a>(
     }
 }
 
+fn store_failure(operation: &'static str, error: impl std::fmt::Display) -> StatusCode {
+    tracing::error!(operation, error = %error, "graph store operation failed");
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
 pub fn router(store: Arc<GraphStore>, verifier: Arc<JwtVerifier>) -> Router {
     let public = Router::new()
         .route("/health", get(health))
@@ -256,7 +261,7 @@ async fn get_org_graph(
                 "truncated": truncated,
             })))
         }
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => Err(store_failure("snapshot_org_graph", e)),
     }
 }
 
@@ -336,8 +341,8 @@ async fn get_entity(
     let org_id = require_org(&principal, &q.org_id)?;
     match store.get_entity(org_id, &entity_id).await {
         Ok(Some(e)) => Ok(Json(serde_json::json!({"entity": e}))),
-        Ok(None) => Ok(Json(serde_json::json!({"error": "not found"}))),
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => Err(store_failure("get_entity", e)),
     }
 }
 
@@ -354,7 +359,7 @@ async fn list_entities(
         Ok((entities, total)) => Ok(Json(
             serde_json::json!({"entities": entities, "total": total}),
         )),
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => Err(store_failure("list_entities_by_type", e)),
     }
 }
 
@@ -370,7 +375,7 @@ async fn get_relationships(
         .await
     {
         Ok(rels) => Ok(Json(serde_json::json!({"relationships": rels}))),
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => Err(store_failure("get_relationships", e)),
     }
 }
 
@@ -385,7 +390,7 @@ async fn get_claims(
         .await
     {
         Ok(claims) => Ok(Json(serde_json::json!({"claims": claims}))),
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => Err(store_failure("get_claims", e)),
     }
 }
 
@@ -399,7 +404,7 @@ async fn get_contradictions(
         Ok((claims, total)) => Ok(Json(
             serde_json::json!({"contradictions": claims, "total": total}),
         )),
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => Err(store_failure("get_contradictions", e)),
     }
 }
 
@@ -419,7 +424,7 @@ async fn expand_graph(
             "hops_traversed": req.max_hops,
             "new_entities_found": entities.len(),
         }))),
-        Err(e) => Ok(Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => Err(store_failure("get_graph_expansion", e)),
     }
 }
 
@@ -695,13 +700,12 @@ mod auth_tests {
                 .await
                 .expect("response")
                 .status();
-            assert_ne!(
+            assert_eq!(
                 status,
-                StatusCode::UNAUTHORIZED,
-                "own-org route {}",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "an unavailable graph store must fail honestly for own-org route {}",
                 case.uri
             );
-            assert_ne!(status, StatusCode::FORBIDDEN, "own-org route {}", case.uri);
         }
     }
 }

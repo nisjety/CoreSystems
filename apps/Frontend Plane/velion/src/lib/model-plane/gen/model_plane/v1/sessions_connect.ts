@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SetRunModeRequest, SetRunModeResponse, StartRunRequest, StartRunResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetRunModeRequest, SetRunModeResponse, StartRunRequest, StartRunResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -59,6 +59,30 @@ export const SessionCore = {
       name: "CompleteStep",
       I: CompleteStepRequest,
       O: CompleteStepResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Durably reserve an inline tool-action audit intent before the tool runs.
+     * This does not advance or terminate the run/plan.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ReserveToolAction
+     */
+    reserveToolAction: {
+      name: "ReserveToolAction",
+      I: ReserveToolActionRequest,
+      O: ReserveToolActionResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Finalize a previously reserved inline tool action after execution.
+     * This persists the final audit event without changing run/plan lifecycle.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.FinalizeToolAction
+     */
+    finalizeToolAction: {
+      name: "FinalizeToolAction",
+      I: FinalizeToolActionRequest,
+      O: FinalizeToolActionResponse,
       kind: MethodKind.Unary,
     },
     /**

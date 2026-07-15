@@ -12,6 +12,7 @@ import { demoWorkspaceIdentity, routeFromPath } from '@/features/core/lib/shell-
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import DashboardHome from '@/features/dashboard/home/DashboardHome'
 import { I18nProvider } from '@/shared/i18n'
+import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 function renderWithRouter(component: () => JSX.Element, path = '/dashboard') {
   window.history.pushState(null, '', path)
@@ -42,6 +43,7 @@ function createStorageMock(): Storage {
 }
 
 afterEach(() => {
+  clearSession()
   vi.unstubAllGlobals()
 })
 
@@ -223,6 +225,59 @@ describe('v2 dashboard shell port', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Åpne profilmeny' }))
     expect(screen.getByText('Abonnement')).toBeTruthy()
+  })
+
+  it('lists and switches canonical Auth organizations instead of a local-only workspace toggle', async () => {
+    setSessionUser({
+      id: 'user_1',
+      email: 'user@example.com',
+      name: 'User',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Velion', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs') {
+        return new Response(JSON.stringify([
+          { id: 'org_1', name: 'Velion', slug: 'velion', metadata: { plan: 'trial' } },
+          { id: 'org_2', name: 'Acme', slug: 'acme', metadata: { plan: 'enterprise' } },
+        ]), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/orgs/switch-active') {
+        expect(JSON.parse(String(init?.body))).toEqual({ organizationId: 'org_2' })
+        return new Response(JSON.stringify({ organization: { id: 'org_2' } }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      if (path === '/api/v1/auth/session') {
+        return new Response(JSON.stringify({
+          user: { id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true },
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/session/current') {
+        return new Response(JSON.stringify({
+          user: { id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true },
+          org: { id: 'org_2', name: 'Acme', role: 'admin' },
+          permissions: [],
+          onboardingStatus: 'COMPLETED',
+          status: 'authenticated',
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      throw new Error(`Unexpected request: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithRouter(() => <CoreNavbar activeRoute="/dashboard" workspace={demoWorkspaceIdentity} />)
+    fireEvent.click(screen.getByRole('button', { name: /Velion.*Trial/ }))
+
+    expect(await screen.findByText('Acme')).toBeTruthy()
+    expect(screen.queryByText('Personlig arbeidsområde')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Acme/ }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/switch-active')).toBe(true)
+    })
   })
 
   it('renders dedicated v2-style expanded sidebar panels for core sections', () => {

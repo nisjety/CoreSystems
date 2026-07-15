@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/runs.proto.
  */
 export const file_model_plane_v1_runs: GenFile = /*@__PURE__*/
-  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJgCg9MaXN0UnVuc1JlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEhUKDXN0YXR1c19maWx0ZXIYAiABKAkSFAoMYWZ0ZXJfcnVuX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNIk0KEExpc3RSdW5zUmVzcG9uc2USJwoEcnVucxgBIAMoCzIZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBIQCghoYXNfbW9yZRgCIAEoCCIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIIpMDCglSdW5EZXRhaWwSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIVCg1wYXJlbnRfcnVuX2lkGAMgASgJEhAKCGFnZW50X2lkGAQgASgJEg4KBnN0YXR1cxgFIAEoCRIMCgRtb2RlGAYgASgJEgwKBGdvYWwYByABKAkSFAoMZmluYWxfb3V0cHV0GAggASgJEg0KBWVycm9yGAkgASgJEhgKEGNoZWNrcG9pbnRfaW5kZXgYCiABKA0SFwoPc3RlcHNfY29tcGxldGVkGAsgASgNEhQKDGlucHV0X3Rva2VucxgMIAEoDRIVCg1vdXRwdXRfdG9rZW5zGA0gASgNEi4KCmNyZWF0ZWRfYXQYDiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYDyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEikKCG1ldGFkYXRhGBAgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdDLxAQoKUnVuU2VydmljZRJCCgZHZXRSdW4SHS5tb2RlbF9wbGFuZS52MS5HZXRSdW5SZXF1ZXN0GhkubW9kZWxfcGxhbmUudjEuUnVuRGV0YWlsEk0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2VCsQEKEmNvbS5tb2RlbF9wbGFuZS52MUIJUnVuc1Byb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
+  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJgCg9MaXN0UnVuc1JlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEhUKDXN0YXR1c19maWx0ZXIYAiABKAkSFAoMYWZ0ZXJfcnVuX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNIk0KEExpc3RSdW5zUmVzcG9uc2USJwoEcnVucxgBIAMoCzIZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBIQCghoYXNfbW9yZRgCIAEoCCIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIIkkKFlJlc29sdmVSdW5Pd25lclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJIi0KF1Jlc29sdmVSdW5Pd25lclJlc3BvbnNlEhIKCmF1dGhvcml6ZWQYASABKAgikwMKCVJ1bkRldGFpbBIOCgZydW5faWQYASABKAkSEQoJdGhyZWFkX2lkGAIgASgJEhUKDXBhcmVudF9ydW5faWQYAyABKAkSEAoIYWdlbnRfaWQYBCABKAkSDgoGc3RhdHVzGAUgASgJEgwKBG1vZGUYBiABKAkSDAoEZ29hbBgHIAEoCRIUCgxmaW5hbF9vdXRwdXQYCCABKAkSDQoFZXJyb3IYCSABKAkSGAoQY2hlY2twb2ludF9pbmRleBgKIAEoDRIXCg9zdGVwc19jb21wbGV0ZWQYCyABKA0SFAoMaW5wdXRfdG9rZW5zGAwgASgNEhUKDW91dHB1dF90b2tlbnMYDSABKA0SLgoKY3JlYXRlZF9hdBgOIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKdXBkYXRlZF9hdBgPIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASKQoIbWV0YWRhdGEYECABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0MtUCCgpSdW5TZXJ2aWNlEkIKBkdldFJ1bhIdLm1vZGVsX3BsYW5lLnYxLkdldFJ1blJlcXVlc3QaGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSTQoITGlzdFJ1bnMSHy5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlElAKCUNhbmNlbFJ1bhIgLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXNwb25zZRJiCg9SZXNvbHZlUnVuT3duZXISJi5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXF1ZXN0GicubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2VCsQEKEmNvbS5tb2RlbF9wbGFuZS52MUIJUnVuc1Byb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
 
 /**
  * @generated from message model_plane.v1.GetRunRequest
@@ -145,6 +145,50 @@ export const CancelRunResponseSchema: GenMessage<CancelRunResponse> = /*@__PURE_
   messageDesc(file_model_plane_v1_runs, 4);
 
 /**
+ * @generated from message model_plane.v1.ResolveRunOwnerRequest
+ */
+export type ResolveRunOwnerRequest = Message<"model_plane.v1.ResolveRunOwnerRequest"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string org_id = 2;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string user_id = 3;
+   */
+  userId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveRunOwnerRequest.
+ * Use `create(ResolveRunOwnerRequestSchema)` to create a new message.
+ */
+export const ResolveRunOwnerRequestSchema: GenMessage<ResolveRunOwnerRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 5);
+
+/**
+ * @generated from message model_plane.v1.ResolveRunOwnerResponse
+ */
+export type ResolveRunOwnerResponse = Message<"model_plane.v1.ResolveRunOwnerResponse"> & {
+  /**
+   * @generated from field: bool authorized = 1;
+   */
+  authorized: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveRunOwnerResponse.
+ * Use `create(ResolveRunOwnerResponseSchema)` to create a new message.
+ */
+export const ResolveRunOwnerResponseSchema: GenMessage<ResolveRunOwnerResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 6);
+
+/**
  * RunDetail — full run metadata.
  *
  * @generated from message model_plane.v1.RunDetail
@@ -264,7 +308,7 @@ export type RunDetail = Message<"model_plane.v1.RunDetail"> & {
  * Use `create(RunDetailSchema)` to create a new message.
  */
 export const RunDetailSchema: GenMessage<RunDetail> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 5);
+  messageDesc(file_model_plane_v1_runs, 7);
 
 /**
  * RunService — query and manage run lifecycle.
@@ -302,6 +346,18 @@ export const RunService: GenService<{
     methodKind: "unary";
     input: typeof CancelRunRequestSchema;
     output: typeof CancelRunResponseSchema;
+  },
+  /**
+   * ResolveRunOwner — authoritative tenant/user ownership check for internal
+   * execution mutations. Returns only a boolean to avoid disclosing another
+   * tenant's run metadata.
+   *
+   * @generated from rpc model_plane.v1.RunService.ResolveRunOwner
+   */
+  resolveRunOwner: {
+    methodKind: "unary";
+    input: typeof ResolveRunOwnerRequestSchema;
+    output: typeof ResolveRunOwnerResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_runs, 0);

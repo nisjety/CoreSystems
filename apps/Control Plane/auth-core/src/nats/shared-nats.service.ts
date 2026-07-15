@@ -26,19 +26,9 @@ import {
   NatsConnection,
   StringCodec,
   JetStreamClient,
-  RetentionPolicy,
-  StorageType,
+  ConnectionOptions,
 } from 'nats';
-
-function isNonFatalStreamError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return (
-    msg.includes('stream name already in use') ||
-    msg.includes('subjects overlap') ||
-    msg.includes('err_code=10058') ||
-    msg.includes('err_code=10065')
-  );
-}
+import { selectNatsCredentials } from './nats-credentials';
 
 @Injectable()
 export class SharedNatsService implements OnModuleInit, OnModuleDestroy {
@@ -62,44 +52,30 @@ export class SharedNatsService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      const token =
-        this.config.get<string>('VELION_NATS_TOKEN') ||
-        this.config.get<string>('NATS_SHARED_TOKEN');
-
-      this.conn = await connect({
+      const credentials = selectNatsCredentials({
+        NATS_USER: this.config.get<string>('NATS_SHARED_USER'),
+        NATS_PASSWORD: this.config.get<string>('NATS_SHARED_PASSWORD'),
+        NATS_TOKEN: this.config.get<string>('NATS_SHARED_TOKEN'),
+        NATS_ALLOW_TOKEN_FALLBACK: this.config.get<string>(
+          'NATS_SHARED_ALLOW_TOKEN_FALLBACK',
+        ),
+      });
+      if (Object.keys(credentials).length === 0) {
+        throw new Error('shared NATS requires scoped credentials');
+      }
+      const options: ConnectionOptions = {
         servers: [url],
         name: 'auth-core-shared',
         maxReconnectAttempts: -1,
         reconnectTimeWait: 3000,
-        ...(token ? { token } : {}),
+        inboxPrefix: '_INBOX.AUTH_SHARED',
+      };
+      Object.assign(options, credentials);
+      this.conn = await connect({
+        ...options,
       });
 
       this.js = this.conn.jetstream();
-
-      // Ensure the AQENCIA_CONTROLPLANE JetStream exists
-      const jsm = await this.conn.jetstreamManager();
-      try {
-        await jsm.streams.add({
-          name: 'AQENCIA_CONTROLPLANE',
-          subjects: ['aqencia.controlplane.>'],
-          retention: RetentionPolicy.Limits,
-          max_msgs: 100_000,
-          // 14 days in nanoseconds
-          max_age: 14 * 24 * 60 * 60 * 1_000_000_000,
-          storage: StorageType.File,
-          duplicate_window: 60_000_000_000, // 60s dedup window (ns)
-        });
-        this.logger.log('AQENCIA_CONTROLPLANE JetStream stream ready');
-      } catch (err) {
-        if (!isNonFatalStreamError(err)) {
-          this.logger.warn(
-            `AQENCIA_CONTROLPLANE stream setup: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        } else {
-          this.logger.debug('AQENCIA_CONTROLPLANE stream already exists');
-        }
-      }
-
       this.enabled = true;
       this.logger.log(`Connected to shared NATS at ${url}`);
     } catch (err) {
@@ -107,7 +83,7 @@ export class SharedNatsService implements OnModuleInit, OnModuleDestroy {
         'Failed to connect to shared NATS — cross-plane publishing disabled',
         err,
       );
-      // Non-fatal: shared NATS is opt-in; the service continues without it
+      throw err;
     }
   }
 
@@ -127,41 +103,42 @@ export class SharedNatsService implements OnModuleInit, OnModuleDestroy {
   async publish(
     subject: string,
     payload: Record<string, unknown>,
+    options?: { msgID?: string },
   ): Promise<void> {
     if (!this.enabled || !this.js) {
-      return;
+      throw new Error('shared NATS publisher unavailable');
     }
 
-    try {
-      const enriched = {
-        ...payload,
-        _source: 'auth-core',
-        _published_at: new Date().toISOString(),
-      };
-
-      await this.js.publish(subject, this.sc.encode(JSON.stringify(enriched)));
-
-      this.logger.debug(`SharedNATS → ${subject}`);
-    } catch (err) {
-      // Fire-and-forget: never fail the caller due to shared NATS issues
-      this.logger.error(`Failed to publish "${subject}" to shared NATS`, err);
+    const enriched = {
+      ...payload,
+      _source: 'auth-core',
+      _published_at: new Date().toISOString(),
+    };
+    const ack = await this.js.publish(
+      subject,
+      this.sc.encode(JSON.stringify(enriched)),
+      options?.msgID ? { msgID: options.msgID } : undefined,
+    );
+    if (!ack.stream || !Number.isSafeInteger(ack.seq) || ack.seq <= 0) {
+      throw new Error('invalid shared NATS PubAck');
     }
+    this.logger.debug(`SharedNATS → ${subject} (${ack.stream}:${ack.seq})`);
   }
 
   /**
    * Publish an event via plain NATS core (not JetStream).
    * Used for subjects that have plain-NATS subscribers (e.g. notification-core).
    */
-  publishPlain(subject: string, payload: Record<string, unknown>): void {
+  async publishPlain(
+    subject: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
     if (!this.conn || this.conn.isClosed()) {
-      return;
+      throw new Error('shared NATS connection unavailable');
     }
-    try {
-      this.conn.publish(subject, this.sc.encode(JSON.stringify(payload)));
-      this.logger.debug(`SharedNATS plain → ${subject}`);
-    } catch (err) {
-      this.logger.error(`Failed to plain-publish "${subject}"`, err);
-    }
+    this.conn.publish(subject, this.sc.encode(JSON.stringify(payload)));
+    await this.conn.flush();
+    this.logger.debug(`SharedNATS plain → ${subject}`);
   }
 
   isConnected(): boolean {

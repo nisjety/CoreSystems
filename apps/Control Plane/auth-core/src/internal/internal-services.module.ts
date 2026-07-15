@@ -17,13 +17,17 @@ import { AuthServiceInitializer } from './auth-service.initializer';
 import { InternalOAuthController } from './internal-oauth.controller';
 import { InternalOAuthService } from './internal-oauth.service';
 import { InternalAgentSignupController } from './internal-agent-signup.controller';
+import { ScopedUserServiceGrpcClient } from './scoped-user-service-grpc.client';
 
 @Module({
   imports: [ConfigModule],
   controllers: [InternalOAuthController, InternalAgentSignupController],
   providers: [
     UserServiceClient,
-    UserServiceGrpcClient,
+    {
+      provide: UserServiceGrpcClient,
+      useClass: ScopedUserServiceGrpcClient,
+    },
     AuthEventPublisher,
     AuthIntegrationService,
     AuthServiceInitializer,

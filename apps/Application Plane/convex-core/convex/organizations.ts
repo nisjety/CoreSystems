@@ -5,7 +5,7 @@
  * External services (auth-core, org-core) publish events via NATS which trigger syncs.
  */
 
-import { mutation, query } from "./_generated/server";
+import { internalMutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
 import { assertServiceKey } from "./authz";
@@ -90,16 +90,14 @@ export const listForUser = query({
  * Mutation: Create organization from external sync
  * Called by NATS integration when org-core publishes organization.created
  */
-export const createFromExternal = mutation({
+export const createFromExternal = internalMutation({
   args: {
     externalOrgId: v.string(),
     name: v.string(),
     slug: v.string(),
-    serviceKey: v.string(),
     externalCreatedAt: v.number(),
   },
   handler: async (ctx, args) => {
-    assertServiceKey(args.serviceKey);
     const { externalOrgId, name, slug, externalCreatedAt } = args;
 
     const orgId = await ctx.db.insert("organizations", {
@@ -120,16 +118,14 @@ export const createFromExternal = mutation({
 /**
  * Mutation: Update organization from external sync
  */
-export const updateFromExternal = mutation({
+export const updateFromExternal = internalMutation({
   args: {
     convexOrgId: v.id("organizations"),
-    serviceKey: v.string(),
     name: v.optional(v.string()),
     slug: v.optional(v.string()),
     settings: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
-    assertServiceKey(args.serviceKey);
     const { convexOrgId, name, slug, settings } = args;
 
     const org = await ctx.db.get(convexOrgId);
@@ -155,13 +151,11 @@ export const updateFromExternal = mutation({
  * Remove an organization completely
  * (Called down from Control Plane sync)
  */
-export const remove = mutation({
+export const remove = internalMutation({
   args: {
     convexOrgId: v.id("organizations"),
-    serviceKey: v.string(),
   },
   handler: async (ctx, args) => {
-    assertServiceKey(args.serviceKey);
     await ctx.db.patch(args.convexOrgId, {
       syncStatus: "deleted",
       deletedAt: Date.now(),

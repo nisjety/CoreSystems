@@ -16,12 +16,12 @@ function request(authorization) {
 test('internal webhook authentication fails closed when the service key is absent', async () => {
   await assert.rejects(
     authorizeInternalRequest(request('Bearer any'), {}),
-    /service key is not configured/,
+    /projection key is not configured/,
   );
 });
 
 test('internal webhook authentication rejects missing, malformed, and incorrect bearer tokens', async () => {
-  const env = { CONVEX_INTERNAL_SERVICE_KEY: 'correct-key' };
+  const env = { CONVEX_CONTROL_PROJECTION_KEY: 'correct-key' };
   assert.equal(await authorizeInternalRequest(request(), env), false);
   assert.equal(await authorizeInternalRequest(request('Basic correct-key'), env), false);
   assert.equal(await authorizeInternalRequest(request('Bearer wrong-key'), env), false);
@@ -31,8 +31,28 @@ test('internal webhook authentication accepts the dedicated service key', async 
   assert.equal(
     await authorizeInternalRequest(
       request('Bearer correct-key'),
-      { CONVEX_INTERNAL_SERVICE_KEY: 'correct-key' },
+      { CONVEX_CONTROL_PROJECTION_KEY: 'correct-key' },
     ),
+    true,
+  );
+});
+
+test('the shared fleet and Convex-internal keys cannot invoke Control projection handlers', async () => {
+  const env = {
+    CONVEX_CONTROL_PROJECTION_KEY: 'projection-key',
+    CONVEX_INTERNAL_SERVICE_KEY: 'convex-internal-key',
+    INTERNAL_API_KEY: 'shared-fleet-key',
+  };
+  assert.equal(
+    await authorizeInternalRequest(request('Bearer shared-fleet-key'), env),
+    false,
+  );
+  assert.equal(
+    await authorizeInternalRequest(request('Bearer convex-internal-key'), env),
+    false,
+  );
+  assert.equal(
+    await authorizeInternalRequest(request('Bearer projection-key'), env),
     true,
   );
 });

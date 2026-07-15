@@ -15,8 +15,9 @@ type Config struct {
 	DatabaseURL    string
 	// Optional: when set, per-export audit events are published to NATS
 	// (best-effort). Empty disables audit publishing (export still works).
-	NATSURL   string
-	NATSToken string
+	NATSURL      string
+	NATSUser     string
+	NATSPassword string
 	// Provider lead sync (LinkedIn Lead Gen forms via integration-corev2's
 	// actions gateway). The default base URL mirrors social-core's; the worker
 	// only runs when enabled AND the URL is non-empty.
@@ -32,7 +33,8 @@ func Load() (*Config, error) {
 		InternalAPIKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
 		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		NATSURL:        strings.TrimSpace(os.Getenv("NATS_URL")),
-		NATSToken:      strings.TrimSpace(os.Getenv("NATS_TOKEN")),
+		NATSUser:       strings.TrimSpace(os.Getenv("NATS_USER")),
+		NATSPassword:   strings.TrimSpace(os.Getenv("NATS_PASSWORD")),
 		IntegrationCoreURL: strings.TrimRight(
 			getEnv("INTEGRATION_CORE_URL", "http://integration-api:3026"), "/"),
 		ProviderLeadSyncEnabled:  getEnvBool("PROVIDER_LEAD_SYNC_ENABLED", true),

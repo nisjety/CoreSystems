@@ -74,10 +74,7 @@ impl RetrievalService for RetrievalSvc {
             .await?;
         let inner = request.into_inner();
         let mut pipeline_req = grpc_to_pipeline(inner).map_err(Status::invalid_argument)?;
-        pipeline_req.org_id = ctx.org_id;
-        pipeline_req.user_id = ctx.user_id;
-        pipeline_req.verified_bearer = ctx.verified_bearer;
-        pipeline_req.admin_read_all = ctx.scopes.iter().any(|scope| scope == "org:data:read_all");
+        apply_verified_context(&ctx, &mut pipeline_req);
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<RetrievalChunk, Status>>(32);
         tokio::spawn(async move {
@@ -139,7 +136,7 @@ impl RetrievalService for RetrievalSvc {
 
         let filters = req.filters.clone().unwrap_or_default();
         let zdr_mode = parse_zdr_mode(req.zdr_mode.clone()).map_err(Status::invalid_argument)?;
-        let pipeline_req = PipelineReq {
+        let mut pipeline_req = PipelineReq {
             org_id: ctx.org_id.clone(),
             query: req.query.clone(),
             top_k: if req.top_k > 0 {
@@ -177,6 +174,7 @@ impl RetrievalService for RetrievalSvc {
             agent_id: req.agent_id,
             admin_read_all: ctx.scopes.iter().any(|scope| scope == "org:data:read_all"),
         };
+        apply_verified_context(&ctx, &mut pipeline_req);
 
         let resp = self
             .pipeline
@@ -518,6 +516,13 @@ fn parse_zdr_mode(mode: Option<String>) -> Result<Option<ZdrMode>, &'static str>
     mode.map(|value| value.parse::<ZdrMode>()).transpose()
 }
 
+/// Apply only verified boundary authority to the pipeline request. Keeping the
+/// unary and streaming gRPC handlers on this shared path prevents either wire
+/// shape from downgrading signed ZDR or caller identity.
+fn apply_verified_context(ctx: &crate::authz::AuthContext, req: &mut PipelineReq) {
+    ctx.apply_to_request(req);
+}
+
 fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
     let filters = req.filters.unwrap_or_default();
     let zdr_mode = parse_zdr_mode(req.zdr_mode)?;
@@ -560,8 +565,56 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
 
 #[cfg(test)]
 mod zdr_boundary_tests {
-    use super::{parse_zdr_mode, ZdrMode};
+    use super::{
+        apply_verified_context, grpc_to_pipeline, parse_zdr_mode, RetrieveRequest, ZdrMode,
+    };
+    use crate::authz::{AuthContext, AuthMethod, EffectiveAcl};
     use tonic::{Code, Status};
+
+    fn ctx(zdr: bool) -> AuthContext {
+        AuthContext {
+            user_id: Some("verified-user".into()),
+            org_id: "verified-org".into(),
+            auth_method: AuthMethod::Jwt,
+            scopes: vec![],
+            zdr,
+            acl: EffectiveAcl::allow_all(),
+            request_id: "grpc-zdr-boundary".into(),
+            verified_bearer: None,
+        }
+    }
+
+    fn request(zdr_mode: Option<&str>) -> RetrieveRequest {
+        RetrieveRequest {
+            org_id: "verified-org".into(),
+            query: "synthetic boundary query".into(),
+            zdr_mode: zdr_mode.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grpc_signed_zdr_forces_ephemeral_and_preserves_reject() {
+        for requested in [None, Some("disabled"), Some("ephemeral")] {
+            let mut pipeline = grpc_to_pipeline(request(requested)).expect("valid gRPC request");
+            apply_verified_context(&ctx(true), &mut pipeline);
+            assert_eq!(pipeline.zdr_mode, Some(ZdrMode::Ephemeral));
+        }
+
+        let mut reject = grpc_to_pipeline(request(Some("reject"))).expect("valid gRPC request");
+        apply_verified_context(&ctx(true), &mut reject);
+        assert_eq!(reject.zdr_mode, Some(ZdrMode::Reject));
+    }
+
+    #[test]
+    fn grpc_signed_non_zdr_preserves_stricter_requested_posture() {
+        for requested in [None, Some("disabled"), Some("reject"), Some("ephemeral")] {
+            let mut pipeline = grpc_to_pipeline(request(requested)).expect("valid gRPC request");
+            let original = pipeline.zdr_mode;
+            apply_verified_context(&ctx(false), &mut pipeline);
+            assert_eq!(pipeline.zdr_mode, original);
+        }
+    }
 
     #[test]
     fn grpc_rejects_unknown_and_case_variant_zdr_modes() {

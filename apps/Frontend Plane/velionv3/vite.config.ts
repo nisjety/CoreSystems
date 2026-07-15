@@ -1,5 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import { ViteMcp } from 'vite-plugin-mcp'
 import solid from 'vite-plugin-solid'
 
@@ -51,7 +51,13 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     // Playwright specs live under tests/e2e and import @playwright/test — they
     // must never be collected by vitest (they run via `pnpm test:e2e`).
-    exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**'],
+    exclude: [
+      ...configDefaults.exclude,
+      'tests/e2e/**',
+      // This gateway coverage gate intentionally uses Node's native test runner
+      // and is executed explicitly by `pnpm test` before the Vitest suite.
+      'apps/gateway/scripts/**/*.test.mjs',
+    ],
     // Default per-test budget. The A8 fabrication-guard test spins up the real
     // ESLint flat config (cold-start ~8s), which exceeds vitest's 5s default when
     // that file runs in isolation; 30s keeps the suite stable on CI / slow hosts.

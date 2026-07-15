@@ -42,30 +42,14 @@ func main() {
 	var publisher conversation.EventPublisher
 	var eventPublisher *eventing.Publisher
 	natsClient, err := appnats.NewClient(appnats.Config{
-		URL:   cfg.NATSURL,
-		Token: cfg.NATSToken,
-		Name:  cfg.ServiceName,
+		URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		InboxPrefix: "_INBOX.APPLICATION_CONVERSATION", Name: cfg.ServiceName,
 	})
 	if err != nil {
 		log.Printf("conversation-core-go: NATS disabled: %v", err)
 	} else {
 		defer natsClient.Close()
 		eventPublisher = eventing.NewPublisher(natsClient.JS)
-		if err := eventPublisher.EnsureStream(); err != nil {
-			log.Printf("conversation-core-go: ensure stream: %v", err)
-		}
-		// The model-proposed subject lives in the model namespace, which the
-		// application stream does not cover — ensure its own stream so the
-		// propose leg is durable.
-		if err := eventPublisher.EnsureModelStream(); err != nil {
-			log.Printf("conversation-core-go: ensure model stream: %v", err)
-		}
-		// integration-corev2 (Ingestion Plane) publishes webhook_received via
-		// plain core-NATS Publish, not js.Publish — this stream is what makes
-		// those events durably consumable by our JetStream QueueSubscribe.
-		if err := eventPublisher.EnsureIngestionStream(); err != nil {
-			log.Printf("conversation-core-go: ensure ingestion stream: %v", err)
-		}
 		publisher = eventPublisher
 	}
 

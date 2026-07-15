@@ -179,20 +179,66 @@ function orgHeaders(orgId: string): Record<string, string> {
   return { 'x-velion-org-id': orgId }
 }
 
+type DataPlaneDocument = {
+  created_at?: string
+  document_id?: string
+  id?: string
+  source?: string
+  title?: string
+  type?: string
+  updated_at?: string
+}
+
+function toDocument(document: DataPlaneDocument): Document {
+  return {
+    id: document.document_id ?? document.id ?? '',
+    title: document.title ?? 'Untitled',
+    sourceId: document.source ?? '',
+    kind: document.type,
+    createdAt: document.created_at,
+    updatedAt: document.updated_at,
+  }
+}
+
+type DataPlaneWikiPage = {
+  org_id?: string
+  page_id?: string
+  path?: string
+  title?: string
+  updated_at?: string
+}
+
+type DataPlaneWikiVersion = {
+  content?: string
+}
+
+function toWikiPage(page: DataPlaneWikiPage, version?: DataPlaneWikiVersion | null): WikiPage {
+  return {
+    id: page.page_id ?? '',
+    title: page.title ?? 'Untitled',
+    path: page.path ?? '',
+    orgId: page.org_id ?? '',
+    excerpt: version?.content,
+    updatedAt: page.updated_at,
+  }
+}
+
 // ── Documents ─────────────────────────────────────────────────────────────────
 
 export async function listDocuments(orgId: string, signal?: AbortSignal): Promise<Document[]> {
-  return requestJson<Document[]>('/api/v1/knowledge/documents', {
+  const payload = await requestJson<{ documents?: DataPlaneDocument[] }>('/api/v1/knowledge/documents', {
     headers: orgHeaders(orgId),
     signal,
   })
+  return (payload.documents ?? []).map(toDocument)
 }
 
 export async function getDocument(orgId: string, id: string, signal?: AbortSignal): Promise<Document> {
-  return requestJson<Document>(`/api/v1/knowledge/documents/${encodeURIComponent(id)}`, {
+  const document = await requestJson<DataPlaneDocument>(`/api/v1/knowledge/documents/${encodeURIComponent(id)}`, {
     headers: orgHeaders(orgId),
     signal,
   })
+  return toDocument(document)
 }
 
 /** Flat document-summary list for pickers/typeaheads. The rich workspace payload
@@ -200,7 +246,7 @@ export async function getDocument(orgId: string, id: string, signal?: AbortSigna
  * documents-api passthrough at `/source-list`, which returns `{ sources, total }`. */
 export async function listSources(orgId: string, signal?: AbortSignal): Promise<Source[]> {
   const payload = await requestJson<{
-    sources?: Array<{
+    documents?: Array<{
       document_id?: string
       id?: string
       title?: string
@@ -213,7 +259,7 @@ export async function listSources(orgId: string, signal?: AbortSignal): Promise<
     headers: orgHeaders(orgId),
     signal,
   })
-  return (payload.sources ?? []).map((entry) => ({
+  return (payload.documents ?? []).map((entry) => ({
     id: entry.document_id ?? entry.id ?? '',
     name: entry.title ?? entry.name ?? '',
     type: entry.type ?? 'document',
@@ -239,10 +285,11 @@ export async function searchKnowledge(
 // ── Wiki ──────────────────────────────────────────────────────────────────────
 
 export async function listWikiPages(orgId: string, signal?: AbortSignal): Promise<WikiPage[]> {
-  return requestJson<WikiPage[]>('/api/v1/knowledge/wiki/pages', {
+  const payload = await requestJson<{ pages?: DataPlaneWikiPage[] }>('/api/v1/knowledge/wiki/pages', {
     headers: orgHeaders(orgId),
     signal,
   })
+  return (payload.pages ?? []).map((page) => toWikiPage(page))
 }
 
 export async function getWikiPageByPath(
@@ -251,17 +298,19 @@ export async function getWikiPageByPath(
   signal?: AbortSignal,
 ): Promise<WikiPage> {
   const qs = new URLSearchParams({ path })
-  return requestJson<WikiPage>(`/api/v1/knowledge/wiki/pages/by-path?${qs}`, {
+  const payload = await requestJson<{ page: DataPlaneWikiPage; version?: DataPlaneWikiVersion | null }>(`/api/v1/knowledge/wiki/pages/by-path?${qs}`, {
     headers: orgHeaders(orgId),
     signal,
   })
+  return toWikiPage(payload.page, payload.version)
 }
 
 export async function getWikiPage(orgId: string, id: string, signal?: AbortSignal): Promise<WikiPage> {
-  return requestJson<WikiPage>(`/api/v1/knowledge/wiki/pages/${encodeURIComponent(id)}`, {
+  const payload = await requestJson<{ page: DataPlaneWikiPage; version?: DataPlaneWikiVersion | null }>(`/api/v1/knowledge/wiki/pages/${encodeURIComponent(id)}`, {
     headers: orgHeaders(orgId),
     signal,
   })
+  return toWikiPage(payload.page, payload.version)
 }
 
 // ── Imports ───────────────────────────────────────────────────────────────────

@@ -8,8 +8,10 @@ import { join } from 'node:path';
 
 import { db } from '../db';
 import {
+  buildMembershipList,
   buildMembershipDecision,
   MembershipAuthorityController,
+  requireApplicationReconcilerSecret,
   requireMembershipAuthoritySecret,
 } from './membership-authority.controller';
 
@@ -22,6 +24,9 @@ describe('MembershipAuthorityController', () => {
     process.env = {
       ...originalEnv,
       USER_CORE_MEMBERSHIP_SERVICE_TOKEN: TOKEN,
+      APPLICATION_RECONCILER_AUTH_TOKEN: 'abcdef0123456789abcdef0123456789',
+      ORG_CORE_SERVICE_TOKEN: 'org-core-auth-token-0123456789abcdef',
+      BILLING_CORE_SERVICE_TOKEN: 'billing-auth-token-0123456789abcdef',
     };
   });
 
@@ -54,6 +59,85 @@ describe('MembershipAuthorityController', () => {
       role: null,
     });
     expect(() => buildMembershipDecision({ role: 'superuser' })).toThrow();
+  });
+
+  it('requires a dedicated Application reconciler credential', () => {
+    expect(() => requireApplicationReconcilerSecret('')).toThrow();
+    expect(() =>
+      requireApplicationReconcilerSecret(`placeholder-${'x'.repeat(32)}`),
+    ).toThrow();
+    expect(() => requireApplicationReconcilerSecret(TOKEN, [TOKEN])).toThrow(
+      /dedicated/,
+    );
+  });
+
+  it('rejects an Application reconciler credential reused by another Control audience', () => {
+    process.env.APPLICATION_RECONCILER_AUTH_TOKEN =
+      process.env.ORG_CORE_SERVICE_TOKEN;
+    expect(() => new MembershipAuthorityController()).toThrow(/dedicated/);
+  });
+
+  it('builds a deterministic fail-closed canonical membership list', () => {
+    expect(
+      buildMembershipList('org-1', [
+        { userId: 'user-2', role: 'MEMBER' },
+        { userId: 'user-1', role: 'owner' },
+      ]),
+    ).toEqual({
+      version: 'v1',
+      organizationId: 'org-1',
+      members: [
+        { user_id: 'user-1', role: 'owner', status: 'active' },
+        { user_id: 'user-2', role: 'member', status: 'active' },
+      ],
+    });
+    expect(() =>
+      buildMembershipList('org-1', [
+        { userId: 'user-1', role: 'member' },
+        { userId: 'user-1', role: 'member' },
+      ]),
+    ).toThrow(/ambiguous/);
+    expect(() =>
+      buildMembershipList('org-1', [{ userId: 'user-1', role: 'superuser' }]),
+    ).toThrow(/unsupported role/);
+  });
+
+  it('lists Auth-canonical memberships only for the exact Application principal', async () => {
+    const orderBy = jest
+      .fn()
+      .mockResolvedValue([{ userId: 'user-1', role: 'member' }]);
+    jest.spyOn(db, 'select').mockReturnValue({
+      from: () => ({ where: () => ({ orderBy }) }),
+    } as never);
+    const controller = new MembershipAuthorityController();
+
+    await expect(
+      controller.listOrganizationMembers(
+        'other-service',
+        'abcdef0123456789abcdef0123456789',
+        'org-1',
+      ),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(
+      controller.listOrganizationMembers(
+        'application-reconciler',
+        'wrong-token',
+        'org-1',
+      ),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+
+    await expect(
+      controller.listOrganizationMembers(
+        'application-reconciler',
+        'abcdef0123456789abcdef0123456789',
+        'org-1',
+      ),
+    ).resolves.toEqual({
+      version: 'v1',
+      organizationId: 'org-1',
+      members: [{ user_id: 'user-1', role: 'member', status: 'active' }],
+    });
+    expect(orderBy).toHaveBeenCalled();
   });
 
   it('authenticates the dedicated caller and resolves the exact membership row', async () => {

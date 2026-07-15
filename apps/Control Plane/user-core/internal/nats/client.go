@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -31,6 +30,7 @@ type Config struct {
 func NewClient(cfg Config) (*Client, error) {
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
+		nats.CustomInboxPrefix("_INBOX.USER_CONTROL"),
 		nats.MaxReconnects(cfg.MaxReconnectAttempts),
 		nats.ReconnectWait(cfg.ReconnectWait),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
@@ -46,11 +46,11 @@ func NewClient(cfg Config) (*Client, error) {
 		}),
 	}
 
-	// Add token authentication if provided
-	if cfg.Token != "" {
-		opts = append(opts, nats.Token(cfg.Token))
-		log.Printf("🔐 Using NATS token authentication")
+	authOptions, err := runtimeAuthOptions(cfg.Token)
+	if err != nil {
+		return nil, fmt.Errorf("configure NATS authentication: %w", err)
 	}
+	opts = append(opts, authOptions...)
 
 	// Connect to NATS
 	conn, err := nats.Connect(cfg.URL, opts...)
@@ -117,6 +117,19 @@ func (c *Client) PublishJetStream(ctx context.Context, subject string, data inte
 	return nil
 }
 
+// PublishJetStreamWithMsgID waits for a PubAck and pins the immutable outbox
+// event identity to JetStream's deduplication header.
+func (c *Client) PublishJetStreamWithMsgID(ctx context.Context, subject, eventID string, payload []byte) error {
+	if eventID == "" {
+		return fmt.Errorf("JetStream message ID is required")
+	}
+	if _, err := c.js.Publish(ctx, subject, payload, jetstream.WithMsgID(eventID)); err != nil {
+		return fmt.Errorf("failed to publish to JetStream %s: %w", subject, err)
+	}
+	log.Printf("📤 Published to JetStream with message ID: %s (%s)", subject, eventID)
+	return nil
+}
+
 // Subscribe subscribes to a subject with a handler
 func (c *Client) Subscribe(subject string, handler func(msg *nats.Msg)) (*nats.Subscription, error) {
 	sub, err := c.conn.Subscribe(subject, handler)
@@ -152,41 +165,6 @@ func (c *Client) Request(subject string, data interface{}, timeout time.Duration
 	}
 
 	return msg, nil
-}
-
-// CreateStream creates or updates a JetStream stream
-func (c *Client) CreateStream(ctx context.Context, config jetstream.StreamConfig) error {
-	_, err := c.js.CreateStream(ctx, config)
-	if err != nil {
-		errMsg := strings.ToLower(err.Error())
-		if strings.Contains(errMsg, "stream name already in use") ||
-			strings.Contains(errMsg, "subjects overlap with an existing stream") ||
-			strings.Contains(errMsg, "err_code=10058") ||
-			strings.Contains(errMsg, "err_code=10065") {
-			log.Printf("📋 Stream %s already exists", config.Name)
-			return nil
-		}
-		return fmt.Errorf("failed to create stream %s: %w", config.Name, err)
-	}
-
-	log.Printf("✅ Created JetStream stream: %s", config.Name)
-	return nil
-}
-
-// CreateConsumer creates a consumer for a stream
-func (c *Client) CreateConsumer(ctx context.Context, streamName string, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
-	consumer, err := c.js.CreateConsumer(ctx, streamName, config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create consumer for %s: %w", streamName, err)
-	}
-
-	log.Printf("✅ Created consumer: %s for stream: %s", config.Name, streamName)
-	return consumer, nil
-}
-
-// GetJetStream returns the JetStream instance
-func (c *Client) GetJetStream() jetstream.JetStream {
-	return c.js
 }
 
 // GetConnection returns the underlying NATS connection

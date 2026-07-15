@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Extension, Path, State},
-    http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
+    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -10,25 +10,27 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState, domains::knowledge::shared, envelope::unwrap_data,
-    middleware::AuthenticatedUser, upstream::proxy_json,
+    middleware::AuthenticatedUser,
 };
 
 pub(super) async fn get_operating_map(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let org_id = {
         let o = crate::upstream::authorized_org_id(&state, &user).await;
         (!o.is_empty()).then_some(o)
     };
     let url = format!("{}/v1/wiki/operating-map", state.wiki_store_url);
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -37,6 +39,7 @@ pub(super) async fn get_operating_map(
 pub(super) async fn generate_operating_map(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
     let org_id = {
@@ -51,13 +54,14 @@ pub(super) async fn generate_operating_map(
         });
     }
     let url = format!("{}/v1/wiki/operating-map/refresh", state.wiki_store_url);
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::POST,
         &url,
         Some(body),
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -66,6 +70,7 @@ pub(super) async fn generate_operating_map(
 pub(super) async fn operating_map_run_events(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(run_id): Path<String>,
 ) -> Response {
     let org_id = {
@@ -73,13 +78,14 @@ pub(super) async fn operating_map_run_events(
         (!o.is_empty()).then_some(o)
     };
     let url = format!("{}/v1/wiki/operating-map", state.wiki_store_url);
-    let (upstream_status, Json(body)) = proxy_json(
+    let (upstream_status, Json(body)) = shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await;
@@ -140,6 +146,7 @@ fn operating_map_run_event_payload(run_id: &str, snapshot: &Value) -> Value {
 pub(super) async fn review_operating_map_proposal(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(proposal_id): Path<String>,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
@@ -153,13 +160,14 @@ pub(super) async fn review_operating_map_proposal(
         state.wiki_store_url,
         urlencoding::encode(&proposal_id)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::POST,
         &url,
         Some(body),
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await

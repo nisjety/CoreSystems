@@ -11,17 +11,18 @@ import { requestJson } from './http'
  * SPA never passes an org id here.
  */
 
-/** A single audit row as returned by audit-core (snake_case, loosely typed). */
+/** A validated, UI-facing audit row normalized from Audit Core's wire format. */
 export interface AuditEvent {
   id?: string
   event?: string
   actor?: string
+  actorRole?: string
   userId?: string
-  user_id?: string
   resource?: string
   outcome?: string
-  createdAt?: string
-  created_at?: string
+  occurredAt?: string
+  requestId?: string
+  ipAddress?: string
   /** Zero-data-retention marker — may arrive top-level or inside `details`. */
   zdr?: boolean
   /** Free-form per-event metadata. For `tool_action`: `{ tool, data_category, source, zdr }`. */
@@ -36,11 +37,54 @@ export interface AuditQuery {
   limit?: number
 }
 
-type AuditListResponse = { data?: AuditEvent[] } | AuditEvent[]
+type AuditListResponse = { data?: unknown[] } | unknown[]
+
+function recordFrom(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function textField(row: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = row[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+function normalizeAuditEvent(value: unknown): AuditEvent | undefined {
+  const row = recordFrom(value)
+  if (!row) return undefined
+
+  const rawId = row.id
+  const details = recordFrom(row.details)
+  return {
+    ...(typeof rawId === 'string' || typeof rawId === 'number' ? { id: String(rawId) } : {}),
+    ...(textField(row, 'event', 'action') ? { event: textField(row, 'event', 'action') } : {}),
+    ...(textField(row, 'actor') ? { actor: textField(row, 'actor') } : {}),
+    ...(textField(row, 'actor_role', 'actorRole') ? { actorRole: textField(row, 'actor_role', 'actorRole') } : {}),
+    ...(textField(row, 'user_id', 'userId') ? { userId: textField(row, 'user_id', 'userId') } : {}),
+    ...(textField(row, 'resource', 'resource_id', 'subject') ? { resource: textField(row, 'resource', 'resource_id', 'subject') } : {}),
+    ...(textField(row, 'outcome', 'status') ? { outcome: textField(row, 'outcome', 'status') } : {}),
+    ...(textField(row, 'occurred_at', 'occurredAt', 'created_at', 'createdAt', 'timestamp')
+      ? { occurredAt: textField(row, 'occurred_at', 'occurredAt', 'created_at', 'createdAt', 'timestamp') }
+      : {}),
+    ...(textField(row, 'request_id', 'requestId') ? { requestId: textField(row, 'request_id', 'requestId') } : {}),
+    ...(textField(row, 'ip_address', 'ipAddress') ? { ipAddress: textField(row, 'ip_address', 'ipAddress') } : {}),
+    ...(typeof row.zdr === 'boolean' ? { zdr: row.zdr } : {}),
+    ...(details ? { details } : {}),
+  }
+}
 
 function rowsFrom(payload: AuditListResponse): AuditEvent[] {
-  if (Array.isArray(payload)) return payload
-  return Array.isArray(payload?.data) ? payload.data : []
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data) ? payload.data : []
+  return rows.flatMap((row) => {
+    const normalized = normalizeAuditEvent(row)
+    return normalized ? [normalized] : []
+  })
 }
 
 /**
@@ -48,7 +92,7 @@ function rowsFrom(payload: AuditListResponse): AuditEvent[] {
  * top-level `{ data }` envelope, but audit-core nests rows under `data` AND
  * carries `meta`, so the unwrap may hand back either shape — normalize both.
  */
-export async function listAuditEvents(query: AuditQuery = {}): Promise<AuditEvent[]> {
+export async function listAuditEvents(query: AuditQuery = {}, signal?: AbortSignal): Promise<AuditEvent[]> {
   const params = new URLSearchParams()
   if (query.event) params.set('event', query.event)
   if (query.userId) params.set('user_id', query.userId)
@@ -59,6 +103,7 @@ export async function listAuditEvents(query: AuditQuery = {}): Promise<AuditEven
   const suffix = params.toString()
   const payload = await requestJson<AuditListResponse>(
     `/api/v1/audit${suffix ? `?${suffix}` : ''}`,
+    { signal },
   )
   return rowsFrom(payload)
 }

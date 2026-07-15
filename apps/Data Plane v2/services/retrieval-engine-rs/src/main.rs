@@ -40,6 +40,7 @@ use crate::search::rerank::RerankClient;
 use crate::search::sparse::{
     DynSparseSearchBackend, FallbackSparseBackend, PostgresSparseBackend, QuickwitSparseBackend,
 };
+use event_envelope_rs::{EventSigner, EventVerifier};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -68,6 +69,35 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = Config::from_env()?;
+    let (document_event_verifier, retrieval_event_signer) = if signed_event_consumers_enabled(
+        std::env::var("ENABLE_SIGNED_EVENT_CONSUMERS")
+            .as_deref()
+            .unwrap_or(""),
+    ) {
+        anyhow::ensure!(
+            !cfg.documents_event_public_key_path.trim().is_empty()
+                && !cfg.retrieval_event_private_key_path.trim().is_empty(),
+            "signed retrieval events require producer verification and local signing key paths"
+        );
+        let verifier = Arc::new(EventVerifier::from_rsa_pem(
+            &std::fs::read(&cfg.documents_event_public_key_path)?,
+            "service:documents-api-go",
+            "documents-events-v1",
+            &cfg.event_auth_audience,
+            "events:documents:publish",
+            100_000,
+        )?);
+        let signer = Arc::new(EventSigner::from_rsa_pem(
+            &std::fs::read(&cfg.retrieval_event_private_key_path)?,
+            "service:retrieval-engine-rs",
+            "retrieval-events-v1",
+            &cfg.event_auth_audience,
+            "events:retrieval:publish",
+        )?);
+        (Some(verifier), Some(signer))
+    } else {
+        (None, None)
+    };
     let grpc_jwt_verifier = Arc::new(JwtVerifier::from_env()?);
     tracing::info!(
         http_port = cfg.http_port,
@@ -130,7 +160,17 @@ async fn main() -> anyhow::Result<()> {
         Ok(nats_url) => match nats_connection::connect(&nats_url).await {
             Ok(nats) => {
                 if let Some(cache) = cache_layer.as_ref() {
-                    cache::invalidator::spawn_invalidator(nats.clone(), cache.clone());
+                    if let Some(verifier) = document_event_verifier.as_ref() {
+                        cache::invalidator::spawn_invalidator(
+                            nats.clone(),
+                            cache.clone(),
+                            verifier.clone(),
+                        );
+                    } else {
+                        tracing::warn!(
+                            "retrieval cache invalidation disabled until signed producer events are configured"
+                        );
+                    }
                 }
                 Some(nats)
             }
@@ -280,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
         policy,
         visibility,
         nats: nats_client,
+        event_signer: retrieval_event_signer,
         sparse_backend,
         visual_embedder,
         colqwen,
@@ -374,6 +415,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("shutdown complete");
     Ok(())
+}
+
+fn signed_event_consumers_enabled(value: &str) -> bool {
+    value == "1"
 }
 
 async fn shutdown_signal() {

@@ -333,6 +333,8 @@ describe('AuthPage email verification OTP flow', () => {
       </Router>
     ))
 
+    await waitFor(() => expect(window.location.search).toBe(''))
+
     fireEvent.input(screen.getByLabelText('Nytt passord'), { target: { value: 'NewPassword!2026' } })
     fireEvent.input(screen.getByLabelText('Bekreft nytt passord'), { target: { value: 'NewPassword!2026' } })
     fireEvent.click(screen.getByRole('button', { name: 'Oppdater passord' }))

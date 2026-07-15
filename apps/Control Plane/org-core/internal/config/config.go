@@ -10,18 +10,21 @@ import (
 )
 
 type Config struct {
-	HTTPPort        int
-	GRPCPort        int
-	MetricsPort     int
-	DatabaseURL     string
-	NATSURL         string
-	NATSToken       string
-	NATSSharedURL   string
-	NATSSharedToken string
-	AuthServiceURL  string
-	UserServiceURL  string
-	ServiceName     string
-	Redis           RedisConfig
+	HTTPPort                     int
+	GRPCPort                     int
+	MetricsPort                  int
+	DatabaseURL                  string
+	NATSURL                      string
+	NATSToken                    string
+	NATSSharedURL                string
+	NATSSharedUser               string
+	NATSSharedPass               string
+	NATSSharedToken              string
+	NATSSharedAllowTokenFallback bool
+	AuthServiceURL               string
+	UserServiceURL               string
+	ServiceName                  string
+	Redis                        RedisConfig
 }
 
 type RedisConfig struct {
@@ -36,17 +39,20 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		HTTPPort:        getEnvInt("HTTP_PORT", 3013),
-		GRPCPort:        getEnvInt("GRPC_PORT", 9090),
-		MetricsPort:     getEnvInt("METRICS_PORT", 9091),
-		DatabaseURL:     getEnv("DATABASE_URL", ""),
-		NATSURL:         getEnv("NATS_URL", "nats://controlplane-nats:4222"),
-		NATSToken:       getEnv("NATS_TOKEN", getEnv("NATS_AUTH_TOKEN", "")),
-		NATSSharedURL:   getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
-		NATSSharedToken: getEnv("VELION_NATS_TOKEN", getEnv("NATS_SHARED_TOKEN", "")),
-		AuthServiceURL:  getEnv("AUTH_SERVICE_URL", "http://auth-service:3011"),
-		UserServiceURL:  getEnv("USER_SERVICE_URL", "http://user-service:3012"),
-		ServiceName:     getEnv("SERVICE_NAME", "org-core"),
+		HTTPPort:                     getEnvInt("HTTP_PORT", 3013),
+		GRPCPort:                     getEnvInt("GRPC_PORT", 9090),
+		MetricsPort:                  getEnvInt("METRICS_PORT", 9091),
+		DatabaseURL:                  getEnv("DATABASE_URL", ""),
+		NATSURL:                      getEnv("NATS_URL", "nats://controlplane-nats:4222"),
+		NATSToken:                    getEnv("NATS_TOKEN", getEnv("NATS_AUTH_TOKEN", "")),
+		NATSSharedURL:                getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
+		NATSSharedUser:               getEnv("NATS_SHARED_USER", ""),
+		NATSSharedPass:               getEnv("NATS_SHARED_PASSWORD", ""),
+		NATSSharedToken:              getEnv("NATS_SHARED_TOKEN", ""),
+		NATSSharedAllowTokenFallback: getEnvBool("NATS_SHARED_ALLOW_TOKEN_FALLBACK", false),
+		AuthServiceURL:               getEnv("AUTH_SERVICE_URL", "http://auth-service:3011"),
+		UserServiceURL:               getEnv("USER_SERVICE_URL", "http://user-service:3012"),
+		ServiceName:                  getEnv("SERVICE_NAME", "org-core"),
 		Redis: RedisConfig{
 			Host:     getEnv("DRAGONFLY_HOST", getEnv("CACHE_HOST", getEnv("REDIS_HOST", "controlplane-dragonfly"))),
 			Port:     getEnv("DRAGONFLY_PORT", getEnv("CACHE_PORT", getEnv("REDIS_PORT", "6379"))),

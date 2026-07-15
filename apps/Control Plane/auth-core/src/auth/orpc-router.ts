@@ -4,12 +4,12 @@ import { auth } from './auth';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
-import {
-  publishOrganizationCreated,
-  publishRoleChangeAudit,
-} from './organization-hooks';
 import { redisSecondaryStorage } from '../db/redis';
 import { createHash, randomBytes } from 'crypto';
+import {
+  authorizeAuthInternalServiceToken,
+  loadAuthInternalServiceCredentials,
+} from '../internal/internal-service-auth';
 
 const _BEARER_CACHE_TTL = 90; // seconds
 function _bearerCacheKey(token: string): string {
@@ -67,20 +67,20 @@ type AdminAuthorization = {
   session?: AuthSession;
 };
 
-function configuredInternalSecret(): string | undefined {
-  return (
-    process.env.INTERNAL_SERVICE_SECRET ||
-    process.env.INTERNAL_API_KEY ||
-    ''
-  ).trim();
-}
-
-function hasInternalServiceSecret(headers: Headers | undefined): boolean {
-  const expectedSecret = configuredInternalSecret();
-  const providedSecret = headers?.get('x-internal-service-secret')?.trim();
-  return Boolean(
-    expectedSecret && providedSecret && providedSecret === expectedSecret,
-  );
+function hasInternalAdminServicePrincipal(
+  headers: Headers | undefined,
+): boolean {
+  try {
+    authorizeAuthInternalServiceToken(
+      headers?.get('x-internal-service-secret') ?? undefined,
+      loadAuthInternalServiceCredentials(),
+      'auth:admin',
+      'user-core',
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function adminRoleNames(): Set<string> {
@@ -133,7 +133,7 @@ async function authorizeAdminContext(
 ): Promise<AdminAuthorization> {
   const headers = headersFromCtx(context);
   const allowInternal = options.allowInternal ?? true;
-  if (allowInternal && hasInternalServiceSecret(headers)) {
+  if (allowInternal && hasInternalAdminServicePrincipal(headers)) {
     return { headers: headers ?? new Headers(), internal: true };
   }
 
@@ -147,14 +147,19 @@ async function authorizeAdminContext(
   return { headers: headers ?? new Headers(), internal: false, session };
 }
 
-function getAuthApiMethod(name: string): (...args: any[]) => Promise<any> {
+function getAuthApiMethod<TResult = unknown>(
+  name: string,
+): (options: Record<string, unknown>) => Promise<TResult> {
   const method = (auth.api as Record<string, unknown>)[name];
   if (typeof method !== 'function') {
     throw new Error(
       `${name} is not available. Enable the required Better Auth plugin.`,
     );
   }
-  return method.bind(auth.api) as (...args: any[]) => Promise<any>;
+  return async (options) => {
+    const result: unknown = Reflect.apply(method, auth.api, [options]);
+    return (await result) as TResult;
+  };
 }
 
 function toIsoString(
@@ -190,11 +195,13 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function pickUser(obj: unknown): z.infer<typeof UserOut> | undefined {
   if (!isRecord(obj)) return undefined;
-  if (!('id' in obj) || !('email' in obj)) return undefined;
+  if (typeof obj.id !== 'string' || typeof obj.email !== 'string') {
+    return undefined;
+  }
   return {
-    id: String(obj.id as any),
+    id: obj.id,
     name: (obj.name as string | null | undefined) ?? null,
-    email: String(obj.email as any),
+    email: obj.email,
     emailVerified: Boolean((obj.emailVerified as boolean | undefined) ?? false),
     image: (obj.image as string | null | undefined) ?? null,
     createdAt: obj.createdAt
@@ -555,6 +562,19 @@ const CreateOrganizationSchema = z.object({
   metadata: z.record(z.string(), z.any()).optional(),
 });
 
+const OrganizationApiRecordSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  slug: z.string(),
+  logo: z.string().nullable().optional(),
+  createdAt: z.union([z.date(), z.string(), z.number()]),
+});
+
+const OrganizationListApiRecordSchema = OrganizationApiRecordSchema.extend({
+  role: z.enum(['owner', 'admin', 'member']),
+  memberCount: z.number().optional(),
+});
+
 const InviteMemberSchema = z.object({
   organizationId: z.string().min(1),
   email: z.string().email(),
@@ -757,7 +777,7 @@ const signInProcedure = os
         returnHeaders: true,
       });
       forwardSetCookie(context as RpcContext, respHeaders);
-      const data = response as unknown;
+      const data = response;
       let userUnknown: unknown;
       let sessionUnknown: unknown;
       if (isRecord(data)) {
@@ -817,7 +837,7 @@ const signUpProcedure = os
       );
 
       forwardSetCookie(context as RpcContext, respHeaders);
-      const data = response as unknown;
+      const data = response;
       let userUnknown: unknown;
       let sessionUnknown: unknown;
       if (isRecord(data)) {
@@ -1183,14 +1203,17 @@ const enableTwoFactorProcedure = os
   .handler(async ({ input, context }) => {
     try {
       const headers = headersFromCtx(context as RpcContext);
-      const enableTwoFactor = getAuthApiMethod('enableTwoFactor');
+      const enableTwoFactor = getAuthApiMethod<{
+        headers: Headers;
+        response: unknown;
+      }>('enableTwoFactor');
       const { headers: respHeaders, response } = await enableTwoFactor({
         body: input,
         headers: headers ?? new Headers(),
         returnHeaders: true,
       });
       forwardSetCookie(context as RpcContext, respHeaders);
-      const data = response as unknown;
+      const data = response;
       const totpURI = isRecord(data) ? stringValue(data.totpURI) : undefined;
       return {
         success: true,
@@ -1220,10 +1243,10 @@ const disableTwoFactorProcedure = os
     try {
       const headers = headersFromCtx(context as RpcContext);
       const disableTwoFactor = getAuthApiMethod('disableTwoFactor');
-      const result = (await disableTwoFactor({
+      const result = await disableTwoFactor({
         body: input,
         headers: headers ?? new Headers(),
-      })) as unknown;
+      });
       return {
         success: isRecord(result) ? Boolean(result.status) : true,
       };
@@ -1255,7 +1278,10 @@ const verifyTwoFactorProcedure = os
       const headers = headersFromCtx(context as RpcContext);
       const methodName =
         input.type === 'totp' ? 'verifyTOTP' : 'verifyBackupCode';
-      const verifyTwoFactor = getAuthApiMethod(methodName);
+      const verifyTwoFactor = getAuthApiMethod<{
+        headers: Headers;
+        response: unknown;
+      }>(methodName);
       const { headers: respHeaders, response } = await verifyTwoFactor({
         body: {
           code: input.code,
@@ -1265,7 +1291,7 @@ const verifyTwoFactorProcedure = os
         returnHeaders: true,
       });
       forwardSetCookie(context as RpcContext, respHeaders);
-      const data = response as unknown;
+      const data = response;
       return {
         success: Boolean(isRecord(data) && (data.token || data.user)),
       };
@@ -1338,35 +1364,38 @@ const verifyEmailOtpProcedure = os
 
       if (input.type === 'email-verification') {
         const verifyEmailOTP = getAuthApiMethod('verifyEmailOTP');
-        const result = (await verifyEmailOTP({
+        const result = await verifyEmailOTP({
           body: { email: input.email, otp: input.otp },
           headers: headers ?? new Headers(),
-        })) as unknown;
+        });
         const user = isRecord(result) ? pickUser(result.user) : undefined;
         return { success: Boolean(isRecord(result) && result.status), user };
       }
 
       if (input.type === 'forget-password') {
         const checkVerificationOTP = getAuthApiMethod('checkVerificationOTP');
-        const result = (await checkVerificationOTP({
+        const result = await checkVerificationOTP({
           body: {
             email: input.email,
             otp: input.otp,
             type: input.type,
           },
           headers: headers ?? new Headers(),
-        })) as unknown;
+        });
         return { success: Boolean(isRecord(result) && result.success) };
       }
 
-      const signInEmailOTP = getAuthApiMethod('signInEmailOTP');
+      const signInEmailOTP = getAuthApiMethod<{
+        headers: Headers;
+        response: unknown;
+      }>('signInEmailOTP');
       const { headers: respHeaders, response } = await signInEmailOTP({
         body: { email: input.email, otp: input.otp },
         headers: headers ?? new Headers(),
         returnHeaders: true,
       });
       forwardSetCookie(context as RpcContext, respHeaders);
-      const data = response as unknown;
+      const data = response;
       const user = isRecord(data) ? pickUser(data.user) : undefined;
       if (!user) {
         return { success: false, error: 'Invalid or expired OTP' };
@@ -1465,7 +1494,10 @@ const verifyPhoneOtpProcedure = os
         };
       }
 
-      const verifyPhoneNumber = getAuthApiMethod('verifyPhoneNumber');
+      const verifyPhoneNumber = getAuthApiMethod<{
+        headers: Headers;
+        response: unknown;
+      }>('verifyPhoneNumber');
       const { headers: respHeaders, response } = await verifyPhoneNumber({
         body: {
           phoneNumber: input.phoneNumber,
@@ -1475,7 +1507,7 @@ const verifyPhoneOtpProcedure = os
         returnHeaders: true,
       });
       forwardSetCookie(context as RpcContext, respHeaders);
-      const data = response as unknown;
+      const data = response;
       const user = isRecord(data) ? pickUser(data.user) : undefined;
       if (!isRecord(data) || !data.status) {
         return { success: false, error: 'Invalid or expired SMS OTP' };
@@ -1559,7 +1591,7 @@ const initiateOAuthProcedure = os
       error: z.string().optional(),
     }),
   )
-  .handler(async ({ input, context }) => {
+  .handler(async ({ input }) => {
     try {
       console.log(`🔄 OAuth initiate called for provider: ${input.provider}`);
 
@@ -1576,9 +1608,15 @@ const initiateOAuthProcedure = os
       );
       console.log(`   Callback URL: ${callbackURL}`);
 
-      // Check if the provider is configured
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-      const socialConfig = (auth.options as any)?.socialProviders?.[provider];
+      // Check if the provider is configured without trusting an untyped plugin
+      // options object.
+      const authOptions: unknown = auth.options;
+      const socialProviders = isRecord(authOptions)
+        ? authOptions.socialProviders
+        : undefined;
+      const socialConfig = isRecord(socialProviders)
+        ? socialProviders[provider]
+        : undefined;
       if (!socialConfig) {
         console.error(
           `❌ OAuth provider ${provider} is not configured. Please set the required environment variables.`,
@@ -1620,13 +1658,14 @@ const initiateOAuthProcedure = os
 
       // Try to parse the response body for the URL
       try {
-        const data = await result.json();
+        const data: unknown = await result.json();
         console.log(`📊 Response body:`, data);
-        if (data && typeof data === 'object' && 'url' in data) {
+        const redirectUrl = isRecord(data) ? stringValue(data.url) : undefined;
+        if (redirectUrl) {
           console.log(`✅ Found OAuth URL in response body`);
           return {
             success: true,
-            url: data.url,
+            url: redirectUrl,
           };
         }
       } catch (e) {
@@ -1753,11 +1792,8 @@ const createOrganizationProcedure = os
       console.log('🔍 Attempting to call auth.api.createOrganization');
       console.log('🔍 Input data:', { name: input.name, slug: input.slug });
 
-      if (typeof (auth.api as any).createOrganization !== 'function') {
-        throw new Error('createOrganization method not available on auth.api');
-      }
-
-      const result = await (auth.api as any).createOrganization({
+      const createOrganization = getAuthApiMethod('createOrganization');
+      const rawResult = await createOrganization({
         body: {
           name: input.name,
           slug: input.slug || input.name.toLowerCase().replace(/\s+/g, '-'),
@@ -1766,24 +1802,9 @@ const createOrganizationProcedure = os
         },
         headers: headers ?? new Headers(),
       });
+      const result = OrganizationApiRecordSchema.parse(rawResult);
 
       console.log('✅ Organization created:', result);
-
-      // Publish organization created event
-      try {
-        await publishOrganizationCreated({
-          organizationId: result.id,
-          name: result.name,
-          slug: result.slug,
-          creatorId: session.user.id,
-          creatorEmail: session.user.email,
-          metadata: input.metadata,
-        });
-        console.log('📢 Published organization.created event');
-      } catch (eventError) {
-        console.error('⚠️ Failed to publish organization event:', eventError);
-        // Don't fail the request if event publishing fails
-      }
 
       return {
         success: true,
@@ -1843,12 +1864,14 @@ const getOrganizationsListProcedure = os
       }
 
       // Use Better Auth organization API to get user's organizations
-      const result = await (auth.api as any).listOrganizations({
+      const listOrganizations = getAuthApiMethod('listOrganizations');
+      const rawResult = await listOrganizations({
         query: {},
         headers: headers ?? new Headers(),
       });
+      const result = z.array(OrganizationListApiRecordSchema).parse(rawResult);
 
-      const organizations = result.map((org: any) => ({
+      const organizations = result.map((org) => ({
         id: org.id,
         name: org.name,
         slug: org.slug,
@@ -2097,8 +2120,8 @@ const createOIDCClientProcedure = os
         headers: authorization.headers,
       })) as Record<string, unknown>;
 
-      const clientId = String(registration.client_id ?? '');
-      const clientSecret = String(registration.client_secret ?? '');
+      const clientId = stringValue(registration.client_id) ?? '';
+      const clientSecret = stringValue(registration.client_secret) ?? '';
       if (!clientId || !clientSecret) {
         return {
           success: false,
@@ -2111,21 +2134,20 @@ const createOIDCClientProcedure = os
         client: {
           clientId,
           clientSecret,
-          name: String(registration.client_name ?? input.name),
+          name: stringValue(registration.client_name) ?? input.name,
           redirectUris:
             stringListValue(registration.redirect_uris) ?? input.redirectUris,
           scopes:
             stringListValue(registration.scope) ??
-            stringListValue((registration.metadata as any)?.scopes) ??
+            stringListValue(parseJsonRecord(registration.metadata).scopes) ??
             input.scopes,
           grantTypes:
             stringListValue(registration.grant_types) ?? input.grantTypes,
           responseTypes:
             stringListValue(registration.response_types) ?? input.responseTypes,
-          tokenEndpointAuthMethod: String(
-            registration.token_endpoint_auth_method ??
-              input.tokenEndpointAuthMethod,
-          ),
+          tokenEndpointAuthMethod:
+            stringValue(registration.token_endpoint_auth_method) ??
+            input.tokenEndpointAuthMethod,
           organizationId: input.organizationId,
           createdAt: registration.client_id_issued_at
             ? new Date(
@@ -2846,7 +2868,7 @@ const validateBearerTokenProcedure = os
             },
           };
         }
-      } catch (_cacheErr) {
+      } catch {
         // Redis unavailable — fall through to HTTP validation
       }
 
@@ -2909,7 +2931,7 @@ const validateBearerTokenProcedure = os
               ),
             ),
           );
-        } catch (_cacheErr) {
+        } catch {
           // Redis write failure is non-fatal
         }
 
@@ -2963,7 +2985,7 @@ const validateBearerTokenProcedure = os
           }),
           _BEARER_CACHE_TTL,
         );
-      } catch (_cacheErr) {
+      } catch {
         // Redis write failure is non-fatal
       }
 
@@ -3111,7 +3133,7 @@ const revokeBearerTokenProcedure = os
 
       try {
         await redisSecondaryStorage.delete(_bearerCacheKey(input.token));
-      } catch (_cacheErr) {
+      } catch {
         // Redis delete failure is non-fatal
       }
 
@@ -3692,28 +3714,6 @@ const adminSetRoleProcedure = os
         headers: authorization.headers,
       });
 
-      // Durable audit trail for the privileged role change. The actor is the
-      // authenticated admin; org_id comes from their active-org session and
-      // gates whether the event reaches audit-core.
-      const actor = authorization.session?.user;
-      const actorSession = authorization.session?.session as
-        | { activeOrganizationId?: string }
-        | undefined;
-      const actorRole = Array.isArray(actor?.role)
-        ? actor?.role.join(',')
-        : (actor?.role ?? undefined);
-      const newRole = Array.isArray(input.role)
-        ? input.role.join(',')
-        : input.role;
-      publishRoleChangeAudit({
-        orgId: actorSession?.activeOrganizationId,
-        actorUserId: actor?.id,
-        actorRole: actorRole ?? undefined,
-        targetUserId: input.userId,
-        newRole,
-        outcome: 'ok',
-      });
-
       return { success: true };
     } catch (error) {
       console.error('❌ Admin set role failed:', error);
@@ -3794,7 +3794,7 @@ const adminUpdateUserProcedure = os
   .output(
     z.object({
       success: z.boolean(),
-      user: z.any().optional(),
+      user: z.unknown().optional(),
       error: z.string().optional(),
     }),
   )
@@ -3803,13 +3803,13 @@ const adminUpdateUserProcedure = os
       const authorization = await authorizeAdminContext(context as RpcContext, {
         allowInternal: false,
       });
-      const data: Record<string, any> = {};
+      const data: Record<string, unknown> = {};
       if (input.name !== undefined) data.name = input.name;
       if (input.email !== undefined) data.email = input.email;
       if (input.image !== undefined) data.image = input.image;
 
       const adminUpdateUser = getAuthApiMethod('adminUpdateUser');
-      const result = await adminUpdateUser({
+      const result: unknown = await adminUpdateUser({
         body: {
           userId: input.userId,
           data,
@@ -3817,7 +3817,10 @@ const adminUpdateUserProcedure = os
         headers: authorization.headers,
       });
 
-      return { success: true, user: (result as any).user };
+      return {
+        success: true,
+        user: isRecord(result) ? result.user : undefined,
+      };
     } catch (error) {
       console.error('❌ Admin update user failed:', error);
       return {
@@ -3974,6 +3977,12 @@ const listDeviceSessionsProcedure = os
       }>;
 
       const currentSession = await getAuthenticatedSession(headers);
+      const currentSessionData = isRecord(currentSession?.session)
+        ? currentSession.session
+        : undefined;
+      const currentSessionToken = currentSessionData
+        ? stringValue(currentSessionData.token)
+        : undefined;
       const mappedSessions = sessions.map((entry) => ({
         id: entry.session.id,
         userId: entry.session.userId,
@@ -3988,9 +3997,7 @@ const listDeviceSessionsProcedure = os
           toIsoString(entry.session.createdAt) ?? new Date().toISOString(),
         lastSeenAt:
           toIsoString(entry.session.updatedAt) ?? new Date().toISOString(),
-        isCurrent:
-          typeof (currentSession?.session as any)?.token === 'string' &&
-          (currentSession?.session as any).token === entry.session.token,
+        isCurrent: currentSessionToken === entry.session.token,
       }));
 
       return {

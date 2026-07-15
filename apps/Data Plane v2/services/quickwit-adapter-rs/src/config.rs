@@ -22,6 +22,16 @@ pub struct Config {
     pub auth_public_key_pem: Option<String>,
     pub auth_audience: String,
     pub auth_issuer: String,
+    #[serde(default)]
+    pub documents_event_public_key_path: String,
+    #[serde(default)]
+    pub index_event_public_key_path: String,
+    #[serde(default)]
+    pub embedding_event_public_key_path: String,
+    #[serde(default)]
+    pub wiki_event_public_key_path: String,
+    #[serde(default = "default_event_auth_audience")]
+    pub event_auth_audience: String,
     #[serde(default = "default_admin_job_rate_seconds")]
     pub admin_job_rate_seconds: u64,
     #[serde(default = "default_admin_job_lease_seconds")]
@@ -54,6 +64,10 @@ fn default_admin_job_rate_seconds() -> u64 {
 
 fn default_admin_job_lease_seconds() -> u64 {
     300
+}
+
+fn default_event_auth_audience() -> String {
+    "dataplane-events".into()
 }
 
 impl Config {
@@ -130,6 +144,11 @@ mod tests {
             auth_public_key_pem: None,
             auth_audience: "data-plane".into(),
             auth_issuer: "https://control.example/api/convex-auth".into(),
+            documents_event_public_key_path: "/run/event-keys/documents-events.pub".into(),
+            index_event_public_key_path: "/run/event-keys/index-events.pub".into(),
+            embedding_event_public_key_path: "/run/event-keys/embedding-events.pub".into(),
+            wiki_event_public_key_path: "/run/event-keys/wiki-events.pub".into(),
+            event_auth_audience: default_event_auth_audience(),
             admin_job_rate_seconds: default_admin_job_rate_seconds(),
             admin_job_lease_seconds: default_admin_job_lease_seconds(),
         }
@@ -151,5 +170,15 @@ mod tests {
         config.auth_public_key_file = Some("/run/secrets/test-public-key.pem".into());
         config.auth_public_key_pem = Some("test-public-key".into());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn signed_event_key_paths_are_explicit_configuration() {
+        let config = valid_config();
+        assert!(!config.documents_event_public_key_path.is_empty());
+        assert!(!config.index_event_public_key_path.is_empty());
+        assert!(!config.embedding_event_public_key_path.is_empty());
+        assert!(!config.wiki_event_public_key_path.is_empty());
+        assert_eq!(config.event_auth_audience, "dataplane-events");
     }
 }

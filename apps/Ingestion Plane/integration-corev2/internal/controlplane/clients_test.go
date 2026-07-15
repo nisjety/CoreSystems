@@ -356,11 +356,17 @@ func TestOrgClientReadsOrgPlanFromOrgCore(t *testing.T) {
 		if r.URL.Path != "/orgs/org-1" {
 			t.Fatalf("path = %s, want /orgs/org-1", r.URL.Path)
 		}
-		if got := r.Header.Get("X-Internal-Api-Key"); got != "internal-key" {
-			t.Fatalf("internal key = %q, want internal-key", got)
+		if got := r.Header.Get("X-Service-Id"); got != "integration-corev2" {
+			t.Fatalf("service id = %q, want integration-corev2", got)
 		}
-		if got := r.Header.Get("X-User-ID"); got != "user-1" {
-			t.Fatalf("user header = %q, want user-1", got)
+		if got := r.Header.Get("X-Service-Token"); got != "org-service-token-at-least-32-bytes" {
+			t.Fatalf("service token = %q", got)
+		}
+		if got := r.Header.Get("X-Internal-Api-Key"); got != "" {
+			t.Fatalf("legacy key leaked = %q", got)
+		}
+		if got := r.Header.Get("X-User-ID"); got != "" {
+			t.Fatalf("unverified user header leaked = %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":   "org-1",
@@ -392,8 +398,14 @@ func TestBillingClientRecordsUsageThroughBillingCore(t *testing.T) {
 		if r.URL.Path != "/api/v1/billing/orgs/org-1/usage" {
 			t.Fatalf("path = %s, want /api/v1/billing/orgs/org-1/usage", r.URL.Path)
 		}
-		if got := r.Header.Get("X-Internal-Api-Key"); got != "internal-key" {
-			t.Fatalf("internal key = %q, want internal-key", got)
+		if got := r.Header.Get("X-Service-Id"); got != "integration-corev2" {
+			t.Fatalf("service id = %q, want integration-corev2", got)
+		}
+		if got := r.Header.Get("X-Service-Token"); got != "billing-service-token-at-least-32-bytes" {
+			t.Fatalf("service token = %q", got)
+		}
+		if got := r.Header.Get("X-Internal-Api-Key"); got != "" {
+			t.Fatalf("legacy key leaked = %q", got)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -420,14 +432,21 @@ func TestAuditClientRecordsAuditThroughAuditCore(t *testing.T) {
 		if r.URL.Path != "/v1/audit" {
 			t.Fatalf("path = %s, want /v1/audit", r.URL.Path)
 		}
-		if got := r.Header.Get("X-Internal-Api-Key"); got != "internal-key" {
-			t.Fatalf("internal key = %q, want internal-key", got)
+		if got := r.Header.Get("X-Service-Id"); got != "integration-corev2" {
+			t.Fatalf("service id = %q, want integration-corev2", got)
+		}
+		if got := r.Header.Get("X-Service-Token"); got != "audit-service-token-at-least-32-bytes" {
+			t.Fatalf("service token = %q", got)
+		}
+		if got := r.Header.Get("X-Internal-Api-Key"); got != "" {
+			t.Fatalf("legacy key leaked = %q", got)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("Decode body error: %v", err)
 		}
-		if body["org_id"] != "org-1" || body["plane"] != "integration-corev2" || body["event"] != "connection.action.executed" {
+		if body["org_id"] != "org-1" || body["plane"] != "ingestion" || body["producer"] != "integration-corev2" ||
+			body["event_id"] != "audit-integration-1" || body["event"] != "connection.action.executed" {
 			t.Fatalf("body = %#v", body)
 		}
 		details, ok := body["details"].(map[string]any)
@@ -442,6 +461,8 @@ func TestAuditClientRecordsAuditThroughAuditCore(t *testing.T) {
 	cfg.AuditCoreURL = server.URL
 	client := NewAuditClient(cfg, server.Client())
 	if err := client.RecordAudit(t.Context(), AuditEvent{
+		EventID:    "audit-integration-1",
+		OccurredAt: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC),
 		OrgID:      "org-1",
 		UserID:     "user-1",
 		Event:      "connection.action.executed",
@@ -452,14 +473,52 @@ func TestAuditClientRecordsAuditThroughAuditCore(t *testing.T) {
 	}
 }
 
+func TestAuditClientRejectsMissingStableProducerFields(t *testing.T) {
+	client := NewAuditClient(testControlPlaneConfig("http://unused"), http.DefaultClient)
+	for name, event := range map[string]AuditEvent{
+		"event id":    {OccurredAt: time.Now().UTC(), OrgID: "org-1", Event: "sync_started"},
+		"occurred at": {EventID: "audit-integration-1", OrgID: "org-1", Event: "sync_started"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := client.RecordAudit(t.Context(), event); err == nil {
+				t.Fatal("incomplete producer audit event was accepted")
+			}
+		})
+	}
+}
+
+func TestScopedControlClientDoesNotForwardCredentialAcrossRedirect(t *testing.T) {
+	var redirected atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	cfg := testControlPlaneConfig("http://unused")
+	cfg.AuditCoreURL = redirector.URL
+	client := NewAuditClient(cfg, redirector.Client())
+	_ = client.RecordAudit(t.Context(), AuditEvent{OrgID: "org-1", Event: "redirect.test"})
+	if calls := redirected.Load(); calls != 0 {
+		t.Fatalf("scoped credential followed %d redirect(s)", calls)
+	}
+}
+
 func testControlPlaneConfig(authCoreURL string) config.Config {
 	return config.Config{
-		ServiceName:            "integration-corev2",
-		InternalAPIKey:         "fallback-key",
-		AuthCoreURL:            authCoreURL,
-		AuthCoreInternalAPIKey: "internal-key",
-		OrgCoreURL:             "http://org-core",
-		BillingCoreURL:         "http://billing-core",
-		AuditCoreURL:           "http://audit-core",
+		ServiceName:             "integration-corev2",
+		InternalAPIKey:          "fallback-key",
+		AuthCoreURL:             authCoreURL,
+		AuthCoreInternalAPIKey:  "internal-key",
+		OrgCoreURL:              "http://org-core",
+		BillingCoreURL:          "http://billing-core",
+		AuditCoreURL:            "http://audit-core",
+		OrgCoreServiceToken:     "org-service-token-at-least-32-bytes",
+		BillingCoreServiceToken: "billing-service-token-at-least-32-bytes",
+		AuditCoreServiceToken:   "audit-service-token-at-least-32-bytes",
 	}
 }

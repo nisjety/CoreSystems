@@ -229,5 +229,5 @@ func (c *MicrosoftProviderClient) Profile(ctx context.Context, accessToken strin
 }
 
 func (c *MicrosoftProviderClient) Revoke(_ context.Context, _ string, _ map[string]string) error {
-	return nil
+	return ErrRevocationUnsupported
 }

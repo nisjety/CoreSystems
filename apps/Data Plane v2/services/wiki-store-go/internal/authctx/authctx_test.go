@@ -108,6 +108,39 @@ func TestVerifierRejectsUnsignedAndInvalidIdentityTokens(t *testing.T) {
 	}
 }
 
+func TestVerifierRequiresSignedBooleanZDRClaim(t *testing.T) {
+	key := generateTestKey(t)
+	verifier := newTestVerifier(t, key)
+
+	missing := mergeTestClaims(validTestClaims(), jwt.MapClaims{"zdr": nil})
+	delete(missing, "zdr")
+	for _, tt := range []struct {
+		name   string
+		claims jwt.MapClaims
+	}{
+		{name: "missing", claims: missing},
+		{name: "null", claims: mergeTestClaims(validTestClaims(), jwt.MapClaims{"zdr": nil})},
+		{name: "string", claims: mergeTestClaims(validTestClaims(), jwt.MapClaims{"zdr": "false"})},
+		{name: "number", claims: mergeTestClaims(validTestClaims(), jwt.MapClaims{"zdr": 0})},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := verifier.Verify(signTestToken(t, key, tt.claims)); err == nil {
+				t.Fatal("Verify() accepted token without a signed boolean zdr claim")
+			}
+		})
+	}
+
+	for _, want := range []bool{false, true} {
+		claims, err := verifier.Verify(signTestToken(t, key, mergeTestClaims(validTestClaims(), jwt.MapClaims{"zdr": want})))
+		if err != nil {
+			t.Fatalf("Verify(zdr=%v): %v", want, err)
+		}
+		if claims.RestrictiveZDR() != want {
+			t.Fatalf("RestrictiveZDR() = %v, want %v", claims.RestrictiveZDR(), want)
+		}
+	}
+}
+
 func TestNewVerifierFailsClosedWithoutCompleteConfiguration(t *testing.T) {
 	key := generateTestKey(t)
 	publicPEM := marshalTestPublicKey(t, &key.PublicKey)
@@ -378,6 +411,7 @@ func validTestClaims() jwt.MapClaims {
 	return jwt.MapClaims{
 		"iss": testIssuer, "aud": testAudience,
 		"sub": "user-authorized", "user_id": "user-authorized", "org_id": "org-authorized",
+		"zdr":    false,
 		"scopes": []string{"wiki.read", "wiki.write", "wiki.approve", "wiki.maintenance.write"},
 		"iat":    now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix(),
 	}

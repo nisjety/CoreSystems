@@ -22,6 +22,7 @@ const SharedWithMePage = lazy(() => import('@/features/knowledge/components/Shar
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
 const VelionIngestionsPage = lazy(() => import('@/features/ingestions/components/VelionIngestionsPage'))
 const AuthPage = lazy(() => import('@/features/auth/components/AuthPage'))
+const AcceptInvitationPage = lazy(() => import('@/features/auth/components/AcceptInvitationPage'))
 const OnboardingPage = lazy(() => import('@/features/onboarding/components/OnboardingPage'))
 const AccountSettingsPage = lazy(() => import('@/features/settings/components/AccountSettingsPage'))
 const SettingsPage = lazy(() => import('@/features/settings/components/SettingsPage'))
@@ -127,6 +128,7 @@ export default function App() {
       <Route path="/auth" component={AuthPage} />
       <Route path="/login" component={AuthPage} />
       <Route path="/reset-password" component={AuthPage} />
+      <Route path="/accept-invitation/:invitationId" component={AcceptInvitationPage} />
       <Route
         path="/onboarding"
         component={() => (

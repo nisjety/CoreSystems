@@ -66,6 +66,34 @@ CREATE TABLE IF NOT EXISTS documents_outbox (
     published_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS source_objects (
+    source_object_id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+    org_id TEXT NOT NULL,
+    connector TEXT NOT NULL,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    site_id TEXT,
+    drive_id TEXT,
+    item_id TEXT,
+    parent_id TEXT,
+    path TEXT,
+    name TEXT NOT NULL,
+    mime_type TEXT,
+    size_bytes BIGINT,
+    etag TEXT,
+    ctag TEXT,
+    quickxor_hash TEXT,
+    sha1_hash TEXT,
+    content_hash TEXT,
+    acl_tags TEXT[] NOT NULL DEFAULT '{}',
+    metadata JSONB NOT NULL DEFAULT '{}',
+    modified_at TIMESTAMPTZ,
+    discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (org_id, connector, external_id)
+);
+
 CREATE TABLE IF NOT EXISTS org_versions (
     org_id TEXT PRIMARY KEY,
     version BIGINT NOT NULL,
@@ -355,6 +383,54 @@ func TestCreateUpdateDeleteLifecycleOutboxIsAtomic(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents WHERE idempotency_key='outbox-fixture-2'").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("document commit escaped failed outbox count=%d err=%v", count, err)
+	}
+}
+
+func TestSourceObjectLifecycleOutboxIsAtomic(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewSourceObjectRepo(pool)
+	ctx := context.Background()
+	input := model.UpsertSourceObjectInput{
+		OrgID: "org-source-outbox", Connector: "fixture", Source: "isolated://fixture",
+		ExternalID: "source-1", Name: "source-1.txt", ContentHash: "hash-1",
+	}
+	created, err := r.UpsertWithOutbox(
+		ctx,
+		input,
+		"dataplane.source_objects.changed",
+		"user-source",
+	)
+	if err != nil || !created.Inserted {
+		t.Fatalf("source upsert with outbox: result=%+v err=%v", created, err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents_outbox").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("source outbox count=%d err=%v", count, err)
+	}
+	if _, err := r.SoftDeleteWithOutbox(
+		ctx,
+		model.DeleteSourceObjectInput{OrgID: input.OrgID, SourceObjectID: created.SourceObject.SourceObjectID},
+		"dataplane.source_objects.deleted",
+		"user-source",
+	); err != nil {
+		t.Fatalf("source delete with outbox: %v", err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM documents_outbox").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("source delete outbox count=%d err=%v", count, err)
+	}
+
+	if _, err := pool.Exec(ctx, "DROP TABLE documents_outbox"); err != nil {
+		t.Fatalf("drop outbox for rollback proof: %v", err)
+	}
+	input.ExternalID = "source-rollback"
+	input.Name = "source-rollback.txt"
+	if _, err := r.UpsertWithOutbox(ctx, input, "dataplane.source_objects.changed", "user-source"); err == nil {
+		t.Fatal("source-object upsert succeeded without durable outbox")
+	}
+	if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM source_objects WHERE external_id='source-rollback'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("source-object commit escaped failed outbox count=%d err=%v", count, err)
 	}
 }
 

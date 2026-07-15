@@ -197,6 +197,9 @@ pub(crate) async fn proxy_model_json(
     .await
 }
 
+// Adapter kept explicit because each credential is independently audience-bound;
+// collapsing them into an untyped collection would weaken that contract.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn proxy_model_json_with_data_plane(
     state: &AppState,
     method: Method,
@@ -373,9 +376,9 @@ async fn proxy_model_json_with_delegations(
             let b = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
             (status, Json(b))
         }
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         ),
     }
 }
@@ -409,14 +412,18 @@ mod tests {
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
+            velion_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
             user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
+            billing_core_service_token: "billing-test-secret-at-least-32-bytes".into(),
             cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
+            org_core_service_token: "org-test-secret-at-least-32-bytes".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),
+            audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
             shipping_core_url: "http://127.0.0.1:1".into(),

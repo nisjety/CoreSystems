@@ -199,86 +199,95 @@ Internal API key (`X-Internal-Api-Key` or `X-Api-Key`); reads require `org_id` q
 
 ## 2. Data Plane v2
 
-**Plane-wide warning:** no uniformly enforced auth. Only documents-api (internal key) and retrieval-engine (JWT-or-key) check credentials; wiki-store/graph-index/orchestrator/quality trust `X-Org-ID` outright. The gateway is the trust boundary: terminate the user session at velion-gateway-rs and inject a *validated* `X-Org-ID` + internal key; never forward raw browser headers.
+**Secure-MVP boundary (verified in source/tests 2026-07-15):** every interactive
+Data route below requires an RS256 `aud=data-plane` bearer minted from the
+verified Velion session. The gateway derives the tenant from canonical session
+membership, mints the bearer through Auth Core, forwards the authoritative
+tenant only, and returns 503 when delegation is unavailable. It never falls
+back to the fleet-shared internal key for user reads. Data services independently
+verify issuer, audience, signature, time claims, identity, scopes where
+applicable, and tenant equality; caller-selected headers/body/path values cannot
+widen authority.
 
 ### 2.1 documents-api-go — HTTP :8010 (container dpv2-documents-api)
 
 | Method | Path | Purpose | Auth | Transport | v3 |
 |---|---|---|---|---|---|
 | GET | `/health`, `/readyz` | Probes | none | HTTP | none |
-| GET | `/v1/documents` | List canonical documents (knowledge library) | internal key + X-Org-ID | HTTP | core |
-| POST | `/v1/documents` | Create document (Ingestion Plane write path — not SPA) | internal key | HTTP | none |
-| POST | `/v1/documents/bulk` | Bulk ingest (Ingestion batch) | internal key | HTTP | none |
-| GET | `/v1/documents/{documentID}` | Single document metadata | internal key + X-Org-ID | HTTP | core |
-| DELETE | `/v1/documents/{documentID}` | Delete document (user-initiated removal) | internal key + X-Org-ID | HTTP | **later** |
-| GET | `/v1/sources` | List registered sources (source health) | internal key + X-Org-ID | HTTP | core |
-| POST | `/v1/source-objects`, `/v1/source-objects/delete` | Source-object lifecycle (ingestion-internal) | internal key | HTTP | none |
-| GET | `/v1/source-objects/duplicates` | Duplicate inspection | internal key | HTTP | **later** |
+| GET | `/v1/documents` | List canonical documents (knowledge library) | Bearer; verified user visibility or `documents:read` service | HTTP | core |
+| POST | `/v1/documents` | Create document (Ingestion Plane write path — not SPA) | Bearer; `documents:write` service scope | HTTP | none |
+| POST | `/v1/documents/bulk` | Bulk ingest (Ingestion batch) | Bearer; `documents:write` service scope | HTTP | none |
+| GET | `/v1/documents/{documentID}` | Single document metadata | Bearer; tenant + viewer visibility pinned | HTTP | core |
+| DELETE | `/v1/documents/{documentID}` | Delete document (user-initiated removal) | Bearer; tenant + actor pinned | HTTP | **later** |
+| GET | `/v1/sources` | Source facet data | Bearer; tenant + visibility pinned | HTTP | none (gateway source-list intentionally uses `/v1/documents`) |
+| POST | `/v1/source-objects`, `/v1/source-objects/delete` | Source-object lifecycle (ingestion-internal) | Scoped service bearer | HTTP | none |
+| GET | `/v1/source-objects/duplicates` | Duplicate inspection | Bearer; `documents:read` service scope | HTTP | **later** |
 | NATS | document lifecycle outbox → JetStream | Consumed by index-engine-rs | — | NATS | none |
 
 ### 2.2 retrieval-engine-rs — HTTP host :8014 → container :8004; gRPC host :50062 → :50052
 
-Bearer JWT (Control Plane JWKS) OR api-key headers + `x-org-id`.
+Verified Bearer JWT only. Fleet-shared API keys and header-only tenant identity
+are rejected. User membership is resolved through the versioned Control decision
+contract; calls fail closed when token issuance or policy authority is unavailable.
 
 | Method | Path | Purpose | Auth | Transport | v3 |
 |---|---|---|---|---|---|
 | GET | `/health`, `/readyz` | Probes | none | HTTP | none |
-| POST | `/v1/retrieve` (alias `/v1/retrieve/hybrid`) | Main hybrid retrieval (dense+sparse+rerank) | JWT or key | HTTP | core |
-| GET | `/v1/retrieval/{trace_id}` | Stored retrieval trace (citation provenance) | JWT or key | HTTP | core |
-| POST | `/v1/retrieve/graph` | Graph-aware retrieval | JWT or key | HTTP | core |
-| POST | `/v1/retrieve/wiki` | Wiki ANN retrieval | JWT or key | HTTP | core |
-| POST | `/v1/retrieve/contradictions` | Contradicting claims | JWT or key | HTTP | **later** |
-| POST | `/v1/retrieve/timeline` | Timeline retrieval | JWT or key | HTTP | **later** |
-| POST | `/v1/retrieve/pack` | Context packing (Model Plane consumer — not SPA) | JWT or key | HTTP | none |
-| POST | `/v1/retrieve/sources` | Resolve sources behind results (citation lists) | JWT or key | HTTP | core |
-| POST | `/v1/retrieve/freshness` | Freshness/staleness signal | JWT or key | HTTP | **later** |
-| POST | `/v1/retrieve/chunks` | Fetch chunks (expand citation to text) | JWT or key | HTTP | core |
-| POST | `/v1/retrieve/compare` | Compare retrieval configs (debug/eval) | JWT or key | HTTP | **later** |
-| GET | `/v1/index/versions` | List index versions | JWT or key | HTTP | **later** |
-| POST | `/v1/admin/cleanup/orphans` | Admin cleanup | key | HTTP | none |
-| POST | `/v1/knowledge/search` | Tool-style search (same handler as retrieve) — knowledge page search box | JWT or key | HTTP | core |
-| POST | `/v1/knowledge/graph` | Tool-style graph search | JWT or key | HTTP | core |
-| POST | `/v1/knowledge/wiki` | Tool-style wiki search | JWT or key | HTTP | core |
-| POST | `/v1/knowledge/sources` | Tool-style sources resolution | JWT or key | HTTP | core |
-| POST | `/v1/knowledge/freshness` | Tool-style freshness | JWT or key | HTTP | **later** |
+| POST | `/v1/retrieve` (alias `/v1/retrieve/hybrid`) | Main hybrid retrieval (dense+sparse+rerank) | Verified bearer | HTTP | core |
+| GET | `/v1/retrieval/{trace_id}` | Stored retrieval trace (citation provenance) | Verified bearer; tenant + actor pinned | HTTP | core |
+| POST | `/v1/retrieve/graph` | Graph-aware retrieval | Verified bearer | HTTP | core |
+| POST | `/v1/retrieve/wiki` | Wiki ANN retrieval | Verified bearer | HTTP | core |
+| POST | `/v1/retrieve/contradictions` | Contradicting claims | Verified bearer | HTTP | **later** |
+| POST | `/v1/retrieve/timeline` | Timeline retrieval | Verified bearer | HTTP | **later** |
+| POST | `/v1/retrieve/pack` | Context packing (Model Plane consumer — not SPA) | Scoped service bearer | HTTP | none |
+| POST | `/v1/retrieve/sources` | Resolve sources behind results (citation lists) | Verified bearer | HTTP | core |
+| POST | `/v1/retrieve/freshness` | Freshness/staleness signal | Verified bearer | HTTP | **later** |
+| POST | `/v1/retrieve/chunks` | Fetch chunks (expand citation to text) | Verified bearer | HTTP | core |
+| POST | `/v1/retrieve/compare` | Compare retrieval configs (debug/eval) | Verified bearer | HTTP | **later** |
+| GET | `/v1/index/versions` | List index versions | Verified bearer | HTTP | **later** |
+| POST | `/v1/admin/cleanup/orphans` | Admin cleanup | Dedicated scoped bearer | HTTP | none |
+| POST | `/v1/knowledge/search` | Tool-style search — knowledge page and navbar search | Verified bearer | HTTP | core |
 | gRPC | `RetrievalService` (incl. server-stream `RetrieveStream`), `KnowledgeService`, `DocumentService` (reads only) | Inter-plane retrieval facade | plane | gRPC | none |
 
 ### 2.3 wiki-store-go — HTTP :8011; gRPC internal-only (port unpublished)
 
-`X-Org-ID` header middleware only — **no key/JWT**; must sit behind the gateway.
+Verified `aud=data-plane` bearer on HTTP and gRPC; wiki scopes and tenant are
+derived from verified claims. `X-Org-ID` is only an equality assertion.
 
 | Method | Path | Purpose | Auth | Transport | v3 |
 |---|---|---|---|---|---|
 | GET | `/health`, `/readyz`, `/metrics` | Probes/metrics | none | HTTP | none |
-| POST | `/v1/wiki/pages` | Create wiki page | X-Org-ID | HTTP | **later** |
-| GET | `/v1/wiki/pages` | Paginated page list (built for the velion sidebar) | X-Org-ID | HTTP | core |
-| GET | `/v1/wiki/pages/by-path` | Page by path | X-Org-ID | HTTP | core |
-| GET | `/v1/wiki/pages/{pageID}` | Page by ID | X-Org-ID | HTTP | core |
-| POST | `/v1/wiki/pages/{pageID}/versions` | Publish new version | X-Org-ID | HTTP | **later** |
-| GET | `/v1/wiki/pages/{pageID}/versions` | Version history | X-Org-ID | HTTP | core |
-| GET | `/v1/wiki/pages/{pageID}/diff` | Diff two versions | X-Org-ID | HTTP | core |
-| GET | `/v1/wiki/pages/{pageID}/backlinks` | Backlinks | X-Org-ID | HTTP | core |
-| POST | `/v1/wiki/pages/{pageID}/proposals` | Submit edit proposal | X-Org-ID | HTTP | **later** |
-| POST | `/v1/wiki/proposals/review` | Approve/reject proposal | X-Org-ID | HTTP | **later** |
-| POST/GET | `/v1/wiki/pages/{pageID}/source-logs` | Provenance write (internal) / read | X-Org-ID | HTTP | none / **later** |
-| POST/GET | `/v1/wiki/pages/{pageID}/maintenance-logs` | Maintenance log write (internal) / read | X-Org-ID | HTTP | none / **later** |
-| POST | `/v1/wiki/maintenance/sweep` | Batch lint ingest (operator/automation) | X-Org-ID | HTTP | none |
+| POST | `/v1/wiki/pages` | Create wiki page | `wiki.write` bearer | HTTP | **later** |
+| GET | `/v1/wiki/pages` | Paginated page list (built for the velion sidebar) | `wiki.read` bearer | HTTP | core |
+| GET | `/v1/wiki/pages/by-path` | Page by path | `wiki.read` bearer | HTTP | core |
+| GET | `/v1/wiki/pages/{pageID}` | Page by ID | `wiki.read` bearer | HTTP | core |
+| POST | `/v1/wiki/pages/{pageID}/versions` | Publish new version | `wiki.write` bearer | HTTP | **later** |
+| GET | `/v1/wiki/pages/{pageID}/versions` | Version history | `wiki.read` bearer | HTTP | core |
+| GET | `/v1/wiki/pages/{pageID}/diff` | Diff two versions | `wiki.read` bearer | HTTP | core |
+| GET | `/v1/wiki/pages/{pageID}/backlinks` | Backlinks | `wiki.read` bearer | HTTP | core |
+| POST | `/v1/wiki/pages/{pageID}/proposals` | Submit edit proposal | `wiki.write` bearer | HTTP | **later** |
+| POST | `/v1/wiki/proposals/review` | Approve/reject proposal | `wiki.approve` bearer | HTTP | **later** |
+| POST/GET | `/v1/wiki/pages/{pageID}/source-logs` | Provenance write (internal) / read | scoped bearer | HTTP | none / **later** |
+| POST/GET | `/v1/wiki/pages/{pageID}/maintenance-logs` | Maintenance log write (internal) / read | scoped bearer | HTTP | none / **later** |
+| POST | `/v1/wiki/maintenance/sweep` | Batch lint ingest (operator/automation) | `wiki.maintenance.write` bearer | HTTP | none |
 | gRPC | `wiki.v1.WikiService` (full CRUD mirror) | Inter-plane consumers | plane | gRPC | none |
 | NATS | pub `dataplane.wiki.version.published` | Drives wiki embedding (silent if NATS_URL unset!) | — | NATS | none |
 
 ### 2.4 graph-index-rs — HTTP :9203; gRPC internal-only
 
-No auth middleware — internal-trust behind gateway; org scoping via path/query params.
+Verified RS256/JWKS bearer on HTTP and gRPC. User reads are tenant-bound; service
+principals additionally require `graph:read`. Every path/query/body tenant is
+checked against the signed claim.
 
 | Method | Path | Purpose | Auth | Transport | v3 |
 |---|---|---|---|---|---|
 | GET | `/health`, `/readyz` | Probes | none | HTTP | none |
-| GET | `/v1/graphs/{org_id}` | Aggregate graph snapshot per org (used by onboarding graph-preview today) | none (trust) | HTTP | **later** (workspace graph view; `onboarding` via existing gateway proxy) |
-| GET | `/v1/graph/entities`, `/v1/graph/entities/{entity_id}` | Entities | none (trust) | HTTP | **later** |
-| GET | `/v1/graph/relationships/{entity_id}` | Relationships | none (trust) | HTTP | **later** |
-| GET | `/v1/graph/claims`, `/v1/graph/contradictions` | Claims / contradictions | none (trust) | HTTP | **later** |
-| POST | `/v1/graph/expand` | N-hop expansion from seeds | none (trust) | HTTP | **later** |
-| POST | `/v1/graph/exports` | Export graph (json/graphml/markdown) | none (trust) | HTTP | **later** |
+| GET | `/v1/graphs/{org_id}` | Aggregate graph snapshot per org (Knowledge Graph + onboarding preview) | Verified bearer | HTTP | core |
+| GET | `/v1/graph/entities`, `/v1/graph/entities/{entity_id}` | Entities | Verified bearer | HTTP | core |
+| GET | `/v1/graph/relationships/{entity_id}` | Relationships | Verified bearer | HTTP | core |
+| GET | `/v1/graph/claims`, `/v1/graph/contradictions` | Claims / contradictions | Verified bearer | HTTP | core |
+| POST | `/v1/graph/expand` | N-hop expansion from seeds | Verified bearer | HTTP | core |
+| POST | `/v1/graph/exports` | Export graph (json/graphml/markdown) | Verified bearer | HTTP | core |
 | gRPC | `graph.v1.GraphService` | Consumed by retrieval-engine | plane | gRPC | none |
 | NATS | JetStream consumer (graph extraction, orphan cleanup) | — | — | NATS | none |
 
@@ -288,9 +297,9 @@ No auth middleware — internal-trust behind gateway; org scoping via path/query
 |---|---|---|
 | index-engine-rs (:9201) | health/readyz only; NATS chunking pipeline | none |
 | embedding-engine-rs (:9202) | health/readyz only; NATS embedding + Qdrant writes | none |
-| quickwit-adapter-rs (:9204) | health + `POST /admin/rebuild`; NATS sparse-index maintenance | none |
-| data-orchestrator-go (:8012) | `/v1/orchestrator/{jobs,reindex,stale-embeddings}` — operator-facing | none |
-| data-quality-go (:8013) | evals/quality/cost APIs; `POST /v1/quality/trust`, `GET /v1/quality/lint`, `GET /v1/cost/summary` are **later** candidates (trust badges, knowledge-health panel, dashboard cost widget); rest none | later/none |
+| quickwit-adapter-rs (:9204) | health + scoped, audited `POST /admin/rebuild`; destructive clear remains disabled | none |
+| data-orchestrator-go (:8012) | JWT/scoped `/v1/orchestrator/{jobs,reindex,stale-embeddings}` — operator-facing; production mutations contained | none |
+| data-quality-go (:8013) | JWT + `data:quality:admin` evals/quality/cost APIs; trust/lint/cost are **later** UI candidates | later/none |
 | retrieval-eval-py | empty directory, no endpoints — do not build against | none |
 
 ---
@@ -598,14 +607,26 @@ Deferred: ⏳ `/v1/ai/*` multimodal, ⏳ realtime (placeholder), ⏳ session-cor
 
 ### 6.3 Knowledge (`/knowledge`)
 
-- Library: documents-api `GET /v1/documents`, `GET /v1/documents/{id}`, `GET /v1/sources`
-- Search: retrieval-engine `POST /v1/knowledge/search` (+ `/v1/knowledge/graph`, `/v1/knowledge/wiki`); citation resolve `POST /v1/knowledge/sources`, `POST /v1/retrieve/chunks`
+- Library: documents-api `GET /v1/documents`, `GET /v1/documents/{id}`. The
+  source-list gateway route deliberately derives source cards from visible
+  documents; the Data `/v1/sources` response is a different facet contract.
+- Search: retrieval-engine `POST /v1/knowledge/search`; citation resolve uses
+  the real `/v1/retrieve/sources` and `/v1/retrieve/chunks` routes. The gateway
+  normalizes SPA `limit`/`kinds` into Data `top_k`/filters and maps
+  candidates/sources back into the UI result contract.
 - Wiki: wiki-store `GET /v1/wiki/pages` (sidebar), `GET /v1/wiki/pages/by-path`, `GET /v1/wiki/pages/{id}`, `/versions`, `/diff`, `/backlinks`
+- Graph: graph-index `GET /v1/graphs/{org_id}` plus entities, relationships,
+  claims, contradictions, expansion, and exports. The org is session-derived;
+  the historical onboarding query-parameter IDOR is closed.
 - Imports: imports-core `POST /api/v1/import/jobs/upload` | `POST /api/v1/import/jobs/source` → `GET /api/v1/import/jobs/{id}` → `GET /api/v1/import/jobs/{id}/events`
 - Recrawl action (`knowledge.recrawl_source`): quarry-edge `POST /v1/crawl` → `GET /v1/:kind/jobs` → `GET /v1/runs/:id/events`
 - SharePoint sources: finspo `GET/POST /api/v1/sources`, `GET /api/v1/sources/:id/status`, `POST /api/v1/sources/:id/sync`
-- Deferred: ⏳ graph-index workspace graph views (`/v1/graphs/{org_id}`, entities/expand/exports — replaces mock `graphrest-client.ts`), ⏳ wiki authoring (create/version/proposals), ⏳ document delete, ⏳ trust/lint badges (data-quality), ⏳ autocomplete suggestions (deployment unverified), ⏳ freshness/timeline/contradictions retrieval arms.
-- Known gap: no `documents.updated`/`source_objects.changed` publisher → knowledge surfaces can go stale; plan polling accordingly.
+- Deferred: ⏳ wiki authoring (create/version/proposals), ⏳ document delete,
+  ⏳ trust/lint badges (data-quality), ⏳ autocomplete suggestions (deployment
+  unverified), ⏳ freshness/timeline/contradictions retrieval arms.
+- Every interactive Data request uses a session-minted Data bearer and fails
+  closed with 503 when delegation is unavailable; there is no shared-key user
+  fallback.
 
 ### 6.4 Dashboard (`/`, `/dashboard`)
 

@@ -27,7 +27,7 @@ export async function publishOrganizationCreated(data: {
   slug: string;
   creatorId: string;
   creatorEmail: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }): Promise<void> {
   if (!eventPublisher) {
     console.warn('⚠️ Organization event publisher not available');
@@ -72,39 +72,4 @@ export async function publishOrganizationMemberRemoved(data: {
   }
 
   await eventPublisher.publishOrganizationMemberRemoved(data);
-}
-
-/**
- * Emit a durable control-plane audit record for an admin role change to
- * velion.audit.v1.control.role_change. No-ops (publisher's own guard) when
- * org_id is absent, so callers don't need to pre-check the active org.
- */
-export function publishRoleChangeAudit(data: {
-  orgId?: string;
-  actorUserId?: string;
-  actorRole?: string;
-  targetUserId: string;
-  targetEmail?: string;
-  newRole: string;
-  outcome?: 'ok' | 'denied' | 'error';
-}): void {
-  if (!eventPublisher) {
-    console.warn('⚠️ Organization event publisher not available');
-    return;
-  }
-
-  eventPublisher.publishVelionAudit({
-    org_id: data.orgId,
-    user_id: data.actorUserId,
-    actor_role: data.actorRole,
-    event: 'role_change',
-    subject: data.targetEmail || data.targetUserId,
-    resource_id: data.targetUserId,
-    outcome: data.outcome ?? 'ok',
-    details: {
-      target_user_id: data.targetUserId,
-      target_email: data.targetEmail,
-      new_role: data.newRole,
-    },
-  });
 }

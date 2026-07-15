@@ -22,19 +22,20 @@ type fakePublisher struct {
 	subject string
 	data    []byte
 	calls   int
+	err     error
 }
 
 func (p *fakePublisher) Publish(subject string, data []byte) error {
 	p.subject = subject
 	p.data = data
 	p.calls++
-	return nil
+	return p.err
 }
 
 func TestHandleErasureTransfersUserDocsAndEmits(t *testing.T) {
 	repo := &fakeTransferrer{ret: 3}
 	pub := &fakePublisher{}
-	payload := []byte(`{"subject_type":"user","subject_id":"user-a","org_id":"org-1","requested_by":"admin","ts":"now"}`)
+	payload := []byte(`{"event_id":"gdpr:fanout:event-a","operation_id":"gdpr:operation-a","subject_type":"user","subject_id":"user-a","org_id":"org-1","requested_by":"admin","ts":"now"}`)
 
 	n, err := HandleErasure(context.Background(), repo, pub, payload)
 	if err != nil {
@@ -63,17 +64,18 @@ func TestHandleErasureTransfersUserDocsAndEmits(t *testing.T) {
 	}
 }
 
-func TestHandleErasureIgnoresNonUserAndMissingScope(t *testing.T) {
+func TestHandleErasureRejectsPoisonAndMissingScope(t *testing.T) {
 	for _, payload := range []string{
-		`{"subject_type":"team","subject_id":"team-1","org_id":"org-1"}`,
-		`{"subject_type":"user","subject_id":"","org_id":"org-1"}`,
-		`{"subject_type":"user","subject_id":"u","org_id":""}`,
+		`{"event_id":"event-1","subject_type":"team","subject_id":"team-1","org_id":"org-1"}`,
+		`{"event_id":"event-1","subject_type":"user","subject_id":"","org_id":"org-1"}`,
+		`{"event_id":"event-1","subject_type":"user","subject_id":"u","org_id":""}`,
+		`{"subject_type":"user","subject_id":"u","org_id":"org-1"}`,
 	} {
 		repo := &fakeTransferrer{ret: 9}
 		pub := &fakePublisher{}
 		n, err := HandleErasure(context.Background(), repo, pub, []byte(payload))
-		if err != nil || n != 0 {
-			t.Fatalf("payload %s: (%d, %v), want (0, nil)", payload, n, err)
+		if err == nil || n != 0 {
+			t.Fatalf("payload %s: (%d, %v), want poison error", payload, n, err)
 		}
 		if len(repo.calls) != 0 || pub.calls != 0 {
 			t.Fatalf("payload %s should be a no-op; transfer=%d publish=%d", payload, len(repo.calls), pub.calls)
@@ -84,12 +86,21 @@ func TestHandleErasureIgnoresNonUserAndMissingScope(t *testing.T) {
 func TestHandleErasurePropagatesTransferError(t *testing.T) {
 	repo := &fakeTransferrer{err: errors.New("db down")}
 	pub := &fakePublisher{}
-	payload := []byte(`{"subject_type":"user","subject_id":"user-a","org_id":"org-1"}`)
+	payload := []byte(`{"event_id":"event-1","subject_type":"user","subject_id":"user-a","org_id":"org-1"}`)
 	if _, err := HandleErasure(context.Background(), repo, pub, payload); err == nil {
 		t.Fatal("expected transfer error to propagate")
 	}
 	// Must NOT emit ownership.transferred when the transfer failed.
 	if pub.calls != 0 {
 		t.Fatalf("must not publish on transfer failure; publish=%d", pub.calls)
+	}
+}
+
+func TestHandleErasurePropagatesOwnershipEventFailure(t *testing.T) {
+	repo := &fakeTransferrer{ret: 1}
+	pub := &fakePublisher{err: errors.New("ownership event unavailable")}
+	payload := []byte(`{"event_id":"event-1","subject_type":"user_anonymize","subject_id":"user-a","org_id":"org-1"}`)
+	if _, err := HandleErasure(context.Background(), repo, pub, payload); err == nil {
+		t.Fatal("ownership event failure must prevent durable delivery ACK")
 	}
 }

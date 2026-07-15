@@ -14,7 +14,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/sessions.proto.
  */
 export const file_model_plane_v1_sessions: GenFile = /*@__PURE__*/
-  fileDesc("Ch1tb2RlbF9wbGFuZS92MS9zZXNzaW9ucy5wcm90bxIObW9kZWxfcGxhbmUudjEidgoTQ3JlYXRlVGhyZWFkUmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDwoHdXNlcl9pZBgDIAEoCRIpCghtZXRhZGF0YRgEIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QiWQoUQ3JlYXRlVGhyZWFkUmVzcG9uc2USEQoJdGhyZWFkX2lkGAEgASgJEi4KCmNyZWF0ZWRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wInMKFEFwcGVuZE1lc3NhZ2VSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIMCgRyb2xlGAIgASgJEg8KB2NvbnRlbnQYAyABKAkSKQoIbWV0YWRhdGEYBCABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0IikKFUFwcGVuZE1lc3NhZ2VSZXNwb25zZRIQCghzZXF1ZW5jZRgBIAEoBCKKAQoPU3RhcnRSdW5SZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIVCg1wYXJlbnRfcnVuX2lkGAIgASgJEhAKCGFnZW50X2lkGAMgASgJEgwKBGdvYWwYBCABKAkSDAoEbW9kZRgFIAEoCRIOCgZvcmdfaWQYBiABKAkSDwoHdXNlcl9pZBgHIAEoCSJSChBTdGFydFJ1blJlc3BvbnNlEg4KBnJ1bl9pZBgBIAEoCRIuCgpjcmVhdGVkX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJlChNDb21wbGV0ZVN0ZXBSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIPCgdzdGVwX2lkGAIgASgJEg4KBnN0YXR1cxgDIAEoCRIOCgZvdXRwdXQYBCABKAkSDQoFZXJyb3IYBSABKAkiKgoUQ29tcGxldGVTdGVwUmVzcG9uc2USEgoKc3RlcF9pbmRleBgBIAEoDSJNChVTYXZlQ2hlY2twb2ludFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhUKDWNoZWNrcG9pbnRfaWQYAiABKAkSDQoFc3RhdGUYAyABKAwiYAoWU2F2ZUNoZWNrcG9pbnRSZXNwb25zZRIYChBjaGVja3BvaW50X2luZGV4GAEgASgNEiwKCHNhdmVkX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJPChNSZXBsYXlUaHJlYWRSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIWCg5hZnRlcl9ldmVudF9pZBgCIAEoCRINCgVsaW1pdBgDIAEoDSKNAQoZR2V0Q29udGV4dEFzc2VtYmx5UmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSDgoGcnVuX2lkGAIgASgJEhIKCm1heF90b2tlbnMYAyABKA0SEQoJcG9saWN5X2lkGAQgASgJEhQKDHdvcmtzcGFjZV9pZBgFIAEoCRIQCghhZ2VudF9pZBgGIAEoCSJoChpHZXRDb250ZXh0QXNzZW1ibHlSZXNwb25zZRIwCghzZWdtZW50cxgBIAMoCzIeLm1vZGVsX3BsYW5lLnYxLkNvbnRleHRTZWdtZW50EhgKEGVzdGltYXRlZF90b2tlbnMYAiABKA0iSQoOQ29udGV4dFNlZ21lbnQSDAoEa2luZBgBIAEoCRIPCgdjb250ZW50GAIgASgJEhgKEGVzdGltYXRlZF90b2tlbnMYAyABKA0iIQoRQ29tcGFjdE5vd1JlcXVlc3QSDAoEdG9vbhgBIAEoCCI+ChJDb21wYWN0Tm93UmVzcG9uc2USFwoPY29tcGFjdGVkX2NvdW50GAEgASgDEg8KB3N1bW1hcnkYAiABKAki0gEKF1Vwc2VydEFnZW50U2tpbGxSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJEhMKC2Rlc2NyaXB0aW9uGAMgASgJEg8KB2NvbnRlbnQYBCABKAkSGAoQdHJpZ2dlcl9rZXl3b3JkcxgFIAMoCRIdChV0cmlnZ2VyX2ZpbGVfcGF0dGVybnMYBiADKAkSGQoRdG9vbF9yZXN0cmljdGlvbnMYByADKAkSDwoHZW5hYmxlZBgIIAEoCBIOCgZvcmlnaW4YCSABKAkiUgoYVXBzZXJ0QWdlbnRTa2lsbFJlc3BvbnNlEgoKAmlkGAEgASgJEg8KB2NyZWF0ZWQYAiABKAgSGQoRc2tpcHBlZF9wcm90ZWN0ZWQYAyABKAgiPgoWTGlzdEFnZW50U2tpbGxzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFAoMZW5hYmxlZF9vbmx5GAIgASgIIsEBCgpBZ2VudFNraWxsEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSEwoLZGVzY3JpcHRpb24YAyABKAkSDwoHY29udGVudBgEIAEoCRIYChB0cmlnZ2VyX2tleXdvcmRzGAUgAygJEh0KFXRyaWdnZXJfZmlsZV9wYXR0ZXJucxgGIAMoCRIZChF0b29sX3Jlc3RyaWN0aW9ucxgHIAMoCRIPCgdlbmFibGVkGAggASgIEg4KBm9yaWdpbhgJIAEoCSJFChdMaXN0QWdlbnRTa2lsbHNSZXNwb25zZRIqCgZza2lsbHMYASADKAsyGi5tb2RlbF9wbGFuZS52MS5BZ2VudFNraWxsIjwKF0xpc3RDb252ZXJzYXRpb25SZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkiLwoOU2Vzc2lvbk1lc3NhZ2USDAoEcm9sZRgBIAEoCRIPCgdjb250ZW50GAIgASgJIkwKGExpc3RDb252ZXJzYXRpb25SZXNwb25zZRIwCghtZXNzYWdlcxgBIAMoCzIeLm1vZGVsX3BsYW5lLnYxLlNlc3Npb25NZXNzYWdlIkQKEkxpc3RUaHJlYWRzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRINCgVsaW1pdBgDIAEoDSK3AQoNVGhyZWFkU3VtbWFyeRIRCgl0aHJlYWRfaWQYASABKAkSEwoLc2Vzc2lvbl9rZXkYAiABKAkSDQoFdGl0bGUYAyABKAkSDwoHcHJldmlldxgEIAEoCRIuCgpjcmVhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJFChNMaXN0VGhyZWFkc1Jlc3BvbnNlEi4KB3RocmVhZHMYASADKAsyHS5tb2RlbF9wbGFuZS52MS5UaHJlYWRTdW1tYXJ5IkEKEVNldFJ1bk1vZGVSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIMCgRtb2RlGAIgASgJEg4KBm9yZ19pZBgDIAEoCSIyChJTZXRSdW5Nb2RlUmVzcG9uc2USDgoGcnVuX2lkGAEgASgJEgwKBG1vZGUYAiABKAkywAkKC1Nlc3Npb25Db3JlElkKDENyZWF0ZVRocmVhZBIjLm1vZGVsX3BsYW5lLnYxLkNyZWF0ZVRocmVhZFJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5DcmVhdGVUaHJlYWRSZXNwb25zZRJcCg1BcHBlbmRNZXNzYWdlEiQubW9kZWxfcGxhbmUudjEuQXBwZW5kTWVzc2FnZVJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5BcHBlbmRNZXNzYWdlUmVzcG9uc2USTQoIU3RhcnRSdW4SHy5tb2RlbF9wbGFuZS52MS5TdGFydFJ1blJlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5TdGFydFJ1blJlc3BvbnNlElkKDENvbXBsZXRlU3RlcBIjLm1vZGVsX3BsYW5lLnYxLkNvbXBsZXRlU3RlcFJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5Db21wbGV0ZVN0ZXBSZXNwb25zZRJfCg5TYXZlQ2hlY2twb2ludBIlLm1vZGVsX3BsYW5lLnYxLlNhdmVDaGVja3BvaW50UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLlNhdmVDaGVja3BvaW50UmVzcG9uc2USTAoMUmVwbGF5VGhyZWFkEiMubW9kZWxfcGxhbmUudjEuUmVwbGF5VGhyZWFkUmVxdWVzdBoVLm1vZGVsX3BsYW5lLnYxLkV2ZW50MAESawoSR2V0Q29udGV4dEFzc2VtYmx5EikubW9kZWxfcGxhbmUudjEuR2V0Q29udGV4dEFzc2VtYmx5UmVxdWVzdBoqLm1vZGVsX3BsYW5lLnYxLkdldENvbnRleHRBc3NlbWJseVJlc3BvbnNlElMKCkNvbXBhY3ROb3cSIS5tb2RlbF9wbGFuZS52MS5Db21wYWN0Tm93UmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLkNvbXBhY3ROb3dSZXNwb25zZRJlChBVcHNlcnRBZ2VudFNraWxsEicubW9kZWxfcGxhbmUudjEuVXBzZXJ0QWdlbnRTa2lsbFJlcXVlc3QaKC5tb2RlbF9wbGFuZS52MS5VcHNlcnRBZ2VudFNraWxsUmVzcG9uc2USYgoPTGlzdEFnZW50U2tpbGxzEiYubW9kZWxfcGxhbmUudjEuTGlzdEFnZW50U2tpbGxzUmVxdWVzdBonLm1vZGVsX3BsYW5lLnYxLkxpc3RBZ2VudFNraWxsc1Jlc3BvbnNlEmUKEExpc3RDb252ZXJzYXRpb24SJy5tb2RlbF9wbGFuZS52MS5MaXN0Q29udmVyc2F0aW9uUmVxdWVzdBooLm1vZGVsX3BsYW5lLnYxLkxpc3RDb252ZXJzYXRpb25SZXNwb25zZRJWCgtMaXN0VGhyZWFkcxIiLm1vZGVsX3BsYW5lLnYxLkxpc3RUaHJlYWRzUmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkxpc3RUaHJlYWRzUmVzcG9uc2USUwoKU2V0UnVuTW9kZRIhLm1vZGVsX3BsYW5lLnYxLlNldFJ1bk1vZGVSZXF1ZXN0GiIubW9kZWxfcGxhbmUudjEuU2V0UnVuTW9kZVJlc3BvbnNlQrUBChJjb20ubW9kZWxfcGxhbmUudjFCDVNlc3Npb25zUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp, file_google_protobuf_struct, file_model_plane_v1_events]);
+  fileDesc("Ch1tb2RlbF9wbGFuZS92MS9zZXNzaW9ucy5wcm90bxIObW9kZWxfcGxhbmUudjEidgoTQ3JlYXRlVGhyZWFkUmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDwoHdXNlcl9pZBgDIAEoCRIpCghtZXRhZGF0YRgEIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QiWQoUQ3JlYXRlVGhyZWFkUmVzcG9uc2USEQoJdGhyZWFkX2lkGAEgASgJEi4KCmNyZWF0ZWRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wInMKFEFwcGVuZE1lc3NhZ2VSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIMCgRyb2xlGAIgASgJEg8KB2NvbnRlbnQYAyABKAkSKQoIbWV0YWRhdGEYBCABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0IikKFUFwcGVuZE1lc3NhZ2VSZXNwb25zZRIQCghzZXF1ZW5jZRgBIAEoBCKKAQoPU3RhcnRSdW5SZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIVCg1wYXJlbnRfcnVuX2lkGAIgASgJEhAKCGFnZW50X2lkGAMgASgJEgwKBGdvYWwYBCABKAkSDAoEbW9kZRgFIAEoCRIOCgZvcmdfaWQYBiABKAkSDwoHdXNlcl9pZBgHIAEoCSJSChBTdGFydFJ1blJlc3BvbnNlEg4KBnJ1bl9pZBgBIAEoCRIuCgpjcmVhdGVkX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJ3ChNDb21wbGV0ZVN0ZXBSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIPCgdzdGVwX2lkGAIgASgJEg4KBnN0YXR1cxgDIAEoCRIOCgZvdXRwdXQYBCABKAkSDQoFZXJyb3IYBSABKAkSEAoIdGVybWluYWwYBiABKAgiKgoUQ29tcGxldGVTdGVwUmVzcG9uc2USEgoKc3RlcF9pbmRleBgBIAEoDSKDAQoYUmVzZXJ2ZVRvb2xBY3Rpb25SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIRCglhY3Rpb25faWQYAiABKAkSEgoKcmVxdWVzdF9pZBgDIAEoCRIMCgR0b29sGAQgASgJEhUKDWRhdGFfY2F0ZWdvcnkYBSABKAkSCwoDemRyGAYgASgIIiwKGVJlc2VydmVUb29sQWN0aW9uUmVzcG9uc2USDwoHY3JlYXRlZBgBIAEoCCJPChlGaW5hbGl6ZVRvb2xBY3Rpb25SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIRCglhY3Rpb25faWQYAiABKAkSDwoHb3V0Y29tZRgDIAEoCSItChpGaW5hbGl6ZVRvb2xBY3Rpb25SZXNwb25zZRIPCgd1cGRhdGVkGAEgASgIIk0KFVNhdmVDaGVja3BvaW50UmVxdWVzdBIOCgZydW5faWQYASABKAkSFQoNY2hlY2twb2ludF9pZBgCIAEoCRINCgVzdGF0ZRgDIAEoDCJgChZTYXZlQ2hlY2twb2ludFJlc3BvbnNlEhgKEGNoZWNrcG9pbnRfaW5kZXgYASABKA0SLAoIc2F2ZWRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIk8KE1JlcGxheVRocmVhZFJlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEhYKDmFmdGVyX2V2ZW50X2lkGAIgASgJEg0KBWxpbWl0GAMgASgNIo0BChlHZXRDb250ZXh0QXNzZW1ibHlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIOCgZydW5faWQYAiABKAkSEgoKbWF4X3Rva2VucxgDIAEoDRIRCglwb2xpY3lfaWQYBCABKAkSFAoMd29ya3NwYWNlX2lkGAUgASgJEhAKCGFnZW50X2lkGAYgASgJImgKGkdldENvbnRleHRBc3NlbWJseVJlc3BvbnNlEjAKCHNlZ21lbnRzGAEgAygLMh4ubW9kZWxfcGxhbmUudjEuQ29udGV4dFNlZ21lbnQSGAoQZXN0aW1hdGVkX3Rva2VucxgCIAEoDSJJCg5Db250ZXh0U2VnbWVudBIMCgRraW5kGAEgASgJEg8KB2NvbnRlbnQYAiABKAkSGAoQZXN0aW1hdGVkX3Rva2VucxgDIAEoDSIhChFDb21wYWN0Tm93UmVxdWVzdBIMCgR0b29uGAEgASgIIj4KEkNvbXBhY3ROb3dSZXNwb25zZRIXCg9jb21wYWN0ZWRfY291bnQYASABKAMSDwoHc3VtbWFyeRgCIAEoCSLSAQoXVXBzZXJ0QWdlbnRTa2lsbFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSEwoLZGVzY3JpcHRpb24YAyABKAkSDwoHY29udGVudBgEIAEoCRIYChB0cmlnZ2VyX2tleXdvcmRzGAUgAygJEh0KFXRyaWdnZXJfZmlsZV9wYXR0ZXJucxgGIAMoCRIZChF0b29sX3Jlc3RyaWN0aW9ucxgHIAMoCRIPCgdlbmFibGVkGAggASgIEg4KBm9yaWdpbhgJIAEoCSJSChhVcHNlcnRBZ2VudFNraWxsUmVzcG9uc2USCgoCaWQYASABKAkSDwoHY3JlYXRlZBgCIAEoCBIZChFza2lwcGVkX3Byb3RlY3RlZBgDIAEoCCI+ChZMaXN0QWdlbnRTa2lsbHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIUCgxlbmFibGVkX29ubHkYAiABKAgiwQEKCkFnZW50U2tpbGwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRITCgtkZXNjcmlwdGlvbhgDIAEoCRIPCgdjb250ZW50GAQgASgJEhgKEHRyaWdnZXJfa2V5d29yZHMYBSADKAkSHQoVdHJpZ2dlcl9maWxlX3BhdHRlcm5zGAYgAygJEhkKEXRvb2xfcmVzdHJpY3Rpb25zGAcgAygJEg8KB2VuYWJsZWQYCCABKAgSDgoGb3JpZ2luGAkgASgJIkUKF0xpc3RBZ2VudFNraWxsc1Jlc3BvbnNlEioKBnNraWxscxgBIAMoCzIaLm1vZGVsX3BsYW5lLnYxLkFnZW50U2tpbGwiPAoXTGlzdENvbnZlcnNhdGlvblJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCSIvCg5TZXNzaW9uTWVzc2FnZRIMCgRyb2xlGAEgASgJEg8KB2NvbnRlbnQYAiABKAkiTAoYTGlzdENvbnZlcnNhdGlvblJlc3BvbnNlEjAKCG1lc3NhZ2VzGAEgAygLMh4ubW9kZWxfcGxhbmUudjEuU2Vzc2lvbk1lc3NhZ2UiRAoSTGlzdFRocmVhZHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEg0KBWxpbWl0GAMgASgNIrcBCg1UaHJlYWRTdW1tYXJ5EhEKCXRocmVhZF9pZBgBIAEoCRITCgtzZXNzaW9uX2tleRgCIAEoCRINCgV0aXRsZRgDIAEoCRIPCgdwcmV2aWV3GAQgASgJEi4KCmNyZWF0ZWRfYXQYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIkUKE0xpc3RUaHJlYWRzUmVzcG9uc2USLgoHdGhyZWFkcxgBIAMoCzIdLm1vZGVsX3BsYW5lLnYxLlRocmVhZFN1bW1hcnkiQQoRU2V0UnVuTW9kZVJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEgwKBG1vZGUYAiABKAkSDgoGb3JnX2lkGAMgASgJIjIKElNldFJ1bk1vZGVSZXNwb25zZRIOCgZydW5faWQYASABKAkSDAoEbW9kZRgCIAEoCTKXCwoLU2Vzc2lvbkNvcmUSWQoMQ3JlYXRlVGhyZWFkEiMubW9kZWxfcGxhbmUudjEuQ3JlYXRlVGhyZWFkUmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLkNyZWF0ZVRocmVhZFJlc3BvbnNlElwKDUFwcGVuZE1lc3NhZ2USJC5tb2RlbF9wbGFuZS52MS5BcHBlbmRNZXNzYWdlUmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLkFwcGVuZE1lc3NhZ2VSZXNwb25zZRJNCghTdGFydFJ1bhIfLm1vZGVsX3BsYW5lLnYxLlN0YXJ0UnVuUmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLlN0YXJ0UnVuUmVzcG9uc2USWQoMQ29tcGxldGVTdGVwEiMubW9kZWxfcGxhbmUudjEuQ29tcGxldGVTdGVwUmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLkNvbXBsZXRlU3RlcFJlc3BvbnNlEmgKEVJlc2VydmVUb29sQWN0aW9uEigubW9kZWxfcGxhbmUudjEuUmVzZXJ2ZVRvb2xBY3Rpb25SZXF1ZXN0GikubW9kZWxfcGxhbmUudjEuUmVzZXJ2ZVRvb2xBY3Rpb25SZXNwb25zZRJrChJGaW5hbGl6ZVRvb2xBY3Rpb24SKS5tb2RlbF9wbGFuZS52MS5GaW5hbGl6ZVRvb2xBY3Rpb25SZXF1ZXN0GioubW9kZWxfcGxhbmUudjEuRmluYWxpemVUb29sQWN0aW9uUmVzcG9uc2USXwoOU2F2ZUNoZWNrcG9pbnQSJS5tb2RlbF9wbGFuZS52MS5TYXZlQ2hlY2twb2ludFJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5TYXZlQ2hlY2twb2ludFJlc3BvbnNlEkwKDFJlcGxheVRocmVhZBIjLm1vZGVsX3BsYW5lLnYxLlJlcGxheVRocmVhZFJlcXVlc3QaFS5tb2RlbF9wbGFuZS52MS5FdmVudDABEmsKEkdldENvbnRleHRBc3NlbWJseRIpLm1vZGVsX3BsYW5lLnYxLkdldENvbnRleHRBc3NlbWJseVJlcXVlc3QaKi5tb2RlbF9wbGFuZS52MS5HZXRDb250ZXh0QXNzZW1ibHlSZXNwb25zZRJTCgpDb21wYWN0Tm93EiEubW9kZWxfcGxhbmUudjEuQ29tcGFjdE5vd1JlcXVlc3QaIi5tb2RlbF9wbGFuZS52MS5Db21wYWN0Tm93UmVzcG9uc2USZQoQVXBzZXJ0QWdlbnRTa2lsbBInLm1vZGVsX3BsYW5lLnYxLlVwc2VydEFnZW50U2tpbGxSZXF1ZXN0GigubW9kZWxfcGxhbmUudjEuVXBzZXJ0QWdlbnRTa2lsbFJlc3BvbnNlEmIKD0xpc3RBZ2VudFNraWxscxImLm1vZGVsX3BsYW5lLnYxLkxpc3RBZ2VudFNraWxsc1JlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5MaXN0QWdlbnRTa2lsbHNSZXNwb25zZRJlChBMaXN0Q29udmVyc2F0aW9uEicubW9kZWxfcGxhbmUudjEuTGlzdENvbnZlcnNhdGlvblJlcXVlc3QaKC5tb2RlbF9wbGFuZS52MS5MaXN0Q29udmVyc2F0aW9uUmVzcG9uc2USVgoLTGlzdFRocmVhZHMSIi5tb2RlbF9wbGFuZS52MS5MaXN0VGhyZWFkc1JlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5MaXN0VGhyZWFkc1Jlc3BvbnNlElMKClNldFJ1bk1vZGUSIS5tb2RlbF9wbGFuZS52MS5TZXRSdW5Nb2RlUmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLlNldFJ1bk1vZGVSZXNwb25zZUK1AQoSY29tLm1vZGVsX3BsYW5lLnYxQg1TZXNzaW9uc1Byb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp, file_google_protobuf_struct, file_model_plane_v1_events]);
 
 /**
  * @generated from message model_plane.v1.CreateThreadRequest
@@ -227,6 +227,9 @@ export const StartRunResponseSchema: GenMessage<StartRunResponse> = /*@__PURE__*
   messageDesc(file_model_plane_v1_sessions, 5);
 
 /**
+ * CompleteStepRequest records one immutable execution step and optionally the
+ * single terminal transition for its run.
+ *
  * @generated from message model_plane.v1.CompleteStepRequest
  */
 export type CompleteStepRequest = Message<"model_plane.v1.CompleteStepRequest"> & {
@@ -264,6 +267,14 @@ export type CompleteStepRequest = Message<"model_plane.v1.CompleteStepRequest"> 
    * @generated from field: string error = 5;
    */
   error: string;
+
+  /**
+   * True only for the single final step that closes the run and its plan.
+   * Per-tool and ordinary execution steps must leave this false.
+   *
+   * @generated from field: bool terminal = 6;
+   */
+  terminal: boolean;
 };
 
 /**
@@ -274,6 +285,8 @@ export const CompleteStepRequestSchema: GenMessage<CompleteStepRequest> = /*@__P
   messageDesc(file_model_plane_v1_sessions, 6);
 
 /**
+ * CompleteStepResponse returns the stable ordinal assigned to the step.
+ *
  * @generated from message model_plane.v1.CompleteStepResponse
  */
 export type CompleteStepResponse = Message<"model_plane.v1.CompleteStepResponse"> & {
@@ -291,6 +304,139 @@ export type CompleteStepResponse = Message<"model_plane.v1.CompleteStepResponse"
  */
 export const CompleteStepResponseSchema: GenMessage<CompleteStepResponse> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_sessions, 7);
+
+/**
+ * ReserveToolActionRequest durably binds an inline tool action before execution.
+ *
+ * @generated from message model_plane.v1.ReserveToolActionRequest
+ */
+export type ReserveToolActionRequest = Message<"model_plane.v1.ReserveToolActionRequest"> & {
+  /**
+   * Run that owns the tool action.
+   *
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * Stable opaque identifier derived from the original tool call identity.
+   *
+   * @generated from field: string action_id = 2;
+   */
+  actionId: string;
+
+  /**
+   * Gateway request that produced the tool action.
+   *
+   * @generated from field: string request_id = 3;
+   */
+  requestId: string;
+
+  /**
+   * Canonical tool name selected by the model.
+   *
+   * @generated from field: string tool = 4;
+   */
+  tool: string;
+
+  /**
+   * Data-governance category attached to the action.
+   *
+   * @generated from field: string data_category = 5;
+   */
+  dataCategory: string;
+
+  /**
+   * Effective Zero Data Retention posture for the action.
+   *
+   * @generated from field: bool zdr = 6;
+   */
+  zdr: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ReserveToolActionRequest.
+ * Use `create(ReserveToolActionRequestSchema)` to create a new message.
+ */
+export const ReserveToolActionRequestSchema: GenMessage<ReserveToolActionRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_sessions, 8);
+
+/**
+ * ReserveToolActionResponse reports whether a new reservation was created.
+ *
+ * @generated from message model_plane.v1.ReserveToolActionResponse
+ */
+export type ReserveToolActionResponse = Message<"model_plane.v1.ReserveToolActionResponse"> & {
+  /**
+   * False means an exact prior reservation was replayed idempotently.
+   *
+   * @generated from field: bool created = 1;
+   */
+  created: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ReserveToolActionResponse.
+ * Use `create(ReserveToolActionResponseSchema)` to create a new message.
+ */
+export const ReserveToolActionResponseSchema: GenMessage<ReserveToolActionResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_sessions, 9);
+
+/**
+ * FinalizeToolActionRequest assigns the single immutable result of a reservation.
+ *
+ * @generated from message model_plane.v1.FinalizeToolActionRequest
+ */
+export type FinalizeToolActionRequest = Message<"model_plane.v1.FinalizeToolActionRequest"> & {
+  /**
+   * Run that owns the reserved action.
+   *
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * Stable action identifier supplied during reservation.
+   *
+   * @generated from field: string action_id = 2;
+   */
+  actionId: string;
+
+  /**
+   * "completed" or "failed".
+   *
+   * @generated from field: string outcome = 3;
+   */
+  outcome: string;
+};
+
+/**
+ * Describes the message model_plane.v1.FinalizeToolActionRequest.
+ * Use `create(FinalizeToolActionRequestSchema)` to create a new message.
+ */
+export const FinalizeToolActionRequestSchema: GenMessage<FinalizeToolActionRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_sessions, 10);
+
+/**
+ * FinalizeToolActionResponse reports whether the reservation changed state.
+ *
+ * @generated from message model_plane.v1.FinalizeToolActionResponse
+ */
+export type FinalizeToolActionResponse = Message<"model_plane.v1.FinalizeToolActionResponse"> & {
+  /**
+   * False means an exact prior finalization was replayed idempotently.
+   *
+   * @generated from field: bool updated = 1;
+   */
+  updated: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.FinalizeToolActionResponse.
+ * Use `create(FinalizeToolActionResponseSchema)` to create a new message.
+ */
+export const FinalizeToolActionResponseSchema: GenMessage<FinalizeToolActionResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_sessions, 11);
 
 /**
  * @generated from message model_plane.v1.SaveCheckpointRequest
@@ -323,7 +469,7 @@ export type SaveCheckpointRequest = Message<"model_plane.v1.SaveCheckpointReques
  * Use `create(SaveCheckpointRequestSchema)` to create a new message.
  */
 export const SaveCheckpointRequestSchema: GenMessage<SaveCheckpointRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 8);
+  messageDesc(file_model_plane_v1_sessions, 12);
 
 /**
  * @generated from message model_plane.v1.SaveCheckpointResponse
@@ -349,7 +495,7 @@ export type SaveCheckpointResponse = Message<"model_plane.v1.SaveCheckpointRespo
  * Use `create(SaveCheckpointResponseSchema)` to create a new message.
  */
 export const SaveCheckpointResponseSchema: GenMessage<SaveCheckpointResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 9);
+  messageDesc(file_model_plane_v1_sessions, 13);
 
 /**
  * @generated from message model_plane.v1.ReplayThreadRequest
@@ -382,7 +528,7 @@ export type ReplayThreadRequest = Message<"model_plane.v1.ReplayThreadRequest"> 
  * Use `create(ReplayThreadRequestSchema)` to create a new message.
  */
 export const ReplayThreadRequestSchema: GenMessage<ReplayThreadRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 10);
+  messageDesc(file_model_plane_v1_sessions, 14);
 
 /**
  * @generated from message model_plane.v1.GetContextAssemblyRequest
@@ -436,7 +582,7 @@ export type GetContextAssemblyRequest = Message<"model_plane.v1.GetContextAssemb
  * Use `create(GetContextAssemblyRequestSchema)` to create a new message.
  */
 export const GetContextAssemblyRequestSchema: GenMessage<GetContextAssemblyRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 11);
+  messageDesc(file_model_plane_v1_sessions, 15);
 
 /**
  * @generated from message model_plane.v1.GetContextAssemblyResponse
@@ -462,7 +608,7 @@ export type GetContextAssemblyResponse = Message<"model_plane.v1.GetContextAssem
  * Use `create(GetContextAssemblyResponseSchema)` to create a new message.
  */
 export const GetContextAssemblyResponseSchema: GenMessage<GetContextAssemblyResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 12);
+  messageDesc(file_model_plane_v1_sessions, 16);
 
 /**
  * A single segment of the assembled context window.
@@ -498,7 +644,7 @@ export type ContextSegment = Message<"model_plane.v1.ContextSegment"> & {
  * Use `create(ContextSegmentSchema)` to create a new message.
  */
 export const ContextSegmentSchema: GenMessage<ContextSegment> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 13);
+  messageDesc(file_model_plane_v1_sessions, 17);
 
 /**
  * @generated from message model_plane.v1.CompactNowRequest
@@ -517,7 +663,7 @@ export type CompactNowRequest = Message<"model_plane.v1.CompactNowRequest"> & {
  * Use `create(CompactNowRequestSchema)` to create a new message.
  */
 export const CompactNowRequestSchema: GenMessage<CompactNowRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 14);
+  messageDesc(file_model_plane_v1_sessions, 18);
 
 /**
  * @generated from message model_plane.v1.CompactNowResponse
@@ -543,7 +689,7 @@ export type CompactNowResponse = Message<"model_plane.v1.CompactNowResponse"> & 
  * Use `create(CompactNowResponseSchema)` to create a new message.
  */
 export const CompactNowResponseSchema: GenMessage<CompactNowResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 15);
+  messageDesc(file_model_plane_v1_sessions, 19);
 
 /**
  * @generated from message model_plane.v1.UpsertAgentSkillRequest
@@ -603,7 +749,7 @@ export type UpsertAgentSkillRequest = Message<"model_plane.v1.UpsertAgentSkillRe
  * Use `create(UpsertAgentSkillRequestSchema)` to create a new message.
  */
 export const UpsertAgentSkillRequestSchema: GenMessage<UpsertAgentSkillRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 16);
+  messageDesc(file_model_plane_v1_sessions, 20);
 
 /**
  * @generated from message model_plane.v1.UpsertAgentSkillResponse
@@ -637,7 +783,7 @@ export type UpsertAgentSkillResponse = Message<"model_plane.v1.UpsertAgentSkillR
  * Use `create(UpsertAgentSkillResponseSchema)` to create a new message.
  */
 export const UpsertAgentSkillResponseSchema: GenMessage<UpsertAgentSkillResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 17);
+  messageDesc(file_model_plane_v1_sessions, 21);
 
 /**
  * @generated from message model_plane.v1.ListAgentSkillsRequest
@@ -664,7 +810,7 @@ export type ListAgentSkillsRequest = Message<"model_plane.v1.ListAgentSkillsRequ
  * Use `create(ListAgentSkillsRequestSchema)` to create a new message.
  */
 export const ListAgentSkillsRequestSchema: GenMessage<ListAgentSkillsRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 18);
+  messageDesc(file_model_plane_v1_sessions, 22);
 
 /**
  * @generated from message model_plane.v1.AgentSkill
@@ -723,7 +869,7 @@ export type AgentSkill = Message<"model_plane.v1.AgentSkill"> & {
  * Use `create(AgentSkillSchema)` to create a new message.
  */
 export const AgentSkillSchema: GenMessage<AgentSkill> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 19);
+  messageDesc(file_model_plane_v1_sessions, 23);
 
 /**
  * @generated from message model_plane.v1.ListAgentSkillsResponse
@@ -740,7 +886,7 @@ export type ListAgentSkillsResponse = Message<"model_plane.v1.ListAgentSkillsRes
  * Use `create(ListAgentSkillsResponseSchema)` to create a new message.
  */
 export const ListAgentSkillsResponseSchema: GenMessage<ListAgentSkillsResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 20);
+  messageDesc(file_model_plane_v1_sessions, 24);
 
 /**
  * @generated from message model_plane.v1.ListConversationRequest
@@ -766,7 +912,7 @@ export type ListConversationRequest = Message<"model_plane.v1.ListConversationRe
  * Use `create(ListConversationRequestSchema)` to create a new message.
  */
 export const ListConversationRequestSchema: GenMessage<ListConversationRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 21);
+  messageDesc(file_model_plane_v1_sessions, 25);
 
 /**
  * One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -793,7 +939,7 @@ export type SessionMessage = Message<"model_plane.v1.SessionMessage"> & {
  * Use `create(SessionMessageSchema)` to create a new message.
  */
 export const SessionMessageSchema: GenMessage<SessionMessage> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 22);
+  messageDesc(file_model_plane_v1_sessions, 26);
 
 /**
  * @generated from message model_plane.v1.ListConversationResponse
@@ -812,7 +958,7 @@ export type ListConversationResponse = Message<"model_plane.v1.ListConversationR
  * Use `create(ListConversationResponseSchema)` to create a new message.
  */
 export const ListConversationResponseSchema: GenMessage<ListConversationResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 23);
+  messageDesc(file_model_plane_v1_sessions, 27);
 
 /**
  * @generated from message model_plane.v1.ListThreadsRequest
@@ -845,7 +991,7 @@ export type ListThreadsRequest = Message<"model_plane.v1.ListThreadsRequest"> & 
  * Use `create(ListThreadsRequestSchema)` to create a new message.
  */
 export const ListThreadsRequestSchema: GenMessage<ListThreadsRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 24);
+  messageDesc(file_model_plane_v1_sessions, 28);
 
 /**
  * @generated from message model_plane.v1.ThreadSummary
@@ -887,7 +1033,7 @@ export type ThreadSummary = Message<"model_plane.v1.ThreadSummary"> & {
  * Use `create(ThreadSummarySchema)` to create a new message.
  */
 export const ThreadSummarySchema: GenMessage<ThreadSummary> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 25);
+  messageDesc(file_model_plane_v1_sessions, 29);
 
 /**
  * @generated from message model_plane.v1.ListThreadsResponse
@@ -904,7 +1050,7 @@ export type ListThreadsResponse = Message<"model_plane.v1.ListThreadsResponse"> 
  * Use `create(ListThreadsResponseSchema)` to create a new message.
  */
 export const ListThreadsResponseSchema: GenMessage<ListThreadsResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 26);
+  messageDesc(file_model_plane_v1_sessions, 30);
 
 /**
  * @generated from message model_plane.v1.SetRunModeRequest
@@ -937,7 +1083,7 @@ export type SetRunModeRequest = Message<"model_plane.v1.SetRunModeRequest"> & {
  * Use `create(SetRunModeRequestSchema)` to create a new message.
  */
 export const SetRunModeRequestSchema: GenMessage<SetRunModeRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 27);
+  messageDesc(file_model_plane_v1_sessions, 31);
 
 /**
  * @generated from message model_plane.v1.SetRunModeResponse
@@ -959,7 +1105,7 @@ export type SetRunModeResponse = Message<"model_plane.v1.SetRunModeResponse"> & 
  * Use `create(SetRunModeResponseSchema)` to create a new message.
  */
 export const SetRunModeResponseSchema: GenMessage<SetRunModeResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sessions, 28);
+  messageDesc(file_model_plane_v1_sessions, 32);
 
 /**
  * SessionCore — authoritative state for thread timeline, run metadata,
@@ -1008,6 +1154,28 @@ export const SessionCore: GenService<{
     methodKind: "unary";
     input: typeof CompleteStepRequestSchema;
     output: typeof CompleteStepResponseSchema;
+  },
+  /**
+   * Durably reserve an inline tool-action audit intent before the tool runs.
+   * This does not advance or terminate the run/plan.
+   *
+   * @generated from rpc model_plane.v1.SessionCore.ReserveToolAction
+   */
+  reserveToolAction: {
+    methodKind: "unary";
+    input: typeof ReserveToolActionRequestSchema;
+    output: typeof ReserveToolActionResponseSchema;
+  },
+  /**
+   * Finalize a previously reserved inline tool action after execution.
+   * This persists the final audit event without changing run/plan lifecycle.
+   *
+   * @generated from rpc model_plane.v1.SessionCore.FinalizeToolAction
+   */
+  finalizeToolAction: {
+    methodKind: "unary";
+    input: typeof FinalizeToolActionRequestSchema;
+    output: typeof FinalizeToolActionResponseSchema;
   },
   /**
    * Persist a checkpoint snapshot for a run.

@@ -3,12 +3,10 @@ package nats
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/rs/zerolog/log"
 )
 
 // SharedPublisher handles cross-plane event publishing to velion-nats.
@@ -31,105 +29,6 @@ func (sp *SharedPublisher) Close() {
 	}
 }
 
-// EnsureStreams creates the VELION_SESSION and VELION_AGENT JetStream streams
-// on velion-nats if they don't already exist.
-func (sp *SharedPublisher) EnsureStreams(ctx context.Context) error {
-	if sp == nil {
-		return nil
-	}
-
-	streams := []jetstream.StreamConfig{
-		{
-			Name:        "VELION_SESSION",
-			Description: "Session commands and events for Model Plane v2",
-			Subjects:    []string{"velion.session.>"},
-			Retention:   jetstream.LimitsPolicy,
-			MaxAge:      72 * time.Hour,
-			Storage:     jetstream.FileStorage,
-			Replicas:    1,
-			Discard:     jetstream.DiscardOld,
-			MaxBytes:    1 << 30, // 1 GB
-		},
-		{
-			Name:        "VELION_AGENT",
-			Description: "Agent run events for Model Plane v2",
-			Subjects:    []string{"velion.agent.>"},
-			Retention:   jetstream.LimitsPolicy,
-			MaxAge:      72 * time.Hour,
-			Storage:     jetstream.FileStorage,
-			Replicas:    1,
-			Discard:     jetstream.DiscardOld,
-			MaxBytes:    1 << 30,
-		},
-		// G10/G14: Control Session events for notification-core + convex-core.
-		{
-			Name:        "APP_SESSION",
-			Description: "Control Session events (entitlements, plan, org-switch) — see ADR 0002",
-			Subjects:    []string{"app.session.>"},
-			Retention:   jetstream.LimitsPolicy,
-			MaxAge:      168 * time.Hour, // 7 days
-			Storage:     jetstream.FileStorage,
-			Replicas:    1,
-			Discard:     jetstream.DiscardOld,
-			MaxBytes:    1 << 28, // 256 MB — events are tiny
-		},
-	}
-
-	for _, cfg := range streams {
-		_, err := sp.js.CreateOrUpdateStream(ctx, cfg)
-		if err != nil && cfg.Name == "APP_SESSION" && isSubjectOverlap(err) {
-			if migrated, migrateErr := sp.removeLegacyAppSessionOverlap(ctx); migrateErr != nil {
-				return migrateErr
-			} else if migrated {
-				_, err = sp.js.CreateOrUpdateStream(ctx, cfg)
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("ensure stream %s: %w", cfg.Name, err)
-		}
-		log.Info().Str("stream", cfg.Name).Msg("JetStream stream ready")
-	}
-	return nil
-}
-
-func isSubjectOverlap(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "subjects overlap")
-}
-
-func (sp *SharedPublisher) removeLegacyAppSessionOverlap(ctx context.Context) (bool, error) {
-	const legacyStream = "VELION_SHARED_CONSUMERS"
-
-	stream, err := sp.js.Stream(ctx, legacyStream)
-	if err != nil {
-		return false, nil
-	}
-
-	info, err := stream.Info(ctx)
-	if err != nil {
-		return false, fmt.Errorf("inspect legacy stream %s: %w", legacyStream, err)
-	}
-
-	hasOverlap := false
-	for _, subject := range info.Config.Subjects {
-		if subject == "app.session.>" {
-			hasOverlap = true
-			break
-		}
-	}
-	if !hasOverlap {
-		return false, nil
-	}
-
-	if err := sp.js.DeleteStream(ctx, legacyStream); err != nil {
-		return false, fmt.Errorf("remove legacy stream %s: %w", legacyStream, err)
-	}
-
-	log.Info().Str("stream", legacyStream).Msg("Removed legacy overlapping JetStream stream")
-	return true, nil
-}
 
 // PublishSessionCommand publishes a command to the correct plane based on version.
 func (sp *SharedPublisher) PublishSessionCommand(ctx context.Context, sessionID, commandType string, payload []byte, version string) error {
@@ -165,39 +64,6 @@ func (sp *SharedPublisher) PublishSessionCommand(ctx context.Context, sessionID,
 	}
 }
 
-// SubscribeAgentEvents subscribes to agent run events for a specific session,
-// routing to the correct stream based on the model plane version.
-func (sp *SharedPublisher) SubscribeAgentEvents(ctx context.Context, sessionID, version string) (jetstream.Consumer, error) {
-	if sp == nil {
-		return nil, fmt.Errorf("shared publisher not initialized")
-	}
-
-	var subject string
-	var streamName string
-
-	switch version {
-	case "v2":
-		subject = fmt.Sprintf("velion.agent.run.%s.event", sessionID)
-		streamName = "VELION_AGENT"
-	case "v1":
-		subject = fmt.Sprintf("aqencia.reasoning.run.%s.event", sessionID)
-		streamName = "AQENCIA_REASONING"
-	default:
-		return nil, fmt.Errorf("unknown version: %s", version)
-	}
-
-	consumer, err := sp.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		Name:          fmt.Sprintf("session-core-%s-%s", sessionID[:8], version),
-		FilterSubject: subject,
-		DeliverPolicy: jetstream.DeliverNewPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		MaxDeliver:    3,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create consumer for %s: %w", subject, err)
-	}
-	return consumer, nil
-}
 
 func (sp *SharedPublisher) publishJS(ctx context.Context, subject string, data any) error {
 	payload, err := marshalJSON(data)
@@ -239,10 +105,6 @@ func (sp *SharedPublisher) SubscribeSessionEvents(sessionID string, handler nats
 	}
 	subject := fmt.Sprintf("velion.session.%s.event", sessionID)
 	return sp.client.Subscribe(subject, handler)
-}
-
-func (sp *SharedPublisher) JetStream() jetstream.JetStream {
-	return sp.js
 }
 
 // PublishAppSessionEntitlementsChanged publishes onto the APP_SESSION stream

@@ -146,13 +146,58 @@ func TestActorRole(t *testing.T) {
 	}
 }
 
+func TestVerifiedAuditOrgHintRejectsCallerHeader(t *testing.T) {
+	c, _ := newGDPRTestContext(t, http.MethodDelete, "/api/v1/users/u_123/gdpr/erase", `{"confirm":true}`, "u_123", "")
+	c.Request.Header.Set("X-Org-Id", "attacker-org")
+
+	if got := verifiedAuditOrgHint(c); got != "" {
+		t.Fatalf("caller-supplied X-Org-Id was trusted: %q", got)
+	}
+
+	c.Set("org_id", "verified-org")
+	if got := verifiedAuditOrgHint(c); got != "" {
+		t.Fatalf("unverified context org was trusted: %q", got)
+	}
+
+	c.Set("auth_method", "service_principal")
+	c.Set("delegation_verified", true)
+	if got := verifiedAuditOrgHint(c); got != "verified-org" {
+		t.Fatalf("verified delegated org = %q, want verified-org", got)
+	}
+}
+
+func TestGDPROperatorRequeueRequiresVerifiedAdminAndBoundsInput(t *testing.T) {
+	s := &Server{}
+	unauthorized, unauthorizedRecorder := newGDPRTestContext(
+		t, http.MethodPost, "/api/v1/users/gdpr/operator/requeue",
+		`{"kind":"audit","event_ids":["event-1"]}`, "member-1", "member",
+	)
+	s.requeueGDPRDeliveries(unauthorized)
+	if unauthorizedRecorder.Code != http.StatusForbidden {
+		t.Fatalf("non-admin requeue status=%d body=%s", unauthorizedRecorder.Code, unauthorizedRecorder.Body.String())
+	}
+
+	ids := make([]string, 101)
+	for index := range ids {
+		ids[index] = "event"
+	}
+	body := `{"kind":"fanout","event_ids":["` + strings.Join(ids, `","`) + `"]}`
+	admin, adminRecorder := newGDPRTestContext(
+		t, http.MethodPost, "/api/v1/users/gdpr/operator/requeue", body, "admin-1", "admin",
+	)
+	s.requeueGDPRDeliveries(admin)
+	if adminRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("unbounded requeue status=%d body=%s", adminRecorder.Code, adminRecorder.Body.String())
+	}
+}
+
 // TestErasureProcCallsAreParameterized guards against SQL injection: the GDPR
 // proc invocations in the users package must bind the user id as a parameter
 // ($1), never interpolate it into the SQL string.
 func TestErasureProcCallsAreParameterized(t *testing.T) {
-	b, err := os.ReadFile("../users/gdpr.go")
+	b, err := os.ReadFile("../users/gdpr_erasure_saga.go")
 	if err != nil {
-		t.Fatalf("read gdpr.go: %v", err)
+		t.Fatalf("read gdpr_erasure_saga.go: %v", err)
 	}
 	src := string(b)
 
@@ -161,7 +206,7 @@ func TestErasureProcCallsAreParameterized(t *testing.T) {
 		"gdpr_anonymize_user($1)",
 	} {
 		if !strings.Contains(src, want) {
-			t.Errorf("gdpr.go missing parameterized proc call %q", want)
+			t.Errorf("gdpr_erasure_saga.go missing parameterized proc call %q", want)
 		}
 	}
 	for _, bad := range []string{
@@ -170,7 +215,7 @@ func TestErasureProcCallsAreParameterized(t *testing.T) {
 		"gdpr_hard_delete_user(' +",
 	} {
 		if strings.Contains(src, bad) {
-			t.Errorf("gdpr.go contains non-parameterized proc call %q (SQL injection risk)", bad)
+			t.Errorf("gdpr_erasure_saga.go contains non-parameterized proc call %q (SQL injection risk)", bad)
 		}
 	}
 }

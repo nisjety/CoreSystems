@@ -19,10 +19,9 @@ export async function authorizeInternalRequest(
   request: Request,
   environment: InternalAuthEnvironment = process.env,
 ): Promise<boolean> {
-  const expectedKey =
-    environment.CONVEX_INTERNAL_SERVICE_KEY || environment.INTERNAL_API_KEY;
+  const expectedKey = environment.CONVEX_CONTROL_PROJECTION_KEY;
   if (!expectedKey) {
-    throw new Error("Convex internal service key is not configured");
+    throw new Error("Convex Control projection key is not configured");
   }
 
   const authorization = request.headers.get("authorization") || "";

@@ -122,6 +122,7 @@ func TestProtectedRoutesRequireActionSpecificScopes(t *testing.T) {
 	claims := jwt.MapClaims{
 		"iss": "https://auth.test/issuer", "aud": "data-plane",
 		"sub": "member", "user_id": "member", "org_id": "org-authorized", "scopes": []string{"wiki.read", "wiki.write"},
+		"zdr": false,
 		"iat": now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix(),
 	}
 	bearer, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
@@ -147,6 +148,79 @@ func TestProtectedRoutesRequireActionSpecificScopes(t *testing.T) {
 	}
 }
 
+func TestProtectedRouteFamiliesRejectRestrictiveZDRBeforeHandlers(t *testing.T) {
+	key, verifier, _ := routeTestIdentity(t)
+	called := false
+	guarded := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handlers := wikiRouteHandlers{
+		getOperatingMap: guarded, submitOperatingMapProposal: guarded,
+		reviewOperatingMapProposal: guarded, createOperatingMapBlueprintSuggestion: guarded,
+		refreshOperatingMap: guarded, createPage: guarded, listPages: guarded,
+		getPageByPath: guarded, getPage: guarded, updateVersion: guarded,
+		listVersions: guarded, diffVersions: guarded, getBacklinks: guarded,
+		submitProposal: guarded, reviewProposal: guarded, createSourceLog: guarded,
+		listSourceLogs: guarded, createMaintenanceLog: guarded,
+		listMaintenanceLogs: guarded, maintenanceSweep: guarded,
+	}
+	router := chi.NewRouter()
+	mountProtectedRoutes(router, authctx.Middleware(verifier), handlers)
+
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"iss": "https://auth.test/issuer", "aud": "data-plane",
+		"sub": "member", "user_id": "member", "org_id": "org-authorized",
+		"zdr":    true,
+		"scopes": []string{"wiki.read", "wiki.write", "wiki.approve", "wiki.maintenance.write"},
+		"iat":    now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix(),
+	}
+	bearer, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
+	if err != nil {
+		t.Fatalf("sign restrictive-ZDR JWT: %v", err)
+	}
+
+	for _, route := range []struct {
+		name, path string
+	}{
+		{"operating map proposal", "/v1/wiki/operating-map/proposals"},
+		{"operating map proposal review", "/v1/wiki/operating-map/proposals/proposal-1/review"},
+		{"operating map blueprint", "/v1/wiki/operating-map/agent-blueprints"},
+		{"operating map refresh", "/v1/wiki/operating-map/refresh"},
+		{"create page", "/v1/wiki/pages"},
+		{"update version", "/v1/wiki/pages/page-1/versions"},
+		{"submit proposal", "/v1/wiki/pages/page-1/proposals"},
+		{"review proposal", "/v1/wiki/proposals/review"},
+		{"create source log", "/v1/wiki/pages/page-1/source-logs"},
+		{"create maintenance log", "/v1/wiki/pages/page-1/maintenance-logs"},
+		{"maintenance sweep", "/v1/wiki/maintenance/sweep"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest(http.MethodPost, route.path, bytes.NewBufferString(`{}`))
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, req)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusForbidden, response.Body.String())
+			}
+			if called {
+				t.Fatal("durable mutation handler was called under restrictive ZDR")
+			}
+		})
+	}
+
+	called = false
+	read := httptest.NewRequest(http.MethodGet, "/v1/wiki/pages", nil)
+	read.Header.Set("Authorization", "Bearer "+bearer)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, read)
+	if response.Code != http.StatusNoContent || !called {
+		t.Fatalf("restrictive-ZDR read = (status %d, called %v), want (204, true)", response.Code, called)
+	}
+}
+
 func routeTestIdentity(t *testing.T) (*rsa.PrivateKey, *authctx.Verifier, string) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -168,6 +242,7 @@ func routeTestIdentity(t *testing.T) (*rsa.PrivateKey, *authctx.Verifier, string
 	claims := jwt.MapClaims{
 		"iss": "https://auth.test/issuer", "aud": "data-plane",
 		"sub": "user-authorized", "user_id": "user-authorized", "org_id": "org-authorized",
+		"zdr":    false,
 		"scopes": []string{"wiki.read", "wiki.write", "wiki.approve", "wiki.maintenance.write"},
 		"iat":    now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix(),
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 )
 
 const authorizationRelationshipsMigration = "0009_action_receipt_authorization_relationships.sql"
+const latestMigration = "0011_audit_outbox_terminal_recovery.sql"
 
 func TestApplyMigrationsLocksBeforeCheckingAppliedVersion(t *testing.T) {
 	pool, err := pgxmock.NewPool()
@@ -40,14 +42,17 @@ func TestApplyMigrationsUpgradesDatabaseWithApplied0008(t *testing.T) {
 	}
 	expectMigrationsBootstrap(pool)
 	for _, version := range migrationVersions(t) {
-		applied := version != authorizationRelationshipsMigration
+		applied := version < authorizationRelationshipsMigration
 		expectMigrationState(pool, version, applied)
 		if applied {
 			pool.ExpectCommit()
 			continue
 		}
-		pool.ExpectExec("cannot strengthen provider-write authorization relationships").
-			WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
+		raw, readErr := migrationFS.ReadFile("migrations/" + version)
+		if readErr != nil {
+			t.Fatalf("read migration %s: %v", version, readErr)
+		}
+		pool.ExpectExec(regexp.QuoteMeta(string(raw))).WillReturnResult(pgxmock.NewResult("MIGRATION", 0))
 		pool.ExpectExec(regexp.QuoteMeta("INSERT INTO integration_schema_migrations (version) VALUES ($1)")).
 			WithArgs(version).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -62,14 +67,17 @@ func TestApplyMigrationsUpgradesDatabaseWithApplied0008(t *testing.T) {
 	}
 }
 
-func TestApplyMigrationsFreshInstallEndsWithEnforced0009(t *testing.T) {
+func TestApplyMigrationsFreshInstallEndsWithAuditOutbox(t *testing.T) {
 	pool, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatalf("new pgx mock pool: %v", err)
 	}
 	versions := migrationVersions(t)
-	if got := versions[len(versions)-1]; got != authorizationRelationshipsMigration {
-		t.Fatalf("last migration = %q, want %q", got, authorizationRelationshipsMigration)
+	if got := versions[len(versions)-1]; got != latestMigration {
+		t.Fatalf("last migration = %q, want %q", got, latestMigration)
+	}
+	if !slices.Contains(versions, authorizationRelationshipsMigration) {
+		t.Fatalf("migration set no longer includes %q", authorizationRelationshipsMigration)
 	}
 
 	expectMigrationsBootstrap(pool)
@@ -102,7 +110,7 @@ func TestApplyMigrationsDoesNotRecordFailed0009Audit(t *testing.T) {
 	auditErr := errors.New("legacy authorization relationship mismatch")
 	expectMigrationsBootstrap(pool)
 	for _, version := range migrationVersions(t) {
-		applied := version != authorizationRelationshipsMigration
+		applied := version < authorizationRelationshipsMigration
 		expectMigrationState(pool, version, applied)
 		if applied {
 			pool.ExpectCommit()
@@ -110,6 +118,7 @@ func TestApplyMigrationsDoesNotRecordFailed0009Audit(t *testing.T) {
 		}
 		pool.ExpectExec("cannot strengthen provider-write authorization relationships").WillReturnError(auditErr)
 		pool.ExpectRollback()
+		break
 	}
 
 	err = applyMigrations(context.Background(), pool)

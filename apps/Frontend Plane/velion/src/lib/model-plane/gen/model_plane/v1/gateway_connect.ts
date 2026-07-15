@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest, ApproveApprovalResponse, CheckPermissionRequest, CheckPermissionResponse, CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest, DenyApprovalResponse, EnterPlanModeRequest, EnterPlanModeResponse, ExecuteCommandRequest, ExecuteCommandResponse, ExitPlanModeRequest, ExitPlanModeResponse, ExportTrajectoriesRequest, ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest, FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse, GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse, ListCommandsRequest, ListCommandsResponse, ListHooksRequest, ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest, ListSkillsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest, ListThreadMessagesResponse, ListTrajectoriesRequest, ListTrajectoriesResponse, LspQueryRequest, LspQueryResponse, MatchSkillsRequest, MatchSkillsResponse, ProxyMcpToolRequest, ProxyMcpToolResponse, RecordTrajectoryRequest, RecordTrajectoryResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest, RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, RemoteTriggerRequest, RemoteTriggerResponse, RequestApprovalRequest, RequestApprovalResponse, SendMessageRequest, SendMessageResponse, SetPermissionRequest, SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest, SetPolicyResponse, SleepRequest, SleepResponse, SpeechToTextRequest, SpeechToTextResponse, SyntheticOutputRequest, SyntheticOutputResponse, TeamCreateRequest, TeamCreateResponse, TeamDeleteRequest, TeamDeleteResponse, TeamListRequest, TeamListResponse, TextToSpeechRequest, TextToSpeechResponse, WebSearchRequest, WebSearchResponse } from "./gateway_pbjs";
+import { AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest, ApproveApprovalResponse, CheckPermissionRequest, CheckPermissionResponse, CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest, DenyApprovalResponse, EnterPlanModeRequest, EnterPlanModeResponse, ExecuteCommandRequest, ExecuteCommandResponse, ExitPlanModeRequest, ExitPlanModeResponse, ExportTrajectoriesRequest, ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest, FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse, GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse, ListCommandsRequest, ListCommandsResponse, ListHooksRequest, ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListMcpToolsRequest, ListMcpToolsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest, ListSkillsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest, ListThreadMessagesResponse, ListTrajectoriesRequest, ListTrajectoriesResponse, LspQueryRequest, LspQueryResponse, MatchSkillsRequest, MatchSkillsResponse, ProxyMcpToolRequest, ProxyMcpToolResponse, RecordTrajectoryRequest, RecordTrajectoryResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest, RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, RemoteTriggerRequest, RemoteTriggerResponse, RequestApprovalRequest, RequestApprovalResponse, SendMessageRequest, SendMessageResponse, SetPermissionRequest, SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest, SetPolicyResponse, SleepRequest, SleepResponse, SpeechToTextRequest, SpeechToTextResponse, SyntheticOutputRequest, SyntheticOutputResponse, TeamCreateRequest, TeamCreateResponse, TeamDeleteRequest, TeamDeleteResponse, TeamListRequest, TeamListResponse, TextToSpeechRequest, TextToSpeechResponse, WebSearchRequest, WebSearchResponse } from "./gateway_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -364,6 +364,20 @@ export const ModelGateway = {
       name: "ProxyMcpTool",
       I: ProxyMcpToolRequest,
       O: ProxyMcpToolResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * ListMcpTools — the discovered, agent-facing tool definitions for an org's
+     * enabled MCP servers, namespaced `mcp__<server_id>__<tool>`. Lets the
+     * governed agent loop (execution-core) offer them, then route calls back
+     * through ProxyMcpTool. Mirrors the in-process exposure the chat path uses.
+     *
+     * @generated from rpc model_plane.v1.ModelGateway.ListMcpTools
+     */
+    listMcpTools: {
+      name: "ListMcpTools",
+      I: ListMcpToolsRequest,
+      O: ListMcpToolsResponse,
       kind: MethodKind.Unary,
     },
     /**

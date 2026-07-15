@@ -5,6 +5,21 @@ Updated: 2026-07-11 (secure-MVP durability evidence; preserves the superseded 20
 
 Scope: `apps/Data Plane v2/services/data-quality-go`
 
+## 2026-07-15 final isolated acceptance delta
+
+The final rebuilt disposable service passed the strict HTTP four-shape matrix
+(401/401/200/403) with claim-pinned tenant identity. No shared data was read.
+The shared deployment is unchanged, and database-backed eval/recovery coverage
+remains below the 80% release gate.
+
+## 2026-07-15 isolated runtime delta
+
+The current-source image `f7d4ded34db4` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`. Its disposable HTTP four-shape
+matrix returned 401/401/200/403, proving that header-only tenant impersonation
+is closed on this isolated build. The shared deployment and expanded
+database-backed recovery/coverage run remain pending.
+
 ## Secure-MVP current state — 2026-07-11
 
 - **Implemented:** all eval, quality, and cost routes now require verified
@@ -20,17 +35,13 @@ Scope: `apps/Data Plane v2/services/data-quality-go`
   Current `go test -race ./...`, `go vet ./...`, `go build ./...`, and
   `govulncheck ./...` pass. The changed `internal/authctx` package measures 82.8%
   statement coverage. The source-only `internal/eval` profile is 26.7%, with
-  recovery at 69.2%; Docker failure prevents the current PostgreSQL recovery
-  profile, so the >=80% package gate remains unproven.
-- **Built/deployed/reachable/effective:** an earlier auth-hardened image was
-  built locally with revision/build labels, but the current durability source
-  and migration have not been proven deployed, reachable, or effective in a
-  rebuilt runtime. No current real-bearer endpoint matrix has run. Historical
-  header-only live findings below are superseded for source, not disproved in a
-  deployed environment.
-- **Remaining gates:** rerun PostgreSQL recovery, rebuild the service/migrator,
-  safely prove the current migration/runtime, and include a valid scoped quality
-  bearer in the isolated matrix. Process health alone is insufficient.
+  recovery at 69.2%; the expanded PostgreSQL recovery profile has not been rerun,
+  so the >=80% package gate remains unproven.
+- **Built/reachable/effective in isolation:** the current durability image built
+  with revision/build labels and passed the disposable real-bearer endpoint
+  matrix. It has not been deployed to the shared environment.
+- **Remaining gates:** rerun expanded PostgreSQL recovery/coverage and prove the
+  controlled shared migration/deployment. Process health alone is insufficient.
 
 The remainder is a superseded, sanitized pre-fix audit retained for root-cause
 history, not a statement about the current dirty worktree or a rebuilt runtime.
@@ -187,4 +198,5 @@ verified tenant-pinned JWT plus `data:quality:admin`; eval lifecycle and readbac
 are PostgreSQL-backed with exact idempotency conflict detection. A recovery loop
 atomically resumes pending and expired-running work across replicas. Full race,
 vet, build, and govulncheck pass. The source-only eval profile is 26.7%
-(recovery 69.2%); PostgreSQL recovery integration/coverage remains Docker-blocked.
+(recovery 69.2%); expanded PostgreSQL recovery integration/coverage remains
+pending after the isolated auth runtime pass.

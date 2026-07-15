@@ -15,6 +15,18 @@ var schemaSQL string
 //go:embed migrations/002_jetstream_inbox.sql
 var jetStreamInboxSQL string
 
+//go:embed migrations/003_logical_control_audit_idempotency.sql
+var logicalControlAuditIdempotencySQL string
+
+//go:embed migrations/004_logical_usage_idempotency.sql
+var logicalUsageIdempotencySQL string
+
+//go:embed migrations/005_usage_source_identity.sql
+var usageSourceIdentitySQL string
+
+//go:embed migrations/006_v2_producer_authority.sql
+var v2ProducerAuthoritySQL string
+
 type migration struct {
 	version string
 	name    string
@@ -24,6 +36,10 @@ type migration struct {
 var migrations = []migration{
 	{version: "001_init", name: "initial audit schema", sql: schemaSQL},
 	{version: "002_jetstream_inbox", name: "JetStream inbox idempotency", sql: jetStreamInboxSQL},
+	{version: "003_logical_control_audit_idempotency", name: "logical Control audit idempotency", sql: logicalControlAuditIdempotencySQL},
+	{version: "004_logical_usage_idempotency", name: "logical usage idempotency", sql: logicalUsageIdempotencySQL},
+	{version: "005_usage_source_identity", name: "usage producer identity", sql: usageSourceIdentitySQL},
+	{version: "006_v2_producer_authority", name: "v2 producer authority identity", sql: v2ProducerAuthoritySQL},
 }
 
 // Migrate applies the bundled SQL schema exactly once, tracking it in a

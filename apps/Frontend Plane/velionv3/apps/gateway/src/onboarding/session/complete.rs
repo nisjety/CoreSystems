@@ -119,7 +119,7 @@ pub(crate) async fn complete_onboarding(
     // status is a repairable projection: after canonical success we must never
     // return an error that invites the client to repeat an already-committed
     // completion. Reconciliation can safely replay this idempotent projection.
-    let org_projection_synced = persist_org_onboarding_completion(&state, &input).await;
+    let org_projection_synced = persist_org_onboarding_completion(&state, &input, &actor).await;
 
     crate::upstream::invalidate_session_context_cache(
         &state,
@@ -158,6 +158,7 @@ pub(crate) async fn complete_onboarding(
 async fn persist_org_onboarding_completion(
     state: &AppState,
     input: &CompleteOnboardingRequest,
+    actor: &crate::contracts::ActionActor,
 ) -> bool {
     let Some(org_id) = input
         .org_id
@@ -177,20 +178,20 @@ async fn persist_org_onboarding_completion(
         },
     });
 
-    let Ok(response) = state
-        .client
-        .post(format!(
-            "{}/internal/orgs/{}/onboarding/state",
-            state.org_core_url,
-            urlencoding::encode(org_id),
-        ))
-        .header("x-internal-api-key", &state.internal_api_key)
-        .json(&body)
-        .send()
-        .await
-    else {
-        return false;
-    };
-
-    response.status().is_success()
+    let url = format!(
+        "{}/internal/orgs/{}/onboarding/state",
+        state.org_core_url,
+        urlencoding::encode(org_id),
+    );
+    let (status, _) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(body),
+        Some(org_id),
+        Some(actor),
+        Some("application/json"),
+    )
+    .await;
+    status.is_success()
 }

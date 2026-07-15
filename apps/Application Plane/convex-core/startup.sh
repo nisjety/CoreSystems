@@ -11,6 +11,7 @@ echo "[Convex] Starting gateway service..."
 # runtime from the ignored environment file; it is intentionally not baked into
 # the image.
 : "${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}"
+: "${CONVEX_CONTROL_PROJECTION_KEY:?CONVEX_CONTROL_PROJECTION_KEY must be set}"
 : "${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}"
 
 # Force Convex self-hosted bypass using official env vars
@@ -76,6 +77,7 @@ set_convex_env "CONVEX_AUTH_ISSUER" "${CONVEX_AUTH_ISSUER:-http://localhost:3011
 set_convex_env "CONVEX_AUTH_JWKS_URL" "${CONVEX_AUTH_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}"
 set_convex_env "CONVEX_AUTH_AUDIENCE" "${CONVEX_AUTH_AUDIENCE:-coresystem-convex}"
 set_convex_env "CONVEX_INTERNAL_SERVICE_KEY" "$CONVEX_INTERNAL_SERVICE_KEY"
+set_convex_env "CONVEX_CONTROL_PROJECTION_KEY" "$CONVEX_CONTROL_PROJECTION_KEY"
 set_convex_env "CONVEX_RECONCILIATION_KEY" "$CONVEX_RECONCILIATION_KEY"
 set_convex_env "AI_CORE_URL" "${AI_CORE_URL:-http://ai-core:8000}"
 # Canonical Control Plane service names are `org-core` + `auth-core`

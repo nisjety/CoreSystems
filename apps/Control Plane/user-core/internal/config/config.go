@@ -50,7 +50,10 @@ type NATSConfig struct {
 	URL         string
 	Token       string
 	SharedURL   string
+	SharedUser  string
+	SharedPass  string
 	SharedToken string
+	SharedAllowTokenFallback bool
 	ClusterID   string
 	ClientID    string
 }
@@ -113,7 +116,10 @@ func Load() (*Config, error) {
 			URL:         getEnv("NATS_URL", "nats://localhost:4222"),
 			Token:       getEnv("NATS_TOKEN", ""),
 			SharedURL:   getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
-			SharedToken: getEnv("VELION_NATS_TOKEN", getEnv("NATS_SHARED_TOKEN", "")),
+			SharedUser:  getEnv("NATS_SHARED_USER", ""),
+			SharedPass:  getEnv("NATS_SHARED_PASSWORD", ""),
+			SharedToken: getEnv("NATS_SHARED_TOKEN", ""),
+			SharedAllowTokenFallback: getEnvAsBool("NATS_SHARED_ALLOW_TOKEN_FALLBACK", false),
 			ClusterID:   getEnv("NATS_CLUSTER_ID", "aquatiq-cluster"),
 			ClientID:    getEnv("NATS_CLIENT_ID", "user-service"),
 		},

@@ -11,7 +11,11 @@ export async function fetchReconciliation(
   );
 
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(input, {
+      ...init,
+      redirect: 'manual',
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timeout);
   }

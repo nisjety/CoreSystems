@@ -5,12 +5,7 @@
 //! `org_id`/`user_id` hydrated from the `runs` table.
 
 use crate::store::Pool;
-use async_nats::jetstream::{
-    self,
-    consumer::{pull::Config as PullConfig, AckPolicy, DeliverPolicy},
-    stream::{Config as StreamConfig, RetentionPolicy},
-    AckKind,
-};
+use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
 use futures::StreamExt;
 use metrics::{counter, histogram};
 use mp_events::idempotency::derive_idempotency_hash;
@@ -36,17 +31,8 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
     let client = crate::nats_connection::connect(&nats_url).await?;
     let js = jetstream::new(client);
 
-    // Ensure stream exists (idempotent).
-    js.get_or_create_stream(StreamConfig {
-        name: STREAM_NAME.to_string(),
-        subjects: subscribed_subjects.clone(),
-        retention: RetentionPolicy::Limits,
-        max_age: Duration::from_secs(60 * 60 * 24 * 7),
-        ..Default::default()
-    })
-    .await?;
-
-    // Create durable pull consumer(s), one filter subject per consumer.
+    // Deployment provisioning owns this stream and its fixed consumer. Runtime
+    // credentials can bind/pull/ACK but cannot mutate JetStream topology.
     let stream = js.get_stream(STREAM_NAME).await?;
     let mut consumer_streams = futures::stream::SelectAll::new();
 
@@ -57,20 +43,20 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
             format!("{DURABLE_NAME}-{index}")
         };
 
-        let consumer = stream
-            .get_or_create_consumer(
-                &durable_name,
-                PullConfig {
-                    durable_name: Some(durable_name.clone()),
-                    filter_subject: filter_subject.clone(),
-                    ack_policy: AckPolicy::Explicit,
-                    ack_wait: Duration::from_secs(30),
-                    max_deliver: 5,
-                    deliver_policy: DeliverPolicy::All,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        if index > 0 {
+            return Err(anyhow::anyhow!(
+                "deployment topology does not provision legacy dual-read tool consumers"
+            ));
+        }
+        let consumer: PullConsumer = stream
+            .get_consumer(&durable_name)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if consumer.cached_info().config.filter_subject != *filter_subject {
+            return Err(anyhow::anyhow!(
+                "pre-provisioned tool consumer filter mismatch"
+            ));
+        }
         consumer_streams.push(consumer.messages().await?);
     }
 

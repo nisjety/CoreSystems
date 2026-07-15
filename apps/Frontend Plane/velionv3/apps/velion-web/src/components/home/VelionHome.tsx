@@ -8,8 +8,6 @@ import { HeroSection } from "./sections/HeroSection";
 import { BrandLogosSection } from "./sections/BrandLogosSection";
 import { ProblemSection } from "./sections/ProblemSection";
 import { FeatureCardsSection } from "./sections/FeatureCardsSection";
-import { ProductLoopSection } from "./sections/ProductLoopSection";
-import { Testimonials } from "./sections/TestimonialSection";
 import { LayerSection } from "./sections/layer-section";
 import { SensesSection } from "./sections/SensesSection";
 import { PreFooterStatementSection } from "./sections/PreFooterStatementSection";
@@ -295,8 +293,6 @@ export function VelionHome() {
 				<ProblemSection />
 				<FeatureCardsSection />
 				<SensesSection />
-				<ProductLoopSection />
-				<Testimonials />
 				<LayerSection />
 				<PreFooterStatementSection />
 			</main>

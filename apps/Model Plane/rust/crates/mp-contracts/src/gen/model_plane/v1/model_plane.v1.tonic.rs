@@ -2323,6 +2323,30 @@ pub mod run_service_client {
                 .insert(GrpcMethod::new("model_plane.v1.RunService", "CancelRun"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn resolve_run_owner(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ResolveRunOwnerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResolveRunOwnerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.RunService/ResolveRunOwner",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.RunService", "ResolveRunOwner"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -2354,6 +2378,13 @@ pub mod run_service_server {
             request: tonic::Request<super::CancelRunRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CancelRunResponse>,
+            tonic::Status,
+        >;
+        async fn resolve_run_owner(
+            &self,
+            request: tonic::Request<super::ResolveRunOwnerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResolveRunOwnerResponse>,
             tonic::Status,
         >;
     }
@@ -2566,6 +2597,51 @@ pub mod run_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/model_plane.v1.RunService/ResolveRunOwner" => {
+                    #[allow(non_camel_case_types)]
+                    struct ResolveRunOwnerSvc<T: RunService>(pub Arc<T>);
+                    impl<
+                        T: RunService,
+                    > tonic::server::UnaryService<super::ResolveRunOwnerRequest>
+                    for ResolveRunOwnerSvc<T> {
+                        type Response = super::ResolveRunOwnerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ResolveRunOwnerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunService>::resolve_run_owner(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ResolveRunOwnerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 _ => {
                     Box::pin(async move {
                         let mut response = http::Response::new(
@@ -2603,5100 +2679,6 @@ pub mod run_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "model_plane.v1.RunService";
     impl<T> tonic::server::NamedService for RunServiceServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
-/// Generated client implementations.
-pub mod execution_core_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct ExecutionCoreClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl ExecutionCoreClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> ExecutionCoreClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> ExecutionCoreClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            ExecutionCoreClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        pub async fn execute_step(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ExecuteStepRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExecuteStepResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ExecutionCore/ExecuteStep",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "ExecuteStep"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn resume_run(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ResumeRunRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ResumeRunResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ExecutionCore/ResumeRun",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "ResumeRun"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn cancel_run(
-            &mut self,
-            request: impl tonic::IntoRequest<super::CancelRunRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::CancelRunResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ExecutionCore/CancelRun",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "CancelRun"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn run_agent(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RunAgentRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RunAgentResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ExecutionCore/RunAgent",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "RunAgent"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod execution_core_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with ExecutionCoreServer.
-    #[async_trait]
-    pub trait ExecutionCore: std::marker::Send + std::marker::Sync + 'static {
-        async fn execute_step(
-            &self,
-            request: tonic::Request<super::ExecuteStepRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExecuteStepResponse>,
-            tonic::Status,
-        >;
-        async fn resume_run(
-            &self,
-            request: tonic::Request<super::ResumeRunRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ResumeRunResponse>,
-            tonic::Status,
-        >;
-        async fn cancel_run(
-            &self,
-            request: tonic::Request<super::CancelRunRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::CancelRunResponse>,
-            tonic::Status,
-        >;
-        async fn run_agent(
-            &self,
-            request: tonic::Request<super::RunAgentRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RunAgentResponse>,
-            tonic::Status,
-        >;
-    }
-    #[derive(Debug)]
-    pub struct ExecutionCoreServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> ExecutionCoreServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for ExecutionCoreServer<T>
-    where
-        T: ExecutionCore,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/model_plane.v1.ExecutionCore/ExecuteStep" => {
-                    #[allow(non_camel_case_types)]
-                    struct ExecuteStepSvc<T: ExecutionCore>(pub Arc<T>);
-                    impl<
-                        T: ExecutionCore,
-                    > tonic::server::UnaryService<super::ExecuteStepRequest>
-                    for ExecuteStepSvc<T> {
-                        type Response = super::ExecuteStepResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ExecuteStepRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ExecutionCore>::execute_step(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ExecuteStepSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ExecutionCore/ResumeRun" => {
-                    #[allow(non_camel_case_types)]
-                    struct ResumeRunSvc<T: ExecutionCore>(pub Arc<T>);
-                    impl<
-                        T: ExecutionCore,
-                    > tonic::server::UnaryService<super::ResumeRunRequest>
-                    for ResumeRunSvc<T> {
-                        type Response = super::ResumeRunResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ResumeRunRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ExecutionCore>::resume_run(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ResumeRunSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ExecutionCore/CancelRun" => {
-                    #[allow(non_camel_case_types)]
-                    struct CancelRunSvc<T: ExecutionCore>(pub Arc<T>);
-                    impl<
-                        T: ExecutionCore,
-                    > tonic::server::UnaryService<super::CancelRunRequest>
-                    for CancelRunSvc<T> {
-                        type Response = super::CancelRunResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::CancelRunRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ExecutionCore>::cancel_run(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = CancelRunSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ExecutionCore/RunAgent" => {
-                    #[allow(non_camel_case_types)]
-                    struct RunAgentSvc<T: ExecutionCore>(pub Arc<T>);
-                    impl<
-                        T: ExecutionCore,
-                    > tonic::server::UnaryService<super::RunAgentRequest>
-                    for RunAgentSvc<T> {
-                        type Response = super::RunAgentResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RunAgentRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ExecutionCore>::run_agent(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RunAgentSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for ExecutionCoreServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "model_plane.v1.ExecutionCore";
-    impl<T> tonic::server::NamedService for ExecutionCoreServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
-/// Generated client implementations.
-pub mod finetune_jobs_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct FinetuneJobsClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl FinetuneJobsClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> FinetuneJobsClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> FinetuneJobsClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            FinetuneJobsClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        pub async fn create_job(
-            &mut self,
-            request: impl tonic::IntoRequest<super::CreateFinetuneJobRequest>,
-        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.FinetuneJobs/CreateJob",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.FinetuneJobs", "CreateJob"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn get_job(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetFinetuneJobRequest>,
-        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.FinetuneJobs/GetJob",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.FinetuneJobs", "GetJob"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_jobs(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListFinetuneJobsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListFinetuneJobsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.FinetuneJobs/ListJobs",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.FinetuneJobs", "ListJobs"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn update_job_status(
-            &mut self,
-            request: impl tonic::IntoRequest<super::UpdateFinetuneJobStatusRequest>,
-        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.FinetuneJobs/UpdateJobStatus",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.FinetuneJobs", "UpdateJobStatus"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_active_jobs(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListActiveFinetuneJobsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListActiveFinetuneJobsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.FinetuneJobs/ListActiveJobs",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.FinetuneJobs", "ListActiveJobs"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn get_org_monthly_spend(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetOrgMonthlySpendRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetOrgMonthlySpendResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.FinetuneJobs/GetOrgMonthlySpend",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.FinetuneJobs", "GetOrgMonthlySpend"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod finetune_jobs_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with FinetuneJobsServer.
-    #[async_trait]
-    pub trait FinetuneJobs: std::marker::Send + std::marker::Sync + 'static {
-        async fn create_job(
-            &self,
-            request: tonic::Request<super::CreateFinetuneJobRequest>,
-        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status>;
-        async fn get_job(
-            &self,
-            request: tonic::Request<super::GetFinetuneJobRequest>,
-        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status>;
-        async fn list_jobs(
-            &self,
-            request: tonic::Request<super::ListFinetuneJobsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListFinetuneJobsResponse>,
-            tonic::Status,
-        >;
-        async fn update_job_status(
-            &self,
-            request: tonic::Request<super::UpdateFinetuneJobStatusRequest>,
-        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status>;
-        async fn list_active_jobs(
-            &self,
-            request: tonic::Request<super::ListActiveFinetuneJobsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListActiveFinetuneJobsResponse>,
-            tonic::Status,
-        >;
-        async fn get_org_monthly_spend(
-            &self,
-            request: tonic::Request<super::GetOrgMonthlySpendRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetOrgMonthlySpendResponse>,
-            tonic::Status,
-        >;
-    }
-    #[derive(Debug)]
-    pub struct FinetuneJobsServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> FinetuneJobsServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for FinetuneJobsServer<T>
-    where
-        T: FinetuneJobs,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/model_plane.v1.FinetuneJobs/CreateJob" => {
-                    #[allow(non_camel_case_types)]
-                    struct CreateJobSvc<T: FinetuneJobs>(pub Arc<T>);
-                    impl<
-                        T: FinetuneJobs,
-                    > tonic::server::UnaryService<super::CreateFinetuneJobRequest>
-                    for CreateJobSvc<T> {
-                        type Response = super::FinetuneJob;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::CreateFinetuneJobRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as FinetuneJobs>::create_job(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = CreateJobSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.FinetuneJobs/GetJob" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetJobSvc<T: FinetuneJobs>(pub Arc<T>);
-                    impl<
-                        T: FinetuneJobs,
-                    > tonic::server::UnaryService<super::GetFinetuneJobRequest>
-                    for GetJobSvc<T> {
-                        type Response = super::FinetuneJob;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetFinetuneJobRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as FinetuneJobs>::get_job(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetJobSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.FinetuneJobs/ListJobs" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListJobsSvc<T: FinetuneJobs>(pub Arc<T>);
-                    impl<
-                        T: FinetuneJobs,
-                    > tonic::server::UnaryService<super::ListFinetuneJobsRequest>
-                    for ListJobsSvc<T> {
-                        type Response = super::ListFinetuneJobsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListFinetuneJobsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as FinetuneJobs>::list_jobs(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListJobsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.FinetuneJobs/UpdateJobStatus" => {
-                    #[allow(non_camel_case_types)]
-                    struct UpdateJobStatusSvc<T: FinetuneJobs>(pub Arc<T>);
-                    impl<
-                        T: FinetuneJobs,
-                    > tonic::server::UnaryService<super::UpdateFinetuneJobStatusRequest>
-                    for UpdateJobStatusSvc<T> {
-                        type Response = super::FinetuneJob;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<
-                                super::UpdateFinetuneJobStatusRequest,
-                            >,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as FinetuneJobs>::update_job_status(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = UpdateJobStatusSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.FinetuneJobs/ListActiveJobs" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListActiveJobsSvc<T: FinetuneJobs>(pub Arc<T>);
-                    impl<
-                        T: FinetuneJobs,
-                    > tonic::server::UnaryService<super::ListActiveFinetuneJobsRequest>
-                    for ListActiveJobsSvc<T> {
-                        type Response = super::ListActiveFinetuneJobsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListActiveFinetuneJobsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as FinetuneJobs>::list_active_jobs(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListActiveJobsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.FinetuneJobs/GetOrgMonthlySpend" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetOrgMonthlySpendSvc<T: FinetuneJobs>(pub Arc<T>);
-                    impl<
-                        T: FinetuneJobs,
-                    > tonic::server::UnaryService<super::GetOrgMonthlySpendRequest>
-                    for GetOrgMonthlySpendSvc<T> {
-                        type Response = super::GetOrgMonthlySpendResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetOrgMonthlySpendRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as FinetuneJobs>::get_org_monthly_spend(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetOrgMonthlySpendSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for FinetuneJobsServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "model_plane.v1.FinetuneJobs";
-    impl<T> tonic::server::NamedService for FinetuneJobsServer<T> {
-        const NAME: &'static str = SERVICE_NAME;
-    }
-}
-/// Generated client implementations.
-pub mod model_gateway_client {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    use tonic::codegen::http::Uri;
-    #[derive(Debug, Clone)]
-    pub struct ModelGatewayClient<T> {
-        inner: tonic::client::Grpc<T>,
-    }
-    impl ModelGatewayClient<tonic::transport::Channel> {
-        /// Attempt to create a new client by connecting to a given endpoint.
-        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
-        where
-            D: TryInto<tonic::transport::Endpoint>,
-            D::Error: Into<StdError>,
-        {
-            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
-            Ok(Self::new(conn))
-        }
-    }
-    impl<T> ModelGatewayClient<T>
-    where
-        T: tonic::client::GrpcService<tonic::body::Body>,
-        T::Error: Into<StdError>,
-        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
-        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
-    {
-        pub fn new(inner: T) -> Self {
-            let inner = tonic::client::Grpc::new(inner);
-            Self { inner }
-        }
-        pub fn with_origin(inner: T, origin: Uri) -> Self {
-            let inner = tonic::client::Grpc::with_origin(inner, origin);
-            Self { inner }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> ModelGatewayClient<InterceptedService<T, F>>
-        where
-            F: tonic::service::Interceptor,
-            T::ResponseBody: Default,
-            T: tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-                Response = http::Response<
-                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
-                >,
-            >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::Body>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
-        {
-            ModelGatewayClient::new(InterceptedService::new(inner, interceptor))
-        }
-        /// Compress requests with the given encoding.
-        ///
-        /// This requires the server to support it otherwise it might respond with an
-        /// error.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.send_compressed(encoding);
-            self
-        }
-        /// Enable decompressing responses.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.inner = self.inner.accept_compressed(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_decoding_message_size(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.inner = self.inner.max_encoding_message_size(limit);
-            self
-        }
-        pub async fn invoke(
-            &mut self,
-            request: impl tonic::IntoRequest<super::InvokeRequest>,
-        ) -> std::result::Result<tonic::Response<super::InvokeResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/Invoke",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Invoke"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn invoke_stream(
-            &mut self,
-            request: impl tonic::IntoRequest<super::InvokeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::InvokeChunk>>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/InvokeStream",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "InvokeStream"));
-            self.inner.server_streaming(req, path, codec).await
-        }
-        pub async fn fetch(
-            &mut self,
-            request: impl tonic::IntoRequest<super::FetchRequest>,
-        ) -> std::result::Result<tonic::Response<super::FetchResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/Fetch",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Fetch"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn extract_structured(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ExtractStructuredRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExtractStructuredResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ExtractStructured",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ExtractStructured"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn web_search(
-            &mut self,
-            request: impl tonic::IntoRequest<super::WebSearchRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::WebSearchResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/WebSearch",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "WebSearch"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn sleep(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SleepRequest>,
-        ) -> std::result::Result<tonic::Response<super::SleepResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/Sleep",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Sleep"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn remote_trigger(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RemoteTriggerRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RemoteTriggerResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/RemoteTrigger",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "RemoteTrigger"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn send_message(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SendMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SendMessageResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/SendMessage",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SendMessage"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn synthetic_output(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SyntheticOutputRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SyntheticOutputResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/SyntheticOutput",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "SyntheticOutput"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn enter_plan_mode(
-            &mut self,
-            request: impl tonic::IntoRequest<super::EnterPlanModeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::EnterPlanModeResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/EnterPlanMode",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "EnterPlanMode"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn exit_plan_mode(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ExitPlanModeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExitPlanModeResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ExitPlanMode",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ExitPlanMode"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn is_plan_mode(
-            &mut self,
-            request: impl tonic::IntoRequest<super::IsPlanModeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::IsPlanModeResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/IsPlanMode",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "IsPlanMode"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn team_create(
-            &mut self,
-            request: impl tonic::IntoRequest<super::TeamCreateRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TeamCreateResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/TeamCreate",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TeamCreate"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn team_delete(
-            &mut self,
-            request: impl tonic::IntoRequest<super::TeamDeleteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TeamDeleteResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/TeamDelete",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TeamDelete"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn team_list(
-            &mut self,
-            request: impl tonic::IntoRequest<super::TeamListRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TeamListResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/TeamList",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TeamList"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn lsp_query(
-            &mut self,
-            request: impl tonic::IntoRequest<super::LspQueryRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::LspQueryResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/LspQuery",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "LspQuery"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn request_approval(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RequestApprovalRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RequestApprovalResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/RequestApproval",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "RequestApproval"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn approve_approval(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ApproveApprovalRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ApproveApprovalResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ApproveApproval",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ApproveApproval"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn deny_approval(
-            &mut self,
-            request: impl tonic::IntoRequest<super::DenyApprovalRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::DenyApprovalResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/DenyApproval",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "DenyApproval"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_pending_approvals(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListPendingApprovalsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListPendingApprovalsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListPendingApprovals",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "model_plane.v1.ModelGateway",
-                        "ListPendingApprovals",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn record_trajectory(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RecordTrajectoryRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RecordTrajectoryResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/RecordTrajectory",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "RecordTrajectory"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_trajectories(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListTrajectoriesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListTrajectoriesResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListTrajectories",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ListTrajectories"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn export_trajectories(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ExportTrajectoriesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExportTrajectoriesResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ExportTrajectories",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ExportTrajectories"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_skills(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListSkillsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListSkillsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListSkills",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListSkills"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn get_skill(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetSkillRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetSkillResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/GetSkill",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "GetSkill"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn match_skills(
-            &mut self,
-            request: impl tonic::IntoRequest<super::MatchSkillsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::MatchSkillsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/MatchSkills",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "MatchSkills"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn register_mcp_server(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RegisterMcpServerRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterMcpServerResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/RegisterMcpServer",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "RegisterMcpServer"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_mcp_servers(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListMcpServersRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListMcpServersResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListMcpServers",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ListMcpServers"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn proxy_mcp_tool(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ProxyMcpToolRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ProxyMcpToolResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ProxyMcpTool",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ProxyMcpTool"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn register_plugin(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RegisterPluginRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterPluginResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/RegisterPlugin",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "RegisterPlugin"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_plugins(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListPluginsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListPluginsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListPlugins",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListPlugins"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn set_plugin_enabled(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SetPluginEnabledRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetPluginEnabledResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/SetPluginEnabled",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "SetPluginEnabled"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_commands(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListCommandsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListCommandsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListCommands",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListCommands"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn execute_command(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ExecuteCommandRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExecuteCommandResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ExecuteCommand",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ExecuteCommand"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn register_hook(
-            &mut self,
-            request: impl tonic::IntoRequest<super::RegisterHookRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterHookResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/RegisterHook",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "RegisterHook"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_hooks(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListHooksRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListHooksResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListHooks",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListHooks"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn check_permission(
-            &mut self,
-            request: impl tonic::IntoRequest<super::CheckPermissionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::CheckPermissionResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/CheckPermission",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "CheckPermission"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn set_permission(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SetPermissionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetPermissionResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/SetPermission",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SetPermission"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn get_policy(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetPolicyRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetPolicyResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/GetPolicy",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "GetPolicy"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn set_policy(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SetPolicyRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetPolicyResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/SetPolicy",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SetPolicy"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn append_thread_message(
-            &mut self,
-            request: impl tonic::IntoRequest<super::AppendThreadMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::AppendThreadMessageResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/AppendThreadMessage",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "AppendThreadMessage"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_thread_messages(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListThreadMessagesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListThreadMessagesResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListThreadMessages",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new("model_plane.v1.ModelGateway", "ListThreadMessages"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn get_analytics(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetAnalyticsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetAnalyticsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/GetAnalytics",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "GetAnalytics"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn text_to_speech(
-            &mut self,
-            request: impl tonic::IntoRequest<super::TextToSpeechRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TextToSpeechResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/TextToSpeech",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TextToSpeech"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn speech_to_text(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SpeechToTextRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SpeechToTextResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/SpeechToText",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SpeechToText"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn create_task(
-            &mut self,
-            request: impl tonic::IntoRequest<super::CreateTaskRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::CreateTaskResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/CreateTask",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "CreateTask"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn list_tasks(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ListTasksRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListTasksResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/ListTasks",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListTasks"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn health(
-            &mut self,
-            request: impl tonic::IntoRequest<super::HealthRequest>,
-        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/model_plane.v1.ModelGateway/Health",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Health"));
-            self.inner.unary(req, path, codec).await
-        }
-    }
-}
-/// Generated server implementations.
-pub mod model_gateway_server {
-    #![allow(
-        unused_variables,
-        dead_code,
-        missing_docs,
-        clippy::wildcard_imports,
-        clippy::let_unit_value,
-    )]
-    use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with ModelGatewayServer.
-    #[async_trait]
-    pub trait ModelGateway: std::marker::Send + std::marker::Sync + 'static {
-        async fn invoke(
-            &self,
-            request: tonic::Request<super::InvokeRequest>,
-        ) -> std::result::Result<tonic::Response<super::InvokeResponse>, tonic::Status>;
-        /// Server streaming response type for the InvokeStream method.
-        type InvokeStreamStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<super::InvokeChunk, tonic::Status>,
-            >
-            + std::marker::Send
-            + 'static;
-        async fn invoke_stream(
-            &self,
-            request: tonic::Request<super::InvokeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<Self::InvokeStreamStream>,
-            tonic::Status,
-        >;
-        async fn fetch(
-            &self,
-            request: tonic::Request<super::FetchRequest>,
-        ) -> std::result::Result<tonic::Response<super::FetchResponse>, tonic::Status>;
-        async fn extract_structured(
-            &self,
-            request: tonic::Request<super::ExtractStructuredRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExtractStructuredResponse>,
-            tonic::Status,
-        >;
-        async fn web_search(
-            &self,
-            request: tonic::Request<super::WebSearchRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::WebSearchResponse>,
-            tonic::Status,
-        >;
-        async fn sleep(
-            &self,
-            request: tonic::Request<super::SleepRequest>,
-        ) -> std::result::Result<tonic::Response<super::SleepResponse>, tonic::Status>;
-        async fn remote_trigger(
-            &self,
-            request: tonic::Request<super::RemoteTriggerRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RemoteTriggerResponse>,
-            tonic::Status,
-        >;
-        async fn send_message(
-            &self,
-            request: tonic::Request<super::SendMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SendMessageResponse>,
-            tonic::Status,
-        >;
-        async fn synthetic_output(
-            &self,
-            request: tonic::Request<super::SyntheticOutputRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SyntheticOutputResponse>,
-            tonic::Status,
-        >;
-        async fn enter_plan_mode(
-            &self,
-            request: tonic::Request<super::EnterPlanModeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::EnterPlanModeResponse>,
-            tonic::Status,
-        >;
-        async fn exit_plan_mode(
-            &self,
-            request: tonic::Request<super::ExitPlanModeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExitPlanModeResponse>,
-            tonic::Status,
-        >;
-        async fn is_plan_mode(
-            &self,
-            request: tonic::Request<super::IsPlanModeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::IsPlanModeResponse>,
-            tonic::Status,
-        >;
-        async fn team_create(
-            &self,
-            request: tonic::Request<super::TeamCreateRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TeamCreateResponse>,
-            tonic::Status,
-        >;
-        async fn team_delete(
-            &self,
-            request: tonic::Request<super::TeamDeleteRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TeamDeleteResponse>,
-            tonic::Status,
-        >;
-        async fn team_list(
-            &self,
-            request: tonic::Request<super::TeamListRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TeamListResponse>,
-            tonic::Status,
-        >;
-        async fn lsp_query(
-            &self,
-            request: tonic::Request<super::LspQueryRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::LspQueryResponse>,
-            tonic::Status,
-        >;
-        async fn request_approval(
-            &self,
-            request: tonic::Request<super::RequestApprovalRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RequestApprovalResponse>,
-            tonic::Status,
-        >;
-        async fn approve_approval(
-            &self,
-            request: tonic::Request<super::ApproveApprovalRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ApproveApprovalResponse>,
-            tonic::Status,
-        >;
-        async fn deny_approval(
-            &self,
-            request: tonic::Request<super::DenyApprovalRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::DenyApprovalResponse>,
-            tonic::Status,
-        >;
-        async fn list_pending_approvals(
-            &self,
-            request: tonic::Request<super::ListPendingApprovalsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListPendingApprovalsResponse>,
-            tonic::Status,
-        >;
-        async fn record_trajectory(
-            &self,
-            request: tonic::Request<super::RecordTrajectoryRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RecordTrajectoryResponse>,
-            tonic::Status,
-        >;
-        async fn list_trajectories(
-            &self,
-            request: tonic::Request<super::ListTrajectoriesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListTrajectoriesResponse>,
-            tonic::Status,
-        >;
-        async fn export_trajectories(
-            &self,
-            request: tonic::Request<super::ExportTrajectoriesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExportTrajectoriesResponse>,
-            tonic::Status,
-        >;
-        async fn list_skills(
-            &self,
-            request: tonic::Request<super::ListSkillsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListSkillsResponse>,
-            tonic::Status,
-        >;
-        async fn get_skill(
-            &self,
-            request: tonic::Request<super::GetSkillRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetSkillResponse>,
-            tonic::Status,
-        >;
-        async fn match_skills(
-            &self,
-            request: tonic::Request<super::MatchSkillsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::MatchSkillsResponse>,
-            tonic::Status,
-        >;
-        async fn register_mcp_server(
-            &self,
-            request: tonic::Request<super::RegisterMcpServerRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterMcpServerResponse>,
-            tonic::Status,
-        >;
-        async fn list_mcp_servers(
-            &self,
-            request: tonic::Request<super::ListMcpServersRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListMcpServersResponse>,
-            tonic::Status,
-        >;
-        async fn proxy_mcp_tool(
-            &self,
-            request: tonic::Request<super::ProxyMcpToolRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ProxyMcpToolResponse>,
-            tonic::Status,
-        >;
-        async fn register_plugin(
-            &self,
-            request: tonic::Request<super::RegisterPluginRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterPluginResponse>,
-            tonic::Status,
-        >;
-        async fn list_plugins(
-            &self,
-            request: tonic::Request<super::ListPluginsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListPluginsResponse>,
-            tonic::Status,
-        >;
-        async fn set_plugin_enabled(
-            &self,
-            request: tonic::Request<super::SetPluginEnabledRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetPluginEnabledResponse>,
-            tonic::Status,
-        >;
-        async fn list_commands(
-            &self,
-            request: tonic::Request<super::ListCommandsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListCommandsResponse>,
-            tonic::Status,
-        >;
-        async fn execute_command(
-            &self,
-            request: tonic::Request<super::ExecuteCommandRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ExecuteCommandResponse>,
-            tonic::Status,
-        >;
-        async fn register_hook(
-            &self,
-            request: tonic::Request<super::RegisterHookRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::RegisterHookResponse>,
-            tonic::Status,
-        >;
-        async fn list_hooks(
-            &self,
-            request: tonic::Request<super::ListHooksRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListHooksResponse>,
-            tonic::Status,
-        >;
-        async fn check_permission(
-            &self,
-            request: tonic::Request<super::CheckPermissionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::CheckPermissionResponse>,
-            tonic::Status,
-        >;
-        async fn set_permission(
-            &self,
-            request: tonic::Request<super::SetPermissionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetPermissionResponse>,
-            tonic::Status,
-        >;
-        async fn get_policy(
-            &self,
-            request: tonic::Request<super::GetPolicyRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetPolicyResponse>,
-            tonic::Status,
-        >;
-        async fn set_policy(
-            &self,
-            request: tonic::Request<super::SetPolicyRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SetPolicyResponse>,
-            tonic::Status,
-        >;
-        async fn append_thread_message(
-            &self,
-            request: tonic::Request<super::AppendThreadMessageRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::AppendThreadMessageResponse>,
-            tonic::Status,
-        >;
-        async fn list_thread_messages(
-            &self,
-            request: tonic::Request<super::ListThreadMessagesRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListThreadMessagesResponse>,
-            tonic::Status,
-        >;
-        async fn get_analytics(
-            &self,
-            request: tonic::Request<super::GetAnalyticsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetAnalyticsResponse>,
-            tonic::Status,
-        >;
-        async fn text_to_speech(
-            &self,
-            request: tonic::Request<super::TextToSpeechRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TextToSpeechResponse>,
-            tonic::Status,
-        >;
-        async fn speech_to_text(
-            &self,
-            request: tonic::Request<super::SpeechToTextRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::SpeechToTextResponse>,
-            tonic::Status,
-        >;
-        async fn create_task(
-            &self,
-            request: tonic::Request<super::CreateTaskRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::CreateTaskResponse>,
-            tonic::Status,
-        >;
-        async fn list_tasks(
-            &self,
-            request: tonic::Request<super::ListTasksRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListTasksResponse>,
-            tonic::Status,
-        >;
-        async fn health(
-            &self,
-            request: tonic::Request<super::HealthRequest>,
-        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status>;
-    }
-    #[derive(Debug)]
-    pub struct ModelGatewayServer<T> {
-        inner: Arc<T>,
-        accept_compression_encodings: EnabledCompressionEncodings,
-        send_compression_encodings: EnabledCompressionEncodings,
-        max_decoding_message_size: Option<usize>,
-        max_encoding_message_size: Option<usize>,
-    }
-    impl<T> ModelGatewayServer<T> {
-        pub fn new(inner: T) -> Self {
-            Self::from_arc(Arc::new(inner))
-        }
-        pub fn from_arc(inner: Arc<T>) -> Self {
-            Self {
-                inner,
-                accept_compression_encodings: Default::default(),
-                send_compression_encodings: Default::default(),
-                max_decoding_message_size: None,
-                max_encoding_message_size: None,
-            }
-        }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
-            InterceptedService::new(Self::new(inner), interceptor)
-        }
-        /// Enable decompressing requests with the given encoding.
-        #[must_use]
-        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.accept_compression_encodings.enable(encoding);
-            self
-        }
-        /// Compress responses with the given encoding, if the client supports it.
-        #[must_use]
-        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
-            self.send_compression_encodings.enable(encoding);
-            self
-        }
-        /// Limits the maximum size of a decoded message.
-        ///
-        /// Default: `4MB`
-        #[must_use]
-        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
-            self.max_decoding_message_size = Some(limit);
-            self
-        }
-        /// Limits the maximum size of an encoded message.
-        ///
-        /// Default: `usize::MAX`
-        #[must_use]
-        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
-            self.max_encoding_message_size = Some(limit);
-            self
-        }
-    }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for ModelGatewayServer<T>
-    where
-        T: ModelGateway,
-        B: Body + std::marker::Send + 'static,
-        B::Error: Into<StdError> + std::marker::Send + 'static,
-    {
-        type Response = http::Response<tonic::body::Body>;
-        type Error = std::convert::Infallible;
-        type Future = BoxFuture<Self::Response, Self::Error>;
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<std::result::Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-        fn call(&mut self, req: http::Request<B>) -> Self::Future {
-            match req.uri().path() {
-                "/model_plane.v1.ModelGateway/Invoke" => {
-                    #[allow(non_camel_case_types)]
-                    struct InvokeSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::InvokeRequest>
-                    for InvokeSvc<T> {
-                        type Response = super::InvokeResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::InvokeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::invoke(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = InvokeSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/InvokeStream" => {
-                    #[allow(non_camel_case_types)]
-                    struct InvokeStreamSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::ServerStreamingService<super::InvokeRequest>
-                    for InvokeStreamSvc<T> {
-                        type Response = super::InvokeChunk;
-                        type ResponseStream = T::InvokeStreamStream;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::InvokeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::invoke_stream(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = InvokeStreamSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.server_streaming(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/Fetch" => {
-                    #[allow(non_camel_case_types)]
-                    struct FetchSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::FetchRequest> for FetchSvc<T> {
-                        type Response = super::FetchResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::FetchRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::fetch(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = FetchSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ExtractStructured" => {
-                    #[allow(non_camel_case_types)]
-                    struct ExtractStructuredSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ExtractStructuredRequest>
-                    for ExtractStructuredSvc<T> {
-                        type Response = super::ExtractStructuredResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ExtractStructuredRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::extract_structured(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ExtractStructuredSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/WebSearch" => {
-                    #[allow(non_camel_case_types)]
-                    struct WebSearchSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::WebSearchRequest>
-                    for WebSearchSvc<T> {
-                        type Response = super::WebSearchResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::WebSearchRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::web_search(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = WebSearchSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/Sleep" => {
-                    #[allow(non_camel_case_types)]
-                    struct SleepSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SleepRequest> for SleepSvc<T> {
-                        type Response = super::SleepResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SleepRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::sleep(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SleepSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/RemoteTrigger" => {
-                    #[allow(non_camel_case_types)]
-                    struct RemoteTriggerSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::RemoteTriggerRequest>
-                    for RemoteTriggerSvc<T> {
-                        type Response = super::RemoteTriggerResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RemoteTriggerRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::remote_trigger(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RemoteTriggerSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/SendMessage" => {
-                    #[allow(non_camel_case_types)]
-                    struct SendMessageSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SendMessageRequest>
-                    for SendMessageSvc<T> {
-                        type Response = super::SendMessageResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SendMessageRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::send_message(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SendMessageSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/SyntheticOutput" => {
-                    #[allow(non_camel_case_types)]
-                    struct SyntheticOutputSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SyntheticOutputRequest>
-                    for SyntheticOutputSvc<T> {
-                        type Response = super::SyntheticOutputResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SyntheticOutputRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::synthetic_output(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SyntheticOutputSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/EnterPlanMode" => {
-                    #[allow(non_camel_case_types)]
-                    struct EnterPlanModeSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::EnterPlanModeRequest>
-                    for EnterPlanModeSvc<T> {
-                        type Response = super::EnterPlanModeResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::EnterPlanModeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::enter_plan_mode(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = EnterPlanModeSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ExitPlanMode" => {
-                    #[allow(non_camel_case_types)]
-                    struct ExitPlanModeSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ExitPlanModeRequest>
-                    for ExitPlanModeSvc<T> {
-                        type Response = super::ExitPlanModeResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ExitPlanModeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::exit_plan_mode(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ExitPlanModeSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/IsPlanMode" => {
-                    #[allow(non_camel_case_types)]
-                    struct IsPlanModeSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::IsPlanModeRequest>
-                    for IsPlanModeSvc<T> {
-                        type Response = super::IsPlanModeResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::IsPlanModeRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::is_plan_mode(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = IsPlanModeSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/TeamCreate" => {
-                    #[allow(non_camel_case_types)]
-                    struct TeamCreateSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::TeamCreateRequest>
-                    for TeamCreateSvc<T> {
-                        type Response = super::TeamCreateResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::TeamCreateRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::team_create(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = TeamCreateSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/TeamDelete" => {
-                    #[allow(non_camel_case_types)]
-                    struct TeamDeleteSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::TeamDeleteRequest>
-                    for TeamDeleteSvc<T> {
-                        type Response = super::TeamDeleteResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::TeamDeleteRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::team_delete(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = TeamDeleteSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/TeamList" => {
-                    #[allow(non_camel_case_types)]
-                    struct TeamListSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::TeamListRequest>
-                    for TeamListSvc<T> {
-                        type Response = super::TeamListResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::TeamListRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::team_list(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = TeamListSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/LspQuery" => {
-                    #[allow(non_camel_case_types)]
-                    struct LspQuerySvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::LspQueryRequest>
-                    for LspQuerySvc<T> {
-                        type Response = super::LspQueryResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::LspQueryRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::lsp_query(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = LspQuerySvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/RequestApproval" => {
-                    #[allow(non_camel_case_types)]
-                    struct RequestApprovalSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::RequestApprovalRequest>
-                    for RequestApprovalSvc<T> {
-                        type Response = super::RequestApprovalResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RequestApprovalRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::request_approval(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RequestApprovalSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ApproveApproval" => {
-                    #[allow(non_camel_case_types)]
-                    struct ApproveApprovalSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ApproveApprovalRequest>
-                    for ApproveApprovalSvc<T> {
-                        type Response = super::ApproveApprovalResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ApproveApprovalRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::approve_approval(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ApproveApprovalSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/DenyApproval" => {
-                    #[allow(non_camel_case_types)]
-                    struct DenyApprovalSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::DenyApprovalRequest>
-                    for DenyApprovalSvc<T> {
-                        type Response = super::DenyApprovalResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::DenyApprovalRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::deny_approval(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = DenyApprovalSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListPendingApprovals" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListPendingApprovalsSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListPendingApprovalsRequest>
-                    for ListPendingApprovalsSvc<T> {
-                        type Response = super::ListPendingApprovalsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListPendingApprovalsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_pending_approvals(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListPendingApprovalsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/RecordTrajectory" => {
-                    #[allow(non_camel_case_types)]
-                    struct RecordTrajectorySvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::RecordTrajectoryRequest>
-                    for RecordTrajectorySvc<T> {
-                        type Response = super::RecordTrajectoryResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RecordTrajectoryRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::record_trajectory(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RecordTrajectorySvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListTrajectories" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListTrajectoriesSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListTrajectoriesRequest>
-                    for ListTrajectoriesSvc<T> {
-                        type Response = super::ListTrajectoriesResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListTrajectoriesRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_trajectories(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListTrajectoriesSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ExportTrajectories" => {
-                    #[allow(non_camel_case_types)]
-                    struct ExportTrajectoriesSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ExportTrajectoriesRequest>
-                    for ExportTrajectoriesSvc<T> {
-                        type Response = super::ExportTrajectoriesResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ExportTrajectoriesRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::export_trajectories(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ExportTrajectoriesSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListSkills" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListSkillsSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListSkillsRequest>
-                    for ListSkillsSvc<T> {
-                        type Response = super::ListSkillsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListSkillsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_skills(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListSkillsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/GetSkill" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetSkillSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::GetSkillRequest>
-                    for GetSkillSvc<T> {
-                        type Response = super::GetSkillResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetSkillRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::get_skill(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetSkillSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/MatchSkills" => {
-                    #[allow(non_camel_case_types)]
-                    struct MatchSkillsSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::MatchSkillsRequest>
-                    for MatchSkillsSvc<T> {
-                        type Response = super::MatchSkillsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::MatchSkillsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::match_skills(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = MatchSkillsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/RegisterMcpServer" => {
-                    #[allow(non_camel_case_types)]
-                    struct RegisterMcpServerSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::RegisterMcpServerRequest>
-                    for RegisterMcpServerSvc<T> {
-                        type Response = super::RegisterMcpServerResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RegisterMcpServerRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::register_mcp_server(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RegisterMcpServerSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListMcpServers" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListMcpServersSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListMcpServersRequest>
-                    for ListMcpServersSvc<T> {
-                        type Response = super::ListMcpServersResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListMcpServersRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_mcp_servers(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListMcpServersSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ProxyMcpTool" => {
-                    #[allow(non_camel_case_types)]
-                    struct ProxyMcpToolSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ProxyMcpToolRequest>
-                    for ProxyMcpToolSvc<T> {
-                        type Response = super::ProxyMcpToolResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ProxyMcpToolRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::proxy_mcp_tool(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ProxyMcpToolSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/RegisterPlugin" => {
-                    #[allow(non_camel_case_types)]
-                    struct RegisterPluginSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::RegisterPluginRequest>
-                    for RegisterPluginSvc<T> {
-                        type Response = super::RegisterPluginResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RegisterPluginRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::register_plugin(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RegisterPluginSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListPlugins" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListPluginsSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListPluginsRequest>
-                    for ListPluginsSvc<T> {
-                        type Response = super::ListPluginsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListPluginsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_plugins(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListPluginsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/SetPluginEnabled" => {
-                    #[allow(non_camel_case_types)]
-                    struct SetPluginEnabledSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SetPluginEnabledRequest>
-                    for SetPluginEnabledSvc<T> {
-                        type Response = super::SetPluginEnabledResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SetPluginEnabledRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::set_plugin_enabled(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SetPluginEnabledSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListCommands" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListCommandsSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListCommandsRequest>
-                    for ListCommandsSvc<T> {
-                        type Response = super::ListCommandsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListCommandsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_commands(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListCommandsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ExecuteCommand" => {
-                    #[allow(non_camel_case_types)]
-                    struct ExecuteCommandSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ExecuteCommandRequest>
-                    for ExecuteCommandSvc<T> {
-                        type Response = super::ExecuteCommandResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ExecuteCommandRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::execute_command(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ExecuteCommandSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/RegisterHook" => {
-                    #[allow(non_camel_case_types)]
-                    struct RegisterHookSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::RegisterHookRequest>
-                    for RegisterHookSvc<T> {
-                        type Response = super::RegisterHookResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::RegisterHookRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::register_hook(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = RegisterHookSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListHooks" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListHooksSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListHooksRequest>
-                    for ListHooksSvc<T> {
-                        type Response = super::ListHooksResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListHooksRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_hooks(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListHooksSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/CheckPermission" => {
-                    #[allow(non_camel_case_types)]
-                    struct CheckPermissionSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::CheckPermissionRequest>
-                    for CheckPermissionSvc<T> {
-                        type Response = super::CheckPermissionResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::CheckPermissionRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::check_permission(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = CheckPermissionSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/SetPermission" => {
-                    #[allow(non_camel_case_types)]
-                    struct SetPermissionSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SetPermissionRequest>
-                    for SetPermissionSvc<T> {
-                        type Response = super::SetPermissionResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SetPermissionRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::set_permission(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SetPermissionSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/GetPolicy" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetPolicySvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::GetPolicyRequest>
-                    for GetPolicySvc<T> {
-                        type Response = super::GetPolicyResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetPolicyRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::get_policy(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetPolicySvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/SetPolicy" => {
-                    #[allow(non_camel_case_types)]
-                    struct SetPolicySvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SetPolicyRequest>
-                    for SetPolicySvc<T> {
-                        type Response = super::SetPolicyResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SetPolicyRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::set_policy(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SetPolicySvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/AppendThreadMessage" => {
-                    #[allow(non_camel_case_types)]
-                    struct AppendThreadMessageSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::AppendThreadMessageRequest>
-                    for AppendThreadMessageSvc<T> {
-                        type Response = super::AppendThreadMessageResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::AppendThreadMessageRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::append_thread_message(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = AppendThreadMessageSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListThreadMessages" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListThreadMessagesSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListThreadMessagesRequest>
-                    for ListThreadMessagesSvc<T> {
-                        type Response = super::ListThreadMessagesResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListThreadMessagesRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_thread_messages(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListThreadMessagesSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/GetAnalytics" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetAnalyticsSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::GetAnalyticsRequest>
-                    for GetAnalyticsSvc<T> {
-                        type Response = super::GetAnalyticsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetAnalyticsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::get_analytics(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetAnalyticsSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/TextToSpeech" => {
-                    #[allow(non_camel_case_types)]
-                    struct TextToSpeechSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::TextToSpeechRequest>
-                    for TextToSpeechSvc<T> {
-                        type Response = super::TextToSpeechResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::TextToSpeechRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::text_to_speech(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = TextToSpeechSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/SpeechToText" => {
-                    #[allow(non_camel_case_types)]
-                    struct SpeechToTextSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::SpeechToTextRequest>
-                    for SpeechToTextSvc<T> {
-                        type Response = super::SpeechToTextResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SpeechToTextRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::speech_to_text(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = SpeechToTextSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/CreateTask" => {
-                    #[allow(non_camel_case_types)]
-                    struct CreateTaskSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::CreateTaskRequest>
-                    for CreateTaskSvc<T> {
-                        type Response = super::CreateTaskResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::CreateTaskRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::create_task(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = CreateTaskSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/ListTasks" => {
-                    #[allow(non_camel_case_types)]
-                    struct ListTasksSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::ListTasksRequest>
-                    for ListTasksSvc<T> {
-                        type Response = super::ListTasksResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ListTasksRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::list_tasks(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = ListTasksSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/model_plane.v1.ModelGateway/Health" => {
-                    #[allow(non_camel_case_types)]
-                    struct HealthSvc<T: ModelGateway>(pub Arc<T>);
-                    impl<
-                        T: ModelGateway,
-                    > tonic::server::UnaryService<super::HealthRequest>
-                    for HealthSvc<T> {
-                        type Response = super::HealthResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::HealthRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ModelGateway>::health(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = HealthSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(
-                            tonic::body::Body::default(),
-                        );
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
-            }
-        }
-    }
-    impl<T> Clone for ModelGatewayServer<T> {
-        fn clone(&self) -> Self {
-            let inner = self.inner.clone();
-            Self {
-                inner,
-                accept_compression_encodings: self.accept_compression_encodings,
-                send_compression_encodings: self.send_compression_encodings,
-                max_decoding_message_size: self.max_decoding_message_size,
-                max_encoding_message_size: self.max_encoding_message_size,
-            }
-        }
-    }
-    /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "model_plane.v1.ModelGateway";
-    impl<T> tonic::server::NamedService for ModelGatewayServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
@@ -9535,6 +4517,5252 @@ pub mod inference_core_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "model_plane.v1.InferenceCore";
     impl<T> tonic::server::NamedService for InferenceCoreServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod execution_core_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct ExecutionCoreClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl ExecutionCoreClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> ExecutionCoreClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> ExecutionCoreClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            ExecutionCoreClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn execute_step(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExecuteStepRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExecuteStepResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ExecutionCore/ExecuteStep",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "ExecuteStep"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn resume_run(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ResumeRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResumeRunResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ExecutionCore/ResumeRun",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "ResumeRun"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn cancel_run(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CancelRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CancelRunResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ExecutionCore/CancelRun",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "CancelRun"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn pause_run(
+            &mut self,
+            request: impl tonic::IntoRequest<super::PauseRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PauseRunResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ExecutionCore/PauseRun",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "PauseRun"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn run_agent(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RunAgentRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RunAgentResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ExecutionCore/RunAgent",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ExecutionCore", "RunAgent"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod execution_core_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with ExecutionCoreServer.
+    #[async_trait]
+    pub trait ExecutionCore: std::marker::Send + std::marker::Sync + 'static {
+        async fn execute_step(
+            &self,
+            request: tonic::Request<super::ExecuteStepRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExecuteStepResponse>,
+            tonic::Status,
+        >;
+        async fn resume_run(
+            &self,
+            request: tonic::Request<super::ResumeRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ResumeRunResponse>,
+            tonic::Status,
+        >;
+        async fn cancel_run(
+            &self,
+            request: tonic::Request<super::CancelRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CancelRunResponse>,
+            tonic::Status,
+        >;
+        async fn pause_run(
+            &self,
+            request: tonic::Request<super::PauseRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PauseRunResponse>,
+            tonic::Status,
+        >;
+        async fn run_agent(
+            &self,
+            request: tonic::Request<super::RunAgentRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RunAgentResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct ExecutionCoreServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> ExecutionCoreServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for ExecutionCoreServer<T>
+    where
+        T: ExecutionCore,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/model_plane.v1.ExecutionCore/ExecuteStep" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteStepSvc<T: ExecutionCore>(pub Arc<T>);
+                    impl<
+                        T: ExecutionCore,
+                    > tonic::server::UnaryService<super::ExecuteStepRequest>
+                    for ExecuteStepSvc<T> {
+                        type Response = super::ExecuteStepResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExecuteStepRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ExecutionCore>::execute_step(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteStepSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ExecutionCore/ResumeRun" => {
+                    #[allow(non_camel_case_types)]
+                    struct ResumeRunSvc<T: ExecutionCore>(pub Arc<T>);
+                    impl<
+                        T: ExecutionCore,
+                    > tonic::server::UnaryService<super::ResumeRunRequest>
+                    for ResumeRunSvc<T> {
+                        type Response = super::ResumeRunResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ResumeRunRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ExecutionCore>::resume_run(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ResumeRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ExecutionCore/CancelRun" => {
+                    #[allow(non_camel_case_types)]
+                    struct CancelRunSvc<T: ExecutionCore>(pub Arc<T>);
+                    impl<
+                        T: ExecutionCore,
+                    > tonic::server::UnaryService<super::CancelRunRequest>
+                    for CancelRunSvc<T> {
+                        type Response = super::CancelRunResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CancelRunRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ExecutionCore>::cancel_run(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CancelRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ExecutionCore/PauseRun" => {
+                    #[allow(non_camel_case_types)]
+                    struct PauseRunSvc<T: ExecutionCore>(pub Arc<T>);
+                    impl<
+                        T: ExecutionCore,
+                    > tonic::server::UnaryService<super::PauseRunRequest>
+                    for PauseRunSvc<T> {
+                        type Response = super::PauseRunResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::PauseRunRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ExecutionCore>::pause_run(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PauseRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ExecutionCore/RunAgent" => {
+                    #[allow(non_camel_case_types)]
+                    struct RunAgentSvc<T: ExecutionCore>(pub Arc<T>);
+                    impl<
+                        T: ExecutionCore,
+                    > tonic::server::UnaryService<super::RunAgentRequest>
+                    for RunAgentSvc<T> {
+                        type Response = super::RunAgentResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RunAgentRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ExecutionCore>::run_agent(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RunAgentSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for ExecutionCoreServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "model_plane.v1.ExecutionCore";
+    impl<T> tonic::server::NamedService for ExecutionCoreServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod finetune_jobs_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct FinetuneJobsClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl FinetuneJobsClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> FinetuneJobsClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> FinetuneJobsClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            FinetuneJobsClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn create_job(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateFinetuneJobRequest>,
+        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.FinetuneJobs/CreateJob",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.FinetuneJobs", "CreateJob"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_job(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetFinetuneJobRequest>,
+        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.FinetuneJobs/GetJob",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.FinetuneJobs", "GetJob"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_jobs(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListFinetuneJobsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListFinetuneJobsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.FinetuneJobs/ListJobs",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.FinetuneJobs", "ListJobs"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn update_job_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateFinetuneJobStatusRequest>,
+        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.FinetuneJobs/UpdateJobStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.FinetuneJobs", "UpdateJobStatus"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_active_jobs(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListActiveFinetuneJobsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListActiveFinetuneJobsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.FinetuneJobs/ListActiveJobs",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.FinetuneJobs", "ListActiveJobs"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_org_monthly_spend(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetOrgMonthlySpendRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetOrgMonthlySpendResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.FinetuneJobs/GetOrgMonthlySpend",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.FinetuneJobs", "GetOrgMonthlySpend"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod finetune_jobs_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with FinetuneJobsServer.
+    #[async_trait]
+    pub trait FinetuneJobs: std::marker::Send + std::marker::Sync + 'static {
+        async fn create_job(
+            &self,
+            request: tonic::Request<super::CreateFinetuneJobRequest>,
+        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status>;
+        async fn get_job(
+            &self,
+            request: tonic::Request<super::GetFinetuneJobRequest>,
+        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status>;
+        async fn list_jobs(
+            &self,
+            request: tonic::Request<super::ListFinetuneJobsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListFinetuneJobsResponse>,
+            tonic::Status,
+        >;
+        async fn update_job_status(
+            &self,
+            request: tonic::Request<super::UpdateFinetuneJobStatusRequest>,
+        ) -> std::result::Result<tonic::Response<super::FinetuneJob>, tonic::Status>;
+        async fn list_active_jobs(
+            &self,
+            request: tonic::Request<super::ListActiveFinetuneJobsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListActiveFinetuneJobsResponse>,
+            tonic::Status,
+        >;
+        async fn get_org_monthly_spend(
+            &self,
+            request: tonic::Request<super::GetOrgMonthlySpendRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetOrgMonthlySpendResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct FinetuneJobsServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> FinetuneJobsServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for FinetuneJobsServer<T>
+    where
+        T: FinetuneJobs,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/model_plane.v1.FinetuneJobs/CreateJob" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateJobSvc<T: FinetuneJobs>(pub Arc<T>);
+                    impl<
+                        T: FinetuneJobs,
+                    > tonic::server::UnaryService<super::CreateFinetuneJobRequest>
+                    for CreateJobSvc<T> {
+                        type Response = super::FinetuneJob;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateFinetuneJobRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FinetuneJobs>::create_job(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateJobSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.FinetuneJobs/GetJob" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetJobSvc<T: FinetuneJobs>(pub Arc<T>);
+                    impl<
+                        T: FinetuneJobs,
+                    > tonic::server::UnaryService<super::GetFinetuneJobRequest>
+                    for GetJobSvc<T> {
+                        type Response = super::FinetuneJob;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetFinetuneJobRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FinetuneJobs>::get_job(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetJobSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.FinetuneJobs/ListJobs" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListJobsSvc<T: FinetuneJobs>(pub Arc<T>);
+                    impl<
+                        T: FinetuneJobs,
+                    > tonic::server::UnaryService<super::ListFinetuneJobsRequest>
+                    for ListJobsSvc<T> {
+                        type Response = super::ListFinetuneJobsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListFinetuneJobsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FinetuneJobs>::list_jobs(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListJobsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.FinetuneJobs/UpdateJobStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateJobStatusSvc<T: FinetuneJobs>(pub Arc<T>);
+                    impl<
+                        T: FinetuneJobs,
+                    > tonic::server::UnaryService<super::UpdateFinetuneJobStatusRequest>
+                    for UpdateJobStatusSvc<T> {
+                        type Response = super::FinetuneJob;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::UpdateFinetuneJobStatusRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FinetuneJobs>::update_job_status(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateJobStatusSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.FinetuneJobs/ListActiveJobs" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListActiveJobsSvc<T: FinetuneJobs>(pub Arc<T>);
+                    impl<
+                        T: FinetuneJobs,
+                    > tonic::server::UnaryService<super::ListActiveFinetuneJobsRequest>
+                    for ListActiveJobsSvc<T> {
+                        type Response = super::ListActiveFinetuneJobsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListActiveFinetuneJobsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FinetuneJobs>::list_active_jobs(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListActiveJobsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.FinetuneJobs/GetOrgMonthlySpend" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetOrgMonthlySpendSvc<T: FinetuneJobs>(pub Arc<T>);
+                    impl<
+                        T: FinetuneJobs,
+                    > tonic::server::UnaryService<super::GetOrgMonthlySpendRequest>
+                    for GetOrgMonthlySpendSvc<T> {
+                        type Response = super::GetOrgMonthlySpendResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetOrgMonthlySpendRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as FinetuneJobs>::get_org_monthly_spend(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetOrgMonthlySpendSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for FinetuneJobsServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "model_plane.v1.FinetuneJobs";
+    impl<T> tonic::server::NamedService for FinetuneJobsServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod model_gateway_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct ModelGatewayClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl ModelGatewayClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> ModelGatewayClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> ModelGatewayClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            ModelGatewayClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn invoke(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InvokeRequest>,
+        ) -> std::result::Result<tonic::Response<super::InvokeResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/Invoke",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Invoke"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn invoke_stream(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InvokeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::InvokeChunk>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/InvokeStream",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "InvokeStream"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+        pub async fn fetch(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FetchRequest>,
+        ) -> std::result::Result<tonic::Response<super::FetchResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/Fetch",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Fetch"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn extract_structured(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExtractStructuredRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExtractStructuredResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ExtractStructured",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ExtractStructured"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn web_search(
+            &mut self,
+            request: impl tonic::IntoRequest<super::WebSearchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::WebSearchResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/WebSearch",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "WebSearch"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn sleep(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SleepRequest>,
+        ) -> std::result::Result<tonic::Response<super::SleepResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/Sleep",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Sleep"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn remote_trigger(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoteTriggerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoteTriggerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/RemoteTrigger",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "RemoteTrigger"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn send_message(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SendMessageRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SendMessageResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/SendMessage",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SendMessage"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn synthetic_output(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SyntheticOutputRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SyntheticOutputResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/SyntheticOutput",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "SyntheticOutput"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn enter_plan_mode(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EnterPlanModeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EnterPlanModeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/EnterPlanMode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "EnterPlanMode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn exit_plan_mode(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExitPlanModeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExitPlanModeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ExitPlanMode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ExitPlanMode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn is_plan_mode(
+            &mut self,
+            request: impl tonic::IntoRequest<super::IsPlanModeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::IsPlanModeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/IsPlanMode",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "IsPlanMode"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn team_create(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TeamCreateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TeamCreateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/TeamCreate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TeamCreate"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn team_delete(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TeamDeleteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TeamDeleteResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/TeamDelete",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TeamDelete"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn team_list(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TeamListRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TeamListResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/TeamList",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TeamList"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn lsp_query(
+            &mut self,
+            request: impl tonic::IntoRequest<super::LspQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LspQueryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/LspQuery",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "LspQuery"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn request_approval(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RequestApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RequestApprovalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/RequestApproval",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "RequestApproval"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn approve_approval(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ApproveApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ApproveApprovalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ApproveApproval",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ApproveApproval"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn deny_approval(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DenyApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DenyApprovalResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/DenyApproval",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "DenyApproval"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_pending_approvals(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListPendingApprovalsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPendingApprovalsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListPendingApprovals",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.ModelGateway",
+                        "ListPendingApprovals",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn record_trajectory(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RecordTrajectoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordTrajectoryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/RecordTrajectory",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "RecordTrajectory"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_trajectories(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListTrajectoriesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTrajectoriesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListTrajectories",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ListTrajectories"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn export_trajectories(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExportTrajectoriesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExportTrajectoriesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ExportTrajectories",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ExportTrajectories"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_skills(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListSkillsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListSkillsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListSkills",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListSkills"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_skill(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetSkillRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSkillResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/GetSkill",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "GetSkill"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn match_skills(
+            &mut self,
+            request: impl tonic::IntoRequest<super::MatchSkillsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MatchSkillsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/MatchSkills",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "MatchSkills"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn register_mcp_server(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RegisterMcpServerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterMcpServerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/RegisterMcpServer",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "RegisterMcpServer"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_mcp_servers(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListMcpServersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMcpServersResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListMcpServers",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ListMcpServers"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn proxy_mcp_tool(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ProxyMcpToolRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProxyMcpToolResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ProxyMcpTool",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ProxyMcpTool"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_mcp_tools(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListMcpToolsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMcpToolsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListMcpTools",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListMcpTools"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn register_plugin(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RegisterPluginRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterPluginResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/RegisterPlugin",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "RegisterPlugin"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_plugins(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListPluginsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPluginsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListPlugins",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListPlugins"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_plugin_enabled(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetPluginEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPluginEnabledResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/SetPluginEnabled",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "SetPluginEnabled"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_commands(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListCommandsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListCommandsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListCommands",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListCommands"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn execute_command(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ExecuteCommandRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExecuteCommandResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ExecuteCommand",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ExecuteCommand"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn register_hook(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RegisterHookRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterHookResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/RegisterHook",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "RegisterHook"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_hooks(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListHooksRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListHooksResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListHooks",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListHooks"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn check_permission(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CheckPermissionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckPermissionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/CheckPermission",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "CheckPermission"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_permission(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetPermissionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPermissionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/SetPermission",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SetPermission"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/GetPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "GetPolicy"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_policy(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPolicyResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/SetPolicy",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SetPolicy"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn append_thread_message(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AppendThreadMessageRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AppendThreadMessageResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/AppendThreadMessage",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "AppendThreadMessage"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_thread_messages(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListThreadMessagesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListThreadMessagesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListThreadMessages",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.ModelGateway", "ListThreadMessages"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_analytics(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAnalyticsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAnalyticsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/GetAnalytics",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "GetAnalytics"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn text_to_speech(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TextToSpeechRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TextToSpeechResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/TextToSpeech",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "TextToSpeech"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn speech_to_text(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SpeechToTextRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SpeechToTextResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/SpeechToText",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "SpeechToText"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn create_task(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CreateTaskRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTaskResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/CreateTask",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "CreateTask"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_tasks(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListTasksRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTasksResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/ListTasks",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "ListTasks"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn health(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HealthRequest>,
+        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ModelGateway/Health",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.ModelGateway", "Health"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod model_gateway_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with ModelGatewayServer.
+    #[async_trait]
+    pub trait ModelGateway: std::marker::Send + std::marker::Sync + 'static {
+        async fn invoke(
+            &self,
+            request: tonic::Request<super::InvokeRequest>,
+        ) -> std::result::Result<tonic::Response<super::InvokeResponse>, tonic::Status>;
+        /// Server streaming response type for the InvokeStream method.
+        type InvokeStreamStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::InvokeChunk, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        async fn invoke_stream(
+            &self,
+            request: tonic::Request<super::InvokeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::InvokeStreamStream>,
+            tonic::Status,
+        >;
+        async fn fetch(
+            &self,
+            request: tonic::Request<super::FetchRequest>,
+        ) -> std::result::Result<tonic::Response<super::FetchResponse>, tonic::Status>;
+        async fn extract_structured(
+            &self,
+            request: tonic::Request<super::ExtractStructuredRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExtractStructuredResponse>,
+            tonic::Status,
+        >;
+        async fn web_search(
+            &self,
+            request: tonic::Request<super::WebSearchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::WebSearchResponse>,
+            tonic::Status,
+        >;
+        async fn sleep(
+            &self,
+            request: tonic::Request<super::SleepRequest>,
+        ) -> std::result::Result<tonic::Response<super::SleepResponse>, tonic::Status>;
+        async fn remote_trigger(
+            &self,
+            request: tonic::Request<super::RemoteTriggerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoteTriggerResponse>,
+            tonic::Status,
+        >;
+        async fn send_message(
+            &self,
+            request: tonic::Request<super::SendMessageRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SendMessageResponse>,
+            tonic::Status,
+        >;
+        async fn synthetic_output(
+            &self,
+            request: tonic::Request<super::SyntheticOutputRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SyntheticOutputResponse>,
+            tonic::Status,
+        >;
+        async fn enter_plan_mode(
+            &self,
+            request: tonic::Request<super::EnterPlanModeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::EnterPlanModeResponse>,
+            tonic::Status,
+        >;
+        async fn exit_plan_mode(
+            &self,
+            request: tonic::Request<super::ExitPlanModeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExitPlanModeResponse>,
+            tonic::Status,
+        >;
+        async fn is_plan_mode(
+            &self,
+            request: tonic::Request<super::IsPlanModeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::IsPlanModeResponse>,
+            tonic::Status,
+        >;
+        async fn team_create(
+            &self,
+            request: tonic::Request<super::TeamCreateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TeamCreateResponse>,
+            tonic::Status,
+        >;
+        async fn team_delete(
+            &self,
+            request: tonic::Request<super::TeamDeleteRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TeamDeleteResponse>,
+            tonic::Status,
+        >;
+        async fn team_list(
+            &self,
+            request: tonic::Request<super::TeamListRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TeamListResponse>,
+            tonic::Status,
+        >;
+        async fn lsp_query(
+            &self,
+            request: tonic::Request<super::LspQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::LspQueryResponse>,
+            tonic::Status,
+        >;
+        async fn request_approval(
+            &self,
+            request: tonic::Request<super::RequestApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RequestApprovalResponse>,
+            tonic::Status,
+        >;
+        async fn approve_approval(
+            &self,
+            request: tonic::Request<super::ApproveApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ApproveApprovalResponse>,
+            tonic::Status,
+        >;
+        async fn deny_approval(
+            &self,
+            request: tonic::Request<super::DenyApprovalRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DenyApprovalResponse>,
+            tonic::Status,
+        >;
+        async fn list_pending_approvals(
+            &self,
+            request: tonic::Request<super::ListPendingApprovalsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPendingApprovalsResponse>,
+            tonic::Status,
+        >;
+        async fn record_trajectory(
+            &self,
+            request: tonic::Request<super::RecordTrajectoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordTrajectoryResponse>,
+            tonic::Status,
+        >;
+        async fn list_trajectories(
+            &self,
+            request: tonic::Request<super::ListTrajectoriesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTrajectoriesResponse>,
+            tonic::Status,
+        >;
+        async fn export_trajectories(
+            &self,
+            request: tonic::Request<super::ExportTrajectoriesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExportTrajectoriesResponse>,
+            tonic::Status,
+        >;
+        async fn list_skills(
+            &self,
+            request: tonic::Request<super::ListSkillsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListSkillsResponse>,
+            tonic::Status,
+        >;
+        async fn get_skill(
+            &self,
+            request: tonic::Request<super::GetSkillRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSkillResponse>,
+            tonic::Status,
+        >;
+        async fn match_skills(
+            &self,
+            request: tonic::Request<super::MatchSkillsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MatchSkillsResponse>,
+            tonic::Status,
+        >;
+        async fn register_mcp_server(
+            &self,
+            request: tonic::Request<super::RegisterMcpServerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterMcpServerResponse>,
+            tonic::Status,
+        >;
+        async fn list_mcp_servers(
+            &self,
+            request: tonic::Request<super::ListMcpServersRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMcpServersResponse>,
+            tonic::Status,
+        >;
+        async fn proxy_mcp_tool(
+            &self,
+            request: tonic::Request<super::ProxyMcpToolRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProxyMcpToolResponse>,
+            tonic::Status,
+        >;
+        async fn list_mcp_tools(
+            &self,
+            request: tonic::Request<super::ListMcpToolsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMcpToolsResponse>,
+            tonic::Status,
+        >;
+        async fn register_plugin(
+            &self,
+            request: tonic::Request<super::RegisterPluginRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterPluginResponse>,
+            tonic::Status,
+        >;
+        async fn list_plugins(
+            &self,
+            request: tonic::Request<super::ListPluginsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListPluginsResponse>,
+            tonic::Status,
+        >;
+        async fn set_plugin_enabled(
+            &self,
+            request: tonic::Request<super::SetPluginEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPluginEnabledResponse>,
+            tonic::Status,
+        >;
+        async fn list_commands(
+            &self,
+            request: tonic::Request<super::ListCommandsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListCommandsResponse>,
+            tonic::Status,
+        >;
+        async fn execute_command(
+            &self,
+            request: tonic::Request<super::ExecuteCommandRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ExecuteCommandResponse>,
+            tonic::Status,
+        >;
+        async fn register_hook(
+            &self,
+            request: tonic::Request<super::RegisterHookRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RegisterHookResponse>,
+            tonic::Status,
+        >;
+        async fn list_hooks(
+            &self,
+            request: tonic::Request<super::ListHooksRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListHooksResponse>,
+            tonic::Status,
+        >;
+        async fn check_permission(
+            &self,
+            request: tonic::Request<super::CheckPermissionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckPermissionResponse>,
+            tonic::Status,
+        >;
+        async fn set_permission(
+            &self,
+            request: tonic::Request<super::SetPermissionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPermissionResponse>,
+            tonic::Status,
+        >;
+        async fn get_policy(
+            &self,
+            request: tonic::Request<super::GetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPolicyResponse>,
+            tonic::Status,
+        >;
+        async fn set_policy(
+            &self,
+            request: tonic::Request<super::SetPolicyRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetPolicyResponse>,
+            tonic::Status,
+        >;
+        async fn append_thread_message(
+            &self,
+            request: tonic::Request<super::AppendThreadMessageRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AppendThreadMessageResponse>,
+            tonic::Status,
+        >;
+        async fn list_thread_messages(
+            &self,
+            request: tonic::Request<super::ListThreadMessagesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListThreadMessagesResponse>,
+            tonic::Status,
+        >;
+        async fn get_analytics(
+            &self,
+            request: tonic::Request<super::GetAnalyticsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetAnalyticsResponse>,
+            tonic::Status,
+        >;
+        async fn text_to_speech(
+            &self,
+            request: tonic::Request<super::TextToSpeechRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TextToSpeechResponse>,
+            tonic::Status,
+        >;
+        async fn speech_to_text(
+            &self,
+            request: tonic::Request<super::SpeechToTextRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SpeechToTextResponse>,
+            tonic::Status,
+        >;
+        async fn create_task(
+            &self,
+            request: tonic::Request<super::CreateTaskRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CreateTaskResponse>,
+            tonic::Status,
+        >;
+        async fn list_tasks(
+            &self,
+            request: tonic::Request<super::ListTasksRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListTasksResponse>,
+            tonic::Status,
+        >;
+        async fn health(
+            &self,
+            request: tonic::Request<super::HealthRequest>,
+        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status>;
+    }
+    #[derive(Debug)]
+    pub struct ModelGatewayServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> ModelGatewayServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for ModelGatewayServer<T>
+    where
+        T: ModelGateway,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/model_plane.v1.ModelGateway/Invoke" => {
+                    #[allow(non_camel_case_types)]
+                    struct InvokeSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::InvokeRequest>
+                    for InvokeSvc<T> {
+                        type Response = super::InvokeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::InvokeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::invoke(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InvokeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/InvokeStream" => {
+                    #[allow(non_camel_case_types)]
+                    struct InvokeStreamSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::ServerStreamingService<super::InvokeRequest>
+                    for InvokeStreamSvc<T> {
+                        type Response = super::InvokeChunk;
+                        type ResponseStream = T::InvokeStreamStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::InvokeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::invoke_stream(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = InvokeStreamSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/Fetch" => {
+                    #[allow(non_camel_case_types)]
+                    struct FetchSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::FetchRequest> for FetchSvc<T> {
+                        type Response = super::FetchResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FetchRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::fetch(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = FetchSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ExtractStructured" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExtractStructuredSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ExtractStructuredRequest>
+                    for ExtractStructuredSvc<T> {
+                        type Response = super::ExtractStructuredResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExtractStructuredRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::extract_structured(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExtractStructuredSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/WebSearch" => {
+                    #[allow(non_camel_case_types)]
+                    struct WebSearchSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::WebSearchRequest>
+                    for WebSearchSvc<T> {
+                        type Response = super::WebSearchResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::WebSearchRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::web_search(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WebSearchSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/Sleep" => {
+                    #[allow(non_camel_case_types)]
+                    struct SleepSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SleepRequest> for SleepSvc<T> {
+                        type Response = super::SleepResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SleepRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::sleep(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SleepSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/RemoteTrigger" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoteTriggerSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::RemoteTriggerRequest>
+                    for RemoteTriggerSvc<T> {
+                        type Response = super::RemoteTriggerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoteTriggerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::remote_trigger(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoteTriggerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/SendMessage" => {
+                    #[allow(non_camel_case_types)]
+                    struct SendMessageSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SendMessageRequest>
+                    for SendMessageSvc<T> {
+                        type Response = super::SendMessageResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SendMessageRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::send_message(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SendMessageSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/SyntheticOutput" => {
+                    #[allow(non_camel_case_types)]
+                    struct SyntheticOutputSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SyntheticOutputRequest>
+                    for SyntheticOutputSvc<T> {
+                        type Response = super::SyntheticOutputResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SyntheticOutputRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::synthetic_output(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SyntheticOutputSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/EnterPlanMode" => {
+                    #[allow(non_camel_case_types)]
+                    struct EnterPlanModeSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::EnterPlanModeRequest>
+                    for EnterPlanModeSvc<T> {
+                        type Response = super::EnterPlanModeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::EnterPlanModeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::enter_plan_mode(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = EnterPlanModeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ExitPlanMode" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExitPlanModeSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ExitPlanModeRequest>
+                    for ExitPlanModeSvc<T> {
+                        type Response = super::ExitPlanModeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExitPlanModeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::exit_plan_mode(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExitPlanModeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/IsPlanMode" => {
+                    #[allow(non_camel_case_types)]
+                    struct IsPlanModeSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::IsPlanModeRequest>
+                    for IsPlanModeSvc<T> {
+                        type Response = super::IsPlanModeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::IsPlanModeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::is_plan_mode(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = IsPlanModeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/TeamCreate" => {
+                    #[allow(non_camel_case_types)]
+                    struct TeamCreateSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::TeamCreateRequest>
+                    for TeamCreateSvc<T> {
+                        type Response = super::TeamCreateResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TeamCreateRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::team_create(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TeamCreateSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/TeamDelete" => {
+                    #[allow(non_camel_case_types)]
+                    struct TeamDeleteSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::TeamDeleteRequest>
+                    for TeamDeleteSvc<T> {
+                        type Response = super::TeamDeleteResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TeamDeleteRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::team_delete(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TeamDeleteSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/TeamList" => {
+                    #[allow(non_camel_case_types)]
+                    struct TeamListSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::TeamListRequest>
+                    for TeamListSvc<T> {
+                        type Response = super::TeamListResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TeamListRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::team_list(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TeamListSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/LspQuery" => {
+                    #[allow(non_camel_case_types)]
+                    struct LspQuerySvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::LspQueryRequest>
+                    for LspQuerySvc<T> {
+                        type Response = super::LspQueryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::LspQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::lsp_query(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LspQuerySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/RequestApproval" => {
+                    #[allow(non_camel_case_types)]
+                    struct RequestApprovalSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::RequestApprovalRequest>
+                    for RequestApprovalSvc<T> {
+                        type Response = super::RequestApprovalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RequestApprovalRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::request_approval(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RequestApprovalSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ApproveApproval" => {
+                    #[allow(non_camel_case_types)]
+                    struct ApproveApprovalSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ApproveApprovalRequest>
+                    for ApproveApprovalSvc<T> {
+                        type Response = super::ApproveApprovalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ApproveApprovalRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::approve_approval(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ApproveApprovalSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/DenyApproval" => {
+                    #[allow(non_camel_case_types)]
+                    struct DenyApprovalSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::DenyApprovalRequest>
+                    for DenyApprovalSvc<T> {
+                        type Response = super::DenyApprovalResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DenyApprovalRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::deny_approval(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DenyApprovalSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListPendingApprovals" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListPendingApprovalsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListPendingApprovalsRequest>
+                    for ListPendingApprovalsSvc<T> {
+                        type Response = super::ListPendingApprovalsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListPendingApprovalsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_pending_approvals(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListPendingApprovalsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/RecordTrajectory" => {
+                    #[allow(non_camel_case_types)]
+                    struct RecordTrajectorySvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::RecordTrajectoryRequest>
+                    for RecordTrajectorySvc<T> {
+                        type Response = super::RecordTrajectoryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RecordTrajectoryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::record_trajectory(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RecordTrajectorySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListTrajectories" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListTrajectoriesSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListTrajectoriesRequest>
+                    for ListTrajectoriesSvc<T> {
+                        type Response = super::ListTrajectoriesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListTrajectoriesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_trajectories(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListTrajectoriesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ExportTrajectories" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExportTrajectoriesSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ExportTrajectoriesRequest>
+                    for ExportTrajectoriesSvc<T> {
+                        type Response = super::ExportTrajectoriesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExportTrajectoriesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::export_trajectories(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExportTrajectoriesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListSkills" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListSkillsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListSkillsRequest>
+                    for ListSkillsSvc<T> {
+                        type Response = super::ListSkillsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListSkillsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_skills(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListSkillsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/GetSkill" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSkillSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::GetSkillRequest>
+                    for GetSkillSvc<T> {
+                        type Response = super::GetSkillResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetSkillRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::get_skill(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSkillSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/MatchSkills" => {
+                    #[allow(non_camel_case_types)]
+                    struct MatchSkillsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::MatchSkillsRequest>
+                    for MatchSkillsSvc<T> {
+                        type Response = super::MatchSkillsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::MatchSkillsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::match_skills(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = MatchSkillsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/RegisterMcpServer" => {
+                    #[allow(non_camel_case_types)]
+                    struct RegisterMcpServerSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::RegisterMcpServerRequest>
+                    for RegisterMcpServerSvc<T> {
+                        type Response = super::RegisterMcpServerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RegisterMcpServerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::register_mcp_server(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RegisterMcpServerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListMcpServers" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListMcpServersSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListMcpServersRequest>
+                    for ListMcpServersSvc<T> {
+                        type Response = super::ListMcpServersResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListMcpServersRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_mcp_servers(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListMcpServersSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ProxyMcpTool" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProxyMcpToolSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ProxyMcpToolRequest>
+                    for ProxyMcpToolSvc<T> {
+                        type Response = super::ProxyMcpToolResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ProxyMcpToolRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::proxy_mcp_tool(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ProxyMcpToolSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListMcpTools" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListMcpToolsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListMcpToolsRequest>
+                    for ListMcpToolsSvc<T> {
+                        type Response = super::ListMcpToolsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListMcpToolsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_mcp_tools(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListMcpToolsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/RegisterPlugin" => {
+                    #[allow(non_camel_case_types)]
+                    struct RegisterPluginSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::RegisterPluginRequest>
+                    for RegisterPluginSvc<T> {
+                        type Response = super::RegisterPluginResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RegisterPluginRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::register_plugin(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RegisterPluginSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListPlugins" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListPluginsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListPluginsRequest>
+                    for ListPluginsSvc<T> {
+                        type Response = super::ListPluginsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListPluginsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_plugins(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListPluginsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/SetPluginEnabled" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetPluginEnabledSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SetPluginEnabledRequest>
+                    for SetPluginEnabledSvc<T> {
+                        type Response = super::SetPluginEnabledResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetPluginEnabledRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::set_plugin_enabled(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetPluginEnabledSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListCommands" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListCommandsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListCommandsRequest>
+                    for ListCommandsSvc<T> {
+                        type Response = super::ListCommandsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListCommandsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_commands(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListCommandsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ExecuteCommand" => {
+                    #[allow(non_camel_case_types)]
+                    struct ExecuteCommandSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ExecuteCommandRequest>
+                    for ExecuteCommandSvc<T> {
+                        type Response = super::ExecuteCommandResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ExecuteCommandRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::execute_command(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ExecuteCommandSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/RegisterHook" => {
+                    #[allow(non_camel_case_types)]
+                    struct RegisterHookSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::RegisterHookRequest>
+                    for RegisterHookSvc<T> {
+                        type Response = super::RegisterHookResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RegisterHookRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::register_hook(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RegisterHookSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListHooks" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListHooksSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListHooksRequest>
+                    for ListHooksSvc<T> {
+                        type Response = super::ListHooksResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListHooksRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_hooks(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListHooksSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/CheckPermission" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckPermissionSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::CheckPermissionRequest>
+                    for CheckPermissionSvc<T> {
+                        type Response = super::CheckPermissionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CheckPermissionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::check_permission(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckPermissionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/SetPermission" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetPermissionSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SetPermissionRequest>
+                    for SetPermissionSvc<T> {
+                        type Response = super::SetPermissionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetPermissionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::set_permission(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetPermissionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/GetPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPolicySvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::GetPolicyRequest>
+                    for GetPolicySvc<T> {
+                        type Response = super::GetPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::get_policy(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetPolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/SetPolicy" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetPolicySvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SetPolicyRequest>
+                    for SetPolicySvc<T> {
+                        type Response = super::SetPolicyResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetPolicyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::set_policy(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetPolicySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/AppendThreadMessage" => {
+                    #[allow(non_camel_case_types)]
+                    struct AppendThreadMessageSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::AppendThreadMessageRequest>
+                    for AppendThreadMessageSvc<T> {
+                        type Response = super::AppendThreadMessageResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AppendThreadMessageRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::append_thread_message(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AppendThreadMessageSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListThreadMessages" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListThreadMessagesSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListThreadMessagesRequest>
+                    for ListThreadMessagesSvc<T> {
+                        type Response = super::ListThreadMessagesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListThreadMessagesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_thread_messages(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListThreadMessagesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/GetAnalytics" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetAnalyticsSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::GetAnalyticsRequest>
+                    for GetAnalyticsSvc<T> {
+                        type Response = super::GetAnalyticsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetAnalyticsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::get_analytics(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetAnalyticsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/TextToSpeech" => {
+                    #[allow(non_camel_case_types)]
+                    struct TextToSpeechSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::TextToSpeechRequest>
+                    for TextToSpeechSvc<T> {
+                        type Response = super::TextToSpeechResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TextToSpeechRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::text_to_speech(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TextToSpeechSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/SpeechToText" => {
+                    #[allow(non_camel_case_types)]
+                    struct SpeechToTextSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::SpeechToTextRequest>
+                    for SpeechToTextSvc<T> {
+                        type Response = super::SpeechToTextResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SpeechToTextRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::speech_to_text(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SpeechToTextSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/CreateTask" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateTaskSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::CreateTaskRequest>
+                    for CreateTaskSvc<T> {
+                        type Response = super::CreateTaskResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CreateTaskRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::create_task(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateTaskSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/ListTasks" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListTasksSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::ListTasksRequest>
+                    for ListTasksSvc<T> {
+                        type Response = super::ListTasksResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListTasksRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::list_tasks(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListTasksSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ModelGateway/Health" => {
+                    #[allow(non_camel_case_types)]
+                    struct HealthSvc<T: ModelGateway>(pub Arc<T>);
+                    impl<
+                        T: ModelGateway,
+                    > tonic::server::UnaryService<super::HealthRequest>
+                    for HealthSvc<T> {
+                        type Response = super::HealthResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::HealthRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ModelGateway>::health(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = HealthSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for ModelGatewayServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "model_plane.v1.ModelGateway";
+    impl<T> tonic::server::NamedService for ModelGatewayServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
@@ -12578,6 +12806,58 @@ pub mod session_core_client {
                 .insert(GrpcMethod::new("model_plane.v1.SessionCore", "CompleteStep"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn reserve_tool_action(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReserveToolActionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReserveToolActionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.SessionCore/ReserveToolAction",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.SessionCore", "ReserveToolAction"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn finalize_tool_action(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FinalizeToolActionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FinalizeToolActionResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.SessionCore/FinalizeToolAction",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.SessionCore", "FinalizeToolAction"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn save_checkpoint(
             &mut self,
             request: impl tonic::IntoRequest<super::SaveCheckpointRequest>,
@@ -12843,6 +13123,20 @@ pub mod session_core_server {
             request: tonic::Request<super::CompleteStepRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CompleteStepResponse>,
+            tonic::Status,
+        >;
+        async fn reserve_tool_action(
+            &self,
+            request: tonic::Request<super::ReserveToolActionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReserveToolActionResponse>,
+            tonic::Status,
+        >;
+        async fn finalize_tool_action(
+            &self,
+            request: tonic::Request<super::FinalizeToolActionRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FinalizeToolActionResponse>,
             tonic::Status,
         >;
         async fn save_checkpoint(
@@ -13156,6 +13450,98 @@ pub mod session_core_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CompleteStepSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.SessionCore/ReserveToolAction" => {
+                    #[allow(non_camel_case_types)]
+                    struct ReserveToolActionSvc<T: SessionCore>(pub Arc<T>);
+                    impl<
+                        T: SessionCore,
+                    > tonic::server::UnaryService<super::ReserveToolActionRequest>
+                    for ReserveToolActionSvc<T> {
+                        type Response = super::ReserveToolActionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ReserveToolActionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SessionCore>::reserve_tool_action(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ReserveToolActionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.SessionCore/FinalizeToolAction" => {
+                    #[allow(non_camel_case_types)]
+                    struct FinalizeToolActionSvc<T: SessionCore>(pub Arc<T>);
+                    impl<
+                        T: SessionCore,
+                    > tonic::server::UnaryService<super::FinalizeToolActionRequest>
+                    for FinalizeToolActionSvc<T> {
+                        type Response = super::FinalizeToolActionResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FinalizeToolActionRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SessionCore>::finalize_tool_action(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = FinalizeToolActionSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

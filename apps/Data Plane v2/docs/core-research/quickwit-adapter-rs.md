@@ -5,6 +5,22 @@ Updated: 2026-07-11 (source/static re-verification plus isolated disposable-Post
 
 Scope: `apps/Data Plane v2/services/quickwit-adapter-rs` (container `dpv2-quickwit-adapter`, admin HTTP `:9204`), plus its Quickwit dependency (container `dpv2-quickwit`, REST API `:7280`).
 
+## 2026-07-15 final isolated acceptance delta
+
+The final rebuilt tenant-scoped preview passed 401/401/200/403, signed update
+consumption participated in the isolated broker matrix, and Quickwit final state
+was unchanged under restrictive ZDR. Destructive clear remains deliberately 501
+pending trustworthy task completion and crash/retry proof. No rebuild, clear,
+cleanup, or global request was invoked; the shared deployment is unchanged.
+
+## 2026-07-15 isolated runtime delta
+
+The current-source image `a5f547a120db` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`. The disposable tenant-scoped admin
+preview matrix returned 401/401/200/403. No destructive clear, rebuild, cleanup,
+or global action was invoked. The shared deployment and trustworthy Quickwit
+completion/crash-retry proof remain pending.
+
 ## Secure-MVP current state — 2026-07-11
 
 - **Implemented in source:** `/admin/rebuild` requires a cryptographically verified
@@ -26,15 +42,15 @@ Scope: `apps/Data Plane v2/services/quickwit-adapter-rs` (container `dpv2-quickw
   durable/idempotent submission, two-person approval, claim/checkpoints/completion,
   immutable request fields, and append-only audit. The healthy fixture was then
   removed by its scoped cleanup trap.
-- **Built/deployed/reachable/effective:** not re-verified for the 2026-07-11 source
-  and migration changes. The evidence above proves implementation and isolated
-  behavior only; it does not prove that a rebuilt production-profile image is
-  deployed or that the historical live exposure below is closed at runtime.
+- **Built/reachable/effective in isolation:** the current image built with
+  revision/build labels and passed the authenticated disposable preview matrix.
+  It was not deployed to the shared stack, and destructive execution remains
+  disabled/unexercised.
 - **Key isolation:** Compose mounts only Control's public verification file;
   Quickwit adapter no longer receives the signing-key directory.
 - **Containment/blockers:** unsigned live-update subscribers are disabled by
-  default. Production-profile rebuild/deploy plus the safe auth/admin runtime
-  matrix remain required. Quickwit's directly reachable REST boundary described
+  default. Controlled shared deployment plus destructive-job completion proof
+  remain required. Quickwit's directly reachable REST boundary described
   below also remains a release concern until current network exposure is
   re-verified. Never invoke a destructive rebuild on a shared stack.
 - **Coverage:** after integration tests were rewired to execute the production

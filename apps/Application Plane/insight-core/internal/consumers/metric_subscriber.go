@@ -127,7 +127,7 @@ func NewMetricSubscriber(js nats.JetStreamContext, recorder MetricRecorder, fetc
 }
 
 func (s *MetricSubscriber) Start(_ context.Context) error {
-	return s.consumer.Bind(applicationSubject, metricSubscriberDurable, s.handle)
+	return s.consumer.BindProvisioned(applicationSubject, "VELION_APPLICATION", metricSubscriberDurable, s.handle)
 }
 
 func (s *MetricSubscriber) Stop() { s.consumer.Stop() }

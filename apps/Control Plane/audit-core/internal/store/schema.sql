@@ -21,9 +21,15 @@ CREATE TABLE IF NOT EXISTS audit_events (
   resource_id   TEXT,
   outcome       TEXT         NOT NULL DEFAULT 'ok',
   details       JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  event_id      TEXT,
   request_id    TEXT,
   ip_address    INET,
-  user_agent    TEXT
+  user_agent    TEXT,
+  source_bus    TEXT,
+  source_subject TEXT,
+  source_producer TEXT,
+  source_stream_sequence BIGINT,
+  payload_hash  BYTEA
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_events_org_ingested
@@ -38,6 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_request
 
 CREATE TABLE IF NOT EXISTS usage_events (
   id            BIGSERIAL    PRIMARY KEY,
+  event_id      TEXT,
   ingested_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
   occurred_at   TIMESTAMPTZ  NOT NULL,
   org_id        TEXT         NOT NULL,
@@ -50,7 +57,12 @@ CREATE TABLE IF NOT EXISTS usage_events (
   bytes_out    BIGINT       NOT NULL DEFAULT 0,
   cost_cents    NUMERIC(20, 6) NOT NULL DEFAULT 0,
   request_id    TEXT,
-  metadata      JSONB        NOT NULL DEFAULT '{}'::jsonb
+  metadata      JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  source_bus    TEXT,
+  source_subject TEXT,
+  source_producer TEXT,
+  source_stream_sequence BIGINT,
+  payload_hash  BYTEA
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_events_org_ingested

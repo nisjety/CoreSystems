@@ -22,3 +22,15 @@ func TestUnsignedAsyncEventsRequireThreeIsolatedDevGates(t *testing.T) {
 		t.Fatal("all three explicit isolated development gates should enable legacy events")
 	}
 }
+
+func TestSignedAndLegacyCostConsumersCannotRunTogether(t *testing.T) {
+	if err := validateCostConsumerMode(true, true); err == nil {
+		t.Fatal("ambiguous signed and legacy cost consumer modes were accepted")
+	}
+	if err := validateCostConsumerMode(true, false); err != nil {
+		t.Fatalf("signed-only mode failed: %v", err)
+	}
+	if err := validateCostConsumerMode(false, true); err != nil {
+		t.Fatalf("isolated legacy-only mode failed: %v", err)
+	}
+}

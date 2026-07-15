@@ -10,8 +10,9 @@
  *   3. Create an API key via Better Auth `createApiKey`.
  *   4. Return `{ data: { orgId, userId, apiKey } }`.
  *
- * Protected by `x-internal-api-key` header — only reachable from internal
- * services (Quarry) that share the same INTERNAL_API_KEY env var.
+ * Protected by an audience/scope-bound service principal. Quarry receives a
+ * dedicated agent:provision credential that cannot cross into other Auth
+ * internal contracts.
  */
 
 import {
@@ -23,9 +24,16 @@ import {
   HttpStatus,
   Logger,
   Post,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { status } from '@grpc/grpc-js';
 import { randomBytes } from 'crypto';
 import { auth } from '../auth/auth';
+import {
+  AuthInternalServiceAuthorizationError,
+  authorizeAuthInternalService,
+  loadAuthInternalServiceCredentials,
+} from './internal-service-auth';
 
 interface AgentSignupRequest {
   email: string;
@@ -39,19 +47,65 @@ interface AgentSignupResponse {
   };
 }
 
+type AgentAuthApi = Readonly<{
+  listUsers?: (input: {
+    query: { searchField: string; searchValue: string; limit: number };
+  }) => Promise<unknown>;
+  createOrganization: (input: {
+    body: { name: string; slug: string };
+    query: { userId: string };
+  }) => Promise<unknown>;
+  createApiKey: (input: {
+    body: {
+      name: string;
+      userId: string;
+      metadata: { orgId: string; source: string };
+    };
+  }) => Promise<unknown>;
+}>;
+
+const agentAuthApi = auth.api as unknown as AgentAuthApi;
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringField(value: unknown, name: string): string {
+  const candidate = record(value)?.[name];
+  return typeof candidate === 'string' ? candidate : '';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'unknown error';
+}
+
+function userAlreadyExists(error: unknown): boolean {
+  const details = record(error);
+  return Boolean(
+    errorMessage(error).includes('already exists') ||
+      details?.status === 409 ||
+      record(details?.body)?.code === 'USER_ALREADY_EXISTS',
+  );
+}
+
 @Controller('internal')
 export class InternalAgentSignupController {
   private readonly logger = new Logger(InternalAgentSignupController.name);
+  private readonly serviceCredentials = loadAuthInternalServiceCredentials();
 
   // ── POST /internal/agent-signup ──────────────────────────────────────
 
   @Post('agent-signup')
   @HttpCode(HttpStatus.CREATED)
   async agentSignup(
-    @Headers('x-internal-api-key') internalKey: string,
+    @Headers('x-service-credential-id') credentialId: string | undefined,
+    @Headers('x-service-principal') principal: string | undefined,
+    @Headers('x-service-auth') token: string | undefined,
     @Body() body: AgentSignupRequest,
   ): Promise<AgentSignupResponse> {
-    this.assertInternalKey(internalKey);
+    this.authorize(credentialId, principal, token);
 
     const email = body.email?.trim().toLowerCase();
     if (!email || !this.isValidEmail(email)) {
@@ -77,8 +131,9 @@ export class InternalAgentSignupController {
       });
 
       // signUpEmail returns { user, session? } — user always present on success
-      const user = (signupResult as any)?.user ?? signupResult;
-      userId = user?.id;
+      const signup = record(signupResult);
+      const user = record(signup?.user) ?? signup;
+      userId = stringField(user, 'id');
 
       if (!userId) {
         this.logger.error(`❌ [agent-signup] signUpEmail returned no userId`);
@@ -86,36 +141,34 @@ export class InternalAgentSignupController {
       }
 
       this.logger.log(`✅ [agent-signup] User created: ${userId}`);
-    } catch (err: any) {
+    } catch (error: unknown) {
       // If user already exists, try to look them up
-      if (
-        err?.message?.includes('already exists') ||
-        err?.status === 409 ||
-        err?.body?.code === 'USER_ALREADY_EXISTS'
-      ) {
+      if (userAlreadyExists(error)) {
         this.logger.warn(
           `⚠️ [agent-signup] User ${email} already exists — looking up`,
         );
-        const authApi = auth.api as any;
-        const existingUsers = await authApi
-          .listUsers?.({
-            query: { searchField: 'email', searchValue: email, limit: 1 },
-          })
-          .catch(() => null);
-
-        const existing = existingUsers?.users?.[0];
-        if (!existing?.id) {
+        const existingUsers = agentAuthApi.listUsers
+          ? await agentAuthApi
+              .listUsers({
+                query: { searchField: 'email', searchValue: email, limit: 1 },
+              })
+              .catch(() => null)
+          : null;
+        const users = record(existingUsers)?.users;
+        const existing = Array.isArray(users) ? record(users[0]) : null;
+        const existingUserId = stringField(existing, 'id');
+        if (!existingUserId) {
           throw new ForbiddenException(
             'A user with this email already exists but could not be resolved',
           );
         }
-        userId = existing.id;
+        userId = existingUserId;
         this.logger.log(`✅ [agent-signup] Resolved existing user: ${userId}`);
       } else {
         this.logger.error(
-          `❌ [agent-signup] User creation failed: ${err.message}`,
+          `❌ [agent-signup] User creation failed: ${errorMessage(error)}`,
         );
-        throw err;
+        throw error;
       }
     }
 
@@ -124,17 +177,16 @@ export class InternalAgentSignupController {
 
     try {
       const slug = `sandbox-${email.replace(/[^a-z0-9]/g, '-').slice(0, 40)}-${Date.now()}`;
-      const authApi = auth.api as any;
-      const orgResult = await authApi.createOrganization({
+      const orgResult = await agentAuthApi.createOrganization({
         body: {
           name: `${email}'s workspace`,
           slug,
         },
         // Server-side call — pass userId so org is created for that user
         query: { userId },
-      } as any);
+      });
 
-      orgId = orgResult?.id;
+      orgId = stringField(orgResult, 'id');
 
       if (!orgId) {
         this.logger.error(
@@ -144,19 +196,18 @@ export class InternalAgentSignupController {
       }
 
       this.logger.log(`✅ [agent-signup] Organization created: ${orgId}`);
-    } catch (err: any) {
+    } catch (error: unknown) {
       this.logger.error(
-        `❌ [agent-signup] Org creation failed: ${err.message}`,
+        `❌ [agent-signup] Org creation failed: ${errorMessage(error)}`,
       );
-      throw err;
+      throw error;
     }
 
     // 3. Create API key ────────────────────────────────────────────────
     let apiKeyValue: string;
 
     try {
-      const authApi = auth.api as any;
-      const keyResult = await authApi.createApiKey({
+      const keyResult = await agentAuthApi.createApiKey({
         body: {
           name: 'sandbox-key',
           userId,
@@ -167,7 +218,7 @@ export class InternalAgentSignupController {
         },
       });
 
-      apiKeyValue = keyResult?.key;
+      apiKeyValue = stringField(keyResult, 'key');
 
       if (!apiKeyValue) {
         this.logger.error(`❌ [agent-signup] createApiKey returned no key`);
@@ -175,11 +226,11 @@ export class InternalAgentSignupController {
       }
 
       this.logger.log(`✅ [agent-signup] API key created for user ${userId}`);
-    } catch (err: any) {
+    } catch (error: unknown) {
       this.logger.error(
-        `❌ [agent-signup] API key creation failed: ${err.message}`,
+        `❌ [agent-signup] API key creation failed: ${errorMessage(error)}`,
       );
-      throw err;
+      throw error;
     }
 
     this.logger.log(
@@ -197,18 +248,29 @@ export class InternalAgentSignupController {
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
-  private assertInternalKey(internalKey?: string): void {
-    const expected =
-      process.env.INTERNAL_API_KEY || process.env.INTERNAL_SERVICE_SECRET;
-
-    if (!expected) {
-      throw new ForbiddenException(
-        'INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET not configured — refusing request',
+  private authorize(
+    credentialId: string | undefined,
+    principal: string | undefined,
+    token: string | undefined,
+  ): void {
+    try {
+      authorizeAuthInternalService(
+        { credentialId, principal, token },
+        this.serviceCredentials,
+        'agent:provision',
       );
-    }
-
-    if (!internalKey || internalKey !== expected) {
-      throw new ForbiddenException('invalid internal API key');
+    } catch (error) {
+      if (
+        error instanceof AuthInternalServiceAuthorizationError &&
+        error.code === status.PERMISSION_DENIED
+      ) {
+        throw new ForbiddenException(
+          'Service principal lacks agent provisioning authority',
+        );
+      }
+      throw new UnauthorizedException(
+        'Valid scoped service credential required',
+      );
     }
   }
 

@@ -86,7 +86,7 @@ func NewAIActionExecutor(js nats.JetStreamContext, store ActionStore, tickets Ti
 
 // Start binds the durable consumer on the reviewed-action subject.
 func (e *AIActionExecutor) Start(_ context.Context) error {
-	return e.consumer.Bind(conversation.SubjectAIActionReviewed, aiActionExecutorDurable, e.handle)
+	return e.consumer.BindProvisioned(conversation.SubjectAIActionReviewed, applicationEventsStream, aiActionExecutorDurable, e.handle)
 }
 
 // Stop drains the subscription.

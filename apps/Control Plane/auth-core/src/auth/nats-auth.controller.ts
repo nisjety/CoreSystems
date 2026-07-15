@@ -3,6 +3,10 @@ import { MessagePattern, Payload } from '@nestjs/microservices';
 import type { Request } from 'express';
 import { auth } from './auth';
 import { MicrosoftGraphService } from '../services/microsoft-graph.service';
+import {
+  authorizeAuthInternalService,
+  loadAuthInternalServiceCredentials,
+} from '../internal/internal-service-auth';
 
 /**
  * Convert Express's `IncomingHttpHeaders` (plain object) into a Web API
@@ -36,6 +40,8 @@ function toWebHeaders(
  */
 @Controller('api/v2/auth')
 export class NatsAuthController {
+  private readonly serviceCredentials = loadAuthInternalServiceCredentials();
+
   constructor(private readonly microsoftGraphService: MicrosoftGraphService) {}
   /**
    * Validate session from cookies sent via NATS
@@ -97,64 +103,47 @@ export class NatsAuthController {
    * Service account authentication for internal microservices
    *
    * Pattern: 'service.authenticate'
-   * Payload: { serviceId: string, serviceSecret: string }
-   * Returns: Internal service secret to use as X-Internal-Service-Secret header
+   * Payload: { credentialId: string, serviceId: string, serviceSecret: string }
+   * Returns: The verified credential identity without echoing its token
    *
-   * This allows trusted internal services to bypass admin API authentication
-   * by including the service secret in their HTTP requests.
+   * The same scoped credential can be used only on Auth contracts that grant
+   * its registered principal the required scope.
    */
   @MessagePattern('service.authenticate')
-  async authenticateService(
-    @Payload() data: { serviceId: string; serviceSecret: string },
-  ): Promise<{
+  authenticateService(
+    @Payload()
+    data: {
+      credentialId?: string;
+      serviceId?: string;
+      serviceSecret?: string;
+    },
+  ): {
     authenticated: boolean;
-    serviceSecret?: string;
     serviceId?: string;
+    credentialId?: string;
     error?: string;
-  }> {
+  } {
     console.log('🔔 NATS: Received service.authenticate message');
     console.log('🔑 Service ID:', data.serviceId);
 
     try {
-      // Validate service credentials against environment variables
-      const validServiceIds = (
-        process.env.INTERNAL_SERVICE_IDS || 'admin-service,user-service'
-      ).split(',');
-      const expectedSecret =
-        process.env.INTERNAL_SERVICE_SECRET || process.env.INTERNAL_API_KEY;
-
-      if (!expectedSecret) {
-        console.error('❌ INTERNAL_SERVICE_SECRET not configured');
-        return {
-          error: 'Service authentication not configured',
-          authenticated: false,
-        };
-      }
-
-      if (!validServiceIds.includes(data.serviceId)) {
-        console.log('❌ Invalid service ID:', data.serviceId);
-        return {
-          error: 'Invalid service ID',
-          authenticated: false,
-        };
-      }
-
-      if (data.serviceSecret !== expectedSecret) {
-        console.log('❌ Invalid service secret');
-        return {
-          error: 'Invalid service secret',
-          authenticated: false,
-        };
-      }
+      const authorized = authorizeAuthInternalService(
+        {
+          credentialId: data.credentialId,
+          principal: data.serviceId,
+          token: data.serviceSecret,
+        },
+        this.serviceCredentials,
+        'nats:authenticate',
+      );
 
       const response = {
         authenticated: true,
-        serviceSecret: expectedSecret,
-        serviceId: data.serviceId,
+        credentialId: authorized.credentialId,
+        serviceId: authorized.principal,
       };
 
       console.log('✅ Service authenticated successfully');
-      console.log('📤 Sending response:', JSON.stringify(response));
 
       return response;
     } catch (error) {

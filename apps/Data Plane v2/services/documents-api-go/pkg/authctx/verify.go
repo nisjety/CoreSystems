@@ -137,6 +137,9 @@ func (v *verifier) Verify(token string) (*Claims, error) {
 	if claims.OrgID == "" {
 		return nil, errors.New("token missing org_id claim")
 	}
+	if !claims.ZDRPresent {
+		return nil, errors.New("token missing required boolean zdr claim")
+	}
 	identityValid := false
 	switch claims.PrincipalType {
 	case "user":
@@ -178,6 +181,10 @@ func claimsFromMap(mc jwt.MapClaims) *Claims {
 		IssuedAt:      getInt("iat"),
 		NotBefore:     getInt("nbf"),
 		ExpiresAt:     getInt("exp"),
+	}
+	if zdr, ok := mc["zdr"].(bool); ok {
+		c.ZDR = zdr
+		c.ZDRPresent = true
 	}
 	// aud may be a string or an array; take the first string form.
 	switch aud := mc["aud"].(type) {

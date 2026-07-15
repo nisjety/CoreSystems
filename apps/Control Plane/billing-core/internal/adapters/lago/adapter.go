@@ -45,8 +45,7 @@ func NewAdapter(cfg Config) *Adapter {
 
 func (a *Adapter) ReportUsage(ctx context.Context, usage billing.UsageEvent) error {
 	if a.apiKey == "" {
-		log.Printf("lago-adapter api key missing, skipping usage sync for event=%s", usage.EventID)
-		return nil
+		return fmt.Errorf("lago api key is not configured")
 	}
 
 	payload := map[string]any{

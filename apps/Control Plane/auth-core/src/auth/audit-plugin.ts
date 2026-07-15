@@ -9,7 +9,10 @@ import type { BetterAuthPlugin } from 'better-auth';
  * events), so it never depends on the shared bus being up.
  */
 interface AuditNatsPublisher {
-  publishPlain(subject: string, payload: Record<string, unknown>): void;
+  publishAuditDurable(
+    subject: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ stream: string; seq: number }>;
 }
 
 // Audit event types for Sprint 4
@@ -28,11 +31,12 @@ export interface AuditEvent {
 }
 
 /**
- * audit-core AuditEvent schema (velion.audit.v1.control.<event>)
+ * audit-core AuditEvent schema (velion.audit.v2.control.auth-core.<event>)
  * org_id, plane, and event are REQUIRED fields — omit the publish when org_id is absent.
  */
 interface VelionAuditEvent {
   occurred_at: string;
+  event_id: string;
   org_id: string;
   user_id?: string;
   actor_role?: string;
@@ -50,24 +54,32 @@ interface VelionAuditEvent {
 // Module-level singleton — set by setAuditNatsPublisher() called from auth-service.initializer
 let auditNats: AuditNatsPublisher | null = null;
 
-export function setAuditNatsPublisher(svc: AuditNatsPublisher): void {
+export function setAuditNatsPublisher(svc: AuditNatsPublisher | null): void {
   auditNats = svc;
 }
 
 /**
- * Publish to velion.audit.v1.control.<event> over the LOCAL control-plane bus
+ * Publish to velion.audit.v2.control.auth-core.<event> over the LOCAL control-plane bus
  * (controlplane-nats), only when org_id is known (audit-core rejects events
  * without it). Core publish matches audit-core's core QueueSubscribe.
  */
-function publishVelionAudit(evt: VelionAuditEvent): void {
-  if (!auditNats) return;
-  const subject = `velion.audit.v1.control.${evt.event}`;
-  auditNats.publishPlain(subject, evt as unknown as Record<string, unknown>);
+export async function publishVelionAuditDurable(
+  evt: VelionAuditEvent,
+): Promise<void> {
+  if (!auditNats) {
+    throw new Error('Durable audit transport unavailable');
+  }
+  const subject = `velion.audit.v2.control.auth-core.${evt.event}`;
+  await auditNats.publishAuditDurable(subject, {
+    ...evt,
+    plane: 'control',
+    producer: 'auth-core',
+  });
 }
 
 // Dev-only fallback: when NATS is unconfigured the event can't reach
 // audit-core, so we at least surface it on stdout. When NATS IS configured
-// this is a no-op — the durable record goes to velion.audit.v1.control.<event>.
+// this is a no-op — the durable record goes to the Auth Core v2 subject.
 function logAuditEvent(event: AuditEvent): void {
   if (auditNats) return;
   console.log('[AUDIT:dev-fallback]', JSON.stringify(event, null, 2));
@@ -142,8 +154,23 @@ export function auditPlugin(): BetterAuthPlugin {
               // Durable audit — no-ops when no active org is selected.
               const orgId = activeOrgFrom(ctx);
               if (orgId) {
-                publishVelionAudit({
-                  occurred_at: new Date().toISOString(),
+                const durableSession = session.session as
+                  | { id?: unknown; createdAt?: unknown }
+                  | undefined;
+                const sessionId = durableSession?.id;
+                const sessionCreatedAt = durableSession?.createdAt;
+                if (
+                  typeof sessionId !== 'string' ||
+                  sessionId.length === 0 ||
+                  (typeof sessionCreatedAt !== 'string' &&
+                    typeof sessionCreatedAt !== 'number' &&
+                    !(sessionCreatedAt instanceof Date))
+                ) {
+                  throw new Error('Sign-in has no stable audit identity');
+                }
+                await publishVelionAuditDurable({
+                  occurred_at: new Date(sessionCreatedAt).toISOString(),
+                  event_id: `session:${sessionId}:sign_in`,
                   org_id: orgId,
                   // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
                   user_id: user.id as string,
@@ -204,33 +231,10 @@ export function auditPlugin(): BetterAuthPlugin {
                 success: true,
               });
 
-              // Publish to velion.audit.v1.control.* only when org context is known.
-              // Better Auth sets activeOrganizationId on the session when the user has
-              // selected an active org; without it audit-core would reject the event.
-              const orgId = activeOrgFrom(ctx);
-              if (orgId) {
-                const eventName =
-                  action === 'ENABLE'
-                    ? 'twofa_enable'
-                    : action === 'DISABLE'
-                      ? 'twofa_disable'
-                      : 'twofa_verify';
-                publishVelionAudit({
-                  occurred_at: new Date().toISOString(),
-                  org_id: orgId,
-                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-                  user_id: user.id as string,
-                  plane: 'control',
-                  event: eventName,
-                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-                  subject: user.email as string,
-                  outcome: 'ok',
-                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-                  details: { method: ctx.body?.method || 'totp' },
-                  ip_address: ipAddress,
-                  user_agent: userAgent,
-                });
-              }
+              // Better Auth exposes no immutable mutation id for these hooks.
+              // Durable publication stays disabled until the mutation is written
+              // to an Auth-owned outbox; assigning a request-time id here would
+              // defeat JetStream retry de-duplication.
 
               // Ensure async compliance for middleware
               await Promise.resolve();
@@ -281,24 +285,9 @@ export function auditPlugin(): BetterAuthPlugin {
                 success: true,
               });
 
-              // Publish to velion.audit.v1.control.* only when org context is known.
-              const orgId = activeOrgFrom(ctx);
-              if (orgId) {
-                publishVelionAudit({
-                  occurred_at: new Date().toISOString(),
-                  org_id: orgId,
-                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-                  user_id: user.id as string,
-                  plane: 'control',
-                  event: 'session_revoke',
-                  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-                  subject: user.email as string,
-                  outcome: 'ok',
-                  details: { revoke_type: revokeType },
-                  ip_address: ipAddress,
-                  user_agent: userAgent,
-                });
-              }
+              // Better Auth's bulk/single revoke after-hooks expose no immutable
+              // mutation id. A durable Auth outbox must own this event before it
+              // can safely use the audit v2 de-duplication contract.
 
               // Ensure async compliance for middleware
               await Promise.resolve();

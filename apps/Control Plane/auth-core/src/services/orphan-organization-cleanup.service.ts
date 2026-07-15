@@ -4,7 +4,10 @@ import { sqlClient } from '../db';
 import {
   flushOrganizationProjectionOutbox,
   flushOrganizationMembershipOutbox,
+  flushOrganizationMembershipAuditOutbox,
+  flushOrganizationInvitationAuditOutbox,
   flushOrganizationDeletionOutbox,
+  recoverPendingMembershipAuditActors,
 } from '../auth/organization-events.plugin';
 
 export type OwnerlessOrganizationMode = 'off' | 'report';
@@ -35,6 +38,29 @@ export class OrphanOrganizationCleanupService {
       const memberships = await flushOrganizationMembershipOutbox();
       if (memberships > 0) {
         this.logger.log(`Reconciled ${memberships} organization membership(s)`);
+      }
+      const invitationsAudited = await flushOrganizationInvitationAuditOutbox();
+      if (invitationsAudited > 0) {
+        this.logger.log(
+          `Published ${invitationsAudited} organization invitation audit event(s)`,
+        );
+      }
+      const actorRecovery = await recoverPendingMembershipAuditActors();
+      if (actorRecovery.retried > 0) {
+        this.logger.warn(
+          `Deferred ${actorRecovery.retried} membership audit actor resolution(s) pending verified evidence`,
+        );
+      }
+      if (actorRecovery.deadLettered > 0) {
+        this.logger.error(
+          `Dead-lettered ${actorRecovery.deadLettered} membership audit actor resolution(s) as unresolved; no user actor was inferred`,
+        );
+      }
+      const membershipsAudited = await flushOrganizationMembershipAuditOutbox();
+      if (membershipsAudited > 0) {
+        this.logger.log(
+          `Published ${membershipsAudited} organization membership audit event(s)`,
+        );
       }
       const deletions = await flushOrganizationDeletionOutbox();
       if (deletions > 0) {

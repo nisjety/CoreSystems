@@ -7,9 +7,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::{
-    config::AppState, domains::chat::shared, envelope::error, middleware::AuthenticatedUser,
-};
+use crate::{config::AppState, domains::chat::shared, middleware::AuthenticatedUser};
 
 /// Forward multipart document upload to model-gateway verbatim, preserving content-type boundary.
 pub(super) async fn upload_chat_document(
@@ -50,9 +48,9 @@ pub(super) async fn upload_chat_document(
             let resp_body = upstream.json::<Value>().await.unwrap_or_else(|_| json!({}));
             (status, Json(resp_body)).into_response()
         }
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )
             .into_response(),
     }

@@ -15,10 +15,10 @@ import (
 
 // BetterAuthClient handles communication with Better Auth server
 type BetterAuthClient struct {
-	baseURL       string
-	httpClient    *http.Client
-	apiKey        string // For server-to-server authentication
-	sessionCookie string // Session cookie for authenticated requests
+	baseURL           string
+	httpClient        *http.Client
+	apiKey            string // For server-to-server authentication
+	serviceCredential AuthInternalClientCredential
 
 	// sessionCache is a short-lived in-process cache keyed by session token.
 	// Avoids repeated HTTP calls to auth-core for every request using the same
@@ -60,9 +60,9 @@ func NewBetterAuthClient(baseURL, apiKey string) *BetterAuthClient {
 	}
 }
 
-// SetServiceSecret sets the internal service secret for authenticated requests
-func (c *BetterAuthClient) SetServiceSecret(secret string) {
-	c.sessionCookie = secret
+// SetServicePrincipal sets the exact audience-bound Auth service identity.
+func (c *BetterAuthClient) SetServicePrincipal(credential AuthInternalClientCredential) {
+	c.serviceCredential = credential
 }
 
 // ========== Request/Response Types ==========
@@ -277,11 +277,12 @@ func (c *BetterAuthClient) doRequest(ctx context.Context, method, path string, b
 		req.Header.Set("x-api-key", c.apiKey)
 	}
 
-	// Add internal service secret header for authenticated requests
-	if c.sessionCookie != "" {
-		req.Header.Set("X-Internal-Service-Secret", c.sessionCookie)
+	// The oRPC adapter retains this transport header for compatibility, but the
+	// value resolves through Auth Core's audience/scope-bound principal registry.
+	if c.serviceCredential.Token != "" {
+		req.Header.Set("X-Internal-Service-Secret", c.serviceCredential.Token)
 	} else {
-		zlog.Warn().Msg("BetterAuthClient: no service secret — X-Internal-Service-Secret not set")
+		zlog.Warn().Msg("BetterAuthClient: no scoped service principal configured")
 	}
 
 	// Execute request

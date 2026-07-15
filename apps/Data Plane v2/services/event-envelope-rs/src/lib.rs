@@ -11,7 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -24,6 +24,7 @@ const CLOCK_SKEW_SECONDS: i64 = 30;
 pub struct EventClaims {
     pub iss: String,
     pub sub: String,
+    #[serde(deserialize_with = "deserialize_single_audience")]
     pub aud: String,
     pub principal_type: String,
     pub org_id: String,
@@ -37,6 +38,32 @@ pub struct EventClaims {
     pub iat: i64,
     pub nbf: i64,
     pub exp: i64,
+}
+
+fn deserialize_single_audience<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Audience {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    let audience = match Audience::deserialize(deserializer)? {
+        Audience::One(value) => value,
+        Audience::Many(values) if values.len() == 1 => values[0].clone(),
+        Audience::Many(_) => {
+            return Err(D::Error::custom(
+                "event audience must contain exactly one value",
+            ))
+        }
+    };
+    if audience.trim().is_empty() {
+        return Err(D::Error::custom("event audience is required"));
+    }
+    Ok(audience)
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +405,7 @@ fn subject_allowed_for_scope(scope: &str, subject: &str) -> bool {
                 | "dataplane.dlq.embedding-engine"
         ),
         "events:wiki:publish" => subject == "dataplane.wiki.version.published",
+        "events:retrieval:publish" => subject == "dataplane.cost.ledger",
         _ => false,
     }
 }

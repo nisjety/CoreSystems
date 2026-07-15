@@ -73,7 +73,10 @@ struct HookContext {
 }
 
 fn event_matches(rule_event: &str, event: HookEvent) -> bool {
-    let normalized = rule_event.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    let normalized = rule_event
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_");
     match event {
         HookEvent::PreToolUse => normalized == "pre_tool_use" || normalized == "pretooluse",
         HookEvent::PostToolUse => normalized == "post_tool_use" || normalized == "posttooluse",
@@ -148,7 +151,10 @@ mod tests {
 
     #[test]
     fn empty_context_allows() {
-        assert_eq!(evaluate("", HookEvent::PreToolUse, "shell"), HookDecision::Allow);
+        assert_eq!(
+            evaluate("", HookEvent::PreToolUse, "shell"),
+            HookDecision::Allow
+        );
     }
 
     #[test]
@@ -159,7 +165,10 @@ mod tests {
             HookDecision::Deny { .. }
         ));
         // PostToolUse is unaffected by the legacy pre-tool block.
-        assert_eq!(evaluate(ctx, HookEvent::PostToolUse, "shell"), HookDecision::Allow);
+        assert_eq!(
+            evaluate(ctx, HookEvent::PostToolUse, "shell"),
+            HookDecision::Allow
+        );
         assert!(is_blocked(ctx));
     }
 
@@ -168,10 +177,15 @@ mod tests {
         let ctx = r#"{"rules":[{"event":"pre_tool_use","tools":"shell","decision":"deny","reason":"no shell"}]}"#;
         assert_eq!(
             evaluate(ctx, HookEvent::PreToolUse, "shell"),
-            HookDecision::Deny { reason: "no shell".to_owned() }
+            HookDecision::Deny {
+                reason: "no shell".to_owned()
+            }
         );
         // A different tool is unaffected.
-        assert_eq!(evaluate(ctx, HookEvent::PreToolUse, "web_search"), HookDecision::Allow);
+        assert_eq!(
+            evaluate(ctx, HookEvent::PreToolUse, "web_search"),
+            HookDecision::Allow
+        );
     }
 
     #[test]
@@ -179,9 +193,14 @@ mod tests {
         let ctx = r#"{"rules":[{"event":"PreToolUse","tools":"mcp__*","decision":"ask","reason":"review MCP"}]}"#;
         assert_eq!(
             evaluate(ctx, HookEvent::PreToolUse, "mcp__github__create_issue"),
-            HookDecision::Ask { reason: "review MCP".to_owned() }
+            HookDecision::Ask {
+                reason: "review MCP".to_owned()
+            }
         );
-        assert_eq!(evaluate(ctx, HookEvent::PreToolUse, "shell"), HookDecision::Allow);
+        assert_eq!(
+            evaluate(ctx, HookEvent::PreToolUse, "shell"),
+            HookDecision::Allow
+        );
     }
 
     #[test]
@@ -191,7 +210,10 @@ mod tests {
             {"event":"pre_tool_use","tools":"*","decision":"deny","reason":"default deny"}
         ]}"#;
         // Explicit allow for web_search wins over the later wildcard deny.
-        assert_eq!(evaluate(ctx, HookEvent::PreToolUse, "web_search"), HookDecision::Allow);
+        assert_eq!(
+            evaluate(ctx, HookEvent::PreToolUse, "web_search"),
+            HookDecision::Allow
+        );
         // Everything else hits the wildcard deny.
         assert!(matches!(
             evaluate(ctx, HookEvent::PreToolUse, "shell"),
@@ -207,11 +229,17 @@ mod tests {
             HookDecision::Deny { .. }
         ));
         // Pre-tool phase is unaffected by a post-tool rule.
-        assert_eq!(evaluate(ctx, HookEvent::PreToolUse, "web_fetch"), HookDecision::Allow);
+        assert_eq!(
+            evaluate(ctx, HookEvent::PreToolUse, "web_fetch"),
+            HookDecision::Allow
+        );
     }
 
     #[test]
     fn malformed_context_fails_open() {
-        assert_eq!(evaluate("not json", HookEvent::PreToolUse, "shell"), HookDecision::Allow);
+        assert_eq!(
+            evaluate("not json", HookEvent::PreToolUse, "shell"),
+            HookDecision::Allow
+        );
     }
 }

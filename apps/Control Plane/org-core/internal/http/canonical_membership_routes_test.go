@@ -2,14 +2,10 @@ package http
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
 func TestLegacyDirectMembershipAndRoleMutationsAreNotMounted(t *testing.T) {
-	t.Setenv("INTERNAL_API_KEY", "test-internal-key")
-	t.Setenv("INTERNAL_SERVICE_SECRET", "")
 	server := NewServer(0, nil, nil, "", "")
 
 	tests := []struct {
@@ -27,29 +23,21 @@ func TestLegacyDirectMembershipAndRoleMutationsAreNotMounted(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
-			response := httptest.NewRecorder()
-			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
-			request.Header.Set("Content-Type", "application/json")
-			request.Header.Set("X-Internal-Api-Key", "test-internal-key")
-			request.Header.Set("X-User-Id", "ordinary-member")
-			server.router.ServeHTTP(response, request)
-			if response.Code != http.StatusNotFound {
-				t.Fatalf("status = %d; want 404 so Auth Core remains the only membership mutation authority", response.Code)
+			for _, route := range server.router.Routes() {
+				if route.Method == test.method && route.Path == test.path {
+					t.Fatalf("route %s %s is mounted; Auth Core must remain the only membership mutation authority", test.method, test.path)
+				}
 			}
 		})
 	}
 }
 
 func TestAuthProjectionMembershipRouteRemainsMounted(t *testing.T) {
-	t.Setenv("INTERNAL_API_KEY", "test-internal-key")
-	t.Setenv("INTERNAL_SERVICE_SECRET", "")
 	server := NewServer(0, nil, nil, "", "")
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/internal/orgs/org-1/members/reconcile", strings.NewReader(`{"userId":"user-1","role":"member","action":"upsert","revision":1}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Internal-Api-Key", "test-internal-key")
-	server.router.ServeHTTP(response, request)
-	if response.Code == http.StatusNotFound {
-		t.Fatal("canonical Auth projection route must remain mounted")
+	for _, route := range server.router.Routes() {
+		if route.Method == http.MethodPost && route.Path == "/internal/orgs/:orgId/members/reconcile" {
+			return
+		}
 	}
+	t.Fatal("canonical Auth projection route is not mounted")
 }

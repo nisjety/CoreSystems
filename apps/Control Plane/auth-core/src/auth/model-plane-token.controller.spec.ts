@@ -4,6 +4,7 @@ import {
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 
 const mockGetSession = jest.fn();
 jest.mock('./auth', () => ({
@@ -18,6 +19,14 @@ import { ModelPlaneTokenController } from './model-plane-token.controller';
 
 describe('ModelPlaneTokenController secure ZDR issuance', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
+  const issuedAt = '2026-07-15T00:00:00.000Z';
+  const mintedToken = [
+    'header',
+    Buffer.from(
+      JSON.stringify({ iat: Math.floor(Date.parse(issuedAt) / 1000) }),
+    ).toString('base64url'),
+    'signature',
+  ].join('.');
   const availableAudit = () => ({
     publishAuditDurable: jest
       .fn()
@@ -192,7 +201,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       },
     });
     const tokenService = {
-      issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+      issueModelPlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
     };
     const auditPublisher = availableAudit();
     const controller = new ModelPlaneTokenController(
@@ -210,7 +219,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
           reason: 'submit scheduled evaluation',
         },
       ),
-    ).resolves.toEqual({ token: 'bounded' });
+    ).resolves.toEqual({ token: mintedToken });
     expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith({
       userId: 'service:model-worker',
       orgId: 'org-a',
@@ -221,11 +230,16 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       zdr: true,
     });
     expect(auditPublisher.publishAuditDurable).toHaveBeenCalledWith(
-      'velion.audit.v1.control.model_service_token_issued',
+      'velion.audit.v2.control.auth-core.model_service_token_issued',
       expect.objectContaining({
+        occurred_at: issuedAt,
+        event_id: `model-token:${createHash('sha256')
+          .update(mintedToken)
+          .digest('hex')}`,
         org_id: 'org-a',
         actor_role: 'service',
         plane: 'control',
+        producer: 'auth-core',
         event: 'model_service_token_issued',
         subject: 'service:model-worker',
         resource_id: 'model-gateway',
@@ -251,7 +265,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     });
     const controller = new ModelPlaneTokenController(
       {
-        issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+        issueModelPlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
       } as never,
       {
         publishAuditDurable: jest
@@ -292,7 +306,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     );
     const controller = new ModelPlaneTokenController(
       {
-        issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+        issueModelPlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
       } as never,
       {
         publishAuditDurable: jest.fn().mockReturnValue(auditPending),
@@ -316,7 +330,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     expect(returned).toBe(false);
 
     acknowledge?.({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 43 });
-    await expect(issuance).resolves.toEqual({ token: 'bounded' });
+    await expect(issuance).resolves.toEqual({ token: mintedToken });
   });
 
   it('normalizes a thrown audit transport failure to service unavailable', async () => {
@@ -329,7 +343,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       },
     });
     const tokenService = {
-      issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'bounded' }),
+      issueModelPlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
     };
     const controller = new ModelPlaneTokenController(
       tokenService as never,

@@ -115,6 +115,10 @@ type PlaneJwtClaims = {
   principalType?: 'user' | 'service';
   serviceId?: string;
   reason?: string;
+  retentionPosture?: {
+    zdr: boolean;
+    authority: 'service-principal-policy';
+  };
 };
 
 type PlaneTokenBundle = {
@@ -420,14 +424,11 @@ export class ConvexTokenService {
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
-      // Control Plane has no authoritative org-level ZDR policy source yet.
-      // Historically this failed closed (unconditional zdr:true) for every Model
-      // token. Operator decision 2026-07-14: with no org ZDR policy and no
-      // ZDR-attested provider configured, forcing ZDR blocked ALL chat
-      // (zdr_inference_failed). Default is now relaxed but env-gated — set
-      // AUTH_CORE_DEFAULT_MODEL_ZDR=true to restore the fail-closed posture.
-      // Still not copied from caller input, so a client can never downgrade it.
-      zdr: process.env.AUTH_CORE_DEFAULT_MODEL_ZDR === 'true',
+      // Control Plane has no authoritative org-level ZDR policy source yet, so
+      // the secure MVP posture is fail-closed: every cross-plane token carries
+      // ZDR and callers cannot downgrade it. A non-ZDR provider must not become
+      // reachable by weakening an issuer claim.
+      zdr: true,
     };
 
     const encodedHeader = this.encodeSegment({
@@ -487,6 +488,11 @@ export class ConvexTokenService {
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
     }
+    const zdr =
+      principalType === 'service' &&
+      claims.retentionPosture?.authority === 'service-principal-policy'
+        ? claims.retentionPosture.zdr
+        : true;
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -504,17 +510,10 @@ export class ConvexTokenService {
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
-      // Control Plane does not yet have an authoritative per-org retention
-      // policy. ZDR remains issuer-selected for every delegated audience —
-      // caller input is deliberately ignored so a request cannot weaken the
-      // policy between services. The default is env-gated to match
-      // issueModelPlaneToken (operator decision 2026-07-14): with no org ZDR
-      // policy and no ZDR-attested provider, an unconditional zdr:true here
-      // makes session-core reject `session:write` (authorize_operation) and
-      // inference-core deny the provider call, blocking ALL chat. Set
-      // AUTH_CORE_DEFAULT_MODEL_ZDR=true to restore the fail-closed posture
-      // across both the model-gateway and delegated-audience mints at once.
-      zdr: process.env.AUTH_CORE_DEFAULT_MODEL_ZDR === 'true',
+      // Interactive and ordinary service tokens remain restrictive. A
+      // non-ZDR token can only arrive through the service-principal controller's
+      // deployment-owned persistent-data policy and its durable audit barrier.
+      zdr,
     };
 
     const encodedHeader = this.encodeSegment({
@@ -685,9 +684,37 @@ export class ConvexTokenService {
       process.env.CONVEX_AUTH_PUBLIC_KEY_PEM;
 
     if (privatePem && publicPem) {
+      const privateKey = createPrivateKey(privatePem);
+      const publicKey = createPublicKey(publicPem);
+      const privateModulusLength =
+        privateKey.asymmetricKeyDetails?.modulusLength;
+      const publicModulusLength = publicKey.asymmetricKeyDetails?.modulusLength;
+      if (
+        privateKey.asymmetricKeyType !== 'rsa' ||
+        publicKey.asymmetricKeyType !== 'rsa' ||
+        typeof privateModulusLength !== 'number' ||
+        typeof publicModulusLength !== 'number' ||
+        privateModulusLength < 2048 ||
+        publicModulusLength < 2048
+      ) {
+        throw new Error(
+          'Configured RS256 signing keys must be RSA keys with at least 2048 bits',
+        );
+      }
+      const derivedPublicKey = createPublicKey(privateKey).export({
+        type: 'spki',
+        format: 'der',
+      });
+      const configuredPublicKey = publicKey.export({
+        type: 'spki',
+        format: 'der',
+      });
+      if (!derivedPublicKey.equals(configuredPublicKey)) {
+        throw new Error('Configured RS256 signing keypair does not match');
+      }
       return {
-        privateKey: createPrivateKey(privatePem),
-        publicKey: createPublicKey(publicPem),
+        privateKey,
+        publicKey,
       };
     }
 
@@ -719,9 +746,8 @@ export class ConvexTokenService {
 
   /**
    * Read a PEM key from a mounted file path. Returns `undefined` when the env
-   * var is unset/empty or the file cannot be read, so the caller falls through
-   * to the inline-PEM / ephemeral branches without throwing on a misconfigured
-   * mount.
+   * var is unset/empty. An explicitly configured but unreadable mount is a
+   * release error and must never fall through to another key source.
    */
   private readKeyFile(path: string | undefined): string | undefined {
     const trimmed = (path ?? '').trim();
@@ -730,12 +756,12 @@ export class ConvexTokenService {
     }
     try {
       const pem = readFileSync(trimmed, 'utf8').trim();
-      return pem.length > 0 ? pem : undefined;
-    } catch (error) {
-      this.logger.warn(
-        `Failed to read key file at ${trimmed}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return undefined;
+      if (!pem) {
+        throw new Error('empty signing key file');
+      }
+      return pem;
+    } catch {
+      throw new Error('Configured signing key file is not readable');
     }
   }
 

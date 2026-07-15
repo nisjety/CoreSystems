@@ -11,8 +11,8 @@ import (
 // documents) depend on these exact names — a rename is a breaking change.
 func TestGDPRSubjectContract(t *testing.T) {
 	cases := map[string]string{
-		ErasureAuditSubject:      "velion.audit.v1.control.erasure",
-		DSARExportAuditSubject:   "velion.audit.v1.control.dsar_export",
+		ErasureAuditSubject:      "velion.audit.v2.control.user-core.erasure",
+		DSARExportAuditSubject:   "velion.audit.v2.control.user-core.dsar_export",
 		GDPRErasureFanoutSubject: "velion.gdpr.erasure.requested",
 	}
 	for got, want := range cases {
@@ -30,7 +30,7 @@ func TestGDPRSubjectContract(t *testing.T) {
 func TestDSARDisclosureVerbatim(t *testing.T) {
 	want := []string{
 		"Control Plane export: profile + org memberships + API key metadata.",
-		"Audit events for this subject are retained by audit-core (velion.audit.v1.control.*).",
+		"Audit events for this subject are retained by audit-core (velion.audit.v2.control.user-core.*).",
 		"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
 	}
 	if len(DSARControlPlaneDisclosure) != len(want) {
@@ -48,12 +48,12 @@ func TestDSARDisclosureVerbatim(t *testing.T) {
 // silently skipping auth-side data.
 func TestHardEraseRequiresAuthPool(t *testing.T) {
 	svc := &Service{} // authPool nil
-	if _, err := svc.HardEraseUser(t.Context(), "u_1"); err == nil {
+	if _, err := svc.HardEraseUser(t.Context(), "u_1", "u_1", "self", "org-1"); err == nil {
 		t.Error("HardEraseUser must error when authPool is nil")
 	} else if !strings.Contains(err.Error(), "AUTH_DATABASE_URL") {
 		t.Errorf("error should mention AUTH_DATABASE_URL, got %v", err)
 	}
-	if _, err := svc.AnonymizeUser(t.Context(), "u_1"); err == nil {
+	if _, err := svc.AnonymizeUser(t.Context(), "u_1", "u_1", "self", "org-1"); err == nil {
 		t.Error("AnonymizeUser must error when authPool is nil")
 	}
 }
@@ -61,10 +61,10 @@ func TestHardEraseRequiresAuthPool(t *testing.T) {
 // TestEraseRejectsEmptyID covers the input-validation guard.
 func TestEraseRejectsEmptyID(t *testing.T) {
 	svc := &Service{}
-	if _, err := svc.HardEraseUser(t.Context(), ""); err == nil {
+	if _, err := svc.HardEraseUser(t.Context(), "", "u_1", "self", "org-1"); err == nil {
 		t.Error("HardEraseUser must reject empty id")
 	}
-	if _, err := svc.AnonymizeUser(t.Context(), "  "); err == nil {
+	if _, err := svc.AnonymizeUser(t.Context(), "  ", "u_1", "self", "org-1"); err == nil {
 		t.Error("AnonymizeUser must reject blank id")
 	}
 	if _, err := svc.BuildDSARExport(t.Context(), ""); err == nil {

@@ -44,6 +44,24 @@ func (c *DurableConsumer) Bind(subject, durable string, handler nats.MsgHandler)
 	return nil
 }
 
+// BindProvisioned binds an exact deployment-owned push consumer without
+// granting this runtime any stream or consumer creation authority.
+func (c *DurableConsumer) BindProvisioned(subject, stream, durable string, handler nats.MsgHandler) error {
+	if c == nil || c.js == nil {
+		return nil
+	}
+	sub, err := c.js.QueueSubscribe(subject, durable, handler,
+		nats.Bind(stream, durable),
+		nats.ManualAck(),
+	)
+	if err != nil {
+		return err
+	}
+	c.subs = append(c.subs, sub)
+	log.Printf("[insight-core/consumers] %s bound to %s/%s", c.name, stream, durable)
+	return nil
+}
+
 // Stop drains every bound subscription.
 func (c *DurableConsumer) Stop() {
 	if c == nil {

@@ -12,6 +12,18 @@ use crate::{config::AppState, middleware::require_session};
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     // Public routes: no session required (create/validate sessions).
     let public_routes = Router::new()
+        // Better Auth sends provider round-trips to these public paths. They
+        // stay on the Velion origin and are forwarded by a bounded, opaque
+        // callback proxy; session middleware must not intercept them.
+        .route("/api/auth/callback/:provider", get(public::oauth_callback))
+        .route(
+            "/api/auth/sso/callback/:provider",
+            get(public::sso_oidc_callback),
+        )
+        .route(
+            "/api/auth/sso/saml2/callback/:provider",
+            get(public::sso_saml_callback_get).post(public::sso_saml_callback_post),
+        )
         .route("/api/v1/auth/sign-up", post(public::sign_up))
         .route("/api/v1/auth/sign-in", post(public::sign_in))
         .route("/api/v1/auth/2fa/verify", post(public::verify_two_factor))

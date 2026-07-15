@@ -42,6 +42,24 @@ test('Control session projection writes are internal-only', () => {
   assert.match(source, /upsertControlSessionInternal\s*=\s*internalMutation/);
 });
 
+test('Control organization and membership projection writes are internal-only', () => {
+  const natsSource = fs.readFileSync(path.join(convexDirectory, 'nats.ts'), 'utf8');
+  const organizationsSource = fs.readFileSync(
+    path.join(convexDirectory, 'organizations.ts'),
+    'utf8',
+  );
+  const usersSource = fs.readFileSync(path.join(convexDirectory, 'users.ts'), 'utf8');
+  assert.match(natsSource, /onOrganizationProjectionChanged\s*=\s*internalMutation/);
+  assert.match(
+    natsSource,
+    /onOrganizationMembershipProjectionChanged\s*=\s*internalMutation/,
+  );
+  assert.match(organizationsSource, /createFromExternal\s*=\s*internalMutation/);
+  assert.match(organizationsSource, /updateFromExternal\s*=\s*internalMutation/);
+  assert.match(organizationsSource, /remove\s*=\s*internalMutation/);
+  assert.match(usersSource, /createOrUpdateFromExternal\s*=\s*internalMutation/);
+});
+
 test('Control session reads verify active organization membership', () => {
   const source = fs.readFileSync(path.join(convexDirectory, 'controlSessions.ts'), 'utf8');
   assert.match(source, /const snapshot = await ctx\.db[\s\S]*requireViewerMembership\(ctx, snapshot\.externalOrgId\)/);

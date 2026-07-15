@@ -4,8 +4,6 @@ import (
 	"context"
 	"log"
 	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // Publisher handles publishing user service events to NATS
@@ -234,19 +232,4 @@ func getStatusChangeSubject(newStatus string) string {
 	default:
 		return SubjectUserUpdated
 	}
-}
-
-// EnsureUserEventsStream ensures the USER_EVENTS stream exists
-func (p *Publisher) EnsureUserEventsStream(ctx context.Context) error {
-	streamConfig := jetstream.StreamConfig{
-		Name:       StreamUserEvents,
-		Subjects:   []string{"user.>"},
-		Retention:  jetstream.LimitsPolicy,
-		MaxMsgs:    50000,
-		MaxAge:     30 * 24 * time.Hour, // 30 days
-		Storage:    jetstream.FileStorage,
-		Duplicates: 1 * time.Minute,
-	}
-
-	return p.client.CreateStream(ctx, streamConfig)
 }

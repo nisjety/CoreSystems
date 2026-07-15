@@ -55,7 +55,7 @@ func main() {
 
 	// Optional best-effort per-export + per-sync-run audit → NATS → audit-core.
 	if cfg.NATSURL != "" {
-		publisher, perr := audit.Connect(cfg.NATSURL, cfg.NATSToken, cfg.ServiceName)
+		publisher, perr := audit.Connect(cfg.NATSURL, cfg.NATSUser, cfg.NATSPassword, cfg.ServiceName, db.Pool)
 		if perr != nil {
 			log.Printf("leads-core: audit publisher disabled: %v", perr)
 		} else {

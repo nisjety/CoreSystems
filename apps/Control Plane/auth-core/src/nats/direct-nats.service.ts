@@ -7,11 +7,21 @@ import {
   type ConnectionOptions,
   type JetStreamClient,
 } from 'nats';
+import { selectNatsCredentials } from './nats-credentials';
+import {
+  authorizeAuthInternalService,
+  loadAuthInternalServiceCredentials,
+} from '../internal/internal-service-auth';
 
 type ServiceAuthenticationRequest = {
+  credentialId: string;
   serviceId: string;
   serviceSecret: string;
 };
+
+const AUTH_AUDIT_SUBJECT =
+  /^velion\.audit\.v2\.control\.auth-core\.([a-z0-9_]+)$/;
+const AUDIT_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
 function isServiceAuthenticationRequest(
   value: unknown,
@@ -19,6 +29,8 @@ function isServiceAuthenticationRequest(
   return (
     typeof value === 'object' &&
     value !== null &&
+    'credentialId' in value &&
+    typeof value.credentialId === 'string' &&
     'serviceId' in value &&
     typeof value.serviceId === 'string' &&
     'serviceSecret' in value &&
@@ -39,31 +51,21 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
   private nc: NatsConnection;
   private jetStream: JetStreamClient | null = null;
   private sc = StringCodec();
+  private readonly serviceCredentials = loadAuthInternalServiceCredentials();
 
   async onModuleInit() {
     try {
       console.log('🔌 Connecting to NATS for direct request-reply...');
-
-      const natsToken = process.env.NATS_TOKEN || process.env.NATS_AUTH_TOKEN;
-      const natsUser = process.env.NATS_USER;
-      const natsPass = process.env.NATS_PASS;
 
       const connectionOptions: ConnectionOptions = {
         servers: [process.env.NATS_URL || 'nats://nats:4222'],
         maxReconnectAttempts: -1,
         reconnectTimeWait: 2000,
         name: 'auth-service-direct',
+        inboxPrefix: '_INBOX.AUTH_CONTROL',
       };
 
-      // Token auth takes precedence (for production with aquatiq root container)
-      if (natsToken) {
-        connectionOptions.token = natsToken;
-        console.log('🔐 Using NATS token authentication');
-      } else if (natsUser && natsPass) {
-        connectionOptions.user = natsUser;
-        connectionOptions.pass = natsPass;
-        console.log('🔐 Using NATS user/password authentication');
-      }
+      Object.assign(connectionOptions, selectNatsCredentials(process.env));
 
       this.nc = await connect(connectionOptions);
       this.jetStream = this.nc.jetstream();
@@ -124,48 +126,20 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
       }
       console.log('🔑 Service ID:', data.serviceId);
 
-      // Validate service credentials
-      const validServiceIds = (
-        process.env.INTERNAL_SERVICE_IDS || 'admin-service,user-service'
-      ).split(',');
-      const expectedSecret =
-        process.env.INTERNAL_SERVICE_SECRET || process.env.INTERNAL_API_KEY;
+      const authorized = authorizeAuthInternalService(
+        {
+          credentialId: data.credentialId,
+          principal: data.serviceId,
+          token: data.serviceSecret,
+        },
+        this.serviceCredentials,
+        'nats:authenticate',
+      );
 
-      if (!expectedSecret) {
-        console.error('❌ INTERNAL_SERVICE_SECRET not configured');
-        const errorResponse = {
-          authenticated: false,
-          error: 'Service authentication not configured',
-        };
-        msg.respond(this.sc.encode(JSON.stringify(errorResponse)));
-        return;
-      }
-
-      if (!validServiceIds.includes(data.serviceId)) {
-        console.log('❌ Invalid service ID:', data.serviceId);
-        const errorResponse = {
-          authenticated: false,
-          error: 'Invalid service ID',
-        };
-        msg.respond(this.sc.encode(JSON.stringify(errorResponse)));
-        return;
-      }
-
-      if (data.serviceSecret !== expectedSecret) {
-        console.log('❌ Invalid service secret');
-        const errorResponse = {
-          authenticated: false,
-          error: 'Invalid service secret',
-        };
-        msg.respond(this.sc.encode(JSON.stringify(errorResponse)));
-        return;
-      }
-
-      // Success - send service secret for HTTP headers
       const response = {
         authenticated: true,
-        serviceSecret: expectedSecret,
-        serviceId: data.serviceId,
+        credentialId: authorized.credentialId,
+        serviceId: authorized.principal,
       };
 
       console.log('✅ Service authenticated successfully');
@@ -203,7 +177,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Fire-and-forget core publish for audit events (velion.audit.v1.control.*).
+   * Fire-and-forget core publish for non-durable local events.
    *
    * This is the LOCAL control-plane bus connection (NATS_URL → controlplane-nats),
    * where audit-core's primary core QueueSubscribe listens — NOT the shared
@@ -236,8 +210,29 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
     subject: string,
     payload: Record<string, unknown>,
   ): Promise<{ stream: string; seq: number }> {
-    if (!subject.startsWith('velion.audit.v1.')) {
+    const subjectMatch = AUTH_AUDIT_SUBJECT.exec(subject);
+    if (!subjectMatch) {
       throw new Error('Invalid durable audit subject');
+    }
+    const eventId = payload.event_id;
+    const occurredAt = payload.occurred_at;
+    const parsedOccurredAt =
+      typeof occurredAt === 'string' ? new Date(occurredAt) : null;
+    if (
+      typeof eventId !== 'string' ||
+      !AUDIT_EVENT_ID.test(eventId) ||
+      typeof occurredAt !== 'string' ||
+      occurredAt.length === 0 ||
+      parsedOccurredAt === null ||
+      Number.isNaN(parsedOccurredAt.getTime()) ||
+      parsedOccurredAt.toISOString() !== occurredAt ||
+      typeof payload.org_id !== 'string' ||
+      payload.org_id.trim().length === 0 ||
+      payload.plane !== 'control' ||
+      payload.producer !== 'auth-core' ||
+      payload.event !== subjectMatch[1]
+    ) {
+      throw new Error('Invalid durable audit identity');
     }
     if (!this.nc || this.nc.isClosed() || !this.jetStream) {
       throw new Error('Durable audit transport unavailable');
@@ -246,6 +241,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
     const ack = await this.jetStream.publish(
       subject,
       this.sc.encode(JSON.stringify(payload)),
+      { msgID: eventId },
     );
     if (!ack || !ack.stream || !Number.isSafeInteger(ack.seq) || ack.seq <= 0) {
       throw new Error('Invalid durable audit PubAck');

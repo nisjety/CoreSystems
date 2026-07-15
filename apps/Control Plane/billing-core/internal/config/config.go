@@ -9,39 +9,43 @@ import (
 )
 
 type Config struct {
-	HTTPPort                  int
-	GRPCPort                  int
-	DatabaseURL               string
-	NATSURL                   string
-	NATSToken                 string
-	NATSSharedURL             string
-	NATSSharedToken           string
-	ServiceName               string
-	Redis                     RedisConfig
-	PaymentProvider           string
-	StripeBaseURL             string
-	StripeAPIKey              string
-	HyperswitchBaseURL        string
-	HyperswitchAPIKey         string
-	HyperswitchPublishableKey string
-	HyperswitchProfileID      string
-	HyperswitchClientURL      string
-	HyperswitchBackendURL     string
-	NexiEnvironment           string
-	NexiBaseURL               string
-	NexiSecretKey             string
-	NexiCheckoutKey           string
-	NexiCheckoutJSURL         string
-	NexiWebhookURL            string
-	NexiWebhookAuthorization  string
-	NexiTermsURL              string
-	LagoBaseURL               string
-	LagoAPIKey                string
-	AdapterTimeoutSeconds     int
-	RetryPollSeconds          int
-	RetryBatchSize            int
-	RetryMaxAttempts          int
-	RetryBackoffSeconds       int
+	HTTPPort                     int
+	GRPCPort                     int
+	DatabaseURL                  string
+	NATSURL                      string
+	NATSToken                    string
+	NATSSharedURL                string
+	NATSSharedUser               string
+	NATSSharedPass               string
+	NATSSharedToken              string
+	NATSSharedAllowTokenFallback bool
+	ServiceName                  string
+	OrgCoreServiceToken          string
+	Redis                        RedisConfig
+	PaymentProvider              string
+	StripeBaseURL                string
+	StripeAPIKey                 string
+	HyperswitchBaseURL           string
+	HyperswitchAPIKey            string
+	HyperswitchPublishableKey    string
+	HyperswitchProfileID         string
+	HyperswitchClientURL         string
+	HyperswitchBackendURL        string
+	NexiEnvironment              string
+	NexiBaseURL                  string
+	NexiSecretKey                string
+	NexiCheckoutKey              string
+	NexiCheckoutJSURL            string
+	NexiWebhookURL               string
+	NexiWebhookAuthorization     string
+	NexiTermsURL                 string
+	LagoBaseURL                  string
+	LagoAPIKey                   string
+	AdapterTimeoutSeconds        int
+	RetryPollSeconds             int
+	RetryBatchSize               int
+	RetryMaxAttempts             int
+	RetryBackoffSeconds          int
 }
 
 type RedisConfig struct {
@@ -67,14 +71,18 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		HTTPPort:        getEnvInt("HTTP_PORT", 3014),
-		GRPCPort:        getEnvInt("GRPC_PORT", 50013),
-		DatabaseURL:     getEnv("DATABASE_URL", "postgres://aquatiq:CHANGE_ME_set_DATABASE_URL@controlplane-postgres:5432/postgres?sslmode=disable"),
-		NATSURL:         getEnv("NATS_URL", "nats://controlplane-nats:4222"),
-		NATSToken:       getEnv("NATS_TOKEN", getEnv("NATS_AUTH_TOKEN", "")),
-		NATSSharedURL:   getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
-		NATSSharedToken: getEnv("VELION_NATS_TOKEN", getEnv("NATS_SHARED_TOKEN", "")),
-		ServiceName:     getEnv("SERVICE_NAME", "billing-core"),
+		HTTPPort:                     getEnvInt("HTTP_PORT", 3014),
+		GRPCPort:                     getEnvInt("GRPC_PORT", 50013),
+		DatabaseURL:                  getEnv("DATABASE_URL", "postgres://aquatiq:CHANGE_ME_set_DATABASE_URL@controlplane-postgres:5432/postgres?sslmode=disable"),
+		NATSURL:                      getEnv("NATS_URL", "nats://controlplane-nats:4222"),
+		NATSToken:                    getEnv("NATS_TOKEN", getEnv("NATS_AUTH_TOKEN", "")),
+		NATSSharedURL:                getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
+		NATSSharedUser:               getEnv("NATS_SHARED_USER", ""),
+		NATSSharedPass:               getEnv("NATS_SHARED_PASSWORD", ""),
+		NATSSharedToken:              getEnv("NATS_SHARED_TOKEN", ""),
+		NATSSharedAllowTokenFallback: getEnvBool("NATS_SHARED_ALLOW_TOKEN_FALLBACK", false),
+		ServiceName:                  getEnv("SERVICE_NAME", "billing-core"),
+		OrgCoreServiceToken:          strings.TrimSpace(os.Getenv("ORG_CORE_SERVICE_TOKEN")),
 		Redis: RedisConfig{
 			Host:     getEnv("DRAGONFLY_HOST", getEnv("CACHE_HOST", getEnv("REDIS_HOST", "controlplane-dragonfly"))),
 			Port:     getEnv("DRAGONFLY_PORT", getEnv("CACHE_PORT", getEnv("REDIS_PORT", "6379"))),
@@ -117,8 +125,26 @@ func Load() (*Config, error) {
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
+	if !validDedicatedServiceToken(cfg.OrgCoreServiceToken) {
+		return nil, fmt.Errorf("ORG_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+	}
+	for _, legacyName := range []string{"INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"} {
+		if legacy := strings.TrimSpace(os.Getenv(legacyName)); legacy != "" && legacy == cfg.OrgCoreServiceToken {
+			return nil, fmt.Errorf("ORG_CORE_SERVICE_TOKEN must be distinct from legacy shared credentials")
+		}
+	}
 
 	return cfg, nil
+}
+
+func validDedicatedServiceToken(token string) bool {
+	token = strings.TrimSpace(token)
+	lower := strings.ToLower(token)
+	return len(token) >= 32 &&
+		!strings.HasPrefix(lower, "test") &&
+		!strings.HasPrefix(lower, "placeholder") &&
+		!strings.HasPrefix(lower, "change-me") &&
+		!strings.HasPrefix(lower, "replace-with")
 }
 
 func getEnv(key, fallback string) string {

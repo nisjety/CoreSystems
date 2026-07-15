@@ -86,6 +86,10 @@ func main() {
 	defer eventCleanup()
 	controlPlaneClient := &http.Client{Timeout: 5 * time.Second}
 	hotPathClient := &http.Client{Timeout: 2 * time.Second}
+	auditClient := controlplane.NewAuditClient(cfg, controlPlaneClient)
+	auditOutbox := api.NewAuditOutbox(repo, auditClient, &logger)
+	auditOutbox.Start()
+	defer auditOutbox.Close()
 	app := api.NewServer(api.ServerConfig{
 		Config:            cfg,
 		Repo:              repo,
@@ -93,7 +97,8 @@ func main() {
 		Auth:              controlplane.NewAuthClient(cfg, controlPlaneClient),
 		Org:               controlplane.NewOrgClient(cfg, controlPlaneClient),
 		Billing:           controlplane.NewBillingClient(cfg, controlPlaneClient),
-		Audit:             controlplane.NewAuditClient(cfg, controlPlaneClient),
+		Audit:             auditClient,
+		AuditOutbox:       auditOutbox,
 		Events:            publisher,
 		Discovery:         discovery.NewService(cfg, &http.Client{Timeout: 8 * time.Second}),
 		Actions:           actions.NewService(cfg, &http.Client{Timeout: 15 * time.Second}),

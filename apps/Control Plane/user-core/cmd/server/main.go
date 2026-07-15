@@ -30,18 +30,6 @@ import (
 func main() {
 	log.Println("Starting Aquatiq User Service...")
 
-	// G40 (velion-gap.md §8.29): refuse to start in production with a
-	// placeholder / missing / drifted internal API key. Mirrors velion's
-	// boot-time gate (§8.27).
-	if r := internalkey.AssertFromEnv("INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"); !r.OK {
-		msg := "[user-core startup] internal API key validation failed (" + string(r.Problem.Kind) + " on " + r.Problem.EnvVar + "): " + r.Problem.Detail
-		if internalkey.IsProduction() {
-			log.Fatalf("FATAL %s", msg)
-		}
-		log.Printf("WARN  %s — continuing because not production", msg)
-	} else {
-		log.Printf("[user-core startup] internal API key OK (%s)", r.Resolved)
-	}
 	if r := internalkey.AssertFromEnv("USER_CORE_MEMBERSHIP_SERVICE_TOKEN"); !r.OK {
 		msg := "[user-core startup] canonical membership credential validation failed (" + string(r.Problem.Kind) + " on " + r.Problem.EnvVar + "): " + r.Problem.Detail
 		if internalkey.IsProduction() {
@@ -60,6 +48,14 @@ func main() {
 	} else {
 		log.Printf("[user-core startup] required gateway service principal OK")
 	}
+	if err := grpc.ValidateGRPCServiceCredentialRegistry(); err != nil {
+		log.Fatalf("FATAL [user-core startup] gRPC service credential registry validation failed: %v", err)
+	}
+	authInternalCredential, err := clients.LoadAuthInternalClientCredential()
+	if err != nil {
+		log.Fatalf("FATAL [user-core startup] Auth internal client credential validation failed: %v", err)
+	}
+	log.Printf("[user-core startup] scoped Auth and gRPC service principals OK")
 
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6060
 	if os.Getenv("PPROF_ENABLED") == "true" {
@@ -125,18 +121,9 @@ func main() {
 
 	// Initialize NATS authentication client
 	log.Println("🔌 Initializing NATS authentication...")
-	serviceAuthSecret := strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET"))
-	if serviceAuthSecret == "" {
-		serviceAuthSecret = strings.TrimSpace(os.Getenv("INTERNAL_API_KEY"))
-	}
-	if serviceAuthSecret == "" {
-		log.Fatal("INTERNAL_SERVICE_SECRET or INTERNAL_API_KEY must be set")
-	}
-
 	natsAuthClient, err := clients.NewNatsAuthClient(
 		natsURL,
-		"user-service",
-		serviceAuthSecret,
+		authInternalCredential,
 	)
 	if err != nil {
 		log.Fatalf("❌ Failed to create NATS auth client: %v", err)
@@ -145,15 +132,16 @@ func main() {
 
 	// Authenticate via NATS to get service secret (with retries)
 	const maxAuthAttempts = 10
-	var serviceSecret string
+	serviceCredential := authInternalCredential
 	for attempt := 1; attempt <= maxAuthAttempts; attempt++ {
 		log.Printf("🔑 Authenticating user service with auth service via NATS... (attempt %d/%d)", attempt, maxAuthAttempts)
 		if err := natsAuthClient.Authenticate(ctx); err != nil {
 			if attempt == maxAuthAttempts {
-				// In development, continue without auth instead of crashing
+				if internalkey.IsProduction() {
+					log.Fatalf("FATAL scoped Auth service-principal verification failed after %d attempts: %v", attempt, err)
+				}
 				log.Printf("⚠️  Warning: Failed to authenticate user service after %d attempts: %v", attempt, err)
 				log.Println("ℹ️  Continuing without NATS authentication in development mode...")
-				serviceSecret = serviceAuthSecret // Fallback to resolved secret
 				break
 			}
 			wait := time.Duration(attempt*2) * time.Second
@@ -167,28 +155,23 @@ func main() {
 		} else {
 			log.Println("✅ User service authenticated successfully via NATS")
 			var err error
-			serviceSecret, err = natsAuthClient.GetServiceSecret()
+			serviceCredential, err = natsAuthClient.GetServiceCredential()
 			if err != nil {
-				log.Printf("⚠️  Warning: Failed to get service secret: %v", err)
-				serviceSecret = serviceAuthSecret // Fallback
+				log.Printf("⚠️  Warning: Failed to get verified service credential: %v", err)
+				serviceCredential = authInternalCredential
 			}
 			break
 		}
 	}
 
-	// Initialize Better Auth client with service secret
+	// Initialize Better Auth client with its scoped service principal.
 	betterAuthClient := clients.NewBetterAuthClient(
 		betterAuthURL,
 		"", // No API key needed, using service secret
 	)
 
-	// Use service secret (either from NATS or fallback)
-	if serviceSecret != "" {
-		betterAuthClient.SetServiceSecret(serviceSecret)
-		log.Println("✅ Better Auth client configured with service secret")
-	} else {
-		log.Println("⚠️  Better Auth client running without service secret (dev mode)")
-	}
+	betterAuthClient.SetServicePrincipal(serviceCredential)
+	log.Println("✅ Better Auth client configured with scoped service principal")
 
 	// Initialize user repository
 	userRepo := users.NewRepository(db)
@@ -219,8 +202,11 @@ func main() {
 	var sharedPublisher *nats.SharedPublisher
 
 	// Shared velion-nats should not depend on local controlplane-nats health.
-	if sp, spErr := nats.NewSharedPublisher(cfg.NATS.SharedURL, cfg.NATS.SharedToken, "user-core"); spErr != nil {
-		log.Printf("⚠️  Shared NATS unavailable: %v", spErr)
+	if sp, spErr := nats.NewSharedPublisher(cfg.NATS.SharedURL, nats.SharedCredentials{
+		User: cfg.NATS.SharedUser, Password: cfg.NATS.SharedPass,
+		Token: cfg.NATS.SharedToken, AllowTokenFallback: cfg.NATS.SharedAllowTokenFallback,
+	}, "user-core"); spErr != nil {
+		log.Fatalf("shared NATS unavailable: %v", spErr)
 	} else if sp != nil {
 		sharedPublisher = sp
 		defer sp.Close()
@@ -248,11 +234,6 @@ func main() {
 		// Initialize publisher
 		natsPublisher = nats.NewPublisher(natsClient)
 
-		// Ensure USER_EVENTS stream exists
-		if err := natsPublisher.EnsureUserEventsStream(ctx); err != nil {
-			log.Printf("⚠️  Warning: Failed to ensure USER_EVENTS stream: %v", err)
-		}
-
 		// G41 (Slice D / §8.30): construct the optional Graph-enrichment
 		// dependencies. `NewAuthCoreOAuthClient` returns nil when env is
 		// missing — the handler is nil-safe and gracefully falls back to
@@ -262,18 +243,16 @@ func main() {
 		// global Graph endpoint when unset.
 		authCoreOAuth := clients.NewAuthCoreOAuthClient(
 			os.Getenv("AUTH_SERVICE_URL"),
-			os.Getenv("INTERNAL_API_KEY"),
+			serviceCredential,
 		)
 		if authCoreOAuth == nil {
-			// Fall back to BETTER_AUTH_URL / INTERNAL_SERVICE_SECRET as the
-			// HTTP handler does (mirrors fetchAuthCoreTokenByRef precedence).
 			authCoreOAuth = clients.NewAuthCoreOAuthClient(
 				os.Getenv("BETTER_AUTH_URL"),
-				os.Getenv("INTERNAL_SERVICE_SECRET"),
+				serviceCredential,
 			)
 		}
 		if authCoreOAuth == nil {
-			log.Println("ℹ️  Graph enrichment disabled: auth-core OAuth client not configured (AUTH_SERVICE_URL + INTERNAL_API_KEY)")
+			log.Println("ℹ️  Graph enrichment disabled: auth-core OAuth client URL not configured")
 		} else {
 			log.Println("✅ Graph enrichment: auth-core OAuth client ready")
 		}
@@ -295,6 +274,8 @@ func main() {
 
 	// Initialize user service (Phase 4: After NATS setup so publisher is available)
 	userService := users.NewService(userRepo, betterAuthClient, natsPublisher, redisClient)
+	defer userService.CloseAuditOutbox()
+	defer userService.CloseErasureSaga()
 	go func() {
 		purge := func() {
 			purgeCtx, purgeCancel := context.WithTimeout(ctx, 30*time.Second)
@@ -357,6 +338,7 @@ func main() {
 	} else {
 		log.Println("⚠️  GDPR: AUTH_DATABASE_URL not set — hard-erase/anonymize routes will return 503 erasure_unavailable (never an opaque 500); DSAR export still works")
 	}
+	userService.StartErasureSaga()
 
 	// Create gRPC server with NATS publisher and Better Auth client
 	grpcServer := grpc.NewServer(cfg, db, natsPublisher, sharedPublisher, betterAuthClient)
@@ -371,6 +353,7 @@ func main() {
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, httpPort)
+	httpServer.SetAuthInternalCredential(serviceCredential)
 
 	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
 	// Control-Plane Prometheus (Phase 6 B13).

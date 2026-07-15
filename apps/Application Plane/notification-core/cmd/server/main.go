@@ -44,9 +44,8 @@ func main() {
 	}
 
 	natsClient, err := natsclient.NewClient(natsclient.Config{
-		URL:   cfg.NATSURL,
-		Token: cfg.NATSToken,
-		Name:  cfg.ServiceName,
+		URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		InboxPrefix: "_INBOX.APPLICATION_NOTIFICATION", Name: cfg.ServiceName,
 	})
 	if err != nil {
 		log.Fatalf("connect velion nats: %v", err)
@@ -61,9 +60,6 @@ func main() {
 	// ── Wiring ──────────────────────────────────────────────────────────
 	repository := notification.NewRepository(db.Pool)
 	publisher := eventing.NewPublisher(natsClient.JS)
-	if err := publisher.EnsureStream(); err != nil {
-		log.Printf("warning: ensure VELION_APPLICATION stream: %v", err)
-	}
 	runtime, err := runtimeclient.NewNovuAdapter(runtimeclient.Config{
 		Mode:      cfg.DeliveryMode,
 		SecretKey: cfg.NovuSecretKey,

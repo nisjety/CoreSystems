@@ -18,7 +18,6 @@ import (
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/convex"
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/database"
 	internalhttp "github.com/I-Dacosta/CoreSystem/apps/session-core/internal/http"
-	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/internalkey"
 	metricsserver "github.com/I-Dacosta/CoreSystem/apps/session-core/internal/metrics"
 	internalnats "github.com/I-Dacosta/CoreSystem/apps/session-core/internal/nats"
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/redis"
@@ -43,21 +42,8 @@ func main() {
 		Str("http_port", cfg.Server.HTTPPort).
 		Msg("Starting session-core")
 
-	// G40 (velion-gap.md §8.29): refuse to start in production with a
-	// placeholder / missing / drifted internal API key. Mirrors velion's
-	// boot-time gate (§8.27). Logged via zerolog so the line lands in the
-	// same JSON stream as the rest of startup.
-	if r := internalkey.AssertFromEnv("INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"); !r.OK {
-		evt := log.Warn()
-		if internalkey.IsProduction() {
-			evt = log.Fatal()
-		}
-		evt.
-			Str("env_var", r.Problem.EnvVar).
-			Str("kind", string(r.Problem.Kind)).
-			Msg("[session-core startup] internal API key validation failed: " + r.Problem.Detail)
-	} else {
-		log.Info().Str("env_var", r.Resolved).Msg("[session-core startup] internal API key OK")
+	if err := cfg.ValidateScopedServiceTokens(); err != nil {
+		log.Fatal().Err(err).Msg("[session-core startup] scoped upstream credential validation failed")
 	}
 
 	ctx := context.Background()
@@ -73,7 +59,11 @@ func main() {
 	}
 	log.Info().Msg("Database connected and migrations applied")
 
-	natsLocal, err := internalnats.NewClient(cfg.NATS.LocalURL, cfg.NATS.Token)
+	natsLocal, err := internalnats.NewClient(cfg.NATS.LocalURL, internalnats.Credentials{
+		User: cfg.NATS.LocalUser, Password: cfg.NATS.LocalPassword,
+		Token: cfg.NATS.Token, AllowTokenFallback: cfg.NATS.AllowTokenFallback,
+		InboxPrefix: "_INBOX.SESSION_CONTROL",
+	})
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to connect local NATS; proceeding without local pub/sub")
 	}
@@ -81,16 +71,17 @@ func main() {
 	var natsShared *internalnats.SharedPublisher
 	var natsSharedClient *internalnats.Client
 	if cfg.NATS.SharedURL != "" {
-		sharedClient, err := internalnats.NewClient(cfg.NATS.SharedURL, cfg.NATS.SharedToken)
+		sharedClient, err := internalnats.NewClient(cfg.NATS.SharedURL, internalnats.Credentials{
+			User: cfg.NATS.SharedUser, Password: cfg.NATS.SharedPassword,
+			Token: cfg.NATS.SharedToken, AllowTokenFallback: cfg.NATS.SharedAllowTokenFallback,
+			InboxPrefix: "_INBOX.SESSION_SHARED",
+		})
 		if err != nil {
 			log.Warn().Err(err).Msg("Failed to connect shared NATS; v2 routing disabled")
 		} else {
 			natsSharedClient = sharedClient
 			natsShared = internalnats.NewSharedPublisher(sharedClient)
-			if err := natsShared.EnsureStreams(ctx); err != nil {
-				log.Warn().Err(err).Msg("Failed to ensure JetStream streams")
-			}
-			log.Info().Msg("Shared NATS connected, JetStream streams ensured")
+			log.Info().Msg("Shared NATS connected (streams provisioned externally)")
 		}
 	}
 
@@ -112,7 +103,7 @@ func main() {
 	if convexClient != nil {
 		log.Info().Str("url", cfg.Convex.URL).Msg("Convex sync enabled")
 	}
-	orgClient := clients.NewOrgClient(cfg.OrgCore.URL)
+	orgClient := clients.NewOrgClient(cfg.OrgCore.URL, cfg.OrgCore.ServiceToken)
 	if orgClient != nil {
 		log.Info().Str("url", cfg.OrgCore.URL).Msg("Org membership validation enabled")
 	}
@@ -123,7 +114,7 @@ func main() {
 	if userClient != nil {
 		log.Info().Str("url", cfg.UserCore.URL).Msg("user-core client enabled for Control Session aggregator")
 	}
-	billingClient := clients.NewBillingClient(cfg.BillingCore.URL, cfg.Auth.InternalAPIKey)
+	billingClient := clients.NewBillingClient(cfg.BillingCore.URL, cfg.BillingCore.ServiceToken)
 	if billingClient != nil {
 		log.Info().Str("url", cfg.BillingCore.URL).Msg("billing-core client enabled for Control Session aggregator")
 	}

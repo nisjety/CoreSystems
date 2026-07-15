@@ -19,6 +19,12 @@ type MemoryRepository struct {
 	tokenLeases                 map[string]TokenLease
 	scimTokens                  map[string]memorySCIMToken
 	audit                       []AuditEvent
+	auditAttempts               map[string]int
+	auditPublished              map[string]bool
+	auditTerminal               map[string]bool
+	auditTerminalAt             map[string]time.Time
+	auditNextAttempt            map[string]time.Time
+	auditProcessing             map[string]time.Time
 	actionReceipts              map[string]ActionReceipt
 	actionAuthorizationReceipts map[string]string
 
@@ -42,6 +48,12 @@ func NewMemoryRepository() *MemoryRepository {
 		tokenLeases:                 map[string]TokenLease{},
 		scimTokens:                  map[string]memorySCIMToken{},
 		audit:                       []AuditEvent{},
+		auditAttempts:               map[string]int{},
+		auditPublished:              map[string]bool{},
+		auditTerminal:               map[string]bool{},
+		auditTerminalAt:             map[string]time.Time{},
+		auditNextAttempt:            map[string]time.Time{},
+		auditProcessing:             map[string]time.Time{},
 		actionReceipts:              map[string]ActionReceipt{},
 		actionAuthorizationReceipts: map[string]string{},
 
@@ -483,8 +495,107 @@ func (r *MemoryRepository) RevokeSCIMToken(_ context.Context, organizationID, id
 func (r *MemoryRepository) InsertAuditEvent(_ context.Context, event AuditEvent) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, existing := range r.audit {
+		if existing.ID == event.ID {
+			return nil
+		}
+	}
 	r.audit = append(r.audit, event)
+	r.auditNextAttempt[event.ID] = time.Now().UTC()
 	return nil
+}
+
+func (r *MemoryRepository) ClaimAuditEvent(_ context.Context) (AuditEvent, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+	for _, event := range r.audit {
+		if r.auditPublished[event.ID] || r.auditTerminal[event.ID] || r.auditNextAttempt[event.ID].After(now) {
+			continue
+		}
+		if processing := r.auditProcessing[event.ID]; !processing.IsZero() && processing.After(now.Add(-time.Minute)) {
+			continue
+		}
+		r.auditAttempts[event.ID]++
+		r.auditProcessing[event.ID] = now
+		event.Attempts = r.auditAttempts[event.ID]
+		return event, true, nil
+	}
+	return AuditEvent{}, false, nil
+}
+
+func (r *MemoryRepository) CompleteAuditEvent(_ context.Context, eventID string, attempts int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.auditAttempts[eventID] != attempts || r.auditPublished[eventID] {
+		return ErrConflict
+	}
+	r.auditPublished[eventID] = true
+	delete(r.auditProcessing, eventID)
+	return nil
+}
+
+func (r *MemoryRepository) FailAuditEvent(_ context.Context, eventID string, attempts int, nextAttempt time.Time, _ string, terminal bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.auditAttempts[eventID] != attempts || r.auditPublished[eventID] {
+		return ErrConflict
+	}
+	delete(r.auditProcessing, eventID)
+	r.auditNextAttempt[eventID] = nextAttempt
+	r.auditTerminal[eventID] = terminal
+	if terminal {
+		r.auditTerminalAt[eventID] = time.Now().UTC()
+	}
+	return nil
+}
+
+func (r *MemoryRepository) AuditOutboxStats(_ context.Context) (AuditOutboxStats, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	now := time.Now().UTC()
+	stats := AuditOutboxStats{}
+	for _, event := range r.audit {
+		if r.auditPublished[event.ID] {
+			continue
+		}
+		if r.auditTerminal[event.ID] {
+			stats.Terminal++
+			terminalAt := r.auditTerminalAt[event.ID]
+			if terminalAt.IsZero() {
+				terminalAt = event.CreatedAt
+			}
+			age := now.Sub(terminalAt)
+			if age > stats.OldestTerminalAge {
+				stats.OldestTerminalAge = age
+			}
+			continue
+		}
+		stats.Pending++
+		age := now.Sub(event.CreatedAt)
+		if age > stats.OldestPendingAge {
+			stats.OldestPendingAge = age
+		}
+	}
+	return stats, nil
+}
+
+func (r *MemoryRepository) RequeueTerminalAuditEvents(_ context.Context, eventIDs []string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	requeued := 0
+	for _, eventID := range eventIDs {
+		if !r.auditTerminal[eventID] || r.auditPublished[eventID] {
+			continue
+		}
+		r.auditTerminal[eventID] = false
+		delete(r.auditTerminalAt, eventID)
+		delete(r.auditProcessing, eventID)
+		r.auditAttempts[eventID] = 0
+		r.auditNextAttempt[eventID] = time.Now().UTC()
+		requeued++
+	}
+	return requeued, nil
 }
 
 func actionReceiptKey(organizationID, idempotencyKey string) string {

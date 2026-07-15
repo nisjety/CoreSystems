@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 	"github.com/gin-gonic/gin"
@@ -32,10 +33,17 @@ type Server struct {
 	internalKey                string
 	authMembershipService      string
 	authMembershipToken        string
+	authInternalCredential     clients.AuthInternalClientCredential
 	// publisher emits aqencia.controlplane.acl.resource_grants.changed on
 	// grant/revoke so the Data Plane retrieval visibility cache evicts the
 	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
 	publisher *nats.SharedPublisher
+}
+
+// SetAuthInternalCredential wires the validated, deployment-owned User Core
+// identity used only for Auth Core internal OAuth contracts.
+func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClientCredential) {
+	s.authInternalCredential = credential
 }
 
 // NewServer creates a new HTTP server. aclRepo backs the per-user authz facade
@@ -103,6 +111,9 @@ func (s *Server) setupRoutes() {
 		// User profile endpoints (frontend-facing)
 		users := v1.Group("/users")
 		{
+			// Operator-only delivery recovery. Static route is registered before
+			// the :id catch-all and never performs a destructive purge.
+			users.POST("/gdpr/operator/requeue", s.requeueGDPRDeliveries)
 			// GET /api/v1/users/me - Get current user profile
 			users.GET("/me", s.getCurrentUserProfile)
 
@@ -311,10 +322,23 @@ func (s *Server) healthCheck(c *gin.Context) {
 		})
 		return
 	}
+	delivery, err := s.userService.GDPRDeliveryHealth(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("health: GDPR delivery ledger unavailable")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status": "unhealthy", "service": "user-service", "error": "delivery ledger unavailable",
+		})
+		return
+	}
+	status := "healthy"
+	if delivery.Degraded {
+		status = "degraded"
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"service":   "user-service",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"status":        status,
+		"service":       "user-service",
+		"timestamp":     time.Now().UTC().Format(time.RFC3339),
+		"gdpr_delivery": delivery,
 	})
 }
 

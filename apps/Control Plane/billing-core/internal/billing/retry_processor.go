@@ -86,6 +86,9 @@ func (s *Service) processRetryJob(ctx context.Context, job RetryJob, cfg RetryPr
 func (s *Service) executeRetryJob(ctx context.Context, job RetryJob) error {
 	switch job.Kind {
 	case RetryJobKindLagoUsage:
+		if s.invoiceAdapter == nil {
+			return fmt.Errorf("invoice adapter is not configured")
+		}
 		usage, err := usageFromPayload(job.Payload)
 		if err != nil {
 			return err
@@ -145,6 +148,9 @@ func usageFromPayload(payload map[string]interface{}) (UsageEvent, error) {
 		return UsageEvent{}, fmt.Errorf("retry payload missing quantity")
 	}
 	eventID, _ := payload["event_id"].(string)
+	if err := ValidateUsageEventID(eventID); err != nil {
+		return UsageEvent{}, fmt.Errorf("retry payload invalid event_id: %w", err)
+	}
 	source, _ := payload["source"].(string)
 	if source == "" {
 		source = "unknown"
@@ -152,7 +158,7 @@ func usageFromPayload(payload map[string]interface{}) (UsageEvent, error) {
 	occurredRaw, _ := payload["occurred_at"].(string)
 	occurredAt, err := time.Parse(time.RFC3339, occurredRaw)
 	if err != nil {
-		occurredAt = time.Now().UTC()
+		return UsageEvent{}, fmt.Errorf("retry payload invalid occurred_at")
 	}
 
 	metadata := map[string]interface{}{}

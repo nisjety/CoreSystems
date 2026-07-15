@@ -87,9 +87,9 @@ func mountProtectedRoutes(r chi.Router, authMiddleware func(http.Handler) http.H
 	r.Route("/v1/wiki", func(r chi.Router) {
 		r.Use(authMiddleware)
 		read := r.With(authctx.RequireScope("wiki.read"))
-		write := r.With(authctx.RequireScope("wiki.write"))
-		approve := r.With(authctx.RequireScope("wiki.approve"))
-		maintenance := r.With(authctx.RequireScope("wiki.maintenance.write"))
+		write := r.With(authctx.RequireScope("wiki.write"), authctx.RequireDurableWritesAllowed)
+		approve := r.With(authctx.RequireScope("wiki.approve"), authctx.RequireDurableWritesAllowed)
+		maintenance := r.With(authctx.RequireScope("wiki.maintenance.write"), authctx.RequireDurableWritesAllowed)
 		read.Method(http.MethodGet, "/operating-map", h.getOperatingMap)
 		write.Method(http.MethodPost, "/operating-map/proposals", h.submitOperatingMapProposal)
 		approve.Method(http.MethodPost, "/operating-map/proposals/{proposalID}/review", h.reviewOperatingMapProposal)

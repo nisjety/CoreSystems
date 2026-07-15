@@ -23,7 +23,7 @@ pub(super) async fn get_org(
         Method::GET,
         &url,
         None,
-        None,
+        Some(&id),
         Some(&actor_for(&user)),
         None,
     )
@@ -48,7 +48,7 @@ pub(super) async fn get_org_entitlements(
         Method::GET,
         &url,
         None,
-        None,
+        Some(&id),
         Some(&actor_for(&user)),
         None,
     )

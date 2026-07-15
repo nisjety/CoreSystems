@@ -169,7 +169,9 @@ export type LiveKnowledgePayload = {
   dataPlane: {
     available: boolean
     documentCount: number
+    documentsTruncated?: boolean
     indexedCount: number
+    loadedDocumentCount?: number
   }
   diagnostics?: LiveKnowledgeDiagnostics | null
   files: LiveKnowledgeFile[]

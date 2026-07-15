@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -59,11 +58,14 @@ func main() {
 
 	natsOpts := []nats.Option{
 		nats.Name("audit-core"),
+		nats.CustomInboxPrefix(auditInboxPrefix("control")),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
 	}
-	if cfg.NATSToken != "" {
+	if cfg.NATSUser != "" {
+		natsOpts = append(natsOpts, nats.UserInfo(cfg.NATSUser, cfg.NATSPassword))
+	} else if cfg.NATSToken != "" {
 		natsOpts = append(natsOpts, nats.Token(cfg.NATSToken))
 	}
 	nc, err := nats.Connect(cfg.NATSURL, natsOpts...)
@@ -77,37 +79,15 @@ func main() {
 		log.Fatal().Err(err).Msg("subscriber start failed")
 	}
 
-	// Cross-plane audit aggregation: each plane runs its own NATS and
-	// audit-core is the single sink. The primary connection above is the
-	// control-plane bus (NATS_URL); EXTRA_NATS_URLS lists other plane buses
-	// (e.g. the model-plane NATS at model-plane-nats-1:4222, where session-core
-	// publishes velion.audit.v1.model.tool_action). Each extra bus is
-	// best-effort — an unreachable or token-less plane bus must never take down
-	// audit ingestion for the others, so failures are logged, not fatal.
-	extraConnections := make([]*nats.Conn, len(cfg.ExtraNATSURLs))
-	extraSubscribersReady := make([]bool, len(cfg.ExtraNATSURLs))
-	for index, url := range cfg.ExtraNATSURLs {
-		bus := fmt.Sprintf("extra-%d", index+1)
-		extraNC, err := nats.Connect(
-			url,
-			nats.Name("audit-core-aggregator-"+bus),
-			nats.RetryOnFailedConnect(true),
-			nats.MaxReconnects(-1),
-			nats.ReconnectWait(2*time.Second),
-		)
-		if err != nil {
-			log.Warn().Err(err).Str("bus", bus).Msg("extra nats bus connect failed")
-			continue
-		}
-		extraConnections[index] = extraNC
-		conn := extraNC
-		defer func() { _ = conn.Drain() }()
-		if err := subscriber.New(conn, st, bus).Start(ctx); err != nil {
-			log.Warn().Err(err).Str("bus", bus).Msg("extra nats subscriber start failed")
-			continue
-		}
-		extraSubscribersReady[index] = true
-		log.Info().Str("bus", bus).Msg("audit-core configured extra plane bus")
+	// Cross-plane buses are explicitly named and independently credentialed.
+	// Their supervisors tolerate initial unavailability and reconnect without
+	// changing durable consumer or inbox identities; readiness remains degraded
+	// until both durable consumers on every configured bus are observable.
+	extraBuses := make([]*managedExtraNATSBus, 0, len(cfg.ExtraNATSBuses))
+	for _, bus := range cfg.ExtraNATSBuses {
+		managed := startManagedExtraNATSBus(ctx, bus, st)
+		extraBuses = append(extraBuses, managed)
+		defer managed.Close()
 	}
 
 	// Retention: enforce the AUDIT_RETENTION_DAYS window the velion settings
@@ -116,28 +96,28 @@ func main() {
 	go runRetention(ctx, st, cfg.RetentionDays)
 
 	r := chi.NewRouter()
-	api.New(st, cfg.InternalAPIKey, func(requestContext context.Context) api.Readiness {
+	auditAPI, err := api.New(st, cfg.ServiceCredentials, func(requestContext context.Context) api.Readiness {
 		checkContext, checkCancel := context.WithTimeout(requestContext, 2*time.Second)
 		defer checkCancel()
 		databaseConnected := pool.Ping(checkContext) == nil
 		primaryConnected := nc.IsConnected()
 		metricsserver.SetNATSConnected("primary", primaryConnected)
-		extraConnected := make([]bool, len(cfg.ExtraNATSURLs))
-		for index := range extraConnected {
-			connected := extraConnections[index] != nil &&
-				extraConnections[index].IsConnected() &&
-				extraSubscribersReady[index]
-			extraConnected[index] = connected
-			metricsserver.SetNATSConnected(fmt.Sprintf("extra-%d", index+1), connected)
+		buses := make([]api.NATSBusReadiness, 0, len(extraBuses)+1)
+		buses = append(buses, subscriberReadiness("primary", primaryConnected, true, sub))
+		for _, bus := range extraBuses {
+			buses = append(buses, bus.Readiness())
 		}
 		return api.Readiness{
-			DatabaseConnected:    databaseConnected,
-			PrimaryNATSConnected: primaryConnected,
-			ExtraNATSConnected:   extraConnected,
-			DeliveryMode:         "jetstream_durable",
-			LagMetric:            "event_age_seconds",
+			DatabaseConnected: databaseConnected,
+			NATSBuses:         buses,
+			DeliveryMode:      "jetstream_durable",
+			LagMetric:         "time() - audit_core_event_last_processed_timestamp_seconds",
 		}
-	}).Mount(r)
+	})
+	if err != nil {
+		log.Fatal().Err(err).Msg("service credential configuration invalid")
+	}
+	auditAPI.Mount(r)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort)
 	srv := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 5 * time.Second}
@@ -207,14 +187,16 @@ func runRetention(ctx context.Context, st *store.Store, retentionDays int) {
 }
 
 type config struct {
-	DatabaseURL    string
-	NATSURL        string
-	NATSToken      string
-	HTTPPort       int
-	MetricsPort    int
-	InternalAPIKey string
-	RetentionDays  int
-	ExtraNATSURLs  []string
+	DatabaseURL        string
+	NATSURL            string
+	NATSUser           string
+	NATSPassword       string
+	NATSToken          string
+	HTTPPort           int
+	MetricsPort        int
+	ServiceCredentials string
+	RetentionDays      int
+	ExtraNATSBuses     []extraNATSBus
 }
 
 func loadConfig() (*config, error) {
@@ -224,7 +206,20 @@ func loadConfig() (*config, error) {
 	}
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
-		natsURL = "nats://velion-nats:4222"
+		return nil, fmt.Errorf("NATS_URL is required")
+	}
+	if err := validateNATSURL(natsURL); err != nil {
+		return nil, fmt.Errorf("NATS_URL: %w", err)
+	}
+	allowTokenFallback := os.Getenv("AUDIT_ALLOW_NATS_TOKEN_FALLBACK") == "1"
+	credential, err := selectNATSCredential(
+		os.Getenv("NATS_USER"),
+		os.Getenv("NATS_PASSWORD"),
+		os.Getenv("NATS_TOKEN"),
+		allowTokenFallback,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("primary NATS credential: %w", err)
 	}
 	port := 8187 // default listen port; override with HTTP_PORT
 	if v := os.Getenv("HTTP_PORT"); v != "" {
@@ -240,12 +235,9 @@ func loadConfig() (*config, error) {
 			metricsPort = p
 		}
 	}
-	internalAPIKey := os.Getenv("INTERNAL_API_KEY")
-	if internalAPIKey == "" {
-		internalAPIKey = os.Getenv("INTERNAL_SERVICE_SECRET")
-	}
-	if internalAPIKey == "" {
-		return nil, fmt.Errorf("INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET is required")
+	serviceCredentials := os.Getenv("AUDIT_CORE_SERVICE_CREDENTIALS")
+	if err := api.ValidateRequiredServiceCredentialRegistry(serviceCredentials); err != nil {
+		return nil, fmt.Errorf("service credential registry: %w", err)
 	}
 
 	// Retention window for both append-only tables. Defaults to 365 days to
@@ -262,25 +254,24 @@ func loadConfig() (*config, error) {
 		}
 	}
 
-	// Extra plane NATS buses to aggregate audit/usage events from (comma-
-	// separated). audit-core is the single sink; each plane runs its own NATS,
-	// so list the other plane buses here (e.g. nats://model-plane-nats-1:4222,
-	// the model-plane bus where session-core publishes tool_action events).
-	var extraNATS []string
-	for _, u := range strings.Split(os.Getenv("EXTRA_NATS_URLS"), ",") {
-		if u = strings.TrimSpace(u); u != "" {
-			extraNATS = append(extraNATS, u)
-		}
+	if os.Getenv("EXTRA_NATS_URLS") != "" {
+		return nil, fmt.Errorf("EXTRA_NATS_URLS is unsupported; configure named AUDIT_EXTRA_NATS_BUSES")
+	}
+	extraNATSBuses, err := parseExtraNATSBuses(os.Getenv("AUDIT_EXTRA_NATS_BUSES"), allowTokenFallback)
+	if err != nil {
+		return nil, err
 	}
 
 	return &config{
-		DatabaseURL:    dsn,
-		NATSURL:        natsURL,
-		NATSToken:      os.Getenv("NATS_TOKEN"),
-		HTTPPort:       port,
-		MetricsPort:    metricsPort,
-		InternalAPIKey: internalAPIKey,
-		RetentionDays:  retentionDays,
-		ExtraNATSURLs:  extraNATS,
+		DatabaseURL:        dsn,
+		NATSURL:            natsURL,
+		NATSUser:           credential.User,
+		NATSPassword:       credential.Password,
+		NATSToken:          credential.Token,
+		HTTPPort:           port,
+		MetricsPort:        metricsPort,
+		ServiceCredentials: serviceCredentials,
+		RetentionDays:      retentionDays,
+		ExtraNATSBuses:     extraNATSBuses,
 	}, nil
 }

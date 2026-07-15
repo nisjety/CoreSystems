@@ -55,7 +55,7 @@ impl JwtVerifier {
         }
 
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub"]);
+        validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub", "zdr"]);
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.audience.as_str()]);
         validation.validate_exp = true;
@@ -78,6 +78,7 @@ impl JwtVerifier {
             org_id,
             auth_method: AuthMethod::Jwt,
             scopes: claims.scopes,
+            zdr: claims.zdr,
             acl: EffectiveAcl::default(),
             request_id: uuid::Uuid::new_v4().to_string(),
             verified_bearer: Some(token.to_owned()),
@@ -174,6 +175,9 @@ where
 
     let decision = policy.resolve(user_id, &ctx.org_id).await;
     if !decision.is_member || !decision.acl.can_read {
+        if decision.cause == "denied:control_plane_unavailable" {
+            return Err(Status::unavailable("Control authorization unavailable"));
+        }
         return Err(Status::permission_denied("Control authorization denied"));
     }
     ctx.acl = decision.acl;
@@ -250,11 +254,12 @@ mod tests {
         sub: &'a str,
         org_id: &'a str,
         scopes: Vec<&'a str>,
+        zdr: bool,
         exp: usize,
         nbf: usize,
     }
 
-    fn token(org_id: &str) -> String {
+    fn token(org_id: &str, zdr: bool) -> String {
         let now = chrono::Utc::now().timestamp() as usize;
         encode(
             &Header::new(Algorithm::RS256),
@@ -264,12 +269,53 @@ mod tests {
                 sub: "user-1",
                 org_id,
                 scopes: vec![],
+                zdr,
                 exp: now + 300,
                 nbf: now.saturating_sub(5),
             },
             &keys().encoding,
         )
         .expect("token")
+    }
+
+    fn token_with_raw_zdr(zdr: Option<serde_json::Value>) -> String {
+        let now = chrono::Utc::now().timestamp() as usize;
+        let mut claims = serde_json::json!({
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sub": "user-1",
+            "org_id": "org-a",
+            "scopes": [],
+            "exp": now + 300,
+            "nbf": now.saturating_sub(5),
+        });
+        if let Some(value) = zdr {
+            claims["zdr"] = value;
+        }
+        encode(&Header::new(Algorithm::RS256), &claims, &keys().encoding).expect("token")
+    }
+
+    #[test]
+    fn grpc_verifier_requires_a_boolean_signed_zdr_claim() {
+        for invalid_zdr in [
+            None,
+            Some(serde_json::json!("false")),
+            Some(serde_json::json!(0)),
+        ] {
+            assert!(
+                keys()
+                    .verifier
+                    .verify(&token_with_raw_zdr(invalid_zdr))
+                    .is_err(),
+                "missing or non-boolean signed ZDR posture must be rejected"
+            );
+        }
+
+        let ctx = keys()
+            .verifier
+            .verify(&token("org-a", true))
+            .expect("signed boolean posture is valid");
+        assert!(ctx.zdr, "verified posture must reach the gRPC boundary");
     }
 
     #[test]
@@ -315,7 +361,7 @@ mod tests {
         let mut request = tonic::Request::new(());
         request.metadata_mut().insert(
             "authorization",
-            format!("Bearer {}", token("org-a"))
+            format!("Bearer {}", token("org-a", false))
                 .parse()
                 .expect("metadata"),
         );
@@ -330,6 +376,8 @@ mod tests {
     }
 
     struct Policy(bool);
+
+    struct UnavailablePolicy;
 
     #[async_trait::async_trait]
     impl PolicyClient for Policy {
@@ -349,13 +397,20 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl PolicyClient for UnavailablePolicy {
+        async fn resolve(&self, _user_id: &str, _org_id: &str) -> PolicyDecision {
+            PolicyDecision::deny("denied:control_plane_unavailable")
+        }
+    }
+
     #[tokio::test]
     async fn authorizer_pins_org_user_and_fails_closed_on_policy() {
         let mut interceptor = JwtInterceptor::new(Arc::new(keys().verifier.clone()));
         let mut request = tonic::Request::new(());
         request.metadata_mut().insert(
             "authorization",
-            format!("Bearer {}", token("org-a"))
+            format!("Bearer {}", token("org-a", false))
                 .parse()
                 .expect("metadata"),
         );
@@ -379,5 +434,11 @@ mod tests {
             .err()
             .expect("policy deny closed");
         assert_eq!(policy_denial.code(), tonic::Code::PermissionDenied);
+
+        let dependency_failure = authorize_request(&UnavailablePolicy, &request, "org-a", None)
+            .await
+            .err()
+            .expect("Control dependency failure denied closed");
+        assert_eq!(dependency_failure.code(), tonic::Code::Unavailable);
     }
 }

@@ -15,7 +15,7 @@ type Client struct {
 	js   jetstream.JetStream
 }
 
-func NewClient(url, token string) (*Client, error) {
+func NewClient(url string, credentials Credentials) (*Client, error) {
 	opts := []nats.Option{
 		nats.Name("session-core"),
 		nats.MaxReconnects(-1),
@@ -29,10 +29,15 @@ func NewClient(url, token string) (*Client, error) {
 			log.Info().Msg("NATS reconnected")
 		}),
 	}
-
-	if token != "" {
-		opts = append(opts, nats.Token(token))
+	if credentials.InboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(credentials.InboxPrefix))
 	}
+
+	authOptions, err := runtimeAuthOptions(credentials)
+	if err != nil {
+		return nil, fmt.Errorf("configure NATS authentication: %w", err)
+	}
+	opts = append(opts, authOptions...)
 
 	conn, err := nats.Connect(url, opts...)
 	if err != nil {

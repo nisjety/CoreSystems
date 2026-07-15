@@ -18,7 +18,8 @@ type Config struct {
 	HTTPPort       int
 	DatabaseURL    string
 	NATSURL        string
-	NATSToken      string
+	NATSUser       string
+	NATSPassword   string
 	ServiceName    string
 	DelegationKeys map[string]string
 	// IntegrationInternalKey is restricted to integration-corev2's internal
@@ -51,11 +52,12 @@ func Load() (*Config, error) {
 
 	attestationPrivateKeyEncoded := strings.TrimSpace(getEnv("CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY", ""))
 	cfg := &Config{
-		HTTPPort:    getEnvInt("PORT", 3160),
-		DatabaseURL: strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		NATSURL:     strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
-		NATSToken:   strings.TrimSpace(getEnv("VELION_NATS_TOKEN", getEnv("NATS_SHARED_TOKEN", getEnv("NATS_TOKEN", "")))),
-		ServiceName: strings.TrimSpace(getEnv("SERVICE_NAME", "conversation-core-go")),
+		HTTPPort:     getEnvInt("PORT", 3160),
+		DatabaseURL:  strings.TrimSpace(getEnv("DATABASE_URL", "")),
+		NATSURL:      strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
+		NATSUser:     strings.TrimSpace(getEnv("NATS_USER", "")),
+		NATSPassword: strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
+		ServiceName:  strings.TrimSpace(getEnv("SERVICE_NAME", "conversation-core-go")),
 		DelegationKeys: map[string]string{
 			"velion-gateway":      strings.TrimSpace(getEnv("CONVERSATION_GATEWAY_SERVICE_TOKEN", "")),
 			"conversation-ingest": strings.TrimSpace(getEnv("CONVERSATION_CORE_INGEST_SERVICE_TOKEN", "")),

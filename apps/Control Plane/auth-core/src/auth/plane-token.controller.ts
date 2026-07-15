@@ -50,13 +50,18 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 
 import { DirectNatsService } from '../nats/direct-nats.service';
+import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
-import { ConvexTokenService, type PlaneAudience } from './convex-token.service';
+import { ConvexTokenService } from './convex-token.service';
 import {
   authorizePlaneServicePrincipal,
   ServicePrincipalConfigurationError,
+  type AuthorizedPlaneServicePrincipal,
 } from './plane-service-principal';
-import { resolveCanonicalTokenContext } from './plane-token-membership';
+import {
+  resolveCanonicalTokenContext,
+  type CanonicalTokenContext,
+} from './plane-token-membership';
 import { planeScopesForRole } from './plane-token-scopes';
 
 function toWebHeaders(
@@ -84,6 +89,7 @@ interface PlaneInternalTokenBody {
   orgId?: string;
   scopes?: readonly string[];
   reason?: string;
+  zdr?: boolean;
 }
 
 @ApiTags('Plane Auth')
@@ -169,7 +175,7 @@ export class PlaneTokenController {
     const activeOrganizationId = (
       session.session as { activeOrganizationId?: string }
     ).activeOrganizationId;
-    let sessionContext;
+    let sessionContext: CanonicalTokenContext | null;
     try {
       sessionContext = await resolveCanonicalTokenContext(
         session.user.id,
@@ -229,7 +235,7 @@ export class PlaneTokenController {
     const orgId = (body.orgId ?? '').trim();
     const scopes = Array.isArray(body.scopes) ? body.scopes : [];
     const reason = (body.reason ?? '').trim();
-    let principal;
+    let principal: AuthorizedPlaneServicePrincipal;
     try {
       principal = authorizePlaneServicePrincipal(
         process.env.PLANE_SERVICE_PRINCIPALS_JSON ?? '',
@@ -240,6 +246,7 @@ export class PlaneTokenController {
           orgId,
           requestedScopes: scopes,
           reason,
+          zdr: body.zdr,
         },
       );
     } catch (error) {
@@ -260,17 +267,27 @@ export class PlaneTokenController {
       principalType: 'service',
       serviceId: principal.serviceId,
       reason: principal.reason,
+      retentionPosture: {
+        zdr: principal.zdr,
+        authority: 'service-principal-policy',
+      },
     });
     const event = 'plane_service_token_issued';
     let audited = false;
     try {
+      const auditIdentity = issuedTokenAuditIdentity(
+        response.token,
+        'plane-token',
+      );
       await this.directNats.publishAuditDurable(
-        `velion.audit.v1.control.${event}`,
+        `velion.audit.v2.control.auth-core.${event}`,
         {
-          occurred_at: new Date().toISOString(),
+          occurred_at: auditIdentity.occurredAt,
+          event_id: auditIdentity.eventId,
           org_id: principal.orgId,
           actor_role: 'service',
           plane: 'control',
+          producer: 'auth-core',
           event,
           subject: principal.subject,
           resource_id: audience,
@@ -279,6 +296,7 @@ export class PlaneTokenController {
             audience,
             scopes: principal.scopes,
             reason: principal.reason,
+            zdr: principal.zdr,
           },
         },
       );

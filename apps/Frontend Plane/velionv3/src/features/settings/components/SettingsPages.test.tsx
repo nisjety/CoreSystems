@@ -9,6 +9,7 @@ import { CoreSidebar } from '@/features/core/components/CoreSidebar'
 import { routeFromPath } from '@/features/core/lib/shell-data'
 import { VelionWorkspaceSettingsPage } from '@/features/settings/components/WorkspaceSettingsPage'
 import { workspaceSettingsSections } from '@/features/settings/lib/settings-sections'
+import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 function renderWithRouter(component: () => JSX.Element, path: string) {
   window.history.pushState(null, '', path)
@@ -21,6 +22,7 @@ function renderWithRouter(component: () => JSX.Element, path: string) {
 
 afterEach(() => {
   cleanup()
+  clearSession()
   vi.unstubAllGlobals()
 })
 
@@ -158,12 +160,101 @@ describe('workspace settings page', () => {
 
     expect(screen.getByRole('heading', { name: /members & roles/i, level: 1 })).toBeTruthy()
     expect(screen.getByRole('textbox', { name: /invite by email/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /role templates/i })).toBeTruthy()
-    expect(screen.getByText('Full workspace, billing, and security')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /built-in roles/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /create role/i })).toBeNull()
+    expect(screen.queryByText('Agent')).toBeNull()
     expect(screen.queryByRole('textbox', { name: /workspace name/i })).toBeNull()
   })
 
-  it('renders org-security controls as honest unconfigured, never enabled from a literal', () => {
+  it('invites, changes roles, and removes members through the canonical Auth contract', async () => {
+    setSessionUser({
+      id: 'owner_1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
+        return new Response(JSON.stringify({
+          members: [{
+            id: 'membership_2',
+            userId: 'user_2',
+            role: 'member',
+            user: { name: 'Teammate', email: 'teammate@example.com' },
+          }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <VelionWorkspaceSettingsPage section="members" />)
+    expect(await screen.findByText('teammate@example.com')).toBeTruthy()
+
+    fireEvent.input(screen.getByRole('textbox', { name: /invite by email/i }), {
+      target: { value: 'new@example.com' },
+    })
+    fireEvent.change(screen.getByRole('combobox', { name: /^role$/i }), {
+      target: { value: 'admin' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /invite member/i }))
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([path]) => path === '/api/v1/orgs/org_1/members/invite')
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ email: 'new@example.com', role: 'admin' })
+    })
+
+    await waitFor(() => expect(
+      (screen.getByRole('combobox', { name: /role for teammate/i }) as HTMLSelectElement).disabled,
+    ).toBe(false))
+    fireEvent.change(screen.getByRole('combobox', { name: /role for teammate/i }), {
+      target: { value: 'admin' },
+    })
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/org_1/members/user_2/role')).toBe(true)
+    })
+
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: /remove teammate/i }) as HTMLButtonElement).disabled,
+    ).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: /remove teammate/i }))
+    fireEvent.click(screen.getByRole('button', { name: /confirm remove teammate/i }))
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/org_1/members/user_2')).toBe(true)
+    })
+  })
+
+  it('renders org-security controls and live Audit Core security events', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).startsWith('/api/v1/audit')) {
+        return new Response(JSON.stringify({
+          data: [{
+            id: 17,
+            event: 'member.removed',
+            occurred_at: '2026-07-14T18:00:00Z',
+            user_id: 'user_admin',
+            actor_role: 'admin',
+            resource_id: 'user_member',
+            outcome: 'ok',
+            request_id: 'req_audit_17',
+          }],
+          meta: { count: 1 },
+          error: null,
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      return new Response(JSON.stringify({}), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }))
+
     render(() => <VelionWorkspaceSettingsPage section="org-security" />)
 
     expect(screen.getByRole('heading', { name: /org security/i, level: 1 })).toBeTruthy()
@@ -179,7 +270,8 @@ describe('workspace settings page', () => {
     ).toBe(true)
     expect(screen.getByRole('combobox', { name: /session duration/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /recent security events/i })).toBeTruthy()
-    expect(screen.getByText(/loading security events/i)).toBeTruthy()
+    expect(await screen.findByText('member.removed - ok')).toBeTruthy()
+    expect(screen.getByText('user_admin · admin · req_audit_17')).toBeTruthy()
   })
 
   it('defines one route-level page for every settings sidebar tab', () => {
@@ -280,7 +372,7 @@ describe('workspace settings page', () => {
     expect(screen.getByRole('link', { name: /open calendar/i }).getAttribute('href')).toBe('/social/calendar')
   })
 
-  it('renders billing with live account data and starts embedded checkout', async () => {
+  it('renders billing with live account data and prefers embedded Nexi checkout over its hosted URL', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/v1/billing/account')) {
@@ -297,13 +389,13 @@ describe('workspace settings page', () => {
       }
       if (url.endsWith('/api/v1/billing/checkout')) {
         return new Response(JSON.stringify({
-          provider: 'hyperswitch',
+          provider: 'nexi',
+          id: 'pay_settings_123',
           payment_id: 'pay_settings_123',
-          client_secret: 'pay_settings_123_secret',
-          publishable_key: 'pk_test_settings',
-          client_url: 'https://beta.hyperswitch.io/v1/HyperLoader.js',
-          backend_url: 'https://sandbox.hyperswitch.io',
-          status: 'requires_payment_method',
+          publishable_key: 'checkout_test_settings',
+          client_url: 'https://test.checkout.dibspayment.eu/v1/checkout.js?v=1',
+          url: 'https://test.checkout.dibspayment.eu/payments/pay_settings_123',
+          status: 'created',
           amount_cents: 99900,
           currency: 'NOK',
         }), {

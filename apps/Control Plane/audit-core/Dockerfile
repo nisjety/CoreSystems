@@ -26,7 +26,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /audit-core ./cmd/server
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /audit-core ./cmd/server && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /nats-provisioner ./cmd/nats-provisioner && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /control-event-bridge ./cmd/control-event-bridge
 
 FROM alpine:3.22
 ARG SOURCE_REVISION=unverified
@@ -37,6 +39,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add ca-certificates && \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 COPY --chown=appuser:appgroup --from=builder /audit-core /usr/local/bin/audit-core
+COPY --chown=appuser:appgroup --from=builder /nats-provisioner /usr/local/bin/nats-provisioner
+COPY --chown=appuser:appgroup --from=builder /control-event-bridge /usr/local/bin/control-event-bridge
 EXPOSE 8187 9091
 USER appuser
 ENTRYPOINT ["audit-core"]

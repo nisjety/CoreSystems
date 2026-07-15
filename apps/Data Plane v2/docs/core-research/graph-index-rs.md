@@ -6,6 +6,45 @@ Prior flagged-but-unverified pass: 2026-07-10 earlier same-day plane audit (`app
 
 Scope: `apps/Data Plane v2/services/graph-index-rs` (Rust, container `dpv2-graph-index`, HTTP `:9203`, gRPC `:50053`)
 
+## 2026-07-15 final isolated acceptance delta
+
+The final rebuilt service passed HTTP 401/401/200/403 and all six GraphService
+families in the strict gRPC matrix. Authenticated cross-tenant calls returned the
+exact graph tenant-mismatch guard. The real-authority Velion journey surfaced
+only the authorized fixture's GraphRAG nodes, and supported signed graph events
+passed the isolated broker matrix. The shared deployment remains unchanged.
+
+## 2026-07-15 GraphRAG and Velion integration delta
+
+- Signed document events now require exact equality between the verified
+  envelope tenant and payload tenant. The verified claim supplies the tenant
+  used for extraction and persistence; mismatches are acknowledged and dropped
+  without graph mutation. Production posture cannot enable unsigned events even
+  when both development gates are set.
+- The Model Plane extraction hop no longer forwards a shared `x-api-key`.
+  Graph-index mints a short-lived, audited, org-bound service token through Auth
+  Core for exact `aud=inference-core` / `inference:invoke`, forwards only
+  `Authorization: Bearer` to gRPC, and fails closed on missing/malformed
+  issuance. The Control registry entry is audience-specific and cannot reuse a
+  Control-policy scope.
+- ZDR is explicit through extraction. Signed restrictive events never persist;
+  direct-Azure extraction rejects ZDR before network egress. Model requests keep
+  the restrictive flag.
+- HTTP store failures now return sanitized 500 responses instead of successful
+  payloads containing database errors; a missing entity is 404.
+- Velion's Knowledge and onboarding graph routes derive tenant from the verified
+  session and forward a session-minted Data bearer. The historical onboarding
+  query-parameter IDOR and shared-key graph call are removed.
+
+Verification dated 2026-07-15: `cargo test --no-default-features` passed
+**28 tests** with one explicitly ignored disposable-PostgreSQL test; the focused
+extractor suite passed **9/9**; `cargo clippy --all-targets --no-default-features
+-- -D warnings` and Compose config validation passed. The isolated image
+`fc138c8a6b23` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`; its HTTP four-shape matrix returned
+401/401/200/403. The current shared image predates this source, so this is
+isolated effectiveness rather than a shared deployed/effective claim.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented:** HTTP and gRPC require verified RS256/JWKS user or scoped service
@@ -14,9 +53,10 @@ Scope: `apps/Data Plane v2/services/graph-index-rs` (Rust, container `dpv2-graph
   private or grant-only content is not treated as organization-wide graph input.
 - **Tested:** `cargo test -p graph-index-rs` passed 20/20 tests after the auth,
   visibility, and event-containment changes.
-- **Built/deployed/reachable/effective:** the revised image built locally with
-  verified revision/build labels; no deployment or isolated curl/gRPC matrix has
-  run. The unauthenticated live finding below is fixed in source only.
+- **Built/reachable/effective in isolation:** the revised image built locally
+  with verified revision/build labels and passed the disposable HTTP tenant
+  matrix. The shared deployment and the equivalent gRPC/broker matrices have
+  not run on this source.
 - **Containment/blockers:** unsigned mapping/extraction/cleanup consumers are
   disabled by default behind two insecure-development gates. Graph progression is
   ineffective until signed tenant-scoped events/NATS permissions exist. Outbound

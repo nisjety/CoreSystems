@@ -4,7 +4,124 @@ Baseline live audit: 2026-07-10
 
 Remediation re-verification: 2026-07-11
 
+Velion/GraphRAG re-verification: 2026-07-15
+
 Scope: Data Plane v2 services/infrastructure plus the Control, Frontend, Model, and Ingestion contracts that authorize, invoke, or persist Data Plane work.
+
+## 2026-07-15 final isolated acceptance addendum
+
+This addendum supersedes earlier same-day statements that Docker was unavailable
+or that the final signed-ZDR, gRPC, browser, broker, or multi-store reruns were
+pending. It does **not** supersede the conclusion that the shared deployment is
+unchanged and not production-ready.
+
+- A unique disposable build passed **31 methods / 124 gRPC authorization
+  assertions**. No credential and header-only identity are `Unauthenticated`;
+  authenticated cross-tenant requests are exact service-specific tenant
+  mismatches. Same-tenant reads require `OK` or a named authenticated `NotFound`.
+  Deprecated document mutations require exact permanent containment; wiki
+  mutations require exact approval- or signed-ZDR guards.
+  The script refuses every non-`127.0.0.1:<port>` target, with a negative test.
+- The same build passed **28/28 HTTP assertions** across graph, quality,
+  orchestrator, documents, retrieval, wiki, and Quickwit admin preview:
+  401/401/200/403 for no credential, forged header, valid bearer, and valid
+  bearer plus spoofed organization.
+- A supported-contract fixture created two real users and organizations through
+  Auth Core/User Core/Control. Velion Playwright passed **2/2**: authorized
+  Knowledge, GraphRAG, and navbar retrieval are usable, while spoofed tenant and
+  search calls contain none of the second fixture's serialized fields.
+- The restrictive signed-ZDR run left stabilized final state identical across
+  PostgreSQL, Qdrant, Dragonfly, Quickwit, MinIO, and NATS. NATS sequence and
+  Dragonfly command counters are monotonic no-write evidence. Counts/hashes for
+  the other four stores are final-state evidence and cannot alone exclude a
+  transient write followed by delete; per-operation mutation telemetry remains
+  required before claiming strict zero writes.
+- Supported producer-scoped event delivery/redelivery passes the isolated broker
+  matrix. The real Documents binary also passes scoped GDPR durable bind/health,
+  ACL denial, ownership-transfer-before-ACK, database-outage redelivery/degraded
+  health, and recovery ACK. Production provisioning remains pending and is
+  recorded separately from this disposable proof.
+- Retrieval's Control token budget is longer than Auth Core's durable audit
+  PubAck budget. Only connect/timeout/503 failures retry once; 401/403, malformed
+  contracts, and explicit denial never retry. Dependency exhaustion is bounded,
+  uncached, and exposed as gRPC `Unavailable`; verified non-membership remains
+  `PermissionDenied`.
+- Gateway tests pass **288/288**. The SPA Node security gate passes **4/4** and
+  Vitest passes **68 files / 364 tests**, with typecheck and production build.
+  Retrieval security-module line coverage is 93.76% for policy and 88.14% for
+  the gRPC interceptor; its final all-target suite passes **212 tests with 10
+  explicit infrastructure ignores**.
+
+Safety: response bodies, credentials, generated identifiers, fixture text, and
+graph content were suppressed. No shared/customer content was enumerated and no
+rebuild, cleanup, purge, bulk delete, global admin, or destructive endpoint was
+invoked. Each final harness removed only its own random project resources.
+
+## 2026-07-15 Velion/GraphRAG addendum
+
+The Velion gateway no longer uses a shared internal key as interactive Data
+authority. Every documents, retrieval, wiki, source, graph, navbar-search,
+ingestion-source, onboarding graph-preview, and Operating Map call mints an
+`aud=data-plane` bearer from the verified session, pins tenant from canonical
+membership, and fails closed with a sanitized 503 when delegation is
+unavailable. The SPA/gateway now normalize the actual documents/wiki/retrieval
+envelopes, use bounded document pagination with honest truncation metadata, and
+call the implemented search/chunk contracts.
+
+Retrieval HTTP requires strict RS256 bearer verification with configured
+issuer/audience and all identity/time claims. Retrieval and graph no longer send
+a shared key to Inference Core: they mint short-lived, audited, tenant-bound
+service tokens for exact `aud=inference-core` / `inference:invoke` and forward
+only Bearer metadata. Auth Core's optional `scopesByAudience` registry map is
+fully validated and prevents cross-audience scope reuse while preserving legacy
+single-audience entries. Inference Core independently verifies JWKS,
+issuer/audience, tenant, exact scope, and monotonic ZDR.
+
+Graph event consumption now requires exact verified-claim/payload tenant
+equality; verified tenant drives extraction/persistence. Production cannot
+enable unsigned legacy graph events. Direct-Azure graph extraction rejects ZDR
+before egress, and Graph API storage errors return sanitized 500 rather than a
+successful error payload.
+
+Sanitized source evidence dated 2026-07-15:
+
+| Area | Result |
+|---|---|
+| Graph | 28 passed, 1 explicit disposable-PostgreSQL ignore; focused extractor 9/9; strict clippy passed |
+| Retrieval | 193 non-ignored passed, 10 explicit infrastructure ignores; strict all-target clippy passed |
+| Auth Core registry | 12/12 focused tests and build passed; 90.19% statements / 93.84% branches / 100% functions / 89.79% lines |
+| Velion Gateway | 272/272 tests passed |
+| Velion SPA | 68 files / 360 tests, typecheck, and production build passed; lint has zero errors and one pre-existing warning |
+| Documents signed ZDR | RED/GREEN required-claim, monotonic single/bulk, and source-object pre-persistence tests; full race/vet/build passed; auth 95.5%, both changed ZDR decision helpers 100% (broad handler package 14.9%) |
+
+The passing checkpoint used the durable command
+`./tests/e2e/run-isolated-mvp.sh`, a fresh random project, and a rebuild of every
+Data image at that checkpoint. Caller-selected project suffixes and build bypass are
+not supported; pre-existing resource collisions are refused before project
+cleanup is armed, generated keys have an immediate cleanup trap, and the
+isolated override publishes no database/vector host ports. The matrix exposed
+two real product defects before passing: the retrieval request DTO incorrectly
+required an otherwise optional `filters` object, and the one-shot migrator did
+not tolerate the startup race between PostgreSQL health and the first TCP
+connection. Regression tests were written first; retrieval now defaults omitted
+filters to empty, and the migrator uses bounded retry. Retrieval fmt/full tests/
+strict clippy and migrator Go test/vet pass. That checkpoint then exposed that
+Documents ignored the bearer's signed `zdr:true` posture while honoring only the
+body. The latest source requires/preserves a boolean claim and enforces
+`verified_claim.zdr OR request_policy.zdr`; Docker became unavailable before the
+fixed Documents image/matrix could rebuild. Final security review also found
+that source-object upsert persisted its row and outbox while hardcoding
+`zdr:false`; an endpoint regression failed before the fix and now proves denial
+before persistence under restrictive or missing verified posture. That final
+guard is likewise source-tested but not rebuilt.
+
+The shared running images observed during this pass were healthy but carried
+older source revisions. No customer content was requested, printed, copied, or
+mutated. A disposable isolated Compose project built the pre-final-fix source with
+base-revision label `eeebd0bc98c66434936460020958891066eb05fd` and passed the
+safe runtime matrix described below; the dirty worktree was included, so the
+label is not a reproducible release identity. It did not replace or validate the
+shared deployment.
 
 ## Executive conclusion
 
@@ -15,10 +132,12 @@ and tests, adds producer-scoped signed envelopes and acknowledged transactional
 outboxes to supported async paths, implements signed Control read delegation, and
 adds durable quality/orchestrator/Quickwit state. This is a substantial security
 improvement, but **not production readiness**: unsupported consumers and
-unverified Model gRPC listeners remain contained, current images have not been
-built/deployed, and no isolated Docker/curl matrix has proven runtime
-effectiveness. Docker's containerd content store currently fails on blob reads,
-and restarting a shared engine with 99 containers/86 running was not authorized.
+unverified Model/Execution gRPC listeners remain contained, enabled Data gRPC
+families and broker paths lack the complete matrix, and the shared deployment
+still predates this source. The disposable checkpoint stack passed all **28/28**
+HTTP tenant/auth checks plus its bounded relational body-ZDR snapshot; that is
+isolated effectiveness evidence for the checkpoint, not runtime proof of the
+later signed-claim/source-object guards or shared deployment acceptance.
 
 No customer identifiers, corpus sizes, content, credentials, or response bodies are retained in this document. The baseline evidence came from a read-only cross-tenant matrix; remediation used synthetic keys, local mock servers, disposable organizations/fixtures, and disposable PostgreSQL only.
 
@@ -26,13 +145,13 @@ No customer identifiers, corpus sizes, content, credentials, or response bodies 
 
 | Baseline blocker | Disposition in current source | Runtime/deployment status |
 |---|---|---|
-| Graph read accepted no credential and caller-selected tenant | Strict RS256 user/scoped-service verification, HTTP/gRPC claim pinning, and org-visible provenance filtering; route matrices pass | Current source not rebuilt/deployed/effective |
-| Quality accepted forged `X-Org-ID` | Strict JWKS middleware, claim pinning, and `data:quality:admin` scope; matrices pass | Current durability source not rebuilt/deployed/effective |
-| Orchestrator accepted forged `X-Org-ID` | Strict JWKS middleware, claim pinning, and operation scopes; matrices pass | Current durability source not rebuilt/deployed/effective |
-| Documents shared-key/no-viewer escalation and unsigned JWT default | Shared inbound key removed; strict signature/issuer/audience/time/startup checks; canonical service identity and visibility; unsigned tokens fail | Current signed-outbox source not rebuilt/deployed/effective |
-| Retrieval denied legitimate users while adjacent services were open | Strict user JWT path plus versioned Control decision contract using an org-bound `aud=control-policy` service bearer. Explicit grants additionally require the original matching verified user bearer at User Core | Mock/unit tested; authorized-user Docker E2E pending |
-| Quickwit `/admin/rebuild` unauthenticated/global destructive | Dedicated admin JWT/scopes; durable tenant-default jobs, idempotency, two-person approval, leases/checkpoints, immutable request fields, append-only audit, preflight, and rate/concurrency bounds; destructive clear remains 501 | Source and disposable-PostgreSQL lifecycle tested; not deployed/effective |
-| Bulk ingest persisted under restrictive ZDR | Documents single/bulk share one durable-persistence rejection; Quarry single/bulk/CAS/events share one guard | Unit tested; multi-store runtime proof pending |
+| Graph read accepted no credential and caller-selected tenant | Strict RS256 user/scoped-service verification, HTTP/gRPC claim pinning, and org-visible provenance filtering; route matrices pass | Isolated HTTP 401/401/200/403 passed; shared deployment and gRPC matrix pending |
+| Quality accepted forged `X-Org-ID` | Strict JWKS middleware, claim pinning, and `data:quality:admin` scope; matrices pass | Isolated HTTP 401/401/200/403 passed; shared deployment pending |
+| Orchestrator accepted forged `X-Org-ID` | Strict JWKS middleware, claim pinning, and operation scopes; matrices pass | Isolated HTTP 401/401/200/403 passed; shared deployment pending |
+| Documents shared-key/no-viewer escalation and unsigned JWT default | Shared inbound key removed; strict signature/issuer/audience/time/startup checks; required boolean ZDR posture; canonical service identity and visibility; unsigned tokens fail | Checkpoint HTTP 401/401/200/403 passed; final signed-ZDR/source-object image, shared deployment, and expanded visibility matrix pending |
+| Retrieval denied legitimate users while adjacent services were open | Strict user JWT path plus versioned Control decision contract using an org-bound `aud=control-policy` service bearer. Explicit grants additionally require the original matching verified user bearer at User Core | Isolated cryptographic authority fixture passed 200/403; real Auth/User Core user journey pending |
+| Quickwit `/admin/rebuild` unauthenticated/global destructive | Dedicated admin JWT/scopes; durable tenant-default jobs, idempotency, two-person approval, leases/checkpoints, immutable request fields, append-only audit, preflight, and rate/concurrency bounds; destructive clear remains 501 | Isolated authenticated preview 401/401/200/403 passed; destructive execution was not invoked |
+| Bulk ingest persisted under restrictive ZDR | Documents single/bulk share monotonic signed-or-body durable-persistence rejection; source-object upsert fails before row/outbox persistence under restrictive posture; Quarry single/bulk/CAS/events share one guard | Checkpoint body-ZDR denials plus an unchanged ten-second relational snapshot passed. Final signed-claim/source-object guards are source-tested only; rebuilt and multi-store proof pending |
 | Retrieval auxiliary endpoints trusted body tenant/user | Claim-pinned org/user and canonical visibility across pack/sources/freshness/chunks/compare/timeline/contradictions/wiki/graph/trace | Tests pass; runtime pending |
 | Grant-only shared content leaked org-wide | Shared now requires explicit grant; org-visible remains the only org-wide class | Synthetic Postgres visibility tests pass |
 | Trace GET lacked tenant/actor scope | Trace reads/writes bind verified org and actor; additive actor migration added | Migration tested, not deployed |
@@ -42,7 +161,7 @@ No customer identifiers, corpus sizes, content, credentials, or response bodies 
 | Model grounding/knowledge and standard/direct Data proxy routes omitted or downgraded ZDR | Frontend mints separate audience tokens; Model independently verifies identity equality and forwards Data bearer. Chat/embeddings and document/bulk/retrieval/wiki proxies use monotonic verified-claim OR request ZDR; durable wiki mutations are rejected | Model Gateway all-target tests/clippy pass; rebuilt runtime pending |
 | API-key/gRPC paths trusted caller org/user | Data external surfaces use verified claims; Model/Inference/Execution production listener constructors were removed/test-confined and legacy Compose ports removed | Verified replacements remain pending |
 | Control membership route/config drift | One versioned decision endpoint and canonical membership lookup; strict caller bearer with dedicated scope/audience/org/reason | Control/retrieval mock suites pass |
-| Images lacked reliable revision | OCI labels and mandatory Compose build args cover Data, changed Model, and Control auth/user images | Earlier label proof predates later source changes; current rebuild/deployment is Docker-blocked |
+| Images lacked reliable revision | OCI labels and mandatory Compose build args cover Data, changed Model, and Control auth/user images | Isolated checkpoint images carry revision/build labels; final Documents source is not rebuilt, and shared images remain older and unchanged |
 
 ## Final security-review findings and disposition
 
@@ -152,7 +271,8 @@ program.
 
 ## Verification ledger
 
-All entries are local source/test evidence dated 2026-07-10–11 unless explicitly marked pending.
+Entries are local source/test evidence dated 2026-07-10–11 unless explicitly
+updated by the 2026-07-15 addendum.
 
 | Area | Command/result |
 |---|---|
@@ -161,10 +281,10 @@ All entries are local source/test evidence dated 2026-07-10–11 unless explicit
 | Signed event contract | `event-envelope-rs` wrong-principal/tenant/subject/digest/replay/expiry/ZDR suite passes; measured 92.66% regions / 94.91% lines / 100% functions |
 | Quickwit | 43 tests pass with two explicit PostgreSQL ignores; the separately run earlier disposable-PostgreSQL lifecycle passed 1/1 before Docker failed. Coverage: `auth.rs` 97.06% lines / `api.rs` 86.73% / `jobs.rs` 52.53% |
 | Embedding/index | 26 and 26 tests pass; index has two explicit disposable-PostgreSQL ignores; strict workspace clippy passes |
-| Documents Go | Full race suite/vet/build pass; `authctx` 95.4% statements and signed `eventauth` 89.8%; transactional outbox signing/PubAck/stable-message-ID regressions pass |
-| Quality Go | Full race suite/vet/build and govulncheck pass; auth 82.8%; source-only eval profile 26.7%, recovery 69.2%. Pending/expired-running recovery is tested in memory; PostgreSQL recovery profile is Docker-blocked |
+| Documents Go | Full race suite/vet/build pass; `authctx` 95.5% statements, both changed ZDR helpers 100%, and signed `eventauth` 89.8%; transactional outbox signing/PubAck/stable-message-ID regressions pass |
+| Quality Go | Full race suite/vet/build and govulncheck pass; auth 82.8%; source-only eval profile 26.7%, recovery 69.2%. Pending/expired-running recovery is tested in memory; expanded PostgreSQL recovery coverage remains pending |
 | Orchestrator Go | Full race suite/vet/build and govulncheck pass; auth 91.1%; source-only jobs profile 31.9%. Production mutation acceptance fails 503 before persistence while no signed resumable worker exists |
-| Wiki Go | Full race suite/vet/build pass; schema integration checkpoint passes. Signed `eventauth` 88.1%, config 84.2%, focused pure outbox drain/PubAck 100%, full `internal/events` race profile 28.7%; PostgreSQL outbox execution Docker-blocked |
+| Wiki Go | Full race suite/vet/build pass; schema integration checkpoint passes. Signed `eventauth` 88.1%, config 84.2%, focused pure outbox drain/PubAck 100%, full `internal/events` race profile 28.7%; PostgreSQL outbox execution remains pending |
 | Retrieval visibility | 76 library tests pass, including non-serializable/non-debuggable original-user proof, strict ZDR enum/no-retaining-egress, status-only provider errors, original-user-proof grant delegation, uncached revocation safety, auxiliary/search/trace visibility, and deprecated-mutation containment |
 | Migrations | Wiki integration passes; trace actor migration applies twice and exposes expected column/index in disposable PostgreSQL |
 | Frontend | Gateway 206/206 tests pass |
@@ -176,19 +296,21 @@ All entries are local source/test evidence dated 2026-07-10–11 unless explicit
 | Dependency scans | Documents/wiki/quality/orchestrator/user-core `govulncheck`: zero reachable. Migrator's initial 4 reachable findings were removed by Go 1.26.5/pgx 5.9.2; test/vet/build/scan pass. User Core's initial 13 reachable findings were removed by Go 1.26.5, pgx 5.9.2, gRPC 1.79.3, quic-go 0.59.1, x/net 0.53.0, and compatible locks; full race/vet/build/scan pass with zero reachable. Shipping's initial 7 reachable standard-library findings were removed by Go/Docker builder 1.26.5; full race/vet/build/scan pass with zero reachable, with one required-module advisory reported not called. Auth Core full/production pnpm audits: zero advisories. RustSec: zero unignored Data/Model vulnerabilities; dev-only RSA and Data's unmaintained `rustls-pemfile` warning are recorded. Quarry's production audit passes after dependency remediation, with RSA absent from normal/build graphs and only recorded unmaintained dependency warnings |
 | Safe scripts | Matrix/smoke/load contract tests, Bash/Node syntax, static tenant scanner, and `git diff --check` pass |
 | Compose | Data/self-owned, Model, and Control configs plus Model/Ingestion production overrides validate with test-only credentials/provenance. Production overrides reset 19 Model and 14 Ingestion host-port publications, disable dev bypasses, and require credentials |
-| Image provenance | Earlier 15-image label inspection predates subsequent source changes. Current rebuild/inspection did not run; no deployed/effective claim is made |
-| Runtime matrix | **Not run**; isolated harness/config/contracts pass statically, but Docker content-store failure blocks image creation and startup |
+| Image provenance | Isolated Data checkpoint images were built with base-revision label `eeebd0bc98c66434936460020958891066eb05fd` and created label `2026-07-15T00:45:36Z`. The build included dirty-worktree content, so the label is not a reproducible release identity. Short image IDs: documents `7d668137516c`, graph `fc138c8a6b23`, embedding `401d28370432`, index `b642e7485f5a`, Quickwit adapter `a5f547a120db`, quality `f7d4ded34db4`, orchestrator `f00398f1e980`, wiki `e7c75b756544`, retrieval `5a9bd5f96a14`. The Documents image predates the final signed-ZDR/source-object guards. No shared deployment claim is made |
+| Runtime matrix | **Pass for checkpoint HTTP/body-ZDR scope**: 28/28 across seven route families; exact shapes were 401 no credential, 401 forged tenant header, 200 authorized tenant bearer, and 403 bearer plus spoofed tenant. An authenticated durable write first succeeded at 201; after snapshot quiescence, single/bulk matched their exact body-ZDR denials and the relational content snapshot stayed unchanged for ten seconds. The signed bearer on that control was incorrectly ignored, which the latest source fixes; no runtime-effectiveness claim is made for that repair or the final source-object guard. gRPC, broker, real Auth/User Core, full visibility, and multi-store ZDR matrices remain pending |
 
 `cargo llvm-cov` and `cargo-audit` are installed and produced the evidence above.
 Coverage below 80% remains an acceptance gap for database-backed Quickwit jobs,
 quality evals, orchestrator jobs, and the full wiki events package; functional
 checks that require Docker/PostgreSQL are not inferred from source-only coverage.
 
-Docker's sanitized failure is: `docker system df` → `failed to retrieve image
-list: rpc error ... blob ... open ...: input/output error`. Docker reported 99
-containers/86 running. Restarting or repairing that shared engine would have
-caused an out-of-scope disruption and was not authorized, so current image builds,
-isolated E2E, and pending disposable-PostgreSQL reruns remain blocked.
+The earlier Docker content-store failure cleared without an authorized restart
+or shared-project mutation. The disposable checkpoint build/runtime proof
+completed and its cleanup trap removed all project containers, volumes, and the
+network. Docker later became unavailable before the final Documents signed-ZDR
+and source-object guards could rebuild. Pending latest-source, broker/outbox/
+database-coverage, and cross-plane matrices are not inferred from the narrower
+passing checkpoint.
 
 ## Dependency remediation note
 
@@ -196,35 +318,40 @@ Control auth-core's initial production scans reported critical/high advisories. 
 
 ## Security incident note
 
-An audit search accidentally surfaced one existing shared internal credential from a local Model `.env` in tool output. The value is not repeated or stored in evidence. It must be rotated through normal secret management before deployment; this program did not mutate secrets.
+Audit commands accidentally surfaced existing local Model and retrieval
+Control-policy deployment credentials in tool output. The values are not
+repeated or stored in evidence. They must be rotated through normal secret
+management before deployment; this program did not mutate secrets.
 
 ## Release blockers
 
-1. Signed producer-scoped envelopes exist for supported document/wiki/index/
-   embedding/graph paths, but NATS subject ACLs and rebuilt broker/database E2E
-   are unproven; unsupported consumers remain intentionally off.
-2. Verified Inference, Execution, and Model gRPC machine/user contracts are
-   absent; their production listeners remain intentionally unavailable.
-3. Signed Control plus original-user-proof read delegation is source/cross-language tested but lacks an
-   isolated real-user E2E. Grant mutation/listing remains denied pending
-   resource-owner authorization.
+1. Supported signed producer-scoped broker flows pass in isolation, but
+   production subject ACLs/credentials and the scoped Documents GDPR durable
+   consumer still require coordinated provisioning and post-deploy proof.
+2. Inference Core verifies tenant-bound JWKS credentials and exact invoke scope.
+   Execution/Model gRPC listeners without the equivalent contract must remain
+   disabled; re-enabling them would reopen an MVP blocker.
+3. Signed Control plus original-user-proof read delegation and the real-user
+   Velion journey pass in isolation. Grant mutation/listing remains denied until
+   resource-owner authorization is defined.
 4. Quickwit durable safe orchestration exists and its isolated PostgreSQL
    lifecycle passed, but destructive clear remains 501 pending trustworthy
    Quickwit completion and rebuilt-runtime crash/retry proof.
-5. Remaining Ingestion/legacy signed ZDR propagation, authoritative org policy
-   for any future non-ZDR Model token, and full zero-persistence runtime proof are
-   absent.
-6. Current image rebuild/deployment and the isolated HTTP/gRPC/ZDR/admin matrix
-   are blocked by Docker's containerd blob input/output failure. Earlier image
-   labels do not prove the later source.
+5. Six-store final-state ZDR evidence passes, but PostgreSQL/Qdrant/Quickwit/
+   MinIO still need per-operation mutation telemetry to exclude transient
+   write/delete cycles. An authoritative organization policy is required before
+   any future signed non-restrictive token is issued.
+6. Current shared images still predate this source. Credential rotation,
+   controlled rebuild/deployment, OCI provenance verification, and safe
+   synthetic-tenant post-deploy matrices remain required.
 7. Database-backed coverage remains below 80% for Quickwit jobs (52.53% lines),
    quality eval (26.7% source-only; recovery 69.2%), orchestrator jobs (31.9%), and the full wiki
-   events package (28.7%). Their pending expanded/outbox PostgreSQL reruns are
-   Docker-blocked.
+   events package (28.7%). Their expanded/outbox PostgreSQL coverage reruns are
+   still required.
 8. Orchestrator production mutations remain intentionally unavailable (503)
    until a signed resumable worker/callback identity contract replaces the
    disabled unsigned publisher.
-9. The exposed local credential requires rotation.
+9. The surfaced local deployment credentials require rotation.
 
 ## Safety record
 

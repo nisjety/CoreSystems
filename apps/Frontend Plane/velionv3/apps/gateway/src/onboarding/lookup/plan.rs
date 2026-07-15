@@ -87,10 +87,10 @@ pub(crate) async fn translate_recommendation(
 
     let response = match request.send().await {
         Ok(response) => response,
-        Err(reason) => {
+        Err(_) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("translation_unavailable", reason.to_string())),
+                Json(translation_failure("translation_unavailable")),
             )
         }
     };
@@ -109,10 +109,10 @@ pub(crate) async fn translate_recommendation(
 
     let body = match response.json::<serde_json::Value>().await {
         Ok(body) => body,
-        Err(reason) => {
+        Err(_) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("translation_invalid_response", reason.to_string())),
+                Json(translation_failure("translation_invalid_response")),
             )
         }
     };
@@ -156,6 +156,10 @@ fn normalize_locale(value: &str) -> Option<&'static str> {
         "nb" | "no" | "nb-no" | "no-no" => Some("nb"),
         _ => None,
     }
+}
+
+fn translation_failure(code: &'static str) -> serde_json::Value {
+    error(code, "The translation service is unavailable.")
 }
 
 fn translation_items(input: &RecommendationText) -> Vec<serde_json::Value> {
@@ -247,7 +251,25 @@ mod tests {
 
     use crate::contracts::{PlanRecommendation, RecommendationText};
 
-    use super::{apply_translation, select_recommendation, translation_items, translation_map};
+    use super::{
+        apply_translation, select_recommendation, translation_failure, translation_items,
+        translation_map,
+    };
+
+    #[test]
+    fn translation_operational_failures_are_bounded() {
+        let unavailable = translation_failure("translation_unavailable");
+        let invalid = translation_failure("translation_invalid_response");
+        assert_eq!(
+            unavailable["error"]["message"],
+            "The translation service is unavailable."
+        );
+        assert_eq!(
+            invalid["error"]["message"],
+            "The translation service is unavailable."
+        );
+        assert!(!unavailable.to_string().contains("http://"));
+    }
 
     #[test]
     fn deterministic_plan_is_a_floor_for_model_recommendations() {

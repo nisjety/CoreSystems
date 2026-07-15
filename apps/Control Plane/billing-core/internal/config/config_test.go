@@ -7,9 +7,11 @@ func clearEnv(t *testing.T) {
 	vars := []string{
 		"HTTP_PORT", "GRPC_PORT", "DATABASE_URL",
 		"NATS_URL", "NATS_TOKEN", "NATS_AUTH_TOKEN",
-		"VELION_NATS_URL", "VELION_NATS_TOKEN",
+		"VELION_NATS_URL",
 		"NATS_SHARED_URL", "NATS_SHARED_TOKEN",
 		"SERVICE_NAME",
+		"ORG_CORE_SERVICE_TOKEN",
+		"INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET",
 		"DRAGONFLY_HOST", "DRAGONFLY_PORT", "DRAGONFLY_PASSWORD", "DRAGONFLY_DB", "DRAGONFLY_ENABLED",
 		"CACHE_HOST", "CACHE_PORT", "CACHE_PASSWORD", "CACHE_DB", "CACHE_ENABLED",
 		"REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD", "REDIS_DB", "REDIS_ENABLED",
@@ -23,6 +25,41 @@ func clearEnv(t *testing.T) {
 	}
 	for _, key := range vars {
 		t.Setenv(key, "")
+	}
+	t.Setenv("ORG_CORE_SERVICE_TOKEN", "billing-org-token-at-least-32-bytes")
+}
+
+func TestLoadRequiresDedicatedOrgCoreServiceToken(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("ORG_CORE_SERVICE_TOKEN", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("missing Org Core service token was accepted")
+	}
+	t.Setenv("ORG_CORE_SERVICE_TOKEN", "billing-org-token-at-least-32-bytes")
+	if _, err := Load(); err != nil {
+		t.Fatalf("dedicated Org Core service token rejected: %v", err)
+	}
+
+	for _, token := range []string{
+		"test-billing-org-token-at-least-32-bytes",
+		"placeholder-billing-org-token-at-least-32-bytes",
+		"change-me-billing-org-token-at-least-32-bytes",
+		"replace-with-billing-org-token-at-least-32-bytes",
+	} {
+		t.Setenv("ORG_CORE_SERVICE_TOKEN", token)
+		if _, err := Load(); err == nil {
+			t.Fatalf("unsafe dedicated Org token was accepted: %q", token)
+		}
+	}
+
+	t.Setenv("ORG_CORE_SERVICE_TOKEN", "billing-org-token-at-least-32-bytes")
+	for _, legacyKey := range []string{"INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"} {
+		t.Setenv(legacyKey, "billing-org-token-at-least-32-bytes")
+		if _, err := Load(); err == nil {
+			t.Fatalf("Org Core service token reused legacy credential %s", legacyKey)
+		}
+		t.Setenv(legacyKey, "")
 	}
 }
 
@@ -91,13 +128,12 @@ func TestLoad_GRPCPortFromEnv(t *testing.T) {
 	}
 }
 
-func TestLoad_VelionSharedNATSOverridesLegacySharedVars(t *testing.T) {
+func TestLoad_VelionSharedURLRetainsExplicitTokenFallbackVariable(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	t.Setenv("NATS_SHARED_URL", "nats://legacy:4222")
-	t.Setenv("NATS_SHARED_TOKEN", "legacy-token")
+	t.Setenv("NATS_SHARED_TOKEN", "explicit-fallback-token")
 	t.Setenv("VELION_NATS_URL", "nats://velion-nats:4222")
-	t.Setenv("VELION_NATS_TOKEN", "velion-token")
 
 	cfg, err := Load()
 	if err != nil {
@@ -106,7 +142,7 @@ func TestLoad_VelionSharedNATSOverridesLegacySharedVars(t *testing.T) {
 	if cfg.NATSSharedURL != "nats://velion-nats:4222" {
 		t.Fatalf("NATSSharedURL = %q, want %q", cfg.NATSSharedURL, "nats://velion-nats:4222")
 	}
-	if cfg.NATSSharedToken != "velion-token" {
-		t.Fatalf("NATSSharedToken = %q, want %q", cfg.NATSSharedToken, "velion-token")
+	if cfg.NATSSharedToken != "explicit-fallback-token" {
+		t.Fatalf("NATSSharedToken = %q, want explicit fallback token", cfg.NATSSharedToken)
 	}
 }

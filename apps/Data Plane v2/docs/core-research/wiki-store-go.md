@@ -5,6 +5,23 @@ Live-verified: 2026-07-10 (re-verifies and supersedes the 2026-06-07 pass; do no
 
 Scope: `apps/Data Plane v2/services/wiki-store-go`
 
+## 2026-07-15 final isolated acceptance delta
+
+The final rebuilt service passed HTTP 401/401/200/403 and every WikiService gRPC
+family. Same-tenant writes reached exact signed-ZDR/approval guards and
+cross-tenant calls reached `request tenant does not match verified identity`.
+Migrations/startup and supported signed Wiki broker delivery/redelivery pass in
+isolation. Shared rollout and database-backed outbox coverage remain pending.
+
+## 2026-07-15 isolated runtime delta
+
+The current-source image `e7c75b756544` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`. Its disposable HTTP four-shape
+matrix returned 401/401/200/403 after the bearer fixture was corrected to carry
+the exact wiki scopes. Migrations/startup passed in this isolated stack. Signed
+Wiki→JetStream PubAck→embedding redelivery and the shared deployment remain
+pending.
+
 ## Secure-MVP current state — 2026-07-11
 
 - **Implemented:** HTTP and gRPC now require verified RS256/JWKS claims, pin tenant
@@ -22,16 +39,14 @@ Scope: `apps/Data Plane v2/services/wiki-store-go`
   `govulncheck` reported no reachable vulnerability, and the disposable migration
   integration test passed for the earlier schema reconciliation. On 2026-07-11,
   outbox unit/contract tests passed, signer coverage measured 88.1%, and both
-  disposable PostgreSQL outbox tests compiled and skip safely without
-  `WIKI_TEST_DATABASE_URL`. A fresh disposable PostgreSQL run was attempted but
-  Docker Desktop failed before container creation with a local containerd blob
-  input/output error; no database lifecycle result is claimed.
-- **Built/deployed/reachable/effective:** the revised image and migrator built
-  locally with verified revision/build labels. No deployment, target-database
-  migration, or authenticated endpoint matrix has run.
-- **Blockers:** rebuild the image, apply both migrations to an isolated target,
-  rerun the disposable PostgreSQL lifecycle after Docker storage is repaired,
-  and prove signed Wiki→JetStream PubAck→embedding consumption end to end.
+  disposable PostgreSQL outbox tests compile and skip safely without
+  `WIKI_TEST_DATABASE_URL`. The full outbox database lifecycle remains pending.
+- **Built/reachable/effective in isolation:** the revised image and migrator built
+  locally with verified revision/build labels; isolated migrations/startup and
+  the authenticated endpoint matrix passed. No shared deployment occurred.
+- **Blockers:** run the disposable PostgreSQL outbox lifecycle and prove signed
+  Wiki→JetStream PubAck→embedding consumption end to end, then perform a
+  controlled shared deployment.
   Process readiness does not prove route, migration, outbox, or downstream
   embedding effectiveness.
 

@@ -2,32 +2,46 @@ import {
   Body,
   Controller,
   ForbiddenException,
+  Headers,
   HttpCode,
   HttpStatus,
   Post,
+  UnauthorizedException,
 } from '@nestjs/common';
+import { status } from '@grpc/grpc-js';
 import {
   InternalOAuthService,
   InternalRefreshError,
   InternalRefreshResult,
   InternalTokenResult,
 } from './internal-oauth.service';
+import {
+  AuthInternalServiceAuthorizationError,
+  authorizeAuthInternalService,
+  loadAuthInternalServiceCredentials,
+} from './internal-service-auth';
 
 interface TokenRequest {
   tokenRef?: string;
   provider?: string;
   providerAccountId?: string;
-  internalApiKey?: string;
 }
 
 @Controller('internal/oauth')
 export class InternalOAuthController {
+  private readonly serviceCredentials = loadAuthInternalServiceCredentials();
+
   constructor(private readonly internalOAuthService: InternalOAuthService) {}
 
   @Post('token')
   @HttpCode(HttpStatus.OK)
-  async getToken(@Body() body: TokenRequest) {
-    this.assertInternalKey(body.internalApiKey);
+  async getToken(
+    @Headers('x-service-credential-id') credentialId: string | undefined,
+    @Headers('x-service-principal') principal: string | undefined,
+    @Headers('x-service-auth') serviceToken: string | undefined,
+    @Body() body: TokenRequest,
+  ) {
+    this.authorize(credentialId, principal, serviceToken, 'oauth:token:read');
 
     const tokenRef = body.tokenRef?.trim();
     let token: InternalTokenResult | null = null;
@@ -103,8 +117,18 @@ export class InternalOAuthController {
    */
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  async refreshToken(@Body() body: TokenRequest) {
-    this.assertInternalKey(body.internalApiKey);
+  async refreshToken(
+    @Headers('x-service-credential-id') credentialId: string | undefined,
+    @Headers('x-service-principal') principal: string | undefined,
+    @Headers('x-service-auth') serviceToken: string | undefined,
+    @Body() body: TokenRequest,
+  ) {
+    this.authorize(
+      credentialId,
+      principal,
+      serviceToken,
+      'oauth:token:refresh',
+    );
 
     const tokenRef = body.tokenRef?.trim();
     if (!tokenRef) {
@@ -145,18 +169,30 @@ export class InternalOAuthController {
     };
   }
 
-  private assertInternalKey(internalApiKey?: string) {
-    const expected =
-      process.env.INTERNAL_API_KEY || process.env.INTERNAL_SERVICE_SECRET;
-
-    if (!expected) {
-      throw new ForbiddenException(
-        'INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET not configured — refusing request',
+  private authorize(
+    credentialId: string | undefined,
+    principal: string | undefined,
+    token: string | undefined,
+    requiredScope: 'oauth:token:read' | 'oauth:token:refresh',
+  ): void {
+    try {
+      authorizeAuthInternalService(
+        { credentialId, principal, token },
+        this.serviceCredentials,
+        requiredScope,
       );
-    }
-
-    if (!internalApiKey || internalApiKey !== expected) {
-      throw new ForbiddenException('invalid internal API key');
+    } catch (error) {
+      if (
+        error instanceof AuthInternalServiceAuthorizationError &&
+        error.code === status.PERMISSION_DENIED
+      ) {
+        throw new ForbiddenException(
+          'Service principal lacks OAuth token authority',
+        );
+      }
+      throw new UnauthorizedException(
+        'Valid scoped service credential required',
+      );
     }
   }
 }

@@ -213,9 +213,15 @@ func main() {
 }
 
 func natsAuthOptions() []nats.Option {
-	token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN"))
-	if token == "" {
-		return nil
+	options := []nats.Option{nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME")}
+	user := strings.TrimSpace(os.Getenv("NATS_USER"))
+	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
+	if user != "" || password != "" {
+		return append(options, nats.UserInfo(user, password))
 	}
-	return []nats.Option{nats.Token(token)}
+	token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN"))
+	if token == "" || os.Getenv("NATS_ALLOW_TOKEN_FALLBACK") != "1" {
+		return options
+	}
+	return append(options, nats.Token(token))
 }

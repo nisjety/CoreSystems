@@ -44,6 +44,11 @@ service=${3:-}
 config=$(cat)
 printf '%s\n' "$service" >>"$FAKE_DOCKER_LOG"
 
+if [ "$service" = "retrieval-engine" ] && [ -n "${FAKE_RETRIEVAL_STATUS:-}" ]; then
+  printf '%s' "$FAKE_RETRIEVAL_STATUS"
+  exit 0
+fi
+
 if [ "$service" = "quickwit-adapter" ]; then
   printf '%s' "$config" | grep -Fq '\"dry_run\":true' || exit 97
   if printf '%s' "$config" | grep -Eq '\"(global|clear|break_glass)\":true'; then
@@ -89,6 +94,22 @@ for secret in matrix-own-org matrix-spoof-org header.payload.signature quality.p
     fail "matrix output exposed a credential or organization identifier"
   fi
 done
+
+# A real HTTP failure stays distinguishable from a missing/failed transport,
+# while response bodies and sensitive request material remain suppressed.
+if FAKE_RETRIEVAL_STATUS=500 run_matrix >"$TMP/http-error.out" 2>&1; then
+  fail "matrix accepted retrieval HTTP 500"
+fi
+grep -Fq 'retrieval                valid bearer                 status=500' "$TMP/http-error.out" ||
+  fail "matrix collapsed a real HTTP status into a transport error"
+
+# Curl reports 000 when no HTTP response exists. Keep that distinct from an
+# actual three-digit server response.
+if FAKE_RETRIEVAL_STATUS=000 run_matrix >"$TMP/transport-error.out" 2>&1; then
+  fail "matrix accepted retrieval transport failure"
+fi
+grep -Fq 'retrieval                valid bearer                 status=transport-error' "$TMP/transport-error.out" ||
+  fail "matrix treated curl HTTP code 000 as a server response"
 
 # External endpoints are explicit and restricted to loopback for this local-only harness.
 if DPV2_MATRIX_TRANSPORT=external \

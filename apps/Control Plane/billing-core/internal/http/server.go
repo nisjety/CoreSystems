@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/billing"
@@ -23,7 +22,12 @@ func NewServer(port int, billingCore *billing.Service) *Server {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(correlationMiddleware())
-	router.Use(internalAuthMiddleware())
+	serviceCredentials, credentialErr := parseServiceCredentials(os.Getenv(serviceCredentialEnv))
+	if credentialErr != nil {
+		log.Printf("billing-core service authentication unavailable: %v", credentialErr)
+		serviceCredentials = nil
+	}
+	router.Use(serviceAuthMiddleware(serviceCredentials, time.Now))
 
 	s := &Server{
 		router:      router,
@@ -65,42 +69,11 @@ func (s *Server) setupRoutes() {
 	v1.POST("/orgs/:orgId/deactivate", s.deactivateOrganization)
 	// Nexi Checkout payment webhook. Authenticated by the per-webhook shared
 	// secret Nexi echoes in the Authorization header (verified in the handler),
-	// NOT by the internal API key — so its path is exempted from
-	// internalAuthMiddleware below.
+	// NOT by a Control Plane service principal — so its path is exempted from
+	// serviceAuthMiddleware below.
 	v1.POST("/webhooks/nexi", s.nexiWebhook)
 }
 
-// nexiWebhookPath is the internal-auth-exempt route for the external Nexi
+// nexiWebhookPath is the service-principal-exempt route for the external Nexi
 // payment webhook (it carries its own Authorization shared-secret instead).
 const nexiWebhookPath = "/api/v1/billing/webhooks/nexi"
-
-func internalAuthMiddleware() gin.HandlerFunc {
-	configuredKeys := []string{
-		strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET")),
-	}
-
-	return func(c *gin.Context) {
-		if c.Request.URL.Path == "/health" || c.Request.URL.Path == nexiWebhookPath || c.Request.Method == http.MethodOptions {
-			c.Next()
-			return
-		}
-
-		reqKey := strings.TrimSpace(c.GetHeader("X-Internal-Api-Key"))
-		for _, key := range configuredKeys {
-			if key != "" && reqKey == key {
-				c.Next()
-				return
-			}
-		}
-
-		for _, key := range configuredKeys {
-			if key != "" {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-				return
-			}
-		}
-
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "service auth not configured"})
-	}
-}

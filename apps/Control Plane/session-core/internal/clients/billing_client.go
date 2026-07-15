@@ -20,20 +20,23 @@ type BillingAccount struct {
 
 // BillingClient calls billing-core. G10: part of the Control Session aggregator.
 type BillingClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL      string
+	serviceToken string
+	httpClient   *http.Client
 }
 
 // NewBillingClient returns nil when baseURL is empty.
-func NewBillingClient(baseURL, internalAPIKey string) *BillingClient {
+func NewBillingClient(baseURL, serviceToken string) *BillingClient {
 	if baseURL == "" {
 		return nil
 	}
 	return &BillingClient{
-		baseURL:    baseURL,
-		apiKey:     internalAPIKey,
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		baseURL:      baseURL,
+		serviceToken: serviceToken,
+		httpClient: &http.Client{
+			Timeout:       5 * time.Second,
+			CheckRedirect: rejectScopedServiceRedirect,
+		},
 	}
 }
 
@@ -45,9 +48,7 @@ func (c *BillingClient) GetAccount(ctx context.Context, orgID string) (*BillingA
 	if err != nil {
 		return nil, fmt.Errorf("billing-client: build request: %w", err)
 	}
-	if c.apiKey != "" {
-		req.Header.Set("X-Internal-Api-Key", c.apiKey)
-	}
+	setSessionServicePrincipal(req, c.serviceToken)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)

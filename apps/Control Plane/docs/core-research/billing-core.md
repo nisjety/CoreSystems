@@ -1,11 +1,31 @@
 # billing-core Research Dive
 
 Generated: 2026-06-07
-Updated: 2026-07-11 (production-readiness continuation — live verification + migration evidence)
+Updated: 2026-07-15 (scoped authority and revision/tombstone lifecycle verification)
 
 Scope: `apps/Control Plane/billing-core` plus its Lago dependency (lago-api:3016, lago-front:3015, lago-db:5434, lago-dragonfly:6381, lago-worker, lago-clock, lago-pdf)
 
-## 2026-07-11 production-readiness addendum (current)
+## 2026-07-15 final secure-MVP addendum (current)
+
+The final fresh-image 4/4 lifecycle passed with Billing on the correct 3014 endpoint. `organization.created` correctly auto-provisioned the isolated account before fixture setup, and the test now treats that asynchronous winner idempotently rather than expecting an empty table. Billing-down deletion persisted the Org checkpoint, Billing restart resumed the Auth outbox, cancellation/tombstone state remained permanent, and a delayed revision 99 resurrection was rejected. Stable IDs and revision guards preserve one logical effect under retry/reordering.
+
+Full `go test ./...` and `go vet ./...` pass. Existing changed-path coverage remains 81.6% for revision application, 85.7% for tombstoning, 90.0% for deactivation, and 80.8%-100% for migration-0007 usage/outbox functions. No live checkout, provider call, plan change, cancellation, or tenant deletion was executed. Production secret rotation/deployment is still operator-owned; the external-provider orphan-compensation limitation remains outside the local secure-MVP state guarantee and is not represented as fixed.
+
+## 2026-07-15 scoped/lifecycle detail (superseded by final addendum above)
+
+Billing HTTP requires distinct Gateway self-service and Auth organization-deactivation principals bound to the `billing-core` audience/scopes; Org's plan publisher credential is also distinct from all legacy values. Migration 0006 adds monotonic plan revisions and permanent organization tombstones. Application is serialized with advisory locks and applies only newer revisions; duplicate/reordered plan events and delayed events after cancellation cannot reactivate local billing state. The plan consumer is a named explicit-ACK JetStream consumer with bounded retry and DLQ.
+
+Disposable Postgres/embedded NATS and a fresh-image lifecycle stack prove revision 2 before 1, duplicates, same-revision conflict rejection, publish retry with a stable message ID, crash-before-ACK, max-delivery DLQ, Billing-down deletion checkpointing, restart/resume, and tombstone rejection. Billing now requires a successful shared-bus PubAck before delivery state advances and fails closed when the publisher is absent or denied. Runtime broker principals have no topology-admin rights. `go test ./...`, `go vet ./...`, and the earlier race pass remain green. Changed coverage is 81.6% for `ApplyOrganizationPlanRevision`, 85.7% for `TombstoneOrganization`, and 90.0% for `DeactivateOrganization`. No live plan, checkout, subscription, cancellation, or tenant was mutated; external-provider orphan compensation remains a separate known limitation.
+
+Migration 0007 adds caller-stable usage identity and a durable Lago delivery outbox. New HTTP and NATS usage ingress requires a bounded event ID, an explicit RFC3339 occurrence time, a positive finite bounded quantity, and bounded dimensions/metadata. The repository serializes by event ID and commits the de-duplication binding, aggregate usage row, and Lago job in one transaction: an exact retry returns 202, conflicting reuse returns 409, and a crash cannot lose or double-count the Lago delivery. Processing leases are reclaimable and Lago receives the stable event ID as its transaction ID. Generic account persistence is now compare-and-swap protected by plan revision plus update time, including same-revision stale writers. Full Go test/vet, focused race tests, and disposable-Postgres crash/concurrency/legacy-row tests pass; changed critical functions measure 80.8%-100%. Migration 0007 and the required `event_id`/`occurred_at` caller cutover have not been applied to an integration deployment, so this is source and isolated-database evidence only.
+
+## 2026-07-14 Velion checkout addendum (historical deployment evidence)
+
+The Billing Core and Lago stack remain healthy. Velion's shared checkout resolver now prefers a complete Nexi embedded checkout (`checkout_id`, checkout key, and approved client URL), accepts only provider-pinned executable/redirect origins, and treats Nexi `charged` and `reserved` statuses as successful activation states. The gateway ignores caller return destinations and derives settings/onboarding success/cancel URLs from its validated public Velion origin. Hyperswitch is fail-closed for the secure MVP because its runtime origins are not in the reviewed production CSP.
+
+Nexi confirmation now validates a bounded opaque payment ID, applies path escaping before credentialed provider access, and never returns raw provider bodies through Billing HTTP. Regression tests failed before the fixes and now pass; checkout-resolver line coverage is 95%, Nexi statement coverage is 87.8%, the full Velion suite was then 68 files/357 tests, and Billing's full Go suite/vet passed. Auth, Billing, gateway, and SPA images were rebuilt and healthy. No live checkout, plan change, cancellation, tenant deletion, or provider call was made. At that verification Billing HTTP still used the legacy shared key and lifecycle E2E was pending; the 2026-07-15 addendum supersedes both source/isolation gaps.
+
+## 2026-07-11 production-readiness addendum (historical)
 
 The port defect is fixed: Auth Core calls Billing Core on 3014. Organization deletion checkpoints Billing and Org reconciliation independently, so either side resumes after an outage. Migration 0005 (`billing_organization_tombstones`) is applied, and delayed plan events cannot resurrect a deleted local account: the repository serializes lifecycle writes with a per-org advisory transaction lock and rechecks the tombstone inside the upsert transaction. The service and Lago stack are healthy.
 

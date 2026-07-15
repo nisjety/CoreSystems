@@ -75,7 +75,41 @@ func TestAllGRPCMethodsEnforceSignedFourShapeMatrix(t *testing.T) {
 	}
 }
 
+func TestAllGRPCMutationsRejectRestrictiveZDRBeforeHandler(t *testing.T) {
+	verifier, bearer := grpcTestIdentityWithZDR(t, true)
+	interceptor := authctx.UnaryServerInterceptor(verifier)
+
+	for _, route := range []struct {
+		name, method string
+		req          any
+	}{
+		{"create page", "/wiki.v1.WikiService/CreatePage", &wikipb.CreatePageRequest{OrgId: "org-authorized"}},
+		{"update page", "/wiki.v1.WikiService/UpdatePageVersion", &wikipb.UpdatePageVersionRequest{OrgId: "org-authorized"}},
+		{"submit proposal", "/wiki.v1.WikiService/SubmitProposal", &wikipb.SubmitProposalRequest{OrgId: "org-authorized"}},
+		{"review proposal", "/wiki.v1.WikiService/ReviewProposal", &wikipb.ReviewProposalRequest{OrgId: "org-authorized"}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			called := false
+			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+bearer))
+			_, err := interceptor(ctx, route.req, &grpc.UnaryServerInfo{FullMethod: route.method}, func(context.Context, any) (any, error) {
+				called = true
+				return struct{}{}, nil
+			})
+			if got := status.Code(err); got != codes.PermissionDenied {
+				t.Fatalf("code = %s, want PermissionDenied; err=%v", got, err)
+			}
+			if called {
+				t.Fatal("durable mutation handler was called under restrictive ZDR")
+			}
+		})
+	}
+}
+
 func grpcTestIdentity(t *testing.T) (*authctx.Verifier, string) {
+	return grpcTestIdentityWithZDR(t, false)
+}
+
+func grpcTestIdentityWithZDR(t *testing.T, zdr bool) (*authctx.Verifier, string) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -96,6 +130,7 @@ func grpcTestIdentity(t *testing.T) (*authctx.Verifier, string) {
 	claims := jwt.MapClaims{
 		"iss": "https://auth.test/issuer", "aud": "data-plane",
 		"sub": "user-authorized", "user_id": "user-authorized", "org_id": "org-authorized",
+		"zdr":    zdr,
 		"scopes": []string{"wiki.read", "wiki.write", "wiki.approve"},
 		"iat":    now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(time.Hour).Unix(),
 	}

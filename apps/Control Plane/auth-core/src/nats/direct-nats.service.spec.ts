@@ -3,8 +3,32 @@ import type { JetStreamClient, NatsConnection } from 'nats';
 import { DirectNatsService } from './direct-nats.service';
 
 describe('DirectNatsService durable audit publishing', () => {
-  const subject = 'velion.audit.v1.control.plane_service_token_issued';
-  const payload = { org_id: 'org-a', event: 'plane_service_token_issued' };
+  beforeAll(() => {
+    process.env.NODE_ENV = 'test';
+    process.env.AUTH_INTERNAL_SERVICE_CREDENTIALS = JSON.stringify([
+      {
+        credentialId: 'user-core-test-suite',
+        principal: 'user-core',
+        audience: 'auth-core-internal',
+        token: 'unit-suite-user-core-0123456789abcdef0123456789abcdef',
+        scopes: ['nats:authenticate'],
+      },
+    ]);
+  });
+
+  afterAll(() => {
+    delete process.env.AUTH_INTERNAL_SERVICE_CREDENTIALS;
+  });
+  const subject =
+    'velion.audit.v2.control.auth-core.plane_service_token_issued';
+  const payload = {
+    occurred_at: '2026-07-15T00:00:00.000Z',
+    event_id: 'plane-token:stable-token-artifact',
+    org_id: 'org-a',
+    plane: 'control',
+    producer: 'auth-core',
+    event: 'plane_service_token_issued',
+  };
 
   function serviceWith(
     publish: jest.Mock,
@@ -34,7 +58,9 @@ describe('DirectNatsService durable audit publishing', () => {
       stream: 'VELION_CONTROL_OBSERVABILITY',
       seq: 17,
     });
-    expect(publish).toHaveBeenCalledWith(subject, expect.any(Uint8Array));
+    expect(publish).toHaveBeenCalledWith(subject, expect.any(Uint8Array), {
+      msgID: 'plane-token:stable-token-artifact',
+    });
   });
 
   it.each([
@@ -91,4 +117,34 @@ describe('DirectNatsService durable audit publishing', () => {
     ).rejects.toThrow('Invalid durable audit subject');
     expect(publish).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [
+      'legacy subject',
+      'velion.audit.v1.control.plane_service_token_issued',
+      payload,
+    ],
+    [
+      'wrong producer subject',
+      'velion.audit.v2.control.billing-core.plane_service_token_issued',
+      payload,
+    ],
+    [subject, subject, { ...payload, event_id: '' }],
+    [subject, subject, { ...payload, occurred_at: '' }],
+    [subject, subject, { ...payload, occurred_at: '2026-07-15' }],
+    [subject, subject, { ...payload, org_id: null }],
+    [subject, subject, { ...payload, producer: 'billing-core' }],
+    [subject, subject, { ...payload, event: 'different_event' }],
+  ])(
+    'rejects invalid audit identity: %s',
+    async (_case, invalidSubject, invalidPayload) => {
+      const publish = jest.fn();
+      const service = serviceWith(publish);
+
+      await expect(
+        service.publishAuditDurable(invalidSubject, invalidPayload),
+      ).rejects.toThrow('Invalid durable audit');
+      expect(publish).not.toHaveBeenCalled();
+    },
+  );
 });

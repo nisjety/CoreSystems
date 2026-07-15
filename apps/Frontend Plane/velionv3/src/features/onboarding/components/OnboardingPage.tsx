@@ -8,6 +8,8 @@ import {
   getBrowserActor,
   saveOnboardingState,
 } from '@/features/onboarding/lib/api'
+import { resolveCheckoutSurface } from '@/features/billing/lib/checkout'
+import { isCheckoutActivatingStatus } from '@/features/billing/lib/plans'
 import { signOut } from '@/shared/api/auth-client'
 import { requestJson } from '@/shared/api/http'
 import { clearSession, getSession, loadSession, markSessionOnboardingComplete } from '@/shared/session/session-store'
@@ -654,16 +656,18 @@ export default function OnboardingPage() {
         cancelUrl: `${window.location.origin}/onboarding?checkout=cancel`,
       })
 
-      if (checkout.url) {
-        window.location.assign(checkout.url)
-        return
+      const checkoutSurface = resolveCheckoutSurface(checkout)
+      switch (checkoutSurface) {
+        case 'nexi-embedded':
+        case 'hyperswitch-embedded':
+          setCheckoutSession(checkout)
+          return
+        case 'redirect':
+          window.location.assign(checkout.url!)
+          return
+        default:
+          throw new Error('Payment checkout is not configured.')
       }
-
-      if (!checkout.client_secret || !checkout.publishable_key) {
-        throw new Error('Payment checkout is not configured.')
-      }
-
-      setCheckoutSession(checkout)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not save the selected plan.')
     } finally {
@@ -711,8 +715,7 @@ export default function OnboardingPage() {
         paymentId: payment.paymentId,
         clientSecret: payment.clientSecret,
       })
-      const normalizedStatus = status.status.toLowerCase()
-      if (normalizedStatus !== 'succeeded' && normalizedStatus !== 'processing') {
+      if (!isCheckoutActivatingStatus(status.status)) {
         setState('step', 'paywall')
         setError('Betalingen er ikke fullført ennå.')
         return

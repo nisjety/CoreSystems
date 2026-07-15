@@ -27,7 +27,7 @@ use crate::{
     config::AppState,
     domains::chat::shared,
     envelope::error,
-    middleware::{require_session, AuthenticatedUser},
+    middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -58,23 +58,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// capability token; this is a defense-in-depth gate that also lets the SPA
 /// surface a clear error.
 async fn can_author_skills(state: &AppState, user: &AuthenticatedUser) -> bool {
-    let role_has = |value: Option<&str>, allowed: &[&str]| {
-        value.unwrap_or_default().split(',').map(str::trim).any(|role| {
-            allowed
-                .iter()
-                .any(|allowed_role| role.eq_ignore_ascii_case(allowed_role))
-        })
-    };
-    if role_has(user.auth_role.as_deref(), &["admin", "superadmin"]) {
-        return true;
-    }
-    let org_role = crate::upstream::resolve_session_context(state, user)
-        .await
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    role_has(Some(org_role.as_str()), &["owner", "admin"])
+    let _ = state;
+    has_authorized_org_role(user, &["owner", "admin"])
 }
 
 /// Rebuild a forwardable query string from the incoming params, dropping empty
@@ -139,7 +124,10 @@ async fn create_skill(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can author skills.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can author skills.",
+            )),
         )
             .into_response();
     }
@@ -174,7 +162,10 @@ async fn update_skill(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can edit skills.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can edit skills.",
+            )),
         )
             .into_response();
     }
@@ -212,7 +203,10 @@ async fn delete_skill(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can delete skills.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can delete skills.",
+            )),
         )
             .into_response();
     }
@@ -251,7 +245,11 @@ async fn list_plugins(
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error),
     };
-    let url = format!("{}/v1/plugins{}", state.model_gateway_url, build_query(&params));
+    let url = format!(
+        "{}/v1/plugins{}",
+        state.model_gateway_url,
+        build_query(&params)
+    );
     shared::proxy_model_json_with_capability(
         &state,
         Method::GET,
@@ -276,7 +274,10 @@ async fn create_plugin(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can register plugins.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can register plugins.",
+            )),
         )
             .into_response();
     }
@@ -310,7 +311,10 @@ async fn update_plugin(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can change plugins.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can change plugins.",
+            )),
         )
             .into_response();
     }
@@ -347,7 +351,10 @@ async fn delete_plugin(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can delete plugins.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can delete plugins.",
+            )),
         )
             .into_response();
     }
@@ -386,7 +393,11 @@ async fn list_cron(
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error),
     };
-    let url = format!("{}/v1/cron{}", state.model_gateway_url, build_query(&params));
+    let url = format!(
+        "{}/v1/cron{}",
+        state.model_gateway_url,
+        build_query(&params)
+    );
     shared::proxy_model_json_with_capability(
         &state,
         Method::GET,
@@ -411,7 +422,10 @@ async fn create_cron(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can create cron schedules.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can create cron schedules.",
+            )),
         )
             .into_response();
     }
@@ -445,7 +459,10 @@ async fn update_cron(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can change cron schedules.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can change cron schedules.",
+            )),
         )
             .into_response();
     }
@@ -482,7 +499,10 @@ async fn delete_cron(
     if !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
-            Json(error("forbidden", "Only organization admins can delete cron schedules.")),
+            Json(error(
+                "forbidden",
+                "Only organization admins can delete cron schedules.",
+            )),
         )
             .into_response();
     }

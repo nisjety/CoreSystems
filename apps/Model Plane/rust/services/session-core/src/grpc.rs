@@ -180,10 +180,9 @@ pub struct SessionService {
     graph_client: Option<GraphServiceClient<Channel>>,
     knowledge_client: Option<KnowledgeServiceClient<Channel>>,
     letta_memory: Option<LettaMemoryAdapter>,
-    /// Best-effort publisher for `velion.audit.v1.model.tool_action` events when
-    /// a tool `STEP_COMPLETED` is recorded. `None` when NATS is unreachable —
-    /// the run still completes; only the audit fan-out is skipped.
-    audit_publisher: Option<std::sync::Arc<crate::audit_publisher::NatsAuditPublisher>>,
+    /// Transactional audit outbox. Tool-step intent is committed with the step;
+    /// delivery retries independently until Audit Core acknowledges it.
+    audit_publisher: Option<std::sync::Arc<crate::audit_publisher::AuditOutbox>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -510,12 +509,9 @@ async fn start_run_inner(
     .await
     {
         tracing::warn!(error = %error, run_id = %run_id, "durable plan create failed (best-effort)");
-    } else if let Err(error) = crate::orchestration_store::update_plan_status(
-        pool,
-        &format!("plan_{run_id}"),
-        "executing",
-    )
-    .await
+    } else if let Err(error) =
+        crate::orchestration_store::update_plan_status(pool, &format!("plan_{run_id}"), "executing")
+            .await
     {
         // The run is executing now, so advance its just-created plan out of
         // draft — record_run_terminal drives it to completed/failed at run end.
@@ -530,6 +526,127 @@ async fn start_run_inner(
             nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
         }),
     }))
+}
+
+#[derive(Debug)]
+struct RecordedStep {
+    ordinal: i64,
+    event_id: String,
+    created: bool,
+}
+
+fn is_terminal_run_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+fn requested_terminal_status(req: &pb::CompleteStepRequest) -> Option<&'static str> {
+    if !req.terminal {
+        return None;
+    }
+    match req.status.as_str() {
+        "completed" => Some("completed"),
+        "failed" => Some("failed"),
+        _ => None,
+    }
+}
+
+async fn lock_run_status(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<(String, String), Status> {
+    sqlx::query_as("SELECT status, org_id FROM runs WHERE id = $1 FOR UPDATE")
+        .bind(run_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .ok_or_else(|| Status::not_found("run not found"))
+}
+
+fn step_payload_matches(existing: &serde_json::Value, requested: &serde_json::Value) -> bool {
+    if existing == requested {
+        return true;
+    }
+
+    let (serde_json::Value::Object(existing), serde_json::Value::Object(mut requested)) =
+        (existing, requested.clone())
+    else {
+        return false;
+    };
+    if existing.contains_key("terminal") {
+        return false;
+    }
+    requested.remove("terminal");
+    existing == &requested
+}
+
+async fn insert_or_replay_step(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &pb::CompleteStepRequest,
+    org_id: &str,
+) -> Result<RecordedStep, Status> {
+    let event_id = new_ulid();
+    let step_resource = format!("run:{}:step:{}", &req.run_id, &req.step_id);
+    let step_idem = derive_idempotency_hash(
+        "session-core",
+        "STEP_COMPLETED",
+        &step_resource,
+        &format!("{}:{}", &req.run_id, &req.step_id),
+    );
+    let payload = serde_json::json!({
+        "step_id": &req.step_id,
+        "status": &req.status,
+        "output": &req.output,
+        "error": &req.error,
+        "terminal": req.terminal,
+    });
+    let inserted: Option<(i64,)> = sqlx::query_as(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         SELECT $1, 'STEP_COMPLETED', $2, $3, now(), r.org_id, r.user_id, $2, '', $4, $5, $6, 'session-core', 1
+         FROM runs r WHERE r.id = $2
+         ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING
+         RETURNING step_ordinal",
+    )
+    .bind(&event_id)
+    .bind(&req.run_id)
+    .bind(&payload)
+    .bind(&step_idem)
+    .bind(&step_resource)
+    .bind(STEP_COMPLETED_TYPE_URL)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    if let Some((ordinal,)) = inserted {
+        return Ok(RecordedStep {
+            ordinal,
+            event_id,
+            created: true,
+        });
+    }
+
+    let existing: Option<(String, serde_json::Value, i64)> = sqlx::query_as(
+        "SELECT id, payload, step_ordinal
+         FROM events
+         WHERE org_id = $1 AND idempotency_key = $2
+           AND run_id = $3 AND event_type = 'STEP_COMPLETED'",
+    )
+    .bind(org_id)
+    .bind(&step_idem)
+    .bind(&req.run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (existing_id, existing_payload, ordinal) = existing
+        .ok_or_else(|| Status::already_exists("step idempotency identity is already in use"))?;
+    if !step_payload_matches(&existing_payload, &payload) {
+        return Err(Status::already_exists(
+            "step identity is bound to different immutable input",
+        ));
+    }
+    Ok(RecordedStep {
+        ordinal,
+        event_id: existing_id,
+        created: false,
+    })
 }
 
 /// Record a terminal run event (`RUN_COMPLETED` / `RUN_FAILED`) and flip the
@@ -549,18 +666,11 @@ async fn record_run_terminal(
     let terminal_resource = format!("run:{}", &req.run_id);
     let terminal_idem = derive_idempotency_hash(
         "session-core",
-        terminal_event_type,
+        "RUN_TERMINAL",
         &terminal_resource,
         &format!("{}:terminal", &req.run_id),
     );
-    // `complete_step` is called per step and emits a run-terminal event keyed
-    // `{run_id}:terminal`. A multi-step run therefore re-emits the same key on
-    // every "completed"/"failed" step; without ON CONFLICT the 2nd step would
-    // hit the unique idempotency index and fail the whole call, breaking
-    // multi-step runs. The per-step STEP_COMPLETED event is keyed `{run}:{step}`
-    // (unique per step) so it is unaffected. (Run-completion-once semantics —
-    // marking terminal only at true run end — is a separate refinement.)
-    sqlx::query(
+    let terminal_insert = sqlx::query(
         "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
          SELECT $1, $2, $3, $4, now(), r.org_id, r.user_id, $3, $5, $8, $6, $7, 'session-core', 1
          FROM runs r WHERE r.id = $3
@@ -577,20 +687,37 @@ async fn record_run_terminal(
     .execute(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
+    if terminal_insert.rows_affected() != 1 {
+        return Err(Status::already_exists(
+            "run terminal outcome is already assigned",
+        ));
+    }
 
-    sqlx::query("UPDATE runs SET status = $1, ended_at = now(), updated_at = now() WHERE id = $2")
-        .bind(run_status)
-        .bind(&req.run_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let transitioned = sqlx::query(
+        "UPDATE runs SET status = $1, ended_at = now(), updated_at = now()
+         WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(run_status)
+    .bind(&req.run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    if transitioned.rows_affected() != 1 {
+        return Err(Status::already_exists(
+            "run terminal outcome is already assigned",
+        ));
+    }
 
     // Drive the run's durable plan to its terminal state. `start_run` creates a
     // plan keyed `plan_{run_id}` in `draft`; without this it never left draft
     // ("plans never leave draft"). Only advance a plan that is still open
     // (draft/proposed/approved/executing) so a human decision (rejected/
     // superseded) is never overwritten. Same tx as the run flip => atomic.
-    let plan_status = if run_status == "failed" { "failed" } else { "completed" };
+    let plan_status = if run_status == "failed" {
+        "failed"
+    } else {
+        "completed"
+    };
     sqlx::query(
         "UPDATE plans SET status = $1, updated_at = now()
          WHERE id = $2 AND status IN ('draft','proposed','approved','executing')",
@@ -608,47 +735,51 @@ async fn record_run_terminal(
 /// run-terminal event + status flip, all in one tx.
 async fn complete_step_inner(
     pool: &PgPool,
-    audit_publisher: Option<&crate::audit_publisher::NatsAuditPublisher>,
+    audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
     req: pb::CompleteStepRequest,
 ) -> Result<Response<pb::CompleteStepResponse>, Status> {
+    validate_tool_action_token(&req.run_id, "run_id", 128)?;
+    validate_tool_action_token(&req.step_id, "step_id", 128)?;
+    let desired_terminal_status = if req.terminal {
+        Some(requested_terminal_status(&req).ok_or_else(|| {
+            Status::invalid_argument("terminal step status must be completed or failed")
+        })?)
+    } else {
+        None
+    };
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+    let (run_status, org_id) = lock_run_status(&mut tx, &req.run_id).await?;
+    let step = insert_or_replay_step(&mut tx, &req, &org_id).await?;
 
-    // Append step event; trigger assigns step_ordinal.
-    let event_id = new_ulid();
-    let step_resource = format!("run:{}:step:{}", &req.run_id, &req.step_id);
-    let step_idem = derive_idempotency_hash(
-        "session-core",
-        "STEP_COMPLETED",
-        &step_resource,
-        &format!("{}:{}", &req.run_id, &req.step_id),
-    );
-    let row: (i64,) = sqlx::query_as(
-        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
-          SELECT $1, 'STEP_COMPLETED', $2, $3, now(), r.org_id, r.user_id, $2, '', $4, $5, $6, 'session-core', 1
-         FROM runs r WHERE r.id = $2
-         RETURNING step_ordinal",
-    )
-    .bind(&event_id)
-    .bind(&req.run_id)
-    .bind(serde_json::json!({
-        "step_id": req.step_id,
-        "status": req.status,
-        "output": req.output,
-        "error": req.error,
-    }))
-    .bind(&step_idem)
-    .bind(&step_resource)
-    .bind(STEP_COMPLETED_TYPE_URL)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
-
-    if req.status == "completed" || req.status == "failed" {
-        record_run_terminal(&mut tx, &req, &event_id).await?;
+    if !step.created {
+        if let Some(desired) = desired_terminal_status {
+            if run_status != desired {
+                return Err(Status::already_exists(
+                    "terminal step replay conflicts with the durable run outcome",
+                ));
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let step_index =
+            u32::try_from(step.ordinal).map_err(|_| Status::internal("step index out of range"))?;
+        return Ok(Response::new(pb::CompleteStepResponse { step_index }));
     }
+
+    if is_terminal_run_status(&run_status) {
+        return Err(Status::already_exists(
+            "run terminal outcome is already assigned",
+        ));
+    }
+    if desired_terminal_status.is_some() {
+        record_run_terminal(&mut tx, &req, &step.event_id).await?;
+    }
+
+    enqueue_tool_action_audit(&mut tx, &req).await?;
 
     tx.commit()
         .await
@@ -695,62 +826,299 @@ async fn complete_step_inner(
         }
     }
 
-    // GDPR audit fan-out for tool steps (best-effort; never fails the step).
-    maybe_publish_tool_action(pool, audit_publisher, &req).await;
+    // The intent already committed with the step. Immediate dispatch reduces
+    // latency; any failure remains durable for the background retry worker.
+    if let Some(outbox) = audit_publisher {
+        if let Err(error) = outbox.dispatch_one().await {
+            tracing::warn!(%error, "tool_action audit retained for retry");
+        }
+    }
 
     let step_index =
-        u32::try_from(row.0).map_err(|_| Status::internal("step index out of range"))?;
+        u32::try_from(step.ordinal).map_err(|_| Status::internal("step index out of range"))?;
 
     Ok(Response::new(pb::CompleteStepResponse { step_index }))
 }
 
-/// Best-effort `velion.audit.v1.model.tool_action` publish for a recorded step.
-///
-/// execution-core's governed multi-tool loop prefixes each per-tool step with
-/// `[data_category=… zdr=…]`. When that prefix is present, this looks up the
-/// run's org/user and publishes the audit event so audit-core durably records
-/// the agentic tool call. A missing publisher, an org/user lookup miss, or a
-/// publish error is logged and swallowed — it never fails step completion.
-async fn maybe_publish_tool_action(
-    pool: &PgPool,
-    audit_publisher: Option<&crate::audit_publisher::NatsAuditPublisher>,
+/// Enqueue the audit body in the same `PostgreSQL` transaction as `STEP_COMPLETED`.
+/// Non-tool steps have no governed data-category prefix and create no row.
+async fn enqueue_tool_action_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     req: &pb::CompleteStepRequest,
-) {
-    let (Some(publisher), Some(detail)) = (
-        audit_publisher,
-        crate::audit_publisher::parse_tool_action_detail(&req.output, &req.error),
-    ) else {
-        return;
+) -> Result<(), Status> {
+    let Some(detail) = crate::audit_publisher::parse_tool_action_detail(&req.output, &req.error)
+    else {
+        return Ok(());
     };
 
-    match sqlx::query_as::<_, (String, String)>("SELECT org_id, user_id FROM runs WHERE id = $1")
-        .bind(&req.run_id)
-        .fetch_optional(pool)
-        .await
+    let identity =
+        sqlx::query_as::<_, (String, String)>("SELECT org_id, user_id FROM runs WHERE id = $1")
+            .bind(&req.run_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let Some((org_id, user_id)) = identity else {
+        return Err(Status::failed_precondition("run identity is unavailable"));
+    };
+
+    let tool = crate::audit_publisher::resolve_tool_name(&detail, &req.step_id);
+    let body = crate::audit_publisher::build_tool_action_body(
+        &org_id,
+        &user_id,
+        &req.run_id,
+        &req.step_id,
+        &req.status,
+        &tool,
+        &detail,
+        Utc::now(),
+    );
+    let event_id = body["event_id"]
+        .as_str()
+        .ok_or_else(|| Status::internal("audit event identity missing"))?
+        .to_owned();
+    sqlx::query(
+        "INSERT INTO session_audit_outbox (event_id, subject, payload)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (event_id) DO NOTHING",
+    )
+    .bind(event_id)
+    .bind(crate::audit_publisher::SUBJECT_MODEL_TOOL_ACTION)
+    .bind(body)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    Ok(())
+}
+
+fn validate_tool_action_token(
+    value: &str,
+    field: &'static str,
+    max_len: usize,
+) -> Result<(), Status> {
+    if value.is_empty()
+        || value != value.trim()
+        || value.len() > max_len
+        || value.chars().any(char::is_control)
     {
-        Ok(Some((org_id, user_id))) => {
-            // Prefer the human-readable tool name from the execution-core prefix
-            // (E5); fall back to the step_id-derived call id only for pre-E5 steps.
-            let tool = crate::audit_publisher::resolve_tool_name(&detail, &req.step_id);
-            let body = crate::audit_publisher::build_tool_action_body(
-                &org_id,
-                &user_id,
-                &req.run_id,
-                &req.step_id,
-                &req.status,
-                &tool,
-                &detail,
-                Utc::now(),
-            );
-            crate::audit_publisher::publish_tool_action(publisher, &body).await;
-        }
-        Ok(None) => {
-            tracing::debug!(run_id = %req.run_id, "tool_action audit skipped (run row not found)");
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, run_id = %req.run_id, "tool_action audit org/user lookup failed (best-effort)");
+        return Err(Status::invalid_argument(format!("invalid {field}")));
+    }
+    Ok(())
+}
+
+fn tool_action_detail(
+    tool: &str,
+    data_category: &str,
+    zdr: bool,
+) -> crate::audit_publisher::ToolActionDetail {
+    crate::audit_publisher::ToolActionDetail {
+        data_category: data_category.to_owned(),
+        zdr,
+        tool: Some(tool.to_owned()),
+    }
+}
+
+async fn enqueue_inline_tool_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    action_id: &str,
+    request_id: &str,
+    outcome: &str,
+    detail: &crate::audit_publisher::ToolActionDetail,
+    phase: &str,
+) -> Result<(), Status> {
+    let tool = detail
+        .tool
+        .as_deref()
+        .ok_or_else(|| Status::internal("tool action name missing"))?;
+    let mut body = crate::audit_publisher::build_tool_action_body_for_phase(
+        org_id,
+        user_id,
+        run_id,
+        action_id,
+        outcome,
+        tool,
+        detail,
+        phase,
+        Utc::now(),
+    );
+    if phase == "reserved" {
+        body["event"] = serde_json::json!("tool_action_reserved");
+    }
+    body["details"]["request_id"] = serde_json::json!(request_id);
+    let event_id = body["event_id"]
+        .as_str()
+        .ok_or_else(|| Status::internal("audit event identity missing"))?
+        .to_owned();
+    sqlx::query(
+        "INSERT INTO session_audit_outbox (event_id, subject, payload)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (event_id) DO NOTHING",
+    )
+    .bind(event_id)
+    .bind(crate::audit_publisher::SUBJECT_MODEL_TOOL_ACTION)
+    .bind(body)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    Ok(())
+}
+
+async fn reserve_tool_action_inner(
+    pool: &PgPool,
+    audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
+    req: pb::ReserveToolActionRequest,
+) -> Result<Response<pb::ReserveToolActionResponse>, Status> {
+    validate_tool_action_token(&req.run_id, "run_id", 128)?;
+    validate_tool_action_token(&req.action_id, "action_id", 128)?;
+    validate_tool_action_token(&req.request_id, "request_id", 128)?;
+    validate_tool_action_token(&req.tool, "tool", 96)?;
+    validate_tool_action_token(&req.data_category, "data_category", 64)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    let inserted = sqlx::query(
+        "INSERT INTO session_tool_audit_intents
+            (run_id, action_id, request_id, tool, data_category, zdr)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (run_id, action_id) DO NOTHING",
+    )
+    .bind(&req.run_id)
+    .bind(&req.action_id)
+    .bind(&req.request_id)
+    .bind(&req.tool)
+    .bind(&req.data_category)
+    .bind(req.zdr)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?
+    .rows_affected()
+        == 1;
+
+    let existing = sqlx::query_as::<_, (String, String, String, bool, String, String)>(
+        "SELECT i.request_id, i.tool, i.data_category, i.zdr, r.org_id, r.user_id
+         FROM session_tool_audit_intents i
+         JOIN runs r ON r.id = i.run_id
+         WHERE i.run_id = $1 AND i.action_id = $2
+         FOR UPDATE OF i",
+    )
+    .bind(&req.run_id)
+    .bind(&req.action_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?
+    .ok_or_else(|| Status::failed_precondition("tool action run is unavailable"))?;
+    if existing.0 != req.request_id
+        || existing.1 != req.tool
+        || existing.2 != req.data_category
+        || existing.3 != req.zdr
+    {
+        return Err(Status::already_exists(
+            "tool action identity is bound to different immutable input",
+        ));
+    }
+
+    let detail = tool_action_detail(&req.tool, &req.data_category, req.zdr);
+    enqueue_inline_tool_audit(
+        &mut tx,
+        &existing.4,
+        &existing.5,
+        &req.run_id,
+        &req.action_id,
+        &req.request_id,
+        "reserved",
+        &detail,
+        "reserved",
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    if let Some(outbox) = audit_publisher {
+        if let Err(error) = outbox.dispatch_one().await {
+            tracing::warn!(%error, "reserved tool_action audit retained for retry");
         }
     }
+    Ok(Response::new(pb::ReserveToolActionResponse {
+        created: inserted,
+    }))
+}
+
+async fn finalize_tool_action_inner(
+    pool: &PgPool,
+    audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
+    req: pb::FinalizeToolActionRequest,
+) -> Result<Response<pb::FinalizeToolActionResponse>, Status> {
+    validate_tool_action_token(&req.run_id, "run_id", 128)?;
+    validate_tool_action_token(&req.action_id, "action_id", 128)?;
+    if !matches!(req.outcome.as_str(), "completed" | "failed") {
+        return Err(Status::invalid_argument("invalid tool action outcome"));
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    let existing = sqlx::query_as::<_, (String, String, String, bool, String, String, String)>(
+        "SELECT i.request_id, i.tool, i.data_category, i.zdr, i.status, r.org_id, r.user_id
+         FROM session_tool_audit_intents i
+         JOIN runs r ON r.id = i.run_id
+         WHERE i.run_id = $1 AND i.action_id = $2
+         FOR UPDATE OF i",
+    )
+    .bind(&req.run_id)
+    .bind(&req.action_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?
+    .ok_or_else(|| Status::failed_precondition("tool action was not reserved"))?;
+    let updated = if existing.4 == "reserved" {
+        sqlx::query(
+            "UPDATE session_tool_audit_intents
+             SET status = $3, finalized_at = now()
+             WHERE run_id = $1 AND action_id = $2 AND status = 'reserved'",
+        )
+        .bind(&req.run_id)
+        .bind(&req.action_id)
+        .bind(&req.outcome)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .rows_affected()
+            == 1
+    } else if existing.4 == req.outcome {
+        false
+    } else {
+        return Err(Status::already_exists(
+            "tool action was finalized with a different outcome",
+        ));
+    };
+
+    let detail = tool_action_detail(&existing.1, &existing.2, existing.3);
+    enqueue_inline_tool_audit(
+        &mut tx,
+        &existing.5,
+        &existing.6,
+        &req.run_id,
+        &req.action_id,
+        &existing.0,
+        &req.outcome,
+        &detail,
+        "final",
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    if let Some(outbox) = audit_publisher {
+        if let Err(error) = outbox.dispatch_one().await {
+            tracing::warn!(%error, "final tool_action audit retained for retry");
+        }
+    }
+    Ok(Response::new(pb::FinalizeToolActionResponse { updated }))
 }
 
 /// One event row in the exact column order selected by `replay_thread_task`'s
@@ -1128,6 +1496,40 @@ impl SessionCore for SessionService {
         }
         .await;
         record_metrics("complete_step", started, result.is_ok());
+        result
+    }
+
+    async fn reserve_tool_action(
+        &self,
+        request: Request<pb::ReserveToolActionRequest>,
+    ) -> Result<Response<pb::ReserveToolActionResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let req = request.into_inner();
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            reserve_tool_action_inner(&self.pool, self.audit_publisher.as_deref(), req).await
+        }
+        .await;
+        record_metrics("reserve_tool_action", started, result.is_ok());
+        result
+    }
+
+    async fn finalize_tool_action(
+        &self,
+        request: Request<pb::FinalizeToolActionRequest>,
+    ) -> Result<Response<pb::FinalizeToolActionResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let req = request.into_inner();
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            finalize_tool_action_inner(&self.pool, self.audit_publisher.as_deref(), req).await
+        }
+        .await;
+        record_metrics("finalize_tool_action", started, result.is_ok());
         result
     }
 
@@ -2208,18 +2610,12 @@ pub async fn serve(
     // status flip).
     let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone());
 
-    // Best-effort connect the audit publisher for `model.tool_action` events.
-    // A NATS hiccup must not block serving; on failure the field is `None` and
-    // tool-step audit fan-out is simply skipped (runs still complete).
+    // Tool-action intent is committed to Postgres with the step. The outbox
+    // reconnects and retries NATS delivery independently.
     let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
-    let audit_publisher = match crate::audit_publisher::NatsAuditPublisher::connect(&nats_url).await
-    {
-        Ok(p) => Some(std::sync::Arc::new(p)),
-        Err(error) => {
-            warn!(error = %error, "audit publisher NATS connect failed; tool_action audit disabled");
-            None
-        }
-    };
+    let audit_outbox = crate::audit_publisher::AuditOutbox::new(pool.clone(), nats_url);
+    audit_outbox.start();
+    let audit_publisher = Some(audit_outbox);
 
     let session = SessionService {
         pool,
@@ -2257,9 +2653,10 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_segments, pb, resolve_residency, validate_user_checkpoint, AssemblyInputs,
-        DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
-        MAX_USER_CHECKPOINT_STATE_BYTES,
+        assemble_segments, complete_step_inner, derive_idempotency_hash,
+        finalize_tool_action_inner, pb, reserve_tool_action_inner, resolve_residency,
+        validate_user_checkpoint, AssemblyInputs, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES,
+        MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES, STEP_COMPLETED_TYPE_URL,
     };
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
     use tonic::Request;
@@ -2843,6 +3240,315 @@ mod tests {
         ] {
             sqlx::query(q).bind(&org).execute(&pool).await.ok();
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn inline_tool_audit_reservation_and_finalization_are_idempotent_in_postgres() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let thread_id = format!("tool-audit-thread-{suffix}");
+        let run_id = format!("tool-audit-run-{suffix}");
+        let plan_id = format!("plan_{run_id}");
+        let org_id = format!("tool-audit-org-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id)
+             VALUES ($1, $1, $2, 'user-1')",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status)
+             VALUES ($1, $2, 'g', $3, 'user-1', 'running')",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            "INSERT INTO plans (id, thread_id, run_id, status, org_id, user_id)
+             VALUES ($1, $2, $3, 'draft', $4, 'user-1')",
+        )
+        .bind(&plan_id)
+        .bind(&thread_id)
+        .bind(&run_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+
+        let legacy_step_id = "legacy-step";
+        let legacy_resource = format!("run:{run_id}:step:{legacy_step_id}");
+        let legacy_idempotency_key = derive_idempotency_hash(
+            "session-core",
+            "STEP_COMPLETED",
+            &legacy_resource,
+            &format!("{run_id}:{legacy_step_id}"),
+        );
+        let legacy_ordinal: i64 = sqlx::query_scalar(
+            "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+             SELECT $1, 'STEP_COMPLETED', $2, $3, now(), r.org_id, r.user_id, $2, '', $4, $5, $6, 'session-core', 1
+             FROM runs r WHERE r.id = $2
+             RETURNING step_ordinal",
+        )
+        .bind(format!("legacy-step-event-{suffix}"))
+        .bind(&run_id)
+        .bind(serde_json::json!({
+            "step_id": legacy_step_id,
+            "status": "running",
+            "output": "legacy output",
+            "error": "",
+        }))
+        .bind(&legacy_idempotency_key)
+        .bind(&legacy_resource)
+        .bind(STEP_COMPLETED_TYPE_URL)
+        .fetch_one(&pool)
+        .await
+        .expect("seed pre-terminal-field step event");
+        let legacy_replay = complete_step_inner(
+            &pool,
+            None,
+            pb::CompleteStepRequest {
+                run_id: run_id.clone(),
+                step_id: legacy_step_id.to_owned(),
+                status: "running".to_owned(),
+                output: "legacy output".to_owned(),
+                error: String::new(),
+                terminal: false,
+            },
+        )
+        .await
+        .expect("legacy exact step replay must remain idempotent")
+        .into_inner();
+        assert_eq!(
+            legacy_replay.step_index,
+            u32::try_from(legacy_ordinal).expect("legacy ordinal fits u32")
+        );
+
+        let reservation = pb::ReserveToolActionRequest {
+            run_id: run_id.clone(),
+            action_id: "inline-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            request_id: "request-1".to_owned(),
+            tool: "web_search".to_owned(),
+            data_category: "public_non_personal".to_owned(),
+            zdr: false,
+        };
+        assert!(
+            reserve_tool_action_inner(&pool, None, reservation.clone())
+                .await
+                .expect("reserve")
+                .into_inner()
+                .created
+        );
+        assert!(
+            !reserve_tool_action_inner(&pool, None, reservation.clone())
+                .await
+                .expect("exact reserve replay")
+                .into_inner()
+                .created
+        );
+        let mut conflict = reservation.clone();
+        conflict.request_id = "different-request".to_owned();
+        assert_eq!(
+            reserve_tool_action_inner(&pool, None, conflict)
+                .await
+                .expect_err("conflicting binding")
+                .code(),
+            tonic::Code::AlreadyExists
+        );
+
+        let finalization = pb::FinalizeToolActionRequest {
+            run_id: run_id.clone(),
+            action_id: reservation.action_id.clone(),
+            outcome: "completed".to_owned(),
+        };
+        assert!(
+            finalize_tool_action_inner(&pool, None, finalization.clone())
+                .await
+                .expect("finalize")
+                .into_inner()
+                .updated
+        );
+        assert!(
+            !finalize_tool_action_inner(&pool, None, finalization.clone())
+                .await
+                .expect("exact finalization replay")
+                .into_inner()
+                .updated
+        );
+        let mut conflicting_final = finalization;
+        conflicting_final.outcome = "failed".to_owned();
+        assert_eq!(
+            finalize_tool_action_inner(&pool, None, conflicting_final)
+                .await
+                .expect_err("conflicting finalization")
+                .code(),
+            tonic::Code::AlreadyExists
+        );
+
+        let ordinary_step = pb::CompleteStepRequest {
+            run_id: run_id.clone(),
+            step_id: "ordinary-step".to_owned(),
+            status: "completed".to_owned(),
+            output: "ordinary step output".to_owned(),
+            error: String::new(),
+            terminal: false,
+        };
+        complete_step_inner(&pool, None, ordinary_step.clone())
+            .await
+            .expect("non-terminal completed step");
+        assert_eq!(
+            complete_step_inner(
+                &pool,
+                None,
+                pb::CompleteStepRequest {
+                    terminal: true,
+                    ..ordinary_step
+                },
+            )
+            .await
+            .expect_err("an explicit terminal mismatch is not an exact replay")
+            .code(),
+            tonic::Code::AlreadyExists
+        );
+
+        let lifecycle: (String, String) = sqlx::query_as(
+            "SELECT r.status, p.status FROM runs r JOIN plans p ON p.run_id = r.id WHERE r.id = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load run lifecycle");
+        assert_eq!(lifecycle, ("running".to_owned(), "draft".to_owned()));
+
+        let terminal = pb::CompleteStepRequest {
+            run_id: run_id.clone(),
+            step_id: "final".to_owned(),
+            status: "completed".to_owned(),
+            output: "final output".to_owned(),
+            error: String::new(),
+            terminal: true,
+        };
+        let first_terminal = complete_step_inner(&pool, None, terminal.clone())
+            .await
+            .expect("first terminal completion")
+            .into_inner();
+        let terminal_replay = complete_step_inner(&pool, None, terminal.clone())
+            .await
+            .expect("exact terminal replay must be idempotent")
+            .into_inner();
+        assert_eq!(terminal_replay.step_index, first_terminal.step_index);
+
+        let conflicting_terminal = pb::CompleteStepRequest {
+            step_id: "different-final-step".to_owned(),
+            status: "failed".to_owned(),
+            output: String::new(),
+            error: "late conflicting failure".to_owned(),
+            ..terminal
+        };
+        assert_eq!(
+            complete_step_inner(&pool, None, conflicting_terminal)
+                .await
+                .expect_err("terminal outcome must be single-assignment")
+                .code(),
+            tonic::Code::AlreadyExists
+        );
+
+        let terminal_lifecycle: (String, String) = sqlx::query_as(
+            "SELECT r.status, p.status FROM runs r JOIN plans p ON p.run_id = r.id WHERE r.id = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load terminal lifecycle");
+        assert_eq!(
+            terminal_lifecycle,
+            ("completed".to_owned(), "completed".to_owned())
+        );
+        let terminal_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events
+             WHERE run_id = $1 AND event_type IN ('RUN_COMPLETED', 'RUN_FAILED')",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count terminal events");
+        assert_eq!(
+            terminal_events, 1,
+            "one run may have only one terminal event"
+        );
+
+        let phases: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT payload->'details'->>'phase', payload->>'outcome', payload->>'event'
+             FROM session_audit_outbox
+             WHERE payload->>'subject' = $1
+             ORDER BY payload->'details'->>'phase'",
+        )
+        .bind(&run_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load audit phases");
+        assert_eq!(
+            phases,
+            vec![
+                (
+                    "final".to_owned(),
+                    "completed".to_owned(),
+                    "tool_action".to_owned(),
+                ),
+                (
+                    "reserved".to_owned(),
+                    "reserved".to_owned(),
+                    "tool_action_reserved".to_owned(),
+                ),
+            ]
+        );
+
+        sqlx::query("DELETE FROM session_audit_outbox WHERE payload->>'subject' = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("clean outbox fixture");
+        sqlx::query("DELETE FROM events WHERE run_id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("clean event fixture");
+        sqlx::query("DELETE FROM plan_steps WHERE plan_id = $1")
+            .bind(&plan_id)
+            .execute(&pool)
+            .await
+            .expect("clean plan-step fixture");
+        sqlx::query("DELETE FROM plans WHERE id = $1")
+            .bind(&plan_id)
+            .execute(&pool)
+            .await
+            .expect("clean plan fixture");
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("clean run fixture");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .expect("clean thread fixture");
     }
 
     // True multi-service round-trip: a real SessionCoreClient calls a real

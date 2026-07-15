@@ -382,13 +382,17 @@ type EvaluatePolicyRequest struct {
 	CapabilityId string `protobuf:"bytes,1,opt,name=capability_id,json=capabilityId,proto3" json:"capability_id,omitempty"`
 	// Run requesting invocation.
 	RunId string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	// Agent making the request.
+	// Caller-supplied agent label for audit/context. This field is not a trusted
+	// agent identity and cannot currently authorize agent-scoped evaluation.
 	AgentId string `protobuf:"bytes,3,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
 	// Tenant context.
 	OrgId string `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	// Effective scope at invocation time. Must match one of the capability's
-	// EnabledForScopes entries. Canonical values: "run", "thread", "workspace",
-	// "user", "org", "global". Empty = backwards-compatible (scope check skipped).
+	// Effective scope at invocation time. Currently authorized values are
+	// "global" and "org"; org derives its concrete value from the verified
+	// tenant and requires a durable grant when the resolver is configured.
+	// "agent", "run", "thread", "workspace", and "user" are reserved but
+	// rejected until trusted identity/resource bindings are carried or resolved
+	// by this contract. Empty, reserved, and unknown values fail closed.
 	Scope         string `protobuf:"bytes,5,opt,name=scope,proto3" json:"scope,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

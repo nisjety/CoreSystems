@@ -60,6 +60,11 @@ export type SignInResult =
   | { user: AuthUser; twoFactorRedirect?: false }
   | { twoFactorRedirect: true; twoFactorMethods?: string[]; user?: never }
 
+export type AcceptedOrganizationInvitation = {
+  invitation: { id: string; organizationId: string; status: string }
+  member: { id: string; organizationId: string; role: string }
+}
+
 export async function signUp(input: SignUpInput): Promise<{ user: AuthUser }> {
   const { captchaToken, ...body } = input
   const headers = captchaToken ? { 'x-captcha-response': captchaToken } : undefined
@@ -92,9 +97,14 @@ export async function signOut(): Promise<void> {
   await requestJson('/api/v1/auth/sign-out', { method: 'POST' })
 }
 
-export async function getAuthSession(): Promise<{ user: AuthUser } | null> {
+export async function getAuthSession(options?: {
+  disableCookieCache?: boolean
+}): Promise<{ user: AuthUser } | null> {
   try {
-    return await requestJson('/api/v1/auth/session')
+    const path = options?.disableCookieCache
+      ? '/api/v1/auth/session?disableCookieCache=true'
+      : '/api/v1/auth/session'
+    return await requestJson(path)
   } catch {
     return null
   }
@@ -119,6 +129,15 @@ export async function getSessionContext(): Promise<{
   orgs: Array<{ id: string; name: string; role: string }>
 }> {
   return requestJson('/api/v1/me/session-context')
+}
+
+export async function acceptOrganizationInvitation(
+  invitationId: string,
+): Promise<AcceptedOrganizationInvitation> {
+  return requestJson(
+    `/api/v1/orgs/invitations/${encodeURIComponent(invitationId)}/accept`,
+    { method: 'POST' },
+  )
 }
 
 export async function sendEmailVerification(email: string, callbackUrl?: string): Promise<void> {

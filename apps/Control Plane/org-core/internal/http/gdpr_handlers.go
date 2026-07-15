@@ -1,11 +1,11 @@
 package http
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,7 +22,7 @@ import (
 //   - is owner-gated (the caller must be an active "owner" of the org, OR a
 //     platform admin/superadmin presented via X-User-Role);
 //   - requires an explicit `confirm: true` body flag for the irreversible path;
-//   - emits a durable audit event on velion.audit.v1.control.erasure;
+//   - emits a durable audit event on velion.audit.v2.control.org-core.erasure;
 //   - emits a cross-plane fan-out on velion.gdpr.erasure.requested so Model
 //     Plane (run history / conversations) and Data Plane can purge their side.
 //
@@ -31,8 +31,8 @@ import (
 
 const (
 	// erasureAuditSubject is the durable audit subject consumed by audit-core
-	// (velion.audit.v1.control.<event>). Mirrors auth-core's publishVelionAudit.
-	erasureAuditSubject = "velion.audit.v1.control.erasure"
+	// (velion.audit.v2.control.<producer>.<event>).
+	erasureAuditSubject = orgcore.GDPRErasureAuditSubject
 
 	// gdprErasureFanoutSubject is the cross-plane erasure fan-out. Subscribers
 	// (Model Plane run-history/conversations, Data Plane documents) are a
@@ -95,50 +95,18 @@ func (s *Server) authorizeOrgErasure(c *gin.Context, orgID string) (string, stri
 	return callerID, role, true
 }
 
-// publishErasureAudit emits a durable audit record on the local control-plane
-// bus (controlplane-nats, where audit-core listens) plus the cross-plane erasure
-// fan-out on the shared velion-nats bus. The two are independent: a disabled
-// local audit publisher does not suppress the fan-out, and vice versa. Both are
-// best-effort and silently no-op when their connection is unavailable.
-func (s *Server) publishErasureAudit(orgID, subjectType, subjectID, actorID, actorRole, outcome string, receipt json.RawMessage) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	var details map[string]any
-	if len(receipt) > 0 {
-		_ = json.Unmarshal(receipt, &details)
-	}
-
-	// Durable audit event → LOCAL control-plane bus (controlplane-nats), via
-	// CORE publish to match audit-core's core QueueSubscribe on velion.audit.v1.>.
-	// audit-core schema: occurred_at/org_id/plane/event/...
-	if ap := s.orgService.AuditPub(); ap != nil {
-		_ = ap.PublishCore(erasureAuditSubject, map[string]any{
-			"occurred_at": now,
-			"org_id":      orgID,
-			"user_id":     actorID,
-			"actor_role":  actorRole,
-			"plane":       "control",
-			"event":       "erasure",
-			"subject":     subjectType + ":" + subjectID,
-			"resource_id": subjectID,
-			"outcome":     outcome,
-			"details":     details,
+// publishErasureFanout emits the independent cross-plane erasure contract.
+// The local audit event is already committed atomically with the erasure and
+// is delivered by the durable outbox worker.
+func (s *Server) publishErasureFanout(orgID, actorID string) {
+	if sp := s.orgService.SharedPub(); sp != nil {
+		sp.PublishPlain(gdprErasureFanoutSubject, map[string]any{
+			"subject_type": "organization",
+			"subject_id":   orgID,
+			"org_id":       orgID,
+			"requested_by": actorID,
+			"ts":           time.Now().UTC().Format(time.RFC3339Nano),
 		})
-	}
-
-	// Cross-plane fan-out contract (emit-only MVP) → SHARED velion-nats bus,
-	// where Model/Data plane subscribers purge their side. Fires only on
-	// irreversible erasure success.
-	if outcome == "ok" {
-		if sp := s.orgService.SharedPub(); sp != nil {
-			sp.PublishPlain(gdprErasureFanoutSubject, map[string]any{
-				"subject_type": subjectType,
-				"subject_id":   subjectID,
-				"org_id":       orgID,
-				"requested_by": actorID,
-				"ts":           now,
-			})
-		}
 	}
 }
 
@@ -170,14 +138,13 @@ func (s *Server) hardDeleteOrganization(c *gin.Context) {
 		return
 	}
 
-	receipt, err := s.orgService.HardDelete(c.Request.Context(), orgID)
+	receipt, err := s.orgService.HardDelete(c.Request.Context(), orgID, actorID, actorRole)
 	if err != nil {
-		s.publishErasureAudit(orgID, "organization", orgID, actorID, actorRole, "error", nil)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to erase organization"})
 		return
 	}
 
-	s.publishErasureAudit(orgID, "organization", orgID, actorID, actorRole, "ok", receipt)
+	s.publishErasureFanout(orgID, actorID)
 	c.Data(http.StatusOK, "application/json", receipt)
 }
 
@@ -196,15 +163,14 @@ func (s *Server) softDeleteOrganization(c *gin.Context) {
 		return
 	}
 
-	receipt, err := s.orgService.SoftDelete(c.Request.Context(), orgID)
+	receipt, err := s.orgService.SoftDelete(c.Request.Context(), orgID, actorID, actorRole)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to soft-delete organization"})
 		return
 	}
 
-	// Soft delete is reversible, so it is audited but does NOT emit the
-	// cross-plane purge fan-out (that fires only on irreversible erasure / cron).
-	s.publishErasureAudit(orgID, "organization_soft", orgID, actorID, actorRole, "ok", receipt)
+	// Soft delete is reversible, so it does not emit the cross-plane purge
+	// fan-out. Its audit intent was committed atomically by the service.
 	c.Data(http.StatusOK, "application/json", receipt)
 }
 

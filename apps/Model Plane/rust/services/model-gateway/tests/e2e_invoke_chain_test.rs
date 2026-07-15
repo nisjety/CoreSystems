@@ -24,15 +24,17 @@ use mp_contracts::model_plane::v1::{
     CreateEmbeddingResponse, CreateRealtimeSessionRequest, CreateRealtimeSessionResponse,
     CreateThreadRequest, CreateThreadResponse, CreateVideoGenerationJobRequest,
     CreateVideoGenerationJobResponse, DetectTextLanguageRequest, DetectTextLanguageResponse, Event,
-    ExtractImageTextRequest, ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse,
-    GeneratedImage, GetContextAssemblyRequest, GetContextAssemblyResponse,
-    GetVideoGenerationJobRequest, GetVideoGenerationJobResponse, InferChunk, InferRequest,
-    InferResponse, LanguageAnalysisResult, ListAgentSkillsRequest, ListAgentSkillsResponse,
-    ListConversationRequest, ListConversationResponse, ListModelsRequest, ListModelsResponse,
-    ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListThreadsRequest, ListThreadsResponse,
+    ExtractImageTextRequest, ExtractImageTextResponse, FinalizeToolActionRequest,
+    FinalizeToolActionResponse, GenerateImageRequest, GenerateImageResponse, GeneratedImage,
+    GetContextAssemblyRequest, GetContextAssemblyResponse, GetVideoGenerationJobRequest,
+    GetVideoGenerationJobResponse, InferChunk, InferRequest, InferResponse, LanguageAnalysisResult,
+    ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest,
+    ListConversationResponse, ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest,
+    ListSpeechVoicesResponse, ListThreadsRequest, ListThreadsResponse,
     ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ModelInfo,
-    ReplayThreadRequest, SaveCheckpointRequest, SaveCheckpointResponse, SessionMessage,
-    SpeechVoiceInfo, StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
+    ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
+    SaveCheckpointRequest, SaveCheckpointResponse, SessionMessage, SpeechVoiceInfo,
+    StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
     StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
     TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse,
     TranslationDetection, TranslationLanguageInfo,
@@ -40,7 +42,7 @@ use mp_contracts::model_plane::v1::{
 use mp_events::publisher::InMemoryPublisher;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use std::time::Duration;
@@ -756,6 +758,10 @@ struct MockSessionHandles {
     context_segments: Arc<Mutex<Option<Vec<ContextSegment>>>>,
     start_run_thread_id: Arc<Mutex<Option<String>>>,
     append_missing_thread_once: Arc<Mutex<Option<String>>>,
+    reserve_tool_action_captures: Arc<Mutex<Vec<ReserveToolActionRequest>>>,
+    finalize_tool_action_captures: Arc<Mutex<Vec<FinalizeToolActionRequest>>>,
+    fail_reserve_tool_action: Arc<AtomicBool>,
+    fail_finalize_tool_action: Arc<AtomicBool>,
 }
 
 struct MockSessionCore {
@@ -775,6 +781,10 @@ impl MockSessionCore {
             context_segments: Arc::new(Mutex::new(None)),
             start_run_thread_id: Arc::new(Mutex::new(None)),
             append_missing_thread_once: Arc::new(Mutex::new(None)),
+            reserve_tool_action_captures: Arc::new(Mutex::new(Vec::new())),
+            finalize_tool_action_captures: Arc::new(Mutex::new(Vec::new())),
+            fail_reserve_tool_action: Arc::new(AtomicBool::new(false)),
+            fail_finalize_tool_action: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -858,6 +868,40 @@ impl SessionCore for MockSessionCore {
         Err(Status::unimplemented(
             "complete_step not needed in this test",
         ))
+    }
+
+    async fn reserve_tool_action(
+        &self,
+        request: TReq<ReserveToolActionRequest>,
+    ) -> Result<Response<ReserveToolActionResponse>, Status> {
+        if self.handles.fail_reserve_tool_action.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("audit outbox unavailable"));
+        }
+        self.handles
+            .reserve_tool_action_captures
+            .lock()
+            .unwrap()
+            .push(request.into_inner());
+        Ok(Response::new(ReserveToolActionResponse { created: true }))
+    }
+
+    async fn finalize_tool_action(
+        &self,
+        request: TReq<FinalizeToolActionRequest>,
+    ) -> Result<Response<FinalizeToolActionResponse>, Status> {
+        if self
+            .handles
+            .fail_finalize_tool_action
+            .load(Ordering::SeqCst)
+        {
+            return Err(Status::unavailable("audit outbox unavailable"));
+        }
+        self.handles
+            .finalize_tool_action_captures
+            .lock()
+            .unwrap()
+            .push(request.into_inner());
+        Ok(Response::new(FinalizeToolActionResponse { updated: true }))
     }
 
     async fn save_checkpoint(
@@ -2091,7 +2135,7 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
 
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
-    let (mock_session, _session_handles) = MockSessionCore::new();
+    let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
     let (mut state, _publisher) = make_state(client, session_client);
     state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
@@ -2130,6 +2174,160 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
     assert!(messages
         .iter()
         .any(|(_, content)| content.contains("Claude Opus 4.8")));
+
+    let reservations = session_handles.reserve_tool_action_captures.lock().unwrap();
+    assert_eq!(reservations.len(), 1);
+    assert_eq!(reservations[0].run_id, "run-for-thread-browse-flag");
+    assert_eq!(reservations[0].tool, "web_search");
+    assert!(reservations[0].action_id.starts_with("inline-"));
+    let finalizations = session_handles
+        .finalize_tool_action_captures
+        .lock()
+        .unwrap();
+    assert_eq!(finalizations.len(), 1);
+    assert_eq!(finalizations[0].action_id, reservations[0].action_id);
+    assert_eq!(finalizations[0].outcome, "completed");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "results": [{
+                    "url": "https://example.test/result",
+                    "title": "Result",
+                    "snippet": "Audited result",
+                    "source": "mock",
+                    "score": 0.99
+                }]
+            }
+        })))
+        .mount(&quarry)
+        .await;
+
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles
+        .fail_reserve_tool_action
+        .store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client);
+    state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: Duration::from_secs(5),
+    });
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"search for audited result","model":"m","thread_id":"thread-audit-down","features":["citations"],"browse_web":true}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("audit_persistence_failed"));
+    assert!(!body.contains("event: citation"));
+    assert!(session_handles
+        .reserve_tool_action_captures
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert!(session_handles
+        .finalize_tool_action_captures
+        .lock()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_leaves_a_durable_reservation_when_tool_audit_finalization_fails() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "results": [{
+                    "url": "https://example.test/result",
+                    "title": "Result",
+                    "snippet": "Audited result",
+                    "source": "mock",
+                    "score": 0.99
+                }]
+            }
+        })))
+        .mount(&quarry)
+        .await;
+
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles
+        .fail_finalize_tool_action
+        .store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client);
+    state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: Duration::from_secs(5),
+    });
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"search for audited result","model":"m","thread_id":"thread-audit-finalize-down","features":["citations"],"browse_web":true}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("audit_persistence_failed"));
+    assert!(!body.contains("event: citation"));
+    assert_eq!(
+        session_handles
+            .reserve_tool_action_captures
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(session_handles
+        .finalize_tool_action_captures
+        .lock()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

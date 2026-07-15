@@ -14,13 +14,18 @@ import { v } from "convex/values";
 import { internalAction, internalMutation } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { normalizeProjectionRole, shouldApplyMembershipRemoval } from "./membershipProjection";
+import {
+  applyMembershipProjectionState,
+  applyOrganizationProjectionState,
+  membershipProjectionFingerprint,
+  organizationProjectionFingerprint,
+  type ProjectionState,
+} from "./authorityProjection";
 
 // Control-Plane-owned shared key; no hardcoded fallback. Empty only if the env
 // is misconfigured, in which case the receiving validator rejects the call.
 const CONVEX_INTERNAL_SERVICE_KEY =
-  process.env.CONVEX_INTERNAL_SERVICE_KEY ||
-  process.env.INTERNAL_API_KEY ||
-  "";
+  process.env.CONVEX_INTERNAL_SERVICE_KEY || "";
 
 /**
  * Start NATS Subscriber
@@ -36,6 +41,370 @@ export const startSubscriber = internalAction(async (ctx) => {
   console.log("[Convex] NATS Subscriber initialized");
 
   return { status: "started" };
+});
+
+function storedProjectionState(value: {
+  kind: "active" | "removed";
+  sourceRevision?: number;
+  sourceEventId?: string;
+  sourceFingerprint?: string;
+}): ProjectionState | undefined {
+  if (
+    !Number.isSafeInteger(value.sourceRevision) ||
+    !value.sourceRevision ||
+    !value.sourceEventId ||
+    !value.sourceFingerprint
+  ) {
+    return undefined;
+  }
+  return {
+    kind: value.kind,
+    revision: value.sourceRevision,
+    eventId: value.sourceEventId,
+    fingerprint: value.sourceFingerprint,
+  };
+}
+
+function sameProjectionState(
+  left: ProjectionState | undefined,
+  right: ProjectionState,
+): boolean {
+  return Boolean(
+    left &&
+      left.kind === right.kind &&
+      left.revision === right.revision &&
+      left.eventId === right.eventId &&
+      left.fingerprint === right.fingerprint,
+  );
+}
+
+export const onOrganizationProjectionChanged = internalMutation({
+  args: {
+    action: v.union(v.literal("upsert"), v.literal("remove")),
+    eventId: v.string(),
+    orgId: v.string(),
+    revision: v.number(),
+    name: v.optional(v.string()),
+    slug: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    if (!Number.isSafeInteger(args.revision) || args.revision <= 0) {
+      throw new Error("organization revision must be a positive safe integer");
+    }
+    if (!args.orgId.trim() || !args.eventId.trim()) {
+      throw new Error("organization projection identity is required");
+    }
+    if (
+      args.action === "upsert" &&
+      (!args.name?.trim() || !args.slug?.trim())
+    ) {
+      throw new Error("organization upsert requires name and slug");
+    }
+
+    const organizations = await ctx.db
+      .query("organizations")
+      .withIndex("by_external_id", (q) => q.eq("externalOrgId", args.orgId))
+      .collect();
+    if (organizations.length > 1) {
+      throw new Error("organization projection is ambiguous");
+    }
+    const organization = organizations[0];
+    const tombstones = await ctx.db
+      .query("organizationTombstones")
+      .withIndex("by_external_org", (q) => q.eq("externalOrgId", args.orgId))
+      .collect();
+    if (tombstones.length > 1) {
+      throw new Error("organization tombstone is ambiguous");
+    }
+    const tombstone = tombstones[0];
+    const current = tombstone
+      ? storedProjectionState({ kind: "removed", ...tombstone })
+      : organization
+        ? storedProjectionState({
+            kind: organization.syncStatus === "deleted" ? "removed" : "active",
+            ...organization,
+          })
+        : undefined;
+    const incoming = {
+      action: args.action,
+      revision: args.revision,
+      eventId: args.eventId,
+      fingerprint: organizationProjectionFingerprint(args),
+    } as const;
+    const next = applyOrganizationProjectionState(current, incoming);
+    if (sameProjectionState(current, next)) {
+      return { status: tombstone ? "permanently_removed" : "unchanged" };
+    }
+
+    const now = Date.now();
+    if (args.action === "upsert") {
+      if (tombstone) return { status: "permanently_removed" };
+      if (organization) {
+        await ctx.db.patch(organization._id, {
+          name: args.name!.trim(),
+          slug: args.slug!.trim(),
+          syncStatus: "synced",
+          lastSyncedAt: now,
+          updatedAt: now,
+          deletedAt: undefined,
+          sourceRevision: next.revision,
+          sourceEventId: next.eventId,
+          sourceFingerprint: next.fingerprint,
+        });
+        return { status: "updated", organizationId: organization._id };
+      }
+      const organizationId = await ctx.db.insert("organizations", {
+        externalOrgId: args.orgId,
+        name: args.name!.trim(),
+        slug: args.slug!.trim(),
+        settings: {},
+        syncStatus: "synced",
+        lastSyncedAt: now,
+        createdAt: now,
+        updatedAt: now,
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+      });
+      return { status: "created", organizationId };
+    }
+
+    if (organization) {
+      await ctx.db.patch(organization._id, {
+        syncStatus: "deleted",
+        lastSyncedAt: now,
+        updatedAt: now,
+        deletedAt: now,
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+      });
+      const users = await ctx.db
+        .query("users")
+        .withIndex("by_org", (q) => q.eq("orgId", organization._id))
+        .collect();
+      for (const user of users) {
+        if (user.syncStatus !== "deleted") {
+          await ctx.db.patch(user._id, {
+            syncStatus: "deleted",
+            deletedAt: now,
+            lastSyncedAt: now,
+          });
+        }
+      }
+    }
+    if (tombstone) {
+      await ctx.db.patch(tombstone._id, {
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+        removedAt: now,
+      });
+    } else {
+      await ctx.db.insert("organizationTombstones", {
+        externalOrgId: args.orgId,
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+        removedAt: now,
+      });
+    }
+    const sessions = await ctx.db
+      .query("controlSessions")
+      .filter((q) => q.eq(q.field("externalOrgId"), args.orgId))
+      .collect();
+    for (const session of sessions) await ctx.db.delete(session._id);
+    return { status: "removed", organizationId: organization?._id };
+  },
+});
+
+export const onOrganizationMembershipProjectionChanged = internalMutation({
+  args: {
+    action: v.union(v.literal("upsert"), v.literal("remove")),
+    eventId: v.string(),
+    orgId: v.string(),
+    userId: v.string(),
+    email: v.optional(v.string()),
+    role: v.optional(v.string()),
+    revision: v.number(),
+    organizationRevision: v.number(),
+  },
+  handler: async (ctx, args) => {
+    if (
+      !Number.isSafeInteger(args.revision) ||
+      args.revision <= 0 ||
+      !Number.isSafeInteger(args.organizationRevision) ||
+      args.organizationRevision <= 0
+    ) {
+      throw new Error("membership revisions must be positive safe integers");
+    }
+    if (!args.orgId.trim() || !args.userId.trim() || !args.eventId.trim()) {
+      throw new Error("membership projection identity is required");
+    }
+    const normalizedEmail = args.email?.trim().toLowerCase();
+    const normalizedRole =
+      args.action === "upsert" && args.role
+        ? normalizeProjectionRole(args.role)
+        : undefined;
+    if (
+      args.action === "upsert" &&
+      (!normalizedEmail || !normalizedRole)
+    ) {
+      throw new Error("membership upsert requires email and role");
+    }
+
+    const organizationTombstones = await ctx.db
+      .query("organizationTombstones")
+      .withIndex("by_external_org", (q) => q.eq("externalOrgId", args.orgId))
+      .collect();
+    if (organizationTombstones.length > 0) {
+      return { status: "organization_permanently_removed" };
+    }
+    const organizations = await ctx.db
+      .query("organizations")
+      .withIndex("by_external_id", (q) => q.eq("externalOrgId", args.orgId))
+      .collect();
+    if (organizations.length !== 1 || organizations[0].syncStatus === "deleted") {
+      throw new Error("active organization projection is unavailable");
+    }
+    const organization = organizations[0];
+    if (
+      !organization.sourceRevision ||
+      organization.sourceRevision < args.organizationRevision
+    ) {
+      throw new Error("organization projection revision is not ready");
+    }
+
+    const memberships = await ctx.db
+      .query("users")
+      .withIndex("by_external_and_org", (q) =>
+        q.eq("externalAuthId", args.userId).eq("orgId", organization._id),
+      )
+      .collect();
+    if (memberships.length > 1) {
+      throw new Error("membership projection is ambiguous");
+    }
+    const membership = memberships[0];
+    const tombstones = await ctx.db
+      .query("membershipTombstones")
+      .withIndex("by_external_org_and_user", (q) =>
+        q.eq("externalOrgId", args.orgId).eq("externalAuthId", args.userId),
+      )
+      .collect();
+    if (tombstones.length > 1) {
+      throw new Error("membership tombstone is ambiguous");
+    }
+    const tombstone = tombstones[0];
+    const membershipState = membership
+      ? storedProjectionState({
+          kind: membership.syncStatus === "deleted" ? "removed" : "active",
+          ...membership,
+        })
+      : undefined;
+    const tombstoneState = tombstone
+      ? storedProjectionState({ kind: "removed", ...tombstone })
+      : undefined;
+    if (
+      membershipState &&
+      tombstoneState &&
+      membershipState.revision === tombstoneState.revision &&
+      !sameProjectionState(membershipState, tombstoneState)
+    ) {
+      throw new Error("stored same-revision membership conflict");
+    }
+    const current =
+      tombstoneState &&
+      (!membershipState || tombstoneState.revision > membershipState.revision)
+        ? tombstoneState
+        : membershipState;
+    const incoming = {
+      action: args.action,
+      revision: args.revision,
+      eventId: args.eventId,
+      fingerprint: membershipProjectionFingerprint({
+        action: args.action,
+        email: normalizedEmail,
+        role: normalizedRole,
+        organizationRevision: args.organizationRevision,
+      }),
+    } as const;
+    const next = applyMembershipProjectionState(current, incoming);
+    if (sameProjectionState(current, next)) {
+      return { status: "unchanged" };
+    }
+
+    const now = Date.now();
+    if (args.action === "upsert") {
+      if (membership) {
+        await ctx.db.patch(membership._id, {
+          email: normalizedEmail!,
+          role: normalizedRole!,
+          syncStatus: "synced",
+          lastSyncedAt: now,
+          lastSeenAt: membership.lastSeenAt || now,
+          deletedAt: undefined,
+          sourceRevision: next.revision,
+          sourceEventId: next.eventId,
+          sourceFingerprint: next.fingerprint,
+        });
+      } else {
+        await ctx.db.insert("users", {
+          externalAuthId: args.userId,
+          email: normalizedEmail!,
+          name: normalizedEmail!.split("@")[0],
+          orgId: organization._id,
+          role: normalizedRole!,
+          syncStatus: "synced",
+          lastSyncedAt: now,
+          createdAt: now,
+          lastSeenAt: now,
+          sourceRevision: next.revision,
+          sourceEventId: next.eventId,
+          sourceFingerprint: next.fingerprint,
+        });
+      }
+      if (tombstone) await ctx.db.delete(tombstone._id);
+      return { status: membership ? "updated" : "created" };
+    }
+
+    if (membership) {
+      await ctx.db.patch(membership._id, {
+        syncStatus: "deleted",
+        deletedAt: now,
+        lastSyncedAt: now,
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+      });
+    }
+    if (tombstone) {
+      await ctx.db.patch(tombstone._id, {
+        sourceUpdatedAt: now,
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+        removedAt: now,
+      });
+    } else {
+      await ctx.db.insert("membershipTombstones", {
+        externalOrgId: args.orgId,
+        externalAuthId: args.userId,
+        sourceUpdatedAt: now,
+        sourceRevision: next.revision,
+        sourceEventId: next.eventId,
+        sourceFingerprint: next.fingerprint,
+        removedAt: now,
+      });
+    }
+    const sessions = await ctx.db
+      .query("controlSessions")
+      .withIndex("by_external_user_and_org", (q) =>
+        q.eq("externalUserId", args.userId).eq("externalOrgId", args.orgId),
+      )
+      .collect();
+    for (const session of sessions) await ctx.db.delete(session._id);
+    return { status: membership ? "removed" : "tombstoned" };
+  },
 });
 
 /**
@@ -80,11 +449,10 @@ export const onOrganizationCreated = internalAction(
       }
 
       // Create organization in Convex
-      const convexOrgId = await ctx.runMutation(api.organizations.createFromExternal, {
+      const convexOrgId = await ctx.runMutation(internal.organizations.createFromExternal, {
         externalOrgId: orgId,
         name,
         slug,
-        serviceKey: CONVEX_INTERNAL_SERVICE_KEY,
         externalCreatedAt: createdAt,
       });
 
@@ -122,11 +490,10 @@ export const onOrganizationMemberAdded = internalAction(
       }
 
       // Create user in Convex if they don't exist
-      const user = await ctx.runMutation(api.users.createOrUpdateFromExternal, {
+      const user = await ctx.runMutation(internal.users.createOrUpdateFromExternal, {
         externalAuthId: userId,
         email,
         convexOrgId: org._id,
-        serviceKey: CONVEX_INTERNAL_SERVICE_KEY,
         role: normalizeProjectionRole(role),
         externalCreatedAt: addedAt,
         sourceUpdatedAt: addedAt,
@@ -307,9 +674,8 @@ export const onOrganizationUpdated = internalAction(
       }
 
       // Update organization
-      await ctx.runMutation(api.organizations.updateFromExternal, {
+      await ctx.runMutation(internal.organizations.updateFromExternal, {
         convexOrgId: org._id,
-        serviceKey: CONVEX_INTERNAL_SERVICE_KEY,
         name,
         slug,
         settings,
@@ -348,9 +714,8 @@ export const onOrganizationDeleted = internalAction(async (ctx, args: { orgId: s
     }
 
     // Soft delete organization
-    await ctx.runMutation(api.organizations.remove, {
+    await ctx.runMutation(internal.organizations.remove, {
       convexOrgId: org._id,
-      serviceKey: CONVEX_INTERNAL_SERVICE_KEY,
     });
 
     console.log(`[Convex] Organization deleted: ${orgId}`);

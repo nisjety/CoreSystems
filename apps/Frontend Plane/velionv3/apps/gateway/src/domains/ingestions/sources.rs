@@ -20,8 +20,8 @@ use std::{
 
 use axum::{
     extract::{Extension, Path, State},
-    http::HeaderMap,
-    response::Response,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use futures_util::future::join_all;
@@ -29,12 +29,16 @@ use reqwest::Method;
 use serde_json::{json, Value};
 
 use crate::{
-    config::AppState, contracts::ActionActor, envelope::unwrap_data, middleware::AuthenticatedUser,
+    config::AppState,
+    contracts::ActionActor,
+    envelope::{error, unwrap_data},
+    middleware::AuthenticatedUser,
 };
 
 use super::shared::{
-    actor_for, authorized_org_id, cookie_header, created, fetch_internal_json, first_str, forward,
-    normalize_target, obj_or_empty, okay, quarry_call, quarry_token, str_at, validation,
+    actor_for, authorized_org_id, cookie_header, created, data_plane_token, fetch_data_plane_json,
+    fetch_internal_json, first_str, forward, normalize_target, obj_or_empty, okay, quarry_call,
+    quarry_token, str_at, validation,
 };
 
 /// Source kinds quarry-control accepts. Mirrors `validSourceKinds` in
@@ -63,13 +67,24 @@ pub(super) async fn list_sources(
         }));
     }
 
+    let Some(dp_token) = data_plane_token(&state, &user, &cookie).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "A scoped Data Plane authorization token could not be minted.",
+            )),
+        )
+            .into_response();
+    };
+
     let (quarry_sources, documents, providers, connections_raw, sync_jobs_raw, graph_snapshot) = tokio::join!(
         load_quarry_sources(&state, token.as_deref(), &user.user_id),
-        load_documents(&state, &org, &actor),
+        load_documents(&state, &org, &actor, &dp_token),
         load_providers(&state, &org, &actor),
         load_connections(&state, &org, &actor),
         load_sync_jobs(&state, &org, &actor),
-        load_graph(&state, &org, &actor),
+        load_graph(&state, &org, &actor, &dp_token),
     );
 
     let connections = build_connections(&connections_raw, &sync_jobs_raw, &providers);
@@ -247,19 +262,24 @@ struct DocSummary {
     status: String,
 }
 
-async fn load_documents(state: &AppState, org: &str, actor: &ActionActor) -> Vec<DocSummary> {
+async fn load_documents(
+    state: &AppState,
+    org: &str,
+    actor: &ActionActor,
+    bearer: &str,
+) -> Vec<DocSummary> {
     let url = format!(
         "{}/v1/documents?limit=100&offset=0",
         state.documents_api_url
     );
-    let payload = fetch_internal_json(
+    let payload = fetch_data_plane_json(
         state,
         Method::GET,
         &url,
-        None,
-        Some(org),
+        org,
         actor,
         Duration::from_millis(2_500),
+        bearer,
     )
     .await;
     array_from_data(payload.as_ref(), "documents")
@@ -353,20 +373,25 @@ async fn load_sync_jobs(state: &AppState, org: &str, actor: &ActionActor) -> Vec
     jobs
 }
 
-async fn load_graph(state: &AppState, org: &str, actor: &ActionActor) -> Option<Value> {
+async fn load_graph(
+    state: &AppState,
+    org: &str,
+    actor: &ActionActor,
+    bearer: &str,
+) -> Option<Value> {
     let url = format!(
         "{}/v1/graphs/{}?limit_nodes=120&limit_edges=240",
         state.graph_index_url,
         urlencoding::encode(org)
     );
-    fetch_internal_json(
+    fetch_data_plane_json(
         state,
         Method::GET,
         &url,
-        None,
-        Some(org),
+        org,
         actor,
         Duration::from_millis(2_500),
+        bearer,
     )
     .await
 }

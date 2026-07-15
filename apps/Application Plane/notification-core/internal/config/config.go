@@ -13,22 +13,14 @@ type Config struct {
 	HTTPPort       int
 	DatabaseURL    string
 	NATSURL        string
-	NATSToken      string
+	NATSUser       string
+	NATSPassword   string
 	ServiceName    string
 	DelegationKeys map[string]string
 	NovuSecretKey  string // optional — activates real Novu delivery when set
 	NovuBaseURL    string // optional — override for EU region
 	DeliveryMode   string // "novu" or explicit fail-closed "disabled"
 
-	// G14: separate connection details for the **shared** velion-nats bus
-	// where cross-plane events (app.session.*, etc.) flow. notification-core
-	// keeps its local app-nats connection for its own publisher; the shared
-	// bus is consumed read-only by subscribers/control_session.go.
-	//
-	// Defaults to the same NATSURL when SHARED_NATS_URL is unset (single-NATS
-	// deployments).
-	SharedNATSURL   string
-	SharedNATSToken string
 }
 
 func Load() (*Config, error) {
@@ -38,9 +30,8 @@ func Load() (*Config, error) {
 		HTTPPort:        getEnvInt("PORT", 3140),
 		DatabaseURL:     strings.TrimSpace(getEnv("DATABASE_URL", "")),
 		NATSURL:         strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://velion-nats:4222")))),
-		NATSToken:       strings.TrimSpace(getEnv("VELION_NATS_TOKEN", getEnv("NATS_SHARED_TOKEN", getEnv("NATS_TOKEN", "")))),
-		SharedNATSURL:   strings.TrimSpace(getEnv("SHARED_NATS_URL", "")),
-		SharedNATSToken: strings.TrimSpace(getEnv("SHARED_NATS_TOKEN", "")),
+		NATSUser:        strings.TrimSpace(getEnv("NATS_USER", "")),
+		NATSPassword:    strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
 		ServiceName:     getEnv("SERVICE_NAME", "notification-core"),
 		NovuSecretKey:   strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
 		NovuBaseURL:     strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),

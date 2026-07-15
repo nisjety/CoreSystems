@@ -52,6 +52,7 @@ pub struct RetrievalRequest {
     pub query: String,
     pub top_k: Option<usize>,
     pub top_n: Option<usize>,
+    #[serde(default)]
     pub filters: RetrievalFiltersInput,
     /// Viewer identity. NEVER trusted from the request body — it is set only by
     /// the auth layer from the verified principal (x-user-id / JWT `sub`).
@@ -285,6 +286,18 @@ pub struct PipelineTimings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_retrieval_request_defaults_to_empty_filters() {
+        let request: RetrievalRequest = serde_json::from_str(
+            r#"{"org_id":"org-a","query":"safe probe","top_k":1,"zdr_mode":"ephemeral"}"#,
+        )
+        .expect("the canonical minimal retrieval request must not require an empty filters object");
+
+        assert!(request.filters.document_types.is_empty());
+        assert!(request.filters.document_ids.is_empty());
+        assert!(request.filters.acl_tags.is_empty());
+    }
 
     #[test]
     fn zdr_mode_deserialization_is_exact_and_fail_closed() {

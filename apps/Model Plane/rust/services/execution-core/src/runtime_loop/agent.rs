@@ -657,6 +657,7 @@ async fn record_tool_step(
             status: "running".to_owned(),
             output,
             error,
+            terminal: false,
         },
         bearer,
     );
@@ -804,6 +805,7 @@ async fn finalize(
             status: status.to_owned(),
             output,
             error,
+            terminal: true,
         },
         bearer,
     );
@@ -1248,6 +1250,20 @@ mod tests {
                 .completed
                 .push((req.step_id, req.status));
             Ok(Response::new(pb::CompleteStepResponse { step_index: 1 }))
+        }
+
+        async fn reserve_tool_action(
+            &self,
+            _: Request<pb::ReserveToolActionRequest>,
+        ) -> Result<Response<pb::ReserveToolActionResponse>, Status> {
+            Err(Status::unimplemented("reserve_tool_action not used"))
+        }
+
+        async fn finalize_tool_action(
+            &self,
+            _: Request<pb::FinalizeToolActionRequest>,
+        ) -> Result<Response<pb::FinalizeToolActionResponse>, Status> {
+            Err(Status::unimplemented("finalize_tool_action not used"))
         }
 
         async fn save_checkpoint(

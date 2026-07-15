@@ -27,12 +27,12 @@ import (
 	"time"
 )
 
-// AuthCoreOAuthClient calls auth-core's internal OAuth endpoints with the
-// shared cluster API key. Goroutine-safe (`http.Client` is).
+// AuthCoreOAuthClient calls Auth Core with User Core's scoped service identity.
+// Goroutine-safe (`http.Client` is).
 type AuthCoreOAuthClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL           string
+	serviceCredential AuthInternalClientCredential
+	httpClient        *http.Client
 }
 
 // AuthCoreTokenResult mirrors the JSON returned by `POST /internal/oauth/token`.
@@ -52,17 +52,16 @@ type AuthCoreTokenResult struct {
 // ErrTokenNotFound is returned when auth-core responds 200 with `found=false`.
 var ErrTokenNotFound = errors.New("auth-core: token reference not found")
 
-// NewAuthCoreOAuthClient returns nil when either `baseURL` or `apiKey` is
+// NewAuthCoreOAuthClient returns nil when either `baseURL` or credential is
 // empty so callers can keep the dependency optional without nil checks.
-func NewAuthCoreOAuthClient(baseURL, apiKey string) *AuthCoreOAuthClient {
+func NewAuthCoreOAuthClient(baseURL string, serviceCredential AuthInternalClientCredential) *AuthCoreOAuthClient {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	apiKey = strings.TrimSpace(apiKey)
-	if baseURL == "" || apiKey == "" {
+	if baseURL == "" || serviceCredential.Token == "" {
 		return nil
 	}
 	return &AuthCoreOAuthClient{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL:           baseURL,
+		serviceCredential: serviceCredential,
 		httpClient: &http.Client{
 			// Auth-core's `POST /internal/oauth/token` is a single DB read +
 			// JSON decode — 5s is generous. The NATS handler path swallows
@@ -88,10 +87,7 @@ func (c *AuthCoreOAuthClient) RefreshTokenByRef(ctx context.Context, tokenRef st
 		return nil, errors.New("tokenRef is required")
 	}
 
-	body, err := json.Marshal(map[string]string{
-		"tokenRef":       tokenRef,
-		"internalApiKey": c.apiKey,
-	})
+	body, err := json.Marshal(map[string]string{"tokenRef": tokenRef})
 	if err != nil {
 		return nil, fmt.Errorf("marshal refresh request: %w", err)
 	}
@@ -101,6 +97,7 @@ func (c *AuthCoreOAuthClient) RefreshTokenByRef(ctx context.Context, tokenRef st
 		return nil, fmt.Errorf("build refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setServiceHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -171,10 +168,7 @@ func (c *AuthCoreOAuthClient) GetTokenByRef(ctx context.Context, tokenRef string
 		return nil, errors.New("tokenRef is required")
 	}
 
-	body, err := json.Marshal(map[string]string{
-		"tokenRef":       tokenRef,
-		"internalApiKey": c.apiKey,
-	})
+	body, err := json.Marshal(map[string]string{"tokenRef": tokenRef})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -184,6 +178,7 @@ func (c *AuthCoreOAuthClient) GetTokenByRef(ctx context.Context, tokenRef string
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setServiceHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -213,4 +208,10 @@ func (c *AuthCoreOAuthClient) GetTokenByRef(ctx context.Context, tokenRef string
 	}
 
 	return &result, nil
+}
+
+func (c *AuthCoreOAuthClient) setServiceHeaders(req *http.Request) {
+	req.Header.Set("X-Service-Credential-Id", c.serviceCredential.CredentialID)
+	req.Header.Set("X-Service-Principal", c.serviceCredential.Principal)
+	req.Header.Set("X-Service-Auth", c.serviceCredential.Token)
 }

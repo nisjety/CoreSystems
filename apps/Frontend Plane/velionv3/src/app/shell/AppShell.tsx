@@ -9,6 +9,7 @@ export function AppShell(props: { children?: JSX.Element }) {
   const location = useLocation()
   const isStandaloneSurface = () =>
     location.pathname.startsWith('/onboarding') ||
+    location.pathname.startsWith('/accept-invitation/') ||
     location.pathname.startsWith('/login') ||
     location.pathname.startsWith('/auth')
 

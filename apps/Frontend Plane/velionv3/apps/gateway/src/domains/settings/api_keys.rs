@@ -175,10 +175,10 @@ async fn post_auth_core(
         request = request.header("cookie", cookie);
     }
 
-    let response = request.send().await.map_err(|err| {
+    let response = request.send().await.map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", err.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )
     })?;
     let status =

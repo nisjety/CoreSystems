@@ -1,4 +1,10 @@
 services:
+  postgres:
+    ports: !reset []
+
+  qdrant:
+    ports: !reset []
+
   authority-mock:
     image: node:20-alpine
     restart: "no"
@@ -6,18 +12,22 @@ services:
     command: ["node", "/mock/authority-mock.mjs"]
     environment:
       CONTROL_POLICY_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:?required}
-      CONTROL_POLICY_BEARER: ${ISOLATED_CONTROL_POLICY_BEARER:?required}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?required}
       USER_CORE_RETRIEVAL_TOKEN: ${USER_CORE_RETRIEVAL_TOKEN:?required}
       USER_CORE_DOCUMENTS_TOKEN: ${USER_CORE_DOCUMENTS_TOKEN:?required}
     volumes:
       - ./tests/e2e/isolated/authority-mock.mjs:/mock/authority-mock.mjs:ro
       - ${ISOLATED_JWKS_FILE:?required}:/fixtures/jwks.json:ro
+      - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/fixtures/public.pem:ro
+      - ${ISOLATED_PRIVATE_KEY_FILE:?required}:/fixtures/private.pem:ro
     expose: ["3011", "3012"]
     networks:
       inter-plane-bus:
         aliases: ["auth-core", "user-core"]
 
   retrieval-engine:
+    ports:
+      - "127.0.0.1::50052"
     environment:
       EMBEDDING_PROVIDER: deterministic_test
       ALLOW_INSECURE_DEV_DEFAULTS: "1"
@@ -26,6 +36,24 @@ services:
     volumes:
       - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/app/keys/convex-auth.pub:ro
 
+  # The shared Control GDPR broker is outside this disposable Data Plane
+  # stack and is verified by its dedicated broker matrix. Keep this isolated
+  # profile explicit instead of attempting an unscoped fallback connection.
+  documents-api:
+    environment:
+      NATS_SHARED_URL: ""
+      NATS_SHARED_USER: ""
+      NATS_SHARED_PASSWORD: ""
+      GDPR_DURABLE_CONSUMER_REQUIRED: "0"
+
   quickwit-adapter:
     volumes:
       - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/app/keys/convex-auth.pub:ro
+
+  graph-index:
+    ports:
+      - "127.0.0.1::50053"
+
+  wiki-store:
+    ports:
+      - "127.0.0.1::50054"

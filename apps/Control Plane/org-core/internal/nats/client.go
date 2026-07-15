@@ -12,7 +12,7 @@ import (
 
 type Client struct {
 	conn *nats.Conn
-	js   jetstream.JetStream
+	js   localJetStreamPublisher
 }
 
 type Config struct {
@@ -21,15 +21,27 @@ type Config struct {
 	Name  string
 }
 
+type jetStreamMessagePublisher interface {
+	PublishMsg(context.Context, *nats.Msg, ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+}
+
+type localJetStreamPublisher interface {
+	jetStreamMessagePublisher
+	Publish(context.Context, string, []byte, ...jetstream.PublishOpt) (*jetstream.PubAck, error)
+}
+
 func NewClient(cfg Config) (*Client, error) {
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
+		nats.CustomInboxPrefix("_INBOX.ORG_CONTROL"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
 	}
-	if cfg.Token != "" {
-		opts = append(opts, nats.Token(cfg.Token))
+	authOptions, err := runtimeAuthOptions(cfg.Token)
+	if err != nil {
+		return nil, fmt.Errorf("configure nats authentication: %w", err)
 	}
+	opts = append(opts, authOptions...)
 
 	conn, err := nats.Connect(cfg.URL, opts...)
 	if err != nil {
@@ -66,41 +78,38 @@ func (c *Client) Publish(ctx context.Context, subject string, payload map[string
 	return nil
 }
 
-// PublishCore sends a raw JSON payload over core NATS (no JetStream, no stream
-// binding). Audit events (velion.audit.v1.<plane>.*) are consumed by
-// audit-core's core QueueSubscribe on the control-plane bus (controlplane-nats),
-// which is this local connection — NOT the shared velion-nats bus, which is
-// reserved for cross-plane domain/ACL events (aqencia.controlplane.*).
-// A JetStream publish here would fail (no stream covers velion.audit.* on
-// controlplane-nats), so audit must use core publish, matching the producers
-// audit-core expects.
-func (c *Client) PublishCore(subject string, payload map[string]any) error {
+// PublishAudit publishes a durable audit event with a stable logical message
+// identity and returns only after JetStream supplies a valid PubAck.
+func (c *Client) PublishAudit(ctx context.Context, subject, eventID string, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal event: %w", err)
+		return fmt.Errorf("marshal audit event: %w", err)
 	}
-	if err := c.conn.Publish(subject, body); err != nil {
-		return fmt.Errorf("core publish %s: %w", subject, err)
-	}
-	return nil
+	return publishAuditMessage(ctx, c.js, subject, eventID, body)
 }
 
-func (c *Client) EnsureStream(ctx context.Context, name string, subjects []string) error {
-	_, err := c.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      name,
-		Subjects:  subjects,
-		Retention: jetstream.LimitsPolicy,
-		Storage:   jetstream.FileStorage,
-		MaxAge:    7 * 24 * time.Hour,
-		MaxMsgs:   100000,
-	})
-	if err == nil {
-		return nil
+func publishAuditMessage(
+	ctx context.Context,
+	publisher jetStreamMessagePublisher,
+	subject, eventID string,
+	payload []byte,
+) error {
+	if publisher == nil {
+		return fmt.Errorf("JetStream audit publisher unavailable")
 	}
-
-	_, existingErr := c.js.Stream(ctx, name)
-	if existingErr != nil {
-		return fmt.Errorf("ensure stream %s: %w", name, err)
+	if subject == "" || eventID == "" {
+		return fmt.Errorf("audit subject and event ID are required")
+	}
+	msg := nats.NewMsg(subject)
+	msg.Header = nats.Header{}
+	msg.Header.Set(nats.MsgIdHdr, eventID)
+	msg.Data = append([]byte(nil), payload...)
+	ack, err := publisher.PublishMsg(ctx, msg)
+	if err != nil {
+		return fmt.Errorf("publish audit event %s: %w", eventID, err)
+	}
+	if ack == nil || ack.Stream == "" || ack.Sequence == 0 {
+		return fmt.Errorf("invalid JetStream PubAck for audit event %s", eventID)
 	}
 	return nil
 }

@@ -73,6 +73,10 @@ type Claims struct {
 	IssuedAt      int64    `json:"iat"`
 	NotBefore     int64    `json:"nbf,omitempty"`
 	ExpiresAt     int64    `json:"exp"`
+	ZDR           bool     `json:"zdr"`
+	// ZDRPresent distinguishes an issuer-signed false posture from a missing or
+	// malformed claim. The verifier requires presence before setting Verified.
+	ZDRPresent bool `json:"-"`
 	// Verified is true when the signature + standard claims have been
 	// checked against the JWKS. Observe-mode middleware reads + parses
 	// JWTs without verifying — never trust an unverified Claims struct

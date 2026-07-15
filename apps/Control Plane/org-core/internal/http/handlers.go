@@ -35,10 +35,21 @@ func (s *Server) health(c *gin.Context) {
 		})
 		return
 	}
+	outboxStatus, err := s.orgService.GDPRAuditOutboxStatus(ctx)
+	if err != nil {
+		log.Printf("health: GDPR audit outbox status failed: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "unhealthy",
+			"service": "org-core",
+			"error":   "audit outbox unavailable",
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"service":   "org-core",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"status":            "healthy",
+		"service":           "org-core",
+		"timestamp":         time.Now().UTC().Format(time.RFC3339),
+		"gdpr_audit_outbox": outboxStatus,
 	})
 }
 
@@ -541,7 +552,9 @@ func (s *Server) reconcileOrganizationProjection(c *gin.Context) {
 		req.Revision,
 	)
 	if err != nil {
-		if errors.Is(err, org.ErrOrganizationDeleted) || errors.Is(err, org.ErrOwnerConflict) {
+		if errors.Is(err, org.ErrOrganizationDeleted) ||
+			errors.Is(err, org.ErrOwnerConflict) ||
+			errors.Is(err, org.ErrProjectionConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": "organization projection conflicts with local lifecycle state"})
 			return
 		}
@@ -572,8 +585,8 @@ func (s *Server) reconcileOrganizationMember(c *gin.Context) {
 		return
 	}
 	role := strings.ToLower(strings.TrimSpace(req.Role))
-	if action == "upsert" && role != "owner" && role != "admin" && role != "member" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be owner, admin, or member"})
+	if action == "upsert" && role != "owner" && role != "admin" && role != "member" && role != "viewer" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role must be owner, admin, member, or viewer"})
 		return
 	}
 	applied, err := s.orgService.ReconcileOrganizationMember(c.Request.Context(), orgID, req.UserID, role, action, req.Revision)
@@ -589,17 +602,30 @@ func (s *Server) reconcileOrganizationMember(c *gin.Context) {
 // endpoint. Authentication is enforced by the internal API-key middleware.
 func (s *Server) reconcileOrganizationDeletion(c *gin.Context) {
 	orgID := strings.TrimSpace(c.Param("orgId"))
-	if orgID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "orgId is required"})
+	var req struct {
+		Revision int64 `json:"revision" binding:"required"`
+	}
+	if orgID == "" || c.ShouldBindJSON(&req) != nil ||
+		req.Revision < 1 || req.Revision > org.MaxSafeAuthRevision {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "orgId and a positive safe revision are required"})
 		return
 	}
 
-	receipt, err := s.orgService.ReconcileOrganizationDeletion(c.Request.Context(), orgID)
+	receipt, applied, err := s.orgService.ReconcileOrganizationDeletion(
+		c.Request.Context(), orgID, req.Revision,
+	)
 	if err != nil {
+		if errors.Is(err, org.ErrProjectionConflict) ||
+			errors.Is(err, org.ErrOrganizationDeleted) {
+			c.JSON(http.StatusConflict, gin.H{"error": "organization deletion conflicts with local lifecycle state"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reconcile organization deletion"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "receipt": json.RawMessage(receipt)})
+	c.JSON(http.StatusOK, gin.H{
+		"ok": true, "applied": applied, "receipt": json.RawMessage(receipt),
+	})
 }
 
 type loginRequest struct {

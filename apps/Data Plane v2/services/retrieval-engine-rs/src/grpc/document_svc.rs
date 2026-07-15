@@ -361,6 +361,7 @@ mod tests {
             org_id: "org-test".into(),
             auth_method: AuthMethod::Jwt,
             scopes: vec!["org:data:write_all".into()],
+            zdr: false,
             acl: EffectiveAcl::allow_all(),
             request_id: "grpc-document-write-regression".into(),
             verified_bearer: None,

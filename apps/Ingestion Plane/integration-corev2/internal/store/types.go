@@ -166,7 +166,16 @@ type AuditEvent struct {
 	EventType      string
 	ProviderKey    string
 	Metadata       map[string]any
+	RequestID      string
 	CreatedAt      time.Time
+	Attempts       int
+}
+
+type AuditOutboxStats struct {
+	Pending           int
+	Terminal          int
+	OldestPendingAge  time.Duration
+	OldestTerminalAge time.Duration
 }
 
 // ActionReceipt is the durable, content-free idempotency record for a
@@ -195,7 +204,34 @@ type ActionReceipt struct {
 	UpdatedAt         time.Time
 }
 
+// AuditTransaction is the mutation surface allowed inside a repository-owned
+// transaction that must commit its audit intent atomically. Keeping reads and
+// writes explicit prevents handlers from accidentally escaping to the base
+// repository while constructing a security-sensitive unit of work.
+type AuditTransaction interface {
+	UpsertConnection(ctx context.Context, connection Connection) (Connection, error)
+	ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error)
+	MarkConnectionDeleted(ctx context.Context, id string) (Connection, error)
+	UpdateConnectionCapabilities(ctx context.Context, id string, capabilities []string) (Connection, error)
+	UpsertConnectionConsent(ctx context.Context, consent ConnectionConsent) (ConnectionConsent, error)
+	ListConnectionConsents(ctx context.Context, connectionID string) ([]ConnectionConsent, error)
+	CreateSyncJob(ctx context.Context, job SyncJob) (SyncJob, error)
+	ClaimSyncJob(ctx context.Context, claim SyncJobClaim) (SyncJob, error)
+	UpdateSyncJob(ctx context.Context, job SyncJob) (SyncJob, error)
+	InsertSyncEvent(ctx context.Context, event SyncEvent) error
+	InsertTokenLease(ctx context.Context, lease TokenLease) error
+	CreateSCIMToken(ctx context.Context, token SCIMToken, tokenHash string) (SCIMToken, error)
+	RevokeSCIMToken(ctx context.Context, organizationID, id string, revokedAt time.Time) (SCIMToken, error)
+	InsertAuditEvent(ctx context.Context, event AuditEvent) error
+	BeginActionReceiptExecution(ctx context.Context, organizationID, idempotencyKey string) (ActionReceipt, error)
+	CompleteActionReceipt(ctx context.Context, organizationID, idempotencyKey, providerMessageID string) (ActionReceipt, error)
+	MarkActionReceiptUnknown(ctx context.Context, organizationID, idempotencyKey string) error
+}
+
 type Repository interface {
+	// WithAuditTransaction commits the supplied local mutation(s) and audit
+	// intent(s) together, or rolls every change back when any step fails.
+	WithAuditTransaction(ctx context.Context, fn func(AuditTransaction) error) error
 	CreateConnectSession(ctx context.Context, session ConnectSession) error
 	GetConnectSessionByStateHash(ctx context.Context, stateHash string) (ConnectSession, error)
 	GetConnectSessionByID(ctx context.Context, id string) (ConnectSession, error)
@@ -229,6 +265,11 @@ type Repository interface {
 	MarkSCIMTokenUsed(ctx context.Context, id string, usedAt time.Time) error
 	RevokeSCIMToken(ctx context.Context, organizationID, id string, revokedAt time.Time) (SCIMToken, error)
 	InsertAuditEvent(ctx context.Context, event AuditEvent) error
+	ClaimAuditEvent(ctx context.Context) (AuditEvent, bool, error)
+	CompleteAuditEvent(ctx context.Context, eventID string, attempts int) error
+	FailAuditEvent(ctx context.Context, eventID string, attempts int, nextAttempt time.Time, message string, terminal bool) error
+	AuditOutboxStats(ctx context.Context) (AuditOutboxStats, error)
+	RequeueTerminalAuditEvents(ctx context.Context, eventIDs []string) (int, error)
 	// ClaimActionReceipt inserts an executing receipt exactly once. acquired is
 	// false when the key already exists, in which case the existing receipt is
 	// returned for fingerprint/status evaluation without calling the provider.

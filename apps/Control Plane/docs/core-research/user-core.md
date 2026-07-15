@@ -1,11 +1,49 @@
 # user-core Research Dive
 
 Generated: 2026-06-07
-Updated: 2026-07-11 (production-readiness continuation — container health, live auth checks)
+Updated: 2026-07-15 (scoped runtime credential/static re-verification)
 
 Scope: `apps/Control Plane/user-core`
 
-## 2026-07-11 production-readiness addendum (current)
+## 2026-07-15 final secure-MVP addendum (current)
+
+User gRPC no longer accepts a fleet-wide shared key. A required file-backed registry binds credential ID, principal, `user-core-grpc` audience, token, and exact full method paths; duplicates, placeholders, wildcard methods, wrong principals, retired entries, and cross-principal reuse fail closed. Auth→User and User→Auth clients use reciprocal single-credential files, allowing explicit old/new overlap without caller-asserted privilege. The new gRPC service-auth module measures 84.5% statement coverage.
+
+The production overlay removes User's developer `env_file` and host-mounted Auth key, mounts the same Auth public-key secret used by Auth, and requires an explicit `AUTH_CORE_ISSUER`; the localhost default cannot enter a release render. User's gRPC server now requires a file-backed certificate/key pair with TLS 1.3 minimum; the real Auth/User integration passes and a plaintext channel is rejected. A root-only Compose handoff copies file-backed secrets into app-owned `0600` files before User drops to `appuser`. Existing signed gateway/session delegation, normalized email, verified-role/profile boundaries, durable multi-org GDPR fanout, lag/terminal visibility, and evidence-preserving requeue remain green. Full `go test ./...` and `go vet ./...` pass. Production credential injection/rotation remains operator-owned; no live profile, membership, or erasure row was mutated.
+
+## 2026-07-15 durable GDPR fanout detail (superseded by final addendum above)
+
+The erasure saga no longer relies on one audit org plus a core-NATS flush.
+Migration 016 captures every active `user_org_memberships` organization in the
+operation transaction before Auth or local cleanup, then dispatches one stable
+child per org. A child is marked published only after an
+`AQENCIA_CONTROLPLANE` PubAck with non-zero sequence; the parent completes only
+when no unpublished child remains. A partial publish leaves the already-ACKed
+child immutable and resumes only the missing children.
+
+`/health` now includes durable audit/fanout pending, terminal, and oldest-lag
+state and reports `degraded` without forcing a restart loop. Verified platform
+admins can requeue 1-100 selected terminal audit/fanout IDs. Requeue preserves
+payload/org snapshot, last error, and an incrementing requeue counter; published
+and terminal GDPR audit evidence is not purged.
+
+An isolated tmpfs PostgreSQL run passed pre-mutation two-org snapshot, partial
+PubAck incompletion, restart/resume, terminal evidence, health, and bounded
+requeue tests. Full serialized tests/vet and changed-package race tests pass;
+the four changed GDPR ledger/saga files measure 80.8% (282/349 statements).
+The shared publisher also rejects missing, wrong-stream, and zero-sequence
+PubAcks. No User container or real tenant row was changed, so rollout of the new
+shared stream/credential remains operational evidence rather than live proof.
+
+## 2026-07-15 scoped-runtime addendum (current)
+
+The verified-claim-only privilege and normalized-email fixes remain unchanged. User's release path uses a dedicated Control-bus principal and a dedicated shared-broker principal, sets token fallback to `0`, and has no runtime stream/consumer administration. A one-shot deployment provisioner owns topology; contract and scoped-ACL tests reject missing, placeholder, embedded, ambiguous, and over-privileged credentials. Full `go test ./...`, `go vet ./...`, and the earlier race pass remain green. No User container was recreated and no real profile was mutated in this final continuation; coordinated credential deployment is still an operational gate, not a production claim.
+
+## 2026-07-14 Velion gateway addendum (historical deployment evidence)
+
+The Velion gateway ingress strips caller-supplied user ID, organization ID, role, profile, and internal-key headers before any upstream call. User Core self-service continues to require the audience-, request-, body-, subject-, organization-, and verified-profile-bound HMAC delegation described below; browser `X-User-Role` is not an authority input. The User Core container is healthy. This continuation changed no User Core source and performed no profile mutation; it preserves the existing regression evidence while confirming the repaired SPA/gateway path does not reintroduce raw identity headers.
+
+## 2026-07-11 production-readiness addendum (historical)
 
 User Core is rebuilt, healthy, and no longer authorizes caller-supplied `X-User-Role`. Privileged service calls resolve a registered scoped principal; user/admin authority comes from verified claims, not headers. A second regression found that bearer callers could inject `X-User-Email`/name/avatar into `GetOrCreate` and reach the ID-reassignment path. Bearer profile attributes now come only from Auth Core's verified identity response.
 

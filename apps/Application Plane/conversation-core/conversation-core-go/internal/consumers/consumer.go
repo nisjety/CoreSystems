@@ -25,6 +25,12 @@ type DurableConsumer struct {
 	subs []*nats.Subscription
 }
 
+const (
+	applicationEventsStream    = "VELION_APPLICATION"
+	applicationModelStream     = "VELION_MODEL"
+	applicationIngestionStream = "VELION_INGESTION"
+)
+
 func NewDurableConsumer(js nats.JetStreamContext, name string) *DurableConsumer {
 	return &DurableConsumer{js: js, name: name}
 }
@@ -48,6 +54,22 @@ func (c *DurableConsumer) Bind(subject, durable string, handler nats.MsgHandler)
 	}
 	c.subs = append(c.subs, sub)
 	log.Printf("[cc-go/consumers] %s subscribed to %s (durable=%s)", c.name, subject, durable)
+	return nil
+}
+
+func (c *DurableConsumer) BindProvisioned(subject, stream, durable string, handler nats.MsgHandler) error {
+	if c == nil || c.js == nil {
+		return nil
+	}
+	sub, err := c.js.QueueSubscribe(subject, durable, handler,
+		nats.Bind(stream, durable),
+		nats.ManualAck(),
+	)
+	if err != nil {
+		return err
+	}
+	c.subs = append(c.subs, sub)
+	log.Printf("[cc-go/consumers] %s bound to %s/%s", c.name, stream, durable)
 	return nil
 }
 

@@ -24,12 +24,15 @@ type Config struct {
 func NewClient(cfg Config) (*Client, error) {
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
+		nats.CustomInboxPrefix("_INBOX.BILLING_CONTROL"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
 	}
-	if cfg.Token != "" {
-		opts = append(opts, nats.Token(cfg.Token))
+	authOptions, err := runtimeAuthOptions(cfg.Token)
+	if err != nil {
+		return nil, fmt.Errorf("configure nats authentication: %w", err)
 	}
+	opts = append(opts, authOptions...)
 
 	conn, err := nats.Connect(cfg.URL, opts...)
 	if err != nil {
@@ -63,26 +66,5 @@ func (c *Client) Publish(ctx context.Context, subject string, payload map[string
 	if _, err := c.js.Publish(ctx, subject, body); err != nil {
 		return fmt.Errorf("publish %s: %w", subject, err)
 	}
-	return nil
-}
-
-func (c *Client) EnsureStream(ctx context.Context, name string, subjects []string) error {
-	_, err := c.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      name,
-		Subjects:  subjects,
-		Retention: jetstream.LimitsPolicy,
-		Storage:   jetstream.FileStorage,
-		MaxAge:    7 * 24 * time.Hour,
-		MaxMsgs:   100000,
-	})
-	if err == nil {
-		return nil
-	}
-
-	_, existingErr := c.js.Stream(ctx, name)
-	if existingErr != nil {
-		return fmt.Errorf("ensure stream %s: %w", name, err)
-	}
-
 	return nil
 }

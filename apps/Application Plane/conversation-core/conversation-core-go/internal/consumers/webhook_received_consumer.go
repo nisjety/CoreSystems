@@ -75,7 +75,7 @@ func NewWebhookReceivedConsumer(js nats.JetStreamContext, fetcher WebhookFetcher
 // Start binds the durable consumer on the webhook received subject. The
 // ingestion stream must exist first (see eventing.EnsureIngestionStream).
 func (c *WebhookReceivedConsumer) Start(_ context.Context) error {
-	return c.consumer.Bind(webhookReceivedSubject, webhookReceivedDurable, c.handle)
+	return c.consumer.BindProvisioned(webhookReceivedSubject, applicationIngestionStream, webhookReceivedDurable, c.handle)
 }
 
 // Stop drains the subscription.

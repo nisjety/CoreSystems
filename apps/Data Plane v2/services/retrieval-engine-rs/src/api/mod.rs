@@ -130,15 +130,8 @@ async fn auth_middleware(
                     return Err(StatusCode::FORBIDDEN);
                 }
 
-                let mut ctx = AuthContext {
-                    user_id: Some(claims.sub.clone()),
-                    org_id: claims_org.clone(),
-                    auth_method: AuthMethod::Jwt,
-                    scopes: claims.scopes.clone(),
-                    acl: crate::authz::EffectiveAcl::allow_all(),
-                    request_id: request_id.clone(),
-                    verified_bearer: Some(token.clone()),
-                };
+                let mut ctx =
+                    auth_context_from_verified_claims(&claims, request_id.clone(), token.clone());
 
                 // §15-B + §15-C: PolicyClient lookup.
                 let decision = state.policy.resolve(&claims.sub, &claims_org).await;
@@ -224,6 +217,7 @@ async fn audit_unauthorized(
         org_id: org_id.to_string(),
         auth_method: method,
         scopes: vec![],
+        zdr: true,
         acl: crate::authz::EffectiveAcl::default(),
         request_id: request_id.to_string(),
         verified_bearer: None,
@@ -247,6 +241,86 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     value.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
+fn auth_context_from_verified_claims(
+    claims: &crate::authz::Claims,
+    request_id: String,
+    token: String,
+) -> crate::authz::AuthContext {
+    crate::authz::AuthContext {
+        user_id: Some(claims.sub.clone()),
+        org_id: claims.org_id.clone().unwrap_or_default(),
+        auth_method: crate::authz::AuthMethod::Jwt,
+        scopes: claims.scopes.clone(),
+        zdr: claims.zdr,
+        acl: crate::authz::EffectiveAcl::allow_all(),
+        request_id,
+        verified_bearer: Some(token),
+    }
+}
+
+fn strict_validation_from_env() -> Result<jsonwebtoken::Validation, StatusCode> {
+    let issuer = std::env::var("JWT_REQUIRED_ISSUER")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let audience = std::env::var("JWT_REQUIRED_AUDIENCE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    strict_validation_for(&issuer, &audience)
+}
+
+fn strict_validation_for(
+    issuer: &str,
+    audience: &str,
+) -> Result<jsonwebtoken::Validation, StatusCode> {
+    if issuer.trim().is_empty()
+        || issuer != issuer.trim()
+        || audience.trim().is_empty()
+        || audience != audience.trim()
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub", "zdr"]);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
+    validation.leeway = 30;
+    Ok(validation)
+}
+
+fn decode_verified_claims(
+    token: &str,
+    key: &jsonwebtoken::DecodingKey,
+    validation: &jsonwebtoken::Validation,
+) -> Result<crate::authz::Claims, StatusCode> {
+    let header = jsonwebtoken::decode_header(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    if header.alg != jsonwebtoken::Algorithm::RS256 {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let claims = jsonwebtoken::decode::<crate::authz::Claims>(token, key, validation)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?
+        .claims;
+    let org_id = claims
+        .org_id
+        .as_ref()
+        .filter(|org| !org.trim().is_empty() && org.trim() == org.as_str())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if claims.sub.trim().is_empty() || claims.sub.trim() != claims.sub {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if org_id.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(claims)
+}
+
 /// Verify a JWT against `JWT_PUBLIC_KEY_PEM` (RS256). Returns the decoded
 /// claims so the caller can build `AuthContext` from them. JWKS fetching is
 /// the wave-3.1 follow-up — most internal deployments pin a single key.
@@ -254,25 +328,15 @@ async fn verify_jwt(token: &str) -> Result<crate::authz::Claims, StatusCode> {
     // §16.5.5 — if a JWKS cache is initialized and the token's `kid`
     // resolves there, use that key. Otherwise fall through to the static
     // `JWT_PUBLIC_KEY_PEM` path (pre-3.4 behavior).
-    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-    validation.validate_exp = true;
-    if let Ok(iss) = std::env::var("JWT_REQUIRED_ISSUER") {
-        validation.set_issuer(&[iss]);
-    }
-    if let Ok(aud) = std::env::var("JWT_REQUIRED_AUDIENCE") {
-        validation.set_audience(&[aud]);
-    }
+    let validation = strict_validation_from_env()?;
 
     if let Some(jwks) = crate::authz::JwksCache::global() {
         if let Ok(header) = jsonwebtoken::decode_header(token) {
             if let Some(kid) = header.kid {
                 if let Some(key) = jwks.key_for_kid(&kid).await {
-                    return jsonwebtoken::decode::<crate::authz::Claims>(token, &key, &validation)
-                        .map(|d| d.claims)
-                        .map_err(|e| {
-                            tracing::debug!(error = %e, kid = %kid, "jwks jwt verify failed");
-                            StatusCode::UNAUTHORIZED
-                        });
+                    return decode_verified_claims(token, &key, &validation).inspect_err(|error| {
+                        tracing::debug!(?error, kid = %kid, "jwks jwt verify failed");
+                    });
                 }
             }
         }
@@ -286,12 +350,177 @@ async fn verify_jwt(token: &str) -> Result<crate::authz::Claims, StatusCode> {
     let key = jsonwebtoken::DecodingKey::from_rsa_pem(pem.as_bytes())
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let data =
-        jsonwebtoken::decode::<crate::authz::Claims>(token, &key, &validation).map_err(|e| {
-            tracing::debug!(error = %e, "jwt verification failed");
-            StatusCode::UNAUTHORIZED
-        })?;
-    Ok(data.claims)
+    decode_verified_claims(token, &key, &validation).inspect_err(|error| {
+        tracing::debug!(?error, "jwt verification failed");
+    })
+}
+
+#[cfg(test)]
+mod auth_security_tests {
+    use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
+    use rsa::{
+        pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+        RsaPrivateKey, RsaPublicKey,
+    };
+    use serde_json::{json, Value};
+
+    use super::{auth_context_from_verified_claims, decode_verified_claims, strict_validation_for};
+    use crate::pipeline::types::{RetrievalRequest, ZdrMode};
+
+    const ISSUER: &str = "https://control.test/api/convex-auth";
+    const AUDIENCE: &str = "data-plane";
+
+    fn keys() -> (EncodingKey, DecodingKey) {
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("generate key");
+        let private_pem = private.to_pkcs8_pem(LineEnding::LF).expect("private pem");
+        let public_pem = RsaPublicKey::from(&private)
+            .to_public_key_pem(LineEnding::LF)
+            .expect("public pem");
+        (
+            EncodingKey::from_rsa_pem(private_pem.as_bytes()).expect("encoding key"),
+            DecodingKey::from_rsa_pem(public_pem.as_bytes()).expect("decoding key"),
+        )
+    }
+
+    fn valid_claims() -> Value {
+        let now = chrono::Utc::now().timestamp() as usize;
+        json!({
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sub": "user-1",
+            "org_id": "org-a",
+            "scopes": [],
+            "zdr": false,
+            "exp": now + 300,
+            "nbf": now.saturating_sub(5),
+        })
+    }
+
+    #[test]
+    fn http_verifier_requires_a_boolean_signed_zdr_claim() {
+        let (encoding, decoding) = keys();
+        for invalid_zdr in [None, Some(json!("false")), Some(json!(0))] {
+            let mut claims = valid_claims();
+            match invalid_zdr {
+                Some(value) => claims["zdr"] = value,
+                None => {
+                    claims.as_object_mut().expect("object claims").remove("zdr");
+                }
+            }
+            let token = signed_token(&claims, &encoding);
+            let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+            assert!(
+                decode_verified_claims(&token, &decoding, &validation).is_err(),
+                "missing or non-boolean signed ZDR posture must be rejected"
+            );
+        }
+
+        let mut restrictive = valid_claims();
+        restrictive["zdr"] = json!(true);
+        let token = signed_token(&restrictive, &encoding);
+        let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+        let claims = decode_verified_claims(&token, &decoding, &validation)
+            .expect("signed boolean posture is valid");
+        assert!(claims.zdr, "verified posture must reach the HTTP boundary");
+
+        let ctx = auth_context_from_verified_claims(&claims, "request-1".into(), token);
+        let mut request: RetrievalRequest = serde_json::from_value(json!({
+            "org_id": "org-a",
+            "query": "synthetic boundary query",
+            "zdr_mode": "disabled"
+        }))
+        .expect("valid retrieval request");
+        ctx.apply_to_request(&mut request);
+        assert_eq!(request.zdr_mode, Some(ZdrMode::Ephemeral));
+    }
+
+    fn signed_token(claims: &Value, key: &EncodingKey) -> String {
+        encode(&Header::new(Algorithm::RS256), claims, key).expect("token")
+    }
+
+    #[test]
+    fn http_verifier_requires_all_registered_time_and_identity_claims() {
+        let (encoding, decoding) = keys();
+        for required in ["exp", "nbf", "iss", "aud", "sub"] {
+            let mut claims = valid_claims();
+            claims
+                .as_object_mut()
+                .expect("object claims")
+                .remove(required);
+            let token = signed_token(&claims, &encoding);
+            let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+            assert!(
+                decode_verified_claims(&token, &decoding, &validation).is_err(),
+                "missing {required} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn http_verifier_rejects_noncanonical_identities_and_wrong_issuer_or_audience() {
+        let (encoding, decoding) = keys();
+        for (field, value) in [
+            ("sub", json!("")),
+            ("sub", json!(" user-1")),
+            ("org_id", json!("")),
+            ("org_id", json!("org-a ")),
+        ] {
+            let mut claims = valid_claims();
+            claims[field] = value;
+            let token = signed_token(&claims, &encoding);
+            let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+            assert!(
+                decode_verified_claims(&token, &decoding, &validation).is_err(),
+                "noncanonical {field} must be rejected"
+            );
+        }
+
+        for (field, value) in [
+            ("iss", json!("https://wrong.example")),
+            ("aud", json!("other")),
+        ] {
+            let mut claims = valid_claims();
+            claims[field] = value;
+            let token = signed_token(&claims, &encoding);
+            let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+            assert!(
+                decode_verified_claims(&token, &decoding, &validation).is_err(),
+                "wrong {field} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn http_verifier_rejects_unsigned_or_wrong_algorithm_tokens() {
+        let (_, decoding) = keys();
+        let claims = valid_claims();
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"forged-test-key"),
+        )
+        .expect("forged token");
+        let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+        assert!(decode_verified_claims(&token, &decoding, &validation).is_err());
+    }
+
+    #[test]
+    fn http_validation_rejects_missing_or_noncanonical_configuration() {
+        assert!(strict_validation_for("", AUDIENCE).is_err());
+        assert!(strict_validation_for(ISSUER, "").is_err());
+        assert!(strict_validation_for(" issuer ", AUDIENCE).is_err());
+        assert!(strict_validation_for(ISSUER, " audience ").is_err());
+    }
+
+    #[test]
+    fn http_verifier_rejects_expired_tokens() {
+        let (encoding, decoding) = keys();
+        let mut claims = valid_claims();
+        claims["exp"] = json!(chrono::Utc::now().timestamp().saturating_sub(60));
+        let token = signed_token(&claims, &encoding);
+        let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+        assert!(decode_verified_claims(&token, &decoding, &validation).is_err());
+    }
 }
 
 pub fn router_with_metrics(
@@ -1673,6 +1902,7 @@ mod admin_security_tests {
             org_id: "org-a".into(),
             auth_method: AuthMethod::Jwt,
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            zdr: false,
             acl: EffectiveAcl::allow_all(),
             request_id: "request-1".into(),
             verified_bearer: None,
@@ -1749,6 +1979,7 @@ mod auxiliary_security_tests {
             org_id: org_id.to_owned(),
             auth_method: AuthMethod::Jwt,
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            zdr: false,
             acl: EffectiveAcl::allow_all(),
             request_id: "aux-security-test".into(),
             verified_bearer: None,

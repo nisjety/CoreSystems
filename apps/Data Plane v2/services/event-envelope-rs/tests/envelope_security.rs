@@ -1,6 +1,12 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use chrono::Utc;
 use event_envelope_rs::{EventSigner, EventVerifier};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::{RsaPrivateKey, RsaPublicKey};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 fn keys() -> (String, String) {
     let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("test RSA key");
@@ -38,6 +44,92 @@ fn contract() -> (EventSigner, EventVerifier) {
         )
         .expect("verifier"),
     )
+}
+
+#[derive(Serialize)]
+struct GoCompatibleClaims<'a> {
+    iss: &'a str,
+    sub: &'a str,
+    aud: Vec<&'a str>,
+    principal_type: &'a str,
+    org_id: &'a str,
+    user_id: &'a str,
+    scopes: Vec<&'a str>,
+    zdr: bool,
+    event_type: &'a str,
+    payload_sha256: String,
+    jti: &'a str,
+    iat: i64,
+    nbf: i64,
+    exp: i64,
+}
+
+fn go_compatible_envelope(private: &str, audiences: Vec<&str>) -> Vec<u8> {
+    let payload = br#"{"document_id":"doc-go","org_id":"org-go","user_id":"user-go","zdr":false}"#;
+    let now = Utc::now().timestamp();
+    let claims = GoCompatibleClaims {
+        iss: "service:documents-api-go",
+        sub: "service:documents-api-go",
+        aud: audiences,
+        principal_type: "service",
+        org_id: "org-go",
+        user_id: "user-go",
+        scopes: vec!["events:documents:publish"],
+        zdr: false,
+        event_type: "dataplane.documents.created",
+        payload_sha256: Sha256::digest(payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        jti: "go-compatibility-fixture",
+        iat: now,
+        nbf: now,
+        exp: now + 120,
+    };
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("documents-events-v1".to_owned());
+    let token = encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_pem(private.as_bytes()).expect("encoding key"),
+    )
+    .expect("token");
+    serde_json::to_vec(&serde_json::json!({
+        "authorization": format!("Bearer {token}"),
+        "data": URL_SAFE_NO_PAD.encode(payload),
+    }))
+    .expect("envelope")
+}
+
+#[test]
+fn accepts_go_single_audience_array_but_rejects_ambiguous_arrays() {
+    let (private, public) = keys();
+    let verifier = || {
+        EventVerifier::from_rsa_pem(
+            public.as_bytes(),
+            "service:documents-api-go",
+            "documents-events-v1",
+            "dataplane-events",
+            "events:documents:publish",
+            10,
+        )
+        .expect("verifier")
+    };
+
+    let compatible = go_compatible_envelope(&private, vec!["dataplane-events"]);
+    assert!(verifier()
+        .verify("dataplane.documents.created", &compatible)
+        .is_ok());
+
+    let ambiguous = go_compatible_envelope(&private, vec!["dataplane-events", "other"]);
+    assert!(verifier()
+        .verify("dataplane.documents.created", &ambiguous)
+        .is_err());
+
+    let empty = go_compatible_envelope(&private, vec![""]);
+    assert!(verifier()
+        .verify("dataplane.documents.created", &empty)
+        .is_err());
 }
 
 #[test]
@@ -243,6 +335,53 @@ fn wiki_scope_is_producer_specific_and_requires_non_zdr_payload() {
             Some("user-test"),
             true,
             br#"{"org_id":"org-test","user_id":"user-test","zdr":true}"#,
+        )
+        .is_err());
+}
+
+#[test]
+fn retrieval_cost_scope_is_producer_specific_and_claim_bound() {
+    let (private, public) = keys();
+    let signer = EventSigner::from_rsa_pem(
+        private.as_bytes(),
+        "service:retrieval-engine-rs",
+        "retrieval-events-v1",
+        "dataplane-events",
+        "events:retrieval:publish",
+    )
+    .expect("retrieval signer");
+    let verifier = EventVerifier::from_rsa_pem(
+        public.as_bytes(),
+        "service:retrieval-engine-rs",
+        "retrieval-events-v1",
+        "dataplane-events",
+        "events:retrieval:publish",
+        10,
+    )
+    .expect("retrieval verifier");
+    let payload = br#"{"event_type":"rerank","model":"test","count":2,"estimated_tokens":64,"org_id":"org-test","user_id":"user-test","zdr":false,"idempotency_key":"cost-test"}"#;
+    let envelope = signer
+        .sign(
+            "dataplane.cost.ledger",
+            "org-test",
+            Some("user-test"),
+            false,
+            payload,
+        )
+        .expect("signed retrieval cost event");
+    let verified = verifier
+        .verify("dataplane.cost.ledger", &envelope)
+        .expect("verified retrieval cost event");
+    assert_eq!(verified.claims.org_id, "org-test");
+    assert!(!verified.claims.zdr);
+
+    assert!(signer
+        .sign(
+            "dataplane.documents.indexed",
+            "org-test",
+            Some("user-test"),
+            false,
+            payload,
         )
         .is_err());
 }

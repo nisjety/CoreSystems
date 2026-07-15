@@ -10,7 +10,6 @@ import (
 	"time"
 
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -70,16 +69,6 @@ type SharedPublisher interface {
 	)
 }
 
-// AuditPublisher emits raw audit events over CORE NATS on the local
-// control-plane bus (controlplane-nats), where audit-core's primary
-// QueueSubscribe listens. Satisfied by *nats.Client (its Publish uses core NATS,
-// not JetStream). Defined here (not importing nats) to avoid import cycles.
-// Kept distinct from the cross-plane SharedPublisher (velion-nats) so audit
-// delivery never depends on the shared bus being up.
-type AuditPublisher interface {
-	Publish(subject string, data interface{}) error
-}
-
 // Service handles user business logic
 type Service struct {
 	repo             *Repository
@@ -87,19 +76,28 @@ type Service struct {
 	betterAuthClient interface{}        // Better Auth client (optional, can be nil)
 	eventPublisher   interface{}        // NATS publisher (optional, can be nil)
 	sharedPublisher  SharedPublisher    // cross-plane events on velion-nats
-	auditPublisher   AuditPublisher     // velion.audit.v1.* on local controlplane-nats
+	auditOutbox      *auditOutbox       // durable velion.audit.v2.control.user-core.* delivery
 	cache            *rediscache.Client // optional, nil if Redis disabled
-	authPool         *pgxpool.Pool      // secondary pool to auth_service DB for GDPR procs (nil if unset)
+	erasureStore     erasureOperationStore
+	authEraser       authErasureExecutor
+	erasureFanout    ErasureFanoutPublisher
+	erasureWorker    *erasureWorker
 }
 
 // NewService creates a new user service
 // betterAuthClient, eventPublisher, and cache are optional (can be nil)
 func NewService(repo *Repository, betterAuthClient interface{}, eventPublisher interface{}, cache ...*rediscache.Client) *Service {
+	var auditStore auditOutboxStore
+	if repo != nil {
+		auditStore = repo
+	}
 	svc := &Service{
 		repo:             repo,
 		bcryptCost:       bcrypt.DefaultCost,
 		betterAuthClient: betterAuthClient,
 		eventPublisher:   eventPublisher,
+		auditOutbox:      newAuditOutbox(auditStore, nil),
+		erasureStore:     repo,
 	}
 	if len(cache) > 0 {
 		svc.cache = cache[0]
@@ -111,15 +109,26 @@ func (s *Service) PurgeExpiredOnboardingDrafts(ctx context.Context) (int64, erro
 	return s.repo.PurgeExpiredOnboardingDrafts(ctx)
 }
 
-// SetAuditPublisher wires the local control-plane bus publisher used to emit
-// velion.audit.v1.* events to audit-core. nil disables audit emission.
+// SetAuditPublisher starts durable delivery of the local PostgreSQL audit
+// outbox. Events remain persisted and retryable while the bus is unavailable.
 func (s *Service) SetAuditPublisher(ap AuditPublisher) {
-	s.auditPublisher = ap
+	if s.auditOutbox != nil {
+		s.auditOutbox.Start(ap)
+	}
+}
+
+func (s *Service) CloseAuditOutbox() {
+	if s.auditOutbox != nil {
+		s.auditOutbox.Close()
+	}
 }
 
 // SetSharedPublisher wires the cross-plane NATS publisher for controlplane.user.* subjects.
 func (s *Service) SetSharedPublisher(sp SharedPublisher) {
 	s.sharedPublisher = sp
+	if publisher, ok := any(sp).(ErasureFanoutPublisher); ok {
+		s.erasureFanout = publisher
+	}
 }
 
 // Ping checks database connectivity + authentication for the /health probe.

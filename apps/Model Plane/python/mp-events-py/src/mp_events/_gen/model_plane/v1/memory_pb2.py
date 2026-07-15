@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bmodel_plane/v1/memory.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd9\x01\n\x13SearchMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05query\x18\x02 \x01(\tR\x05query\x12!\n\x0ctopic_filter\x18\x03 \x03(\tR\x0btopicFilter\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n\rupdated_after\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0cupdatedAfter\"M\n\x14SearchMemoryResponse\x12\x35\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1b.model_plane.v1.MemoryEntryR\x07\x65ntries\"\xc8\x01\n\x0bMemoryEntry\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x03 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x04 \x01(\tR\x07\x63ontent\x12\x14\n\x05score\x18\x05 \x01(\x02R\x05score\x12\x39\n\nupdated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAt\"x\n\x12IndexMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x03 \x01(\tR\x07\x63ontent\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\"2\n\x13IndexMemoryResponse\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\"\x15\n\x13MemoryHealthRequest\".\n\x14MemoryHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status2\x97\x02\n\rMemoryService\x12Y\n\x0cSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n\x0bIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponseB\xb3\x01\n\x12\x63om.model_plane.v1B\x0bMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bmodel_plane/v1/memory.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd9\x01\n\x13SearchMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05query\x18\x02 \x01(\tR\x05query\x12!\n\x0ctopic_filter\x18\x03 \x03(\tR\x0btopicFilter\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n\rupdated_after\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0cupdatedAfter\"\x98\x01\n\x14SearchMemoryResponse\x12\x35\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1b.model_plane.v1.MemoryEntryR\x07\x65ntries\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"\xc8\x01\n\x0bMemoryEntry\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x03 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x04 \x01(\tR\x07\x63ontent\x12\x14\n\x05score\x18\x05 \x01(\x02R\x05score\x12\x39\n\nupdated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAt\"x\n\x12IndexMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x03 \x01(\tR\x07\x63ontent\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\"}\n\x13IndexMemoryResponse\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"\x15\n\x13MemoryHealthRequest\"i\n\x14MemoryHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n\x05ready\x18\x02 \x01(\x08R\x05ready\x12#\n\rmemory_status\x18\x03 \x01(\tR\x0cmemoryStatus2\x97\x02\n\rMemoryService\x12Y\n\x0cSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n\x0bIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponseB\xb3\x01\n\x12\x63om.model_plane.v1B\x0bMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,18 +35,18 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\022com.model_plane.v1B\013MemoryProtoP\001Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\242\002\003MXX\252\002\rModelPlane.V1\312\002\rModelPlane\\V1\342\002\031ModelPlane\\V1\\GPBMetadata\352\002\016ModelPlane::V1'
   _globals['_SEARCHMEMORYREQUEST']._serialized_start=81
   _globals['_SEARCHMEMORYREQUEST']._serialized_end=298
-  _globals['_SEARCHMEMORYRESPONSE']._serialized_start=300
-  _globals['_SEARCHMEMORYRESPONSE']._serialized_end=377
-  _globals['_MEMORYENTRY']._serialized_start=380
-  _globals['_MEMORYENTRY']._serialized_end=580
-  _globals['_INDEXMEMORYREQUEST']._serialized_start=582
-  _globals['_INDEXMEMORYREQUEST']._serialized_end=702
-  _globals['_INDEXMEMORYRESPONSE']._serialized_start=704
-  _globals['_INDEXMEMORYRESPONSE']._serialized_end=754
-  _globals['_MEMORYHEALTHREQUEST']._serialized_start=756
-  _globals['_MEMORYHEALTHREQUEST']._serialized_end=777
-  _globals['_MEMORYHEALTHRESPONSE']._serialized_start=779
-  _globals['_MEMORYHEALTHRESPONSE']._serialized_end=825
-  _globals['_MEMORYSERVICE']._serialized_start=828
-  _globals['_MEMORYSERVICE']._serialized_end=1107
+  _globals['_SEARCHMEMORYRESPONSE']._serialized_start=301
+  _globals['_SEARCHMEMORYRESPONSE']._serialized_end=453
+  _globals['_MEMORYENTRY']._serialized_start=456
+  _globals['_MEMORYENTRY']._serialized_end=656
+  _globals['_INDEXMEMORYREQUEST']._serialized_start=658
+  _globals['_INDEXMEMORYREQUEST']._serialized_end=778
+  _globals['_INDEXMEMORYRESPONSE']._serialized_start=780
+  _globals['_INDEXMEMORYRESPONSE']._serialized_end=905
+  _globals['_MEMORYHEALTHREQUEST']._serialized_start=907
+  _globals['_MEMORYHEALTHREQUEST']._serialized_end=928
+  _globals['_MEMORYHEALTHRESPONSE']._serialized_start=930
+  _globals['_MEMORYHEALTHRESPONSE']._serialized_end=1035
+  _globals['_MEMORYSERVICE']._serialized_start=1038
+  _globals['_MEMORYSERVICE']._serialized_end=1317
 # @@protoc_insertion_point(module_scope)

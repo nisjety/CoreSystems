@@ -29,7 +29,7 @@ export function getSession(): SessionState {
   return session
 }
 
-export async function loadSession(): Promise<void> {
+export async function loadSession(options?: { disableAuthCookieCache?: boolean }): Promise<void> {
   if (session.status === 'loading') return
   setSession('status', 'loading')
 
@@ -38,7 +38,9 @@ export async function loadSession(): Promise<void> {
     // out, so the sign-in screen never fires a 401 against the session-gated
     // snapshot route (which the browser would log as a console error). Only
     // fetch the rich snapshot once we know a session exists.
-    const auth = await getAuthSession()
+    const auth = await getAuthSession({
+      disableCookieCache: options?.disableAuthCookieCache,
+    })
     if (!auth?.user) {
       setSession({ status: 'unauthenticated', user: null, activeOrg: null, permissions: [], onboardingStatus: null })
       return
@@ -46,7 +48,9 @@ export async function loadSession(): Promise<void> {
 
     const data = await getCurrentSession()
     const onboardingStatus =
-      session.user?.id === data.user.id && session.onboardingStatus === 'COMPLETED'
+      session.user?.id === data.user.id &&
+      session.activeOrg?.id === data.org?.id &&
+      session.onboardingStatus === 'COMPLETED'
         ? 'COMPLETED'
         : data.onboardingStatus ?? null
     setSession({

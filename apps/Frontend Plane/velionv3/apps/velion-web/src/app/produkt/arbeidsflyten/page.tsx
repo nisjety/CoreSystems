@@ -1,0 +1,19 @@
+import type { Metadata } from "next";
+import { WorkflowPage } from "@/components/product/WorkflowPage";
+
+export const metadata: Metadata = {
+	title: "Arbeidsflyten",
+	description:
+		"Se hvordan et signal blir til et kildebasert utkast, en menneskelig beslutning og et inspiserbart resultat i Velion.",
+	openGraph: {
+		title: "Arbeidsflyten — Velion",
+		description:
+			"Fra signal til kontrollert handling, med synlig grunnlag og menneskelig beslutning.",
+		locale: "nb_NO",
+		type: "website",
+	},
+};
+
+export default function WorkflowRoute() {
+	return <WorkflowPage />;
+}

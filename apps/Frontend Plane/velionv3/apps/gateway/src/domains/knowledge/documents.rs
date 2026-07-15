@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
@@ -9,12 +9,12 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState, domains::knowledge::shared, envelope::error, middleware::AuthenticatedUser,
-    upstream::proxy_json,
 };
 
 pub(super) async fn list_documents(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
     let org_id = {
@@ -26,13 +26,14 @@ pub(super) async fn list_documents(
         state.documents_api_url,
         shared::qs(&uri)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -46,6 +47,7 @@ pub(super) async fn list_documents(
 pub(super) async fn create_document(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let org_id = {
@@ -94,13 +96,14 @@ pub(super) async fn create_document(
     });
 
     let url = format!("{}/v1/documents", state.documents_api_url);
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::POST,
         &url,
         Some(payload),
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -110,6 +113,7 @@ pub(super) async fn create_document(
 pub(super) async fn get_document(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let org_id = {
@@ -121,13 +125,14 @@ pub(super) async fn get_document(
         state.documents_api_url,
         urlencoding::encode(&id)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -136,20 +141,26 @@ pub(super) async fn get_document(
 pub(super) async fn list_sources(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
     let org_id = {
         let o = crate::upstream::authorized_org_id(&state, &user).await;
         (!o.is_empty()).then_some(o)
     };
-    let url = format!("{}/v1/sources{}", state.documents_api_url, shared::qs(&uri));
-    proxy_json(
+    let url = format!(
+        "{}/v1/documents{}",
+        state.documents_api_url,
+        shared::qs(&uri)
+    );
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await

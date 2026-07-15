@@ -1,13 +1,27 @@
 # session-core Research Dive
 
 Generated: 2026-06-07
-Updated: 2026-07-11 (production-readiness continuation + live security regression)
+Updated: 2026-07-15 (scoped runtime credentials and static re-verification)
 
 Scope: `apps/Control Plane/session-core` (Go, HTTP `:3017`, gRPC `:50017`, container `session-core-service`)
 
 > Do not confuse with **Model Plane**'s Rust `session-core` (`model-plane-session-core-1`, `:9091`/`:18081`), which owns plans/todos/lineage/approval state. This doc is the Control Plane legacy bridge / Control Session aggregator only.
 
-## 2026-07-11 production-readiness addendum (current)
+## 2026-07-15 final secure-MVP addendum (current)
+
+Session has no active inbound gRPC path that needs a legacy shared fleet key; the unused release startup/config requirement was removed. Its production service resets the developer `env_file`, keeps insecure defaults disabled, and uses distinct scoped Org/Billing/User and Control/shared-NATS credentials. Browser identity remains token-verified and gateway service delegation remains method/URI/body/subject-bound; `X-User-Id`, `X-Org-Id`, and `X-User-Role` have no independent authority.
+
+Full `go test ./...` and `go vet ./...` pass. The prior live direct/gateway forged-token matrix remains the deployed evidence; no real session aggregate was read or mutated during this final isolated continuation. Production credential injection/rotation remains the operator-owned release gate.
+
+## 2026-07-15 scoped-runtime detail (superseded by final addendum above)
+
+Session's fail-closed browser and signed Gateway delegation contracts remain unchanged and green. Its Org/Billing/User callers consume distinct scoped credentials and never follow redirects; the release path uses separate Control/shared NATS principals, disables token fallback, and grants no runtime topology administration. Full `go test ./...`, `go vet ./...`, and the earlier race pass remain green. This final continuation did not recreate the existing Session container or exercise real session data; production credential rotation remains operator-owned.
+
+## 2026-07-14 live re-verification (historical deployment evidence)
+
+The Docker incident described in the older addendum is no longer active. Session Core and the rebuilt Velion gateway are healthy and their signed delegation pair is live. Missing browser auth and `Bearer garbage` combined with forged `X-User-Id`, `X-Org-Id`, and `X-User-Role: admin` return 401 both through the gateway `/api/v1/session/bootstrap` endpoint and directly from Session Core's `/api/v1/sessions/current` aggregate; no user aggregate is returned. The broader automated regressions below continue to cover malformed, expired, wrong-issuer, wrong-audience, wrong-signature, and header-impersonation cases.
+
+## 2026-07-11 production-readiness addendum (historical)
 
 The critical bearer/header impersonation described below is fixed, covered, deployed, and live-verified. Session Core has no header-fallback identity path. Browser bearer tokens are round-tripped to Auth Core and checked for signature, expiry, issuer, audience, and claims. Machine access uses a separate audience/scope-bound service credential path. Session's outbound User Core self-profile reads now carry the same subject/profile/body-bound HMAC delegation contract as the gateway; an unsigned service token is insufficient.
 

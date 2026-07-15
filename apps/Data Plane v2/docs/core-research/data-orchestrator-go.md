@@ -5,6 +5,22 @@ Updated: 2026-07-11 (secure-MVP durability evidence; preserves the superseded 20
 
 Scope: `apps/Data Plane v2/services/data-orchestrator-go`
 
+## 2026-07-15 final isolated acceptance delta
+
+The rebuilt disposable service passed its strict HTTP four-shape matrix
+(401/401/200/403). The shared deployment is unchanged. Production mutation
+routes still fail before persistence because no signed resumable worker/callback
+contract exists; this is secure containment, not functional production readiness.
+Database-backed job coverage remains below the 80% gate.
+
+## 2026-07-15 isolated runtime delta
+
+The current-source image `f00398f1e980` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`. Its disposable HTTP four-shape
+matrix returned 401/401/200/403, proving that header-only tenant impersonation
+is closed on this isolated build. Production mutations remain intentionally 503
+until the signed resumable worker exists; the shared deployment is unchanged.
+
 ## Secure-MVP current state — 2026-07-11
 
 - **Implemented:** sensitive HTTP routes now require cryptographically verified
@@ -24,20 +40,18 @@ Scope: `apps/Data Plane v2/services/data-orchestrator-go`
   Current `go test -race ./...`, `go vet ./...`, `go build ./...`, and
   `govulncheck ./...` pass. The changed `internal/authctx` package measures 91.1%
   statement coverage. The source-only `internal/jobs` profile is 31.9%; the
-  Docker failure prevents a current PostgreSQL profile, so the >=80% package
+  current expanded PostgreSQL profile has not been rerun, so the >=80% package
   gate remains unproven.
-- **Built/deployed/reachable/effective:** an earlier auth-hardened image was
-  built locally with revision/build labels, but the current durability source
-  and migration have not been proven deployed, reachable, or effective in a
-  rebuilt runtime. No current endpoint matrix has run. The earlier live
-  header-only finding below is fixed in source, not proven fixed in deployment.
+- **Built/reachable/effective in isolation:** the current durability image built
+  with revision/build labels and passed the disposable endpoint matrix. It has
+  not been deployed to the shared environment.
 - **Containment/remaining gates:** the unsigned `dataplane.cost.ledger` consumer
   remains disabled by default behind two explicit insecure-development gates.
   Cost-ledger ingestion is ineffective until signed, scoped events/NATS
   permissions exist. Production mutations return 503 before persistence until a
-  signed resumable worker/callback contract exists. Rebuild the service/migrator,
-  safely prove the migration in the isolated runtime, and prove restart recovery
-  before claiming resumable production operation.
+  signed resumable worker/callback contract exists. Prove expanded database
+  coverage, restart recovery, and controlled deployment before claiming
+  resumable production operation.
 
 The remainder is a superseded, sanitized pre-fix audit. Preserve its root-cause
 analysis, but do not treat its container or reachability statements as current.

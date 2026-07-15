@@ -9,7 +9,7 @@
     "audit": "pnpm audit",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "node --test apps/gateway/scripts/security-coverage-gate.test.mjs && vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",

@@ -1,0 +1,111 @@
+services:
+  model-plane-http-fixture:
+    image: node:20-alpine
+    restart: "no"
+    init: true
+    command: ["node", "/fixture/model-plane-http-fixture.mjs"]
+    environment:
+      PORT: "8088"
+      EMBEDDING_DIMENSION: "32"
+    volumes:
+      - ./tests/e2e/isolated/model-plane-http-fixture.mjs:/fixture/model-plane-http-fixture.mjs:ro
+    expose: ["8088"]
+    networks:
+      - dpv2-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8088/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  embedding-engine:
+    environment:
+      EMBEDDING_PROVIDER: azure_openai
+      EMBEDDING_DIMENSION: "32"
+      AZURE_OPENAI_ENDPOINT: http://model-plane-http-fixture:8088
+      AZURE_OPENAI_API_KEY: ${REAL_AUTHORITY_MODEL_FIXTURE_KEY:?required}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT: isolated-deterministic-embedding
+    depends_on:
+      model-plane-http-fixture:
+        condition: service_healthy
+
+  retrieval-engine:
+    environment:
+      EMBEDDING_PROVIDER: deterministic_test
+      EMBEDDING_DIMENSION: "32"
+      ALLOW_INSECURE_DEV_DEFAULTS: "1"
+      ISOLATED_E2E: "1"
+
+  graph-index:
+    environment:
+      APP_ENV: test
+      GRAPH_EXTRACTION_PROVIDER: azure_openai
+      AZURE_OPENAI_ENDPOINT: http://model-plane-http-fixture:8088
+      AZURE_OPENAI_API_KEY: ${REAL_AUTHORITY_MODEL_FIXTURE_KEY:?required}
+      AZURE_OPENAI_EXTRACTION_DEPLOYMENT: isolated-deterministic-graph
+    depends_on:
+      model-plane-http-fixture:
+        condition: service_healthy
+
+  gateway:
+    build:
+      context: ../Frontend Plane/velionv3/apps/gateway
+      dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?required}
+        BUILD_DATE: ${BUILD_DATE:?required}
+    image: ${REAL_AUTHORITY_GATEWAY_IMAGE:?required}
+    restart: "no"
+    init: true
+    expose: ["3185"]
+    ports:
+      - "127.0.0.1::3185"
+    environment:
+      APP_ENV: test
+      PORT: "3185"
+      # Auth Core validates this key before minting the session-bound
+      # data-plane audience token. A gateway-only random key makes every
+      # interactive Knowledge request fail closed with a 503.
+      INTERNAL_API_KEY: ${REAL_AUTHORITY_INTERNAL_API_KEY:?required}
+      SESSION_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_SESSION_TOKEN:?required}
+      USER_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_TOKEN:?required}
+      BILLING_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_BILLING_TOKEN:?required}
+      ORG_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_ORG_TOKEN:?required}
+      AUDIT_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_AUDIT_TOKEN:?required}
+      NOTIFICATION_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_NOTIFICATION_TOKEN:?required}
+      CONVERSATION_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_GATEWAY_CONVERSATION_TOKEN:?required}
+      CONTROL_PLANE_ENFORCEMENT: strict
+      AUTH_CORE_URL: http://auth-core:3011
+      USER_CORE_URL: http://user-core:3012
+      DOCUMENTS_API_URL: http://documents-api:8010
+      RETRIEVAL_ENGINE_URL: http://retrieval-engine:8004
+      GRAPH_INDEX_URL: http://graph-index:9203
+      EMBEDDING_ENGINE_URL: http://embedding-engine:9202
+      QUICKWIT_ADAPTER_URL: http://quickwit-adapter:9204
+      WIKI_STORE_URL: http://wiki-store:8011
+      VELION_PUBLIC_ORIGIN: ${REAL_AUTHORITY_PUBLIC_ORIGIN:?required}
+      VELION_ALLOWED_ORIGINS: ${REAL_AUTHORITY_PUBLIC_ORIGIN:?required}
+      ALLOW_DEV_AUTH_BYPASS: "0"
+      ALLOW_DEV_ACTOR_HEADERS: "0"
+      GATEWAY_CACHE_REDIS_URL: redis://:${DATAPLANE_DRAGONFLY_PASSWORD:?required}@dragonfly:6379/4
+      RUST_LOG: warn,velion_gateway_rs=info
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      auth-core:
+        condition: service_started
+      user-core:
+        condition: service_started
+      documents-api:
+        condition: service_healthy
+      retrieval-engine:
+        condition: service_healthy
+      graph-index:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3185/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s

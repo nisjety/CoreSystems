@@ -3,6 +3,7 @@ package org
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -82,6 +83,31 @@ func validateDeletionReceipt(receipt []byte) error {
 		return fmt.Errorf("organization erasure failed: %s", result.Error)
 	}
 	return nil
+}
+
+func evaluateDeletionTombstone(
+	incomingRevision, storedRevision int64,
+	completed bool,
+	storedReceipt []byte,
+) (bool, []byte, error) {
+	switch {
+	case incomingRevision < storedRevision:
+		return false, nil, fmt.Errorf(
+			"%w: deletion revision %d is older than tombstone revision %d",
+			ErrProjectionConflict, incomingRevision, storedRevision,
+		)
+	case incomingRevision > storedRevision:
+		return false, nil, fmt.Errorf(
+			"%w: organization tombstone revision is %d",
+			ErrOrganizationDeleted, storedRevision,
+		)
+	case !completed:
+		return true, nil, nil
+	}
+	if err := validateDeletionReceipt(storedReceipt); err != nil {
+		return false, nil, fmt.Errorf("invalid completed deletion checkpoint: %w", err)
+	}
+	return false, append([]byte(nil), storedReceipt...), nil
 }
 
 func NewRepository(db *database.DB) *Repository {
@@ -181,6 +207,150 @@ DO UPDATE SET
 		}
 		return nil
 	})
+}
+
+// UpdatePlanWithOutbox serializes plan changes per organization and commits
+// the new plan, its positive monotonic revision, history, and publish intent in
+// one transaction. A caller crash after commit cannot lose the event.
+func (r *Repository) UpdatePlanWithOutbox(
+	ctx context.Context,
+	orgID, plan, changedBy, reason string,
+) (PlanChange, bool, error) {
+	change := PlanChange{OrgID: orgID, NewPlan: plan, ChangedBy: changedBy, Reason: reason}
+	applied := false
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `
+SELECT name, plan, plan_revision
+FROM organizations
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE`, orgID).Scan(&change.OrgName, &change.PreviousPlan, &change.Revision); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock organization plan: %w", err)
+		}
+		if change.PreviousPlan == plan {
+			return nil
+		}
+		if err := tx.QueryRow(ctx, `
+UPDATE organizations
+SET plan = $2,
+    plan_revision = plan_revision + 1,
+    updated_at = NOW()
+WHERE id = $1
+RETURNING plan_revision`, orgID, plan).Scan(&change.Revision); err != nil {
+			return fmt.Errorf("update organization plan revision: %w", err)
+		}
+		if change.Revision < 1 {
+			return fmt.Errorf("organization plan revision must be positive")
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO org_plan_history (
+  id, org_id, previous_plan, new_plan, changed_by, change_reason, metadata
+) VALUES ($1, $2, $3, $4, $5, $6, jsonb_build_object('revision', $7::bigint))`,
+			fmt.Sprintf("%s:plan:%d", orgID, change.Revision), orgID,
+			change.PreviousPlan, plan, changedBy, reason, change.Revision,
+		); err != nil {
+			return fmt.Errorf("record organization plan history: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO organization_plan_change_outbox (
+  org_id, revision, organization_name, previous_plan, new_plan, changed_by, change_reason
+) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			orgID, change.Revision, change.OrgName, change.PreviousPlan, plan, changedBy, reason,
+		); err != nil {
+			return fmt.Errorf("record organization plan change outbox: %w", err)
+		}
+		applied = true
+		return nil
+	})
+	return change, applied, err
+}
+
+func (r *Repository) ClaimPlanChangeOutbox(ctx context.Context, limit int) ([]PlanChangeOutboxRow, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("plan change outbox limit must be between 1 and 1000")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin plan change outbox claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+WITH claimed AS (
+  SELECT org_id, revision
+  FROM organization_plan_change_outbox
+  WHERE published_at IS NULL
+    AND (processing_at IS NULL OR processing_at < NOW() - INTERVAL '1 minute')
+  ORDER BY created_at, org_id, revision
+  LIMIT $1
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE organization_plan_change_outbox o
+SET processing_at = NOW(), updated_at = NOW()
+FROM claimed
+WHERE o.org_id = claimed.org_id AND o.revision = claimed.revision
+RETURNING o.org_id, o.organization_name, o.previous_plan, o.new_plan,
+          o.changed_by, o.change_reason, o.revision, o.attempts`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim plan change outbox: %w", err)
+	}
+	defer rows.Close()
+	claimed := make([]PlanChangeOutboxRow, 0)
+	for rows.Next() {
+		var row PlanChangeOutboxRow
+		if err := rows.Scan(
+			&row.OrgID, &row.OrgName, &row.PreviousPlan, &row.NewPlan,
+			&row.ChangedBy, &row.Reason, &row.Revision, &row.Attempts,
+		); err != nil {
+			return nil, fmt.Errorf("scan plan change outbox: %w", err)
+		}
+		claimed = append(claimed, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate plan change outbox: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit plan change outbox claim: %w", err)
+	}
+	return claimed, nil
+}
+
+func (r *Repository) MarkPlanChangePublished(ctx context.Context, orgID string, revision int64) error {
+	result, err := r.pool.Exec(ctx, `
+UPDATE organization_plan_change_outbox
+SET published_at = NOW(), processing_at = NULL, attempts = attempts + 1,
+    last_error = NULL, updated_at = NOW()
+WHERE org_id = $1 AND revision = $2 AND published_at IS NULL`, orgID, revision)
+	if err != nil {
+		return fmt.Errorf("mark plan change published: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("plan change outbox acknowledgement did not match pending revision")
+	}
+	return nil
+}
+
+func (r *Repository) MarkPlanChangePublishFailed(ctx context.Context, orgID string, revision int64, publishErr error) error {
+	message := "unknown publish failure"
+	if publishErr != nil {
+		message = publishErr.Error()
+	}
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	_, err := r.pool.Exec(ctx, `
+UPDATE organization_plan_change_outbox
+SET processing_at = NULL, attempts = attempts + 1,
+    last_error = $3, updated_at = NOW()
+WHERE org_id = $1 AND revision = $2 AND published_at IS NULL`, orgID, revision, message)
+	if err != nil {
+		return fmt.Errorf("record plan change publish failure: %w", err)
+	}
+	return nil
 }
 
 // ProvisionOrganizationWithOwner creates or repairs an organization projection
@@ -426,17 +596,45 @@ func (r *Repository) ReconcileOrganizationProjection(
 			return err
 		}
 		result, err := tx.Exec(ctx, `
-INSERT INTO auth_organization_projection_versions (org_id, revision)
-VALUES ($1, $2)
+INSERT INTO auth_organization_projection_versions (
+  org_id, revision, desired_name, desired_slug,
+  desired_owner_user_id, desired_metadata
+)
+VALUES ($1, $2, $3, $4, $5, $6::JSONB)
 ON CONFLICT (org_id) DO UPDATE SET
   revision = EXCLUDED.revision,
+  desired_name = EXCLUDED.desired_name,
+  desired_slug = EXCLUDED.desired_slug,
+  desired_owner_user_id = EXCLUDED.desired_owner_user_id,
+  desired_metadata = EXCLUDED.desired_metadata,
   applied_at = NOW()
 WHERE auth_organization_projection_versions.revision < EXCLUDED.revision`,
-			organization.ID, revision)
+			organization.ID, revision, organization.Name, organization.Slug,
+			ownerUserID, metadataBuf)
 		if err != nil {
 			return fmt.Errorf("record organization projection revision: %w", err)
 		}
 		if result.RowsAffected() == 0 {
+			var storedRevision int64
+			var identical bool
+			if err := tx.QueryRow(ctx, `
+SELECT revision,
+       desired_name IS NOT NULL AND
+       desired_owner_user_id IS NOT NULL AND
+       desired_metadata IS NOT NULL AND
+       desired_name = $2 AND
+       COALESCE(desired_slug, '') = $3 AND
+       desired_owner_user_id = $4 AND
+       desired_metadata = $5::JSONB
+FROM auth_organization_projection_versions
+WHERE org_id = $1
+FOR UPDATE`, organization.ID, organization.Name, organization.Slug,
+				ownerUserID, metadataBuf).Scan(&storedRevision, &identical); err != nil {
+				return fmt.Errorf("read organization projection revision: %w", err)
+			}
+			if storedRevision == revision && !identical {
+				return ErrProjectionConflict
+			}
 			return nil
 		}
 		if err := r.provisionOrganizationWithOwnerTx(
@@ -783,7 +981,9 @@ func (r *Repository) ReconcileOrganizationMember(
 	if revision < 1 {
 		return false, fmt.Errorf("revision must be positive")
 	}
-	if role == "" {
+	if action == "remove" {
+		role = ""
+	} else if role == "" {
 		role = "member"
 	}
 
@@ -804,18 +1004,36 @@ func (r *Repository) ReconcileOrganizationMember(
 		}
 
 		result, err := tx.Exec(ctx, `
-INSERT INTO auth_membership_projection_versions (org_id, user_id, revision, desired_action)
-VALUES ($1, $2, $3, $4)
+INSERT INTO auth_membership_projection_versions (
+  org_id, user_id, revision, desired_action, desired_role
+)
+VALUES ($1, $2, $3, $4, NULLIF($5, ''))
 ON CONFLICT (org_id, user_id) DO UPDATE SET
   revision = EXCLUDED.revision,
   desired_action = EXCLUDED.desired_action,
+  desired_role = EXCLUDED.desired_role,
   applied_at = NOW()
 WHERE auth_membership_projection_versions.revision < EXCLUDED.revision`,
-			orgID, userID, revision, action)
+			orgID, userID, revision, action, role)
 		if err != nil {
 			return fmt.Errorf("record membership projection revision: %w", err)
 		}
 		if result.RowsAffected() == 0 {
+			var storedRevision int64
+			var storedAction, storedRole string
+			if err := tx.QueryRow(ctx, `
+SELECT revision, desired_action, COALESCE(desired_role, '')
+FROM auth_membership_projection_versions
+WHERE org_id = $1 AND user_id = $2
+FOR UPDATE`, orgID, userID).Scan(
+				&storedRevision, &storedAction, &storedRole,
+			); err != nil {
+				return fmt.Errorf("read membership projection revision: %w", err)
+			}
+			if storedRevision == revision &&
+				(storedAction != action || storedRole != role) {
+				return ErrProjectionConflict
+			}
 			return nil
 		}
 
@@ -840,13 +1058,24 @@ WHERE org_id = $1 AND user_id = $2`, orgID, userID)
 	return applied, err
 }
 
-// ReconcileOrganizationDeletion writes a permanent Auth tombstone and erases
-// the local projection in one transaction. The tombstone prevents any delayed
-// create/member delivery from resurrecting authorization.
+// ReconcileOrganizationDeletion commits a permanent Auth tombstone before it
+// erases the local projection. The independent tombstone survives an erasure
+// failure and prevents delayed create/member delivery from restoring authority.
 func (r *Repository) ReconcileOrganizationDeletion(
 	ctx context.Context,
 	orgID string,
-) (json.RawMessage, error) {
+	revision int64,
+) (json.RawMessage, bool, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, false, fmt.Errorf("organization id is required")
+	}
+	if revision < 1 || revision > MaxSafeAuthRevision {
+		return nil, false, fmt.Errorf("revision must be a positive safe integer")
+	}
+
+	var completedReceipt []byte
+	resumeErasure := false
 	// Persist the anti-resurrection tombstone first and independently. If the
 	// downstream erasure reports a semantic failure, retries remain safe and no
 	// delayed create/member event can restore authorization in the meantime.
@@ -854,27 +1083,107 @@ func (r *Repository) ReconcileOrganizationDeletion(
 		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
 			return err
 		}
+
+		var storedRevision int64
+		var completedAt *time.Time
+		var storedReceipt []byte
+		err := tx.QueryRow(ctx, `
+SELECT revision, erasure_completed_at, deletion_receipt
+FROM auth_organization_tombstones
+WHERE org_id = $1
+FOR UPDATE`, orgID).Scan(&storedRevision, &completedAt, &storedReceipt)
+		if err == nil {
+			resume, checkpoint, err := evaluateDeletionTombstone(
+				revision, storedRevision, completedAt != nil, storedReceipt,
+			)
+			if err != nil {
+				return err
+			}
+			resumeErasure = resume
+			completedReceipt = checkpoint
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("read organization tombstone: %w", err)
+		}
+
+		var projectionRevision int64
+		err = tx.QueryRow(ctx, `
+SELECT revision
+FROM auth_organization_projection_versions
+WHERE org_id = $1
+FOR UPDATE`, orgID).Scan(&projectionRevision)
+		if err == nil && revision <= projectionRevision {
+			return fmt.Errorf("%w: deletion revision %d must be newer than projection revision %d", ErrProjectionConflict, revision, projectionRevision)
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("read organization projection revision: %w", err)
+		}
+
 		if _, err := tx.Exec(ctx, `
-INSERT INTO auth_organization_tombstones (org_id)
-VALUES ($1) ON CONFLICT (org_id) DO NOTHING`, orgID); err != nil {
+INSERT INTO auth_organization_tombstones (org_id, revision)
+VALUES ($1, $2)`, orgID, revision); err != nil {
 			return fmt.Errorf("record organization tombstone: %w", err)
 		}
+		resumeErasure = true
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if !resumeErasure {
+		return json.RawMessage(completedReceipt), false, nil
 	}
 
 	var receipt []byte
+	applied := false
 	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
 		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
 			return err
 		}
+
+		var storedRevision int64
+		var completedAt *time.Time
+		var storedReceipt []byte
+		if err := tx.QueryRow(ctx, `
+SELECT revision, erasure_completed_at, deletion_receipt
+FROM auth_organization_tombstones
+WHERE org_id = $1
+FOR UPDATE`, orgID).Scan(&storedRevision, &completedAt, &storedReceipt); err != nil {
+			return fmt.Errorf("lock organization tombstone: %w", err)
+		}
+		resume, checkpoint, err := evaluateDeletionTombstone(
+			revision, storedRevision, completedAt != nil, storedReceipt,
+		)
+		if err != nil {
+			return err
+		}
+		if !resume {
+			receipt = checkpoint
+			return nil
+		}
+
 		if err := tx.QueryRow(ctx, `SELECT gdpr_hard_delete_organization($1)`, orgID).Scan(&receipt); err != nil {
 			return fmt.Errorf("gdpr_hard_delete_organization: %w", err)
 		}
-		return validateDeletionReceipt(receipt)
+		if err := validateDeletionReceipt(receipt); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx, `
+UPDATE auth_organization_tombstones
+SET erasure_completed_at = NOW(), deletion_receipt = $3::JSONB
+WHERE org_id = $1 AND revision = $2
+  AND erasure_completed_at IS NULL AND deletion_receipt IS NULL`,
+			orgID, revision, receipt)
+		if err != nil {
+			return fmt.Errorf("checkpoint organization erasure: %w", err)
+		}
+		if result.RowsAffected() != 1 {
+			return fmt.Errorf("organization erasure checkpoint did not match revision")
+		}
+		applied = true
+		return nil
 	})
-	return json.RawMessage(receipt), err
+	return json.RawMessage(receipt), applied, err
 }
 
 // ============================================
@@ -887,25 +1196,27 @@ VALUES ($1) ON CONFLICT (org_id) DO NOTHING`, orgID); err != nil {
 // cascades a DELETE across all org-owned tables and returns a JSONB receipt.
 // The receipt is returned verbatim to the caller (it records exactly which
 // rows were removed — the GDPR erasure audit trail).
-func (r *Repository) GDPRHardDeleteOrganization(ctx context.Context, orgID string) (json.RawMessage, error) {
-	var receipt []byte
-	err := r.pool.QueryRow(ctx, `SELECT gdpr_hard_delete_organization($1)`, orgID).Scan(&receipt)
-	if err != nil {
-		return nil, fmt.Errorf("gdpr_hard_delete_organization: %w", err)
-	}
-	return json.RawMessage(receipt), nil
+func (r *Repository) GDPRHardDeleteOrganization(
+	ctx context.Context,
+	orgID string,
+	auditEvent GDPRAuditEvent,
+) (json.RawMessage, error) {
+	return r.executeGDPRAuditOperation(
+		ctx, orgID, `SELECT gdpr_hard_delete_organization($1)`, auditEvent,
+	)
 }
 
 // SoftDeleteOrganization invokes soft_delete_organization($1), which sets
 // deleted_at + status='deleted' so the row is purged later by the retention
 // sweep. Returns the proc's JSONB receipt verbatim.
-func (r *Repository) SoftDeleteOrganization(ctx context.Context, orgID string) (json.RawMessage, error) {
-	var receipt []byte
-	err := r.pool.QueryRow(ctx, `SELECT soft_delete_organization($1)`, orgID).Scan(&receipt)
-	if err != nil {
-		return nil, fmt.Errorf("soft_delete_organization: %w", err)
-	}
-	return json.RawMessage(receipt), nil
+func (r *Repository) SoftDeleteOrganization(
+	ctx context.Context,
+	orgID string,
+	auditEvent GDPRAuditEvent,
+) (json.RawMessage, error) {
+	return r.executeGDPRAuditOperation(
+		ctx, orgID, `SELECT soft_delete_organization($1)`, auditEvent,
+	)
 }
 
 // PurgeOldDeletedOrganizations invokes purge_old_deleted_organizations($1),

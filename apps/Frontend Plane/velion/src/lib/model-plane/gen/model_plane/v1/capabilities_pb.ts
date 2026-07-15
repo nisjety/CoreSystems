@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/capabilities.proto.
  */
 export const file_model_plane_v1_capabilities: GenFile = /*@__PURE__*/
-  fileDesc("CiFtb2RlbF9wbGFuZS92MS9jYXBhYmlsaXRpZXMucHJvdG8SDm1vZGVsX3BsYW5lLnYxIl4KF0xpc3RDYXBhYmlsaXRpZXNSZXF1ZXN0EhMKC2tpbmRfZmlsdGVyGAEgASgJEg0KBXF1ZXJ5GAIgASgJEhAKCGFmdGVyX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNImQKGExpc3RDYXBhYmlsaXRpZXNSZXNwb25zZRI2CgxjYXBhYmlsaXRpZXMYASADKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsEhAKCGhhc19tb3JlGAIgASgIIkkKFEdldENhcGFiaWxpdHlSZXF1ZXN0EhUKDWNhcGFiaWxpdHlfaWQYASABKAkSGgoSdmVyc2lvbl9jb25zdHJhaW50GAIgASgJIqEBChBDYXBhYmlsaXR5RGV0YWlsEhUKDWNhcGFiaWxpdHlfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRraW5kGAMgASgJEg8KB3ZlcnNpb24YBCABKAkSEwoLZGVzY3JpcHRpb24YBSABKAkSEgoKcmlza19sZXZlbBgGIAEoCRIRCglsYXp5X2xvYWQYByABKAgSDQoFc2NvcGUYCCABKAkibwoVRXZhbHVhdGVQb2xpY3lSZXF1ZXN0EhUKDWNhcGFiaWxpdHlfaWQYASABKAkSDgoGcnVuX2lkGAIgASgJEhAKCGFnZW50X2lkGAMgASgJEg4KBm9yZ19pZBgEIAEoCRINCgVzY29wZRgFIAEoCSJSChZFdmFsdWF0ZVBvbGljeVJlc3BvbnNlEhAKCGRlY2lzaW9uGAEgASgJEg4KBnJlYXNvbhgCIAEoCRIWCg5idWRnZXRfY29udGV4dBgDIAEoCSIuChpWYWxpZGF0ZVNraWxsQnVuZGxlUmVxdWVzdBIQCghza2lsbF9pZBgBIAEoCSJyChtWYWxpZGF0ZVNraWxsQnVuZGxlUmVzcG9uc2USDQoFdmFsaWQYASABKAgSDgoGZXJyb3JzGAIgAygJEjQKCmNhcGFiaWxpdHkYAyABKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsIlQKGkNoZWNrU2tpbGxQcm9tb3Rpb25SZXF1ZXN0EhAKCHNraWxsX2lkGAEgASgJEhIKCmZyb21fc2NvcGUYAiABKAkSEAoIdG9fc2NvcGUYAyABKAkiTQobQ2hlY2tTa2lsbFByb21vdGlvblJlc3BvbnNlEg4KBnBhc3NlZBgBIAEoCBIOCgZjaGVja3MYAiADKAkSDgoGcmVhc29uGAMgASgJIk0KE1Byb21vdGVTa2lsbFJlcXVlc3QSEAoIc2tpbGxfaWQYASABKAkSEgoKZnJvbV9zY29wZRgCIAEoCRIQCgh0b19zY29wZRgDIAEoCSJ+ChRQcm9tb3RlU2tpbGxSZXNwb25zZRIQCghwcm9tb3RlZBgBIAEoCBIOCgZjaGVja3MYAiADKAkSDgoGcmVhc29uGAMgASgJEjQKCmNhcGFiaWxpdHkYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsMuwECg5DYXBhYmlsaXR5Q29yZRJlChBMaXN0Q2FwYWJpbGl0aWVzEicubW9kZWxfcGxhbmUudjEuTGlzdENhcGFiaWxpdGllc1JlcXVlc3QaKC5tb2RlbF9wbGFuZS52MS5MaXN0Q2FwYWJpbGl0aWVzUmVzcG9uc2USVwoNR2V0Q2FwYWJpbGl0eRIkLm1vZGVsX3BsYW5lLnYxLkdldENhcGFiaWxpdHlSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuQ2FwYWJpbGl0eURldGFpbBJfCg5FdmFsdWF0ZVBvbGljeRIlLm1vZGVsX3BsYW5lLnYxLkV2YWx1YXRlUG9saWN5UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLkV2YWx1YXRlUG9saWN5UmVzcG9uc2USbgoTVmFsaWRhdGVTa2lsbEJ1bmRsZRIqLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlU2tpbGxCdW5kbGVSZXF1ZXN0GisubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVTa2lsbEJ1bmRsZVJlc3BvbnNlEm4KE0NoZWNrU2tpbGxQcm9tb3Rpb24SKi5tb2RlbF9wbGFuZS52MS5DaGVja1NraWxsUHJvbW90aW9uUmVxdWVzdBorLm1vZGVsX3BsYW5lLnYxLkNoZWNrU2tpbGxQcm9tb3Rpb25SZXNwb25zZRJZCgxQcm9tb3RlU2tpbGwSIy5tb2RlbF9wbGFuZS52MS5Qcm9tb3RlU2tpbGxSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuUHJvbW90ZVNraWxsUmVzcG9uc2VCuQEKEmNvbS5tb2RlbF9wbGFuZS52MUIRQ2FwYWJpbGl0aWVzUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z");
+  fileDesc("CiFtb2RlbF9wbGFuZS92MS9jYXBhYmlsaXRpZXMucHJvdG8SDm1vZGVsX3BsYW5lLnYxIl4KF0xpc3RDYXBhYmlsaXRpZXNSZXF1ZXN0EhMKC2tpbmRfZmlsdGVyGAEgASgJEg0KBXF1ZXJ5GAIgASgJEhAKCGFmdGVyX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNImQKGExpc3RDYXBhYmlsaXRpZXNSZXNwb25zZRI2CgxjYXBhYmlsaXRpZXMYASADKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsEhAKCGhhc19tb3JlGAIgASgIIkkKFEdldENhcGFiaWxpdHlSZXF1ZXN0EhUKDWNhcGFiaWxpdHlfaWQYASABKAkSGgoSdmVyc2lvbl9jb25zdHJhaW50GAIgASgJIrcCChBDYXBhYmlsaXR5RGV0YWlsEhUKDWNhcGFiaWxpdHlfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRraW5kGAMgASgJEg8KB3ZlcnNpb24YBCABKAkSEwoLZGVzY3JpcHRpb24YBSABKAkSEgoKcmlza19sZXZlbBgGIAEoCRIRCglsYXp5X2xvYWQYByABKAgSDQoFc2NvcGUYCCABKAkSDQoFc3RhdGUYCSABKAkSEwoLcmVhc29uX2NvZGUYCiABKAkSDgoGcmVhc29uGAsgASgJEhkKEXJlcXVpcmVzX2FwcHJvdmFsGAwgASgIEhYKDmV4ZWN1dGlvbl9tb2RlGA0gASgJEhIKCmNvc3RfY2xhc3MYDiABKAkSGQoRaGVhbHRoX2NoZWNrZWRfYXQYDyABKAkibwoVRXZhbHVhdGVQb2xpY3lSZXF1ZXN0EhUKDWNhcGFiaWxpdHlfaWQYASABKAkSDgoGcnVuX2lkGAIgASgJEhAKCGFnZW50X2lkGAMgASgJEg4KBm9yZ19pZBgEIAEoCRINCgVzY29wZRgFIAEoCSJSChZFdmFsdWF0ZVBvbGljeVJlc3BvbnNlEhAKCGRlY2lzaW9uGAEgASgJEg4KBnJlYXNvbhgCIAEoCRIWCg5idWRnZXRfY29udGV4dBgDIAEoCSIuChpWYWxpZGF0ZVNraWxsQnVuZGxlUmVxdWVzdBIQCghza2lsbF9pZBgBIAEoCSJyChtWYWxpZGF0ZVNraWxsQnVuZGxlUmVzcG9uc2USDQoFdmFsaWQYASABKAgSDgoGZXJyb3JzGAIgAygJEjQKCmNhcGFiaWxpdHkYAyABKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsIlQKGkNoZWNrU2tpbGxQcm9tb3Rpb25SZXF1ZXN0EhAKCHNraWxsX2lkGAEgASgJEhIKCmZyb21fc2NvcGUYAiABKAkSEAoIdG9fc2NvcGUYAyABKAkiTQobQ2hlY2tTa2lsbFByb21vdGlvblJlc3BvbnNlEg4KBnBhc3NlZBgBIAEoCBIOCgZjaGVja3MYAiADKAkSDgoGcmVhc29uGAMgASgJIk0KE1Byb21vdGVTa2lsbFJlcXVlc3QSEAoIc2tpbGxfaWQYASABKAkSEgoKZnJvbV9zY29wZRgCIAEoCRIQCgh0b19zY29wZRgDIAEoCSJ+ChRQcm9tb3RlU2tpbGxSZXNwb25zZRIQCghwcm9tb3RlZBgBIAEoCBIOCgZjaGVja3MYAiADKAkSDgoGcmVhc29uGAMgASgJEjQKCmNhcGFiaWxpdHkYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsMuwECg5DYXBhYmlsaXR5Q29yZRJlChBMaXN0Q2FwYWJpbGl0aWVzEicubW9kZWxfcGxhbmUudjEuTGlzdENhcGFiaWxpdGllc1JlcXVlc3QaKC5tb2RlbF9wbGFuZS52MS5MaXN0Q2FwYWJpbGl0aWVzUmVzcG9uc2USVwoNR2V0Q2FwYWJpbGl0eRIkLm1vZGVsX3BsYW5lLnYxLkdldENhcGFiaWxpdHlSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuQ2FwYWJpbGl0eURldGFpbBJfCg5FdmFsdWF0ZVBvbGljeRIlLm1vZGVsX3BsYW5lLnYxLkV2YWx1YXRlUG9saWN5UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLkV2YWx1YXRlUG9saWN5UmVzcG9uc2USbgoTVmFsaWRhdGVTa2lsbEJ1bmRsZRIqLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlU2tpbGxCdW5kbGVSZXF1ZXN0GisubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVTa2lsbEJ1bmRsZVJlc3BvbnNlEm4KE0NoZWNrU2tpbGxQcm9tb3Rpb24SKi5tb2RlbF9wbGFuZS52MS5DaGVja1NraWxsUHJvbW90aW9uUmVxdWVzdBorLm1vZGVsX3BsYW5lLnYxLkNoZWNrU2tpbGxQcm9tb3Rpb25SZXNwb25zZRJZCgxQcm9tb3RlU2tpbGwSIy5tb2RlbF9wbGFuZS52MS5Qcm9tb3RlU2tpbGxSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuUHJvbW90ZVNraWxsUmVzcG9uc2VCuQEKEmNvbS5tb2RlbF9wbGFuZS52MUIRQ2FwYWJpbGl0aWVzUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z");
 
 /**
  * @generated from message model_plane.v1.ListCapabilitiesRequest
@@ -163,6 +163,58 @@ export type CapabilityDetail = Message<"model_plane.v1.CapabilityDetail"> & {
    * @generated from field: string scope = 8;
    */
   scope: string;
+
+  /**
+   * Runtime state: "available", "disabled", "unhealthy",
+   * "approval_required", "unavailable", or "not_configured". Registry
+   * presence/enabled alone never implies available.
+   *
+   * @generated from field: string state = 9;
+   */
+  state: string;
+
+  /**
+   * Stable machine-readable explanation for state.
+   *
+   * @generated from field: string reason_code = 10;
+   */
+  reasonCode: string;
+
+  /**
+   * Optional user-safe state explanation. Never contains secret/config data.
+   *
+   * @generated from field: string reason = 11;
+   */
+  reason: string;
+
+  /**
+   * True when execution must pause for durable human approval.
+   *
+   * @generated from field: bool requires_approval = 12;
+   */
+  requiresApproval: boolean;
+
+  /**
+   * Governed execution path: "direct_read", "agentic", or "unavailable".
+   *
+   * @generated from field: string execution_mode = 13;
+   */
+  executionMode: string;
+
+  /**
+   * Coarse price disclosure: "bounded", "variable", or "unknown".
+   *
+   * @generated from field: string cost_class = 14;
+   */
+  costClass: string;
+
+  /**
+   * RFC3339 timestamp for the runtime health attestation; empty means no
+   * attestation and MUST derive to unavailable.
+   *
+   * @generated from field: string health_checked_at = 15;
+   */
+  healthCheckedAt: string;
 };
 
 /**
@@ -193,7 +245,8 @@ export type EvaluatePolicyRequest = Message<"model_plane.v1.EvaluatePolicyReques
   runId: string;
 
   /**
-   * Agent making the request.
+   * Caller-supplied agent label for audit/context. This field is not a trusted
+   * agent identity and cannot currently authorize agent-scoped evaluation.
    *
    * @generated from field: string agent_id = 3;
    */
@@ -207,9 +260,12 @@ export type EvaluatePolicyRequest = Message<"model_plane.v1.EvaluatePolicyReques
   orgId: string;
 
   /**
-   * Effective scope at invocation time. Must match one of the capability's
-   * EnabledForScopes entries. Canonical values: "run", "thread", "workspace",
-   * "user", "org", "global". Empty = backwards-compatible (scope check skipped).
+   * Effective scope at invocation time. Currently authorized values are
+   * "global" and "org"; org derives its concrete value from the verified
+   * tenant and requires a durable grant when the resolver is configured.
+   * "agent", "run", "thread", "workspace", and "user" are reserved but
+   * rejected until trusted identity/resource bindings are carried or resolved
+   * by this contract. Empty, reserved, and unknown values fail closed.
    *
    * @generated from field: string scope = 5;
    */

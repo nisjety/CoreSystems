@@ -5,7 +5,7 @@
  * External services (auth-core, user-core, org-core) publish events via NATS which trigger syncs.
  */
 
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
 import { assertServiceKey } from "./authz";
@@ -142,19 +142,17 @@ export const getWithOrg = query({
  * Called by NATS integration when org-core publishes organization.member.added
  * or auth-core publishes user registration
  */
-export const createOrUpdateFromExternal = mutation({
+export const createOrUpdateFromExternal = internalMutation({
   args: {
     externalAuthId: v.string(),
     email: v.string(),
     convexOrgId: v.id("organizations"),
-    serviceKey: v.string(),
     role: v.string(),
     name: v.optional(v.string()),
     externalCreatedAt: v.number(),
     sourceUpdatedAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    assertServiceKey(args.serviceKey);
     const { externalAuthId, email, convexOrgId, role, name, externalCreatedAt } = args;
     const sourceUpdatedAt = args.sourceUpdatedAt ?? externalCreatedAt;
     const organization = await ctx.db.get(convexOrgId);

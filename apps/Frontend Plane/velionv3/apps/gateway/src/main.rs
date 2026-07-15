@@ -2,6 +2,7 @@ use std::{env, net::SocketAddr};
 
 use anyhow::Result;
 use axum::{
+    body::Body,
     http::{header, HeaderValue},
     routing::get,
     Json, Router,
@@ -133,8 +134,44 @@ fn build_router(state: config::AppState) -> Router {
             HeaderValue::from_static("strict-origin-when-cross-origin"),
         ))
         .layer(build_cors_layer())
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(make_http_trace_span))
         .with_state(state)
+}
+
+fn request_target_for_log(uri: &axum::http::Uri) -> String {
+    const SENSITIVE_CALLBACK_PREFIXES: [&str; 3] = [
+        "/api/auth/callback/",
+        "/api/auth/sso/callback/",
+        "/api/auth/sso/saml2/callback/",
+    ];
+
+    if SENSITIVE_CALLBACK_PREFIXES
+        .iter()
+        .any(|prefix| uri.path().starts_with(prefix))
+        || uri.path() == "/reset-password"
+    {
+        return uri.path().to_owned();
+    }
+
+    if uri.path().starts_with("/accept-invitation/") {
+        return "/accept-invitation/:invitationId".to_owned();
+    }
+
+    if uri.path().starts_with("/api/v1/orgs/invitations/") {
+        return "/api/v1/orgs/invitations/:invitationId/accept".to_owned();
+    }
+
+    uri.path().to_owned()
+}
+
+fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
+    let request_target = request_target_for_log(request.uri());
+    tracing::info_span!(
+        "http_request",
+        method = %request.method(),
+        uri = %request_target,
+        version = ?request.version(),
+    )
 }
 
 async fn health() -> Json<Value> {
@@ -158,21 +195,98 @@ mod tests {
         upstream::proxy_json,
     };
 
-    fn test_state(allow_dev_actor_headers: bool) -> AppState {
+    #[test]
+    fn callback_trace_target_redacts_oauth_oidc_and_saml_secrets() {
+        use axum::http::Uri;
+
+        for raw_uri in [
+            "/api/auth/callback/google?code=oauth-secret&state=oauth-state",
+            "/api/auth/sso/callback/acme?code=oidc-secret&state=oidc-state",
+            "/api/auth/sso/saml2/callback/acme?SAMLResponse=saml-secret&RelayState=relay-secret",
+            "/reset-password?token=password-reset-secret",
+        ] {
+            let uri: Uri = raw_uri.parse().expect("valid test URI");
+            let logged = super::request_target_for_log(&uri);
+            assert_eq!(logged, uri.path());
+            assert!(!logged.contains("secret"));
+            assert!(!logged.contains("state="));
+        }
+
+        let invitation: Uri = "/accept-invitation/invitation-secret"
+            .parse()
+            .expect("valid invitation URI");
+        assert_eq!(
+            super::request_target_for_log(&invitation),
+            "/accept-invitation/:invitationId"
+        );
+
+        let invitation_api: Uri = "/api/v1/orgs/invitations/invitation-secret/accept"
+            .parse()
+            .expect("valid invitation API URI");
+        assert_eq!(
+            super::request_target_for_log(&invitation_api),
+            "/api/v1/orgs/invitations/:invitationId/accept"
+        );
+
+        let ordinary: Uri = "/api/v1/audit?limit=25".parse().expect("valid test URI");
+        assert_eq!(super::request_target_for_log(&ordinary), "/api/v1/audit");
+    }
+
+    #[test]
+    fn nginx_access_log_uses_a_query_redacting_callback_target() {
+        let nginx = include_str!("../../../nginx.conf");
+        assert!(nginx.contains("map $uri $velion_log_uri"));
+        assert!(nginx.contains("~^/api/auth/(callback|sso/callback|sso/saml2/callback)/ $uri;"));
+        assert!(nginx.contains("/reset-password $uri;"));
+        assert!(nginx.contains("~^/accept-invitation/ /accept-invitation/:invitationId;"));
+        assert!(nginx.contains(
+            "~^/api/v1/orgs/invitations/ /api/v1/orgs/invitations/:invitationId/accept;"
+        ));
+        assert!(nginx.contains("default $uri;"));
+        assert!(!nginx.contains("default $request_uri;"));
+        assert!(nginx.contains("log_format velion_safe"));
+        assert!(nginx.contains("access_log /var/log/nginx/access.log velion_safe;"));
+
+        let safe_format = nginx
+            .split("log_format velion_safe")
+            .nth(1)
+            .and_then(|suffix| suffix.split(';').next())
+            .expect("velion_safe log format");
+        assert!(safe_format.contains("$velion_log_uri"));
+        assert!(!safe_format.contains("$request "));
+        assert!(!safe_format.contains("$request_uri"));
+    }
+
+    #[test]
+    fn compose_defaults_and_production_override_fail_closed() {
+        let base = include_str!("../../../docker-compose.yml");
+        let production = include_str!("../../../docker-compose.production.yml");
+
+        assert!(base.contains("CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-strict}"));
+        assert!(production.contains("CONTROL_PLANE_ENFORCEMENT: strict"));
+        assert!(production.contains("ALLOW_DEV_AUTH_BYPASS: \"0\""));
+        assert!(production.contains("ALLOW_INSECURE_DEV_DEFAULTS: \"0\""));
+    }
+
+    pub(crate) fn test_state(allow_dev_actor_headers: bool) -> AppState {
         AppState {
             client: reqwest::Client::new(),
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
+            velion_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
             user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
+            billing_core_service_token: "billing-test-secret-at-least-32-bytes".into(),
             cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
+            org_core_service_token: "org-test-secret-at-least-32-bytes".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),
+            audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
             shipping_core_url: "http://127.0.0.1:1".into(),
@@ -366,6 +480,11 @@ mod tests {
             body.pointer("/error/code").and_then(Value::as_str),
             Some("upstream_unavailable")
         );
+        assert_eq!(
+            body.pointer("/error/message").and_then(Value::as_str),
+            Some("The upstream service is unavailable.")
+        );
+        assert!(!body.to_string().contains("127.0.0.1"));
     }
 
     #[test]
@@ -380,6 +499,181 @@ mod tests {
         // same method+path. Building the real router here guards against that
         // boot-time panic (e.g. a duplicated `/api/v1/me` across domains).
         let _ = crate::build_router(test_state(false));
+    }
+
+    #[tokio::test]
+    async fn membership_retry_requests_return_successful_noops() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {
+                    "id": "owner-user",
+                    "email": "owner@example.com",
+                    "emailVerified": true
+                },
+                "session": { "activeOrganizationId": "org-active" }
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/auth/organization/update-member-role"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "member-record-current-role",
+                "userId": "same-role-user",
+                "organizationId": "org-active",
+                "role": "admin"
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/auth/organization/invite-member"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "code": "USER_IS_ALREADY_INVITED_TO_THIS_ORGANIZATION",
+                "message": "User is already invited to this organization"
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/organization/list-members"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "members": [{
+                    "id": "member-record-current-role",
+                    "userId": "same-role-user",
+                    "role": "admin"
+                }]
+            })))
+            .mount(&auth)
+            .await;
+
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "owner-user",
+                "orgId": "org-active",
+                "role": "owner",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let app = crate::build_router(state);
+
+        let invite = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/orgs/org-active/members/invite")
+                    .header("cookie", "better-auth.session_token=owner")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": " Invitee@Example.com ",
+                            "role": "member"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invite.status(), StatusCode::OK);
+        let invite_body: Value =
+            serde_json::from_slice(&invite.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            invite_body,
+            json!({
+                "data": {
+                    "email": "invitee@example.com",
+                    "role": "member",
+                    "invitation_created": false
+                }
+            })
+        );
+
+        let remove = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/orgs/org-active/members/already-removed")
+                    .header("cookie", "better-auth.session_token=owner")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(remove.status(), StatusCode::OK);
+        let remove_body: Value =
+            serde_json::from_slice(&remove.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            remove_body,
+            json!({
+                "data": {
+                    "user_id": "already-removed",
+                    "removed": false
+                }
+            })
+        );
+        let remove_mutations = auth
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/auth/organization/remove-member")
+            .count();
+        assert_eq!(remove_mutations, 0, "a no-op must not reach Auth mutation");
+
+        let same_role = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/orgs/org-active/members/same-role-user/role")
+                    .header("cookie", "better-auth.session_token=owner")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "role": "admin" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(same_role.status(), StatusCode::OK);
+        let same_role_body: Value =
+            serde_json::from_slice(&same_role.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            same_role_body,
+            json!({
+                "id": "member-record-current-role",
+                "userId": "same-role-user",
+                "organizationId": "org-active",
+                "role": "admin"
+            })
+        );
+        let role_mutations = auth
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/auth/organization/update-member-role")
+            .count();
+        assert_eq!(
+            role_mutations, 1,
+            "Auth must serialize even an apparent same-role request"
+        );
     }
 
     /// A validated session's `activeOrganizationId` is only a requested scope,
@@ -1463,5 +1757,582 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(billing.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_preserves_redirect_and_cookies_without_forwarding_authority_headers() {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/callback/google"))
+            .and(query_param("code", "oauth-code"))
+            .and(query_param("state", "opaque-state"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://localhost:5173/onboarding")
+                    .append_header(
+                        "set-cookie",
+                        "idknuten.session_token=session; Path=/; HttpOnly; SameSite=Lax",
+                    )
+                    .append_header(
+                        "set-cookie",
+                        "idknuten.session_data=context; Path=/; HttpOnly; SameSite=Lax",
+                    ),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        let app = crate::build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/callback/google?code=oauth-code&state=opaque-state")
+                    .header("cookie", "idknuten.state=state-cookie")
+                    .header("x-user-id", "forged-user")
+                    .header("x-org-id", "forged-org")
+                    .header("x-user-role", "admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173/onboarding")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .count(),
+            2
+        );
+
+        let received = auth.received_requests().await.unwrap();
+        let callback = received.first().expect("callback request");
+        assert_eq!(
+            callback
+                .headers
+                .get("cookie")
+                .and_then(|value| value.to_str().ok()),
+            Some("idknuten.state=state-cookie")
+        );
+        for forbidden in ["x-user-id", "x-org-id", "x-user-role", "x-internal-api-key"] {
+            assert!(
+                callback.headers.get(forbidden).is_none(),
+                "callback must not forward {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sso_callbacks_preserve_oidc_query_and_saml_form_body() {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+        use wiremock::matchers::{
+            body_string, header as wm_header, method as wm_method, path as wm_path, query_param,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/sso/callback/acme"))
+            .and(query_param("code", "oidc-code"))
+            .and(query_param("state", "oidc-state"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://localhost:5173/dashboard")
+                    .append_header(
+                        "set-cookie",
+                        "idknuten.session_token=oidc; Path=/; HttpOnly",
+                    ),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/auth/sso/saml2/callback/acme"))
+            .and(wm_header(
+                "content-type",
+                "application/x-www-form-urlencoded",
+            ))
+            .and(body_string("SAMLResponse=signed-response&RelayState=relay"))
+            .respond_with(
+                ResponseTemplate::new(303)
+                    .insert_header("location", "http://localhost:5173/dashboard")
+                    .append_header(
+                        "set-cookie",
+                        "idknuten.session_token=saml; Path=/; HttpOnly",
+                    ),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        let app = crate::build_router(state);
+
+        let oidc = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/sso/callback/acme?code=oidc-code&state=oidc-state")
+                    .header("cookie", "idknuten.state=oidc-state-cookie")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oidc.status(), StatusCode::FOUND);
+        assert_eq!(
+            oidc.headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("http://localhost:5173/dashboard")
+        );
+
+        let saml = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/sso/saml2/callback/acme")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", "idknuten.state=saml-state-cookie")
+                    .body(Body::from("SAMLResponse=signed-response&RelayState=relay"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saml.status(), StatusCode::SEE_OTHER);
+        assert_eq!(saml.headers().get_all(header::SET_COOKIE).iter().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_callbacks_reject_invalid_provider_ids_and_oversized_saml_bodies() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        use wiremock::MockServer;
+
+        let auth = MockServer::start().await;
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        let app = crate::build_router(state);
+
+        let invalid_provider = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/callback/%25invalid?code=oauth-code&state=opaque-state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_provider.status(), StatusCode::BAD_REQUEST);
+
+        let oversized_saml = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/sso/saml2/callback/acme")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(vec![b'a'; 64 * 1024 + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized_saml.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(auth.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn organization_list_is_session_scoped_and_proxies_canonical_auth_authority() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "user-1", "email": "user@example.com", "emailVerified": true },
+                "session": { "activeOrganizationId": null }
+            })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/organization/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "org-1", "name": "Acme", "slug": "acme", "metadata": { "plan": "trial" } }
+            ])))
+            .expect(1)
+            .mount(&auth)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        let app = crate::build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/orgs")
+                    .header("cookie", "idknuten.sid=session")
+                    .header("x-user-role", "admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body[0]["id"], "org-1");
+
+        let requests = auth.received_requests().await.unwrap();
+        let list = requests
+            .iter()
+            .find(|request| request.url.path() == "/api/auth/organization/list")
+            .expect("organization list request");
+        assert!(list.headers.get("x-user-role").is_none());
+        assert!(list.headers.get("x-internal-api-key").is_none());
+    }
+
+    #[tokio::test]
+    async fn organization_self_read_sends_org_bound_control_delegation() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "user-1", "email": "user@example.com", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-1" }
+            })))
+            .mount(&auth)
+            .await;
+
+        let org = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1", "name": "Acme"
+            })))
+            .mount(&org)
+            .await;
+
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1",
+                "orgId": "org-1",
+                "role": "owner",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        state.org_core_url = org.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/orgs/org-1")
+                    .header("cookie", "idknuten.sid=session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let requests = org.received_requests().await.unwrap();
+        let request = requests.first().expect("Org Core request");
+        assert_eq!(
+            request.headers.get("x-service-id").unwrap(),
+            "velion-gateway"
+        );
+        assert_eq!(request.headers.get("x-org-id").unwrap(), "org-1");
+        assert_eq!(request.headers.get("x-delegation-version").unwrap(), "v3");
+        assert!(request.headers.get("x-delegation-signature").is_some());
+        assert!(request.headers.get("x-internal-api-key").is_none());
+    }
+
+    #[tokio::test]
+    async fn knowledge_routes_forward_session_minted_data_plane_bearer() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "user-1", "email": "user@example.com", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-1" }
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/data-plane/token"))
+            .and(wm_header("cookie", "idknuten.sid=session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "signed-data-plane-token",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth)
+            .await;
+
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1",
+                "orgId": "org-1",
+                "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+
+        let documents = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/documents"))
+            .and(wm_header("authorization", "Bearer signed-data-plane-token"))
+            .and(wm_header("x-org-id", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "documents": [] })))
+            .expect(2)
+            .mount(&documents)
+            .await;
+
+        let retrieval = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/retrieve/chunks"))
+            .and(wm_header("authorization", "Bearer signed-data-plane-token"))
+            .and(wm_header("x-org-id", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "chunks": [] })))
+            .expect(1)
+            .mount(&retrieval)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/knowledge/search"))
+            .and(wm_header("authorization", "Bearer signed-data-plane-token"))
+            .and(wm_header("x-org-id", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{
+                    "knowledge_id": "chunk-1",
+                    "document_id": "doc-1",
+                    "text": "Budget evidence"
+                }],
+                "sources": [{
+                    "document_id": "doc-1",
+                    "title": "Budget plan",
+                    "source": "sharepoint"
+                }]
+            })))
+            .expect(1)
+            .mount(&retrieval)
+            .await;
+
+        let wiki = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/wiki/pages"))
+            .and(wm_header("authorization", "Bearer signed-data-plane-token"))
+            .and(wm_header("x-org-id", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "pages": [] })))
+            .expect(1)
+            .mount(&wiki)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.documents_api_url = documents.uri();
+        state.retrieval_engine_url = retrieval.uri();
+        state.wiki_store_url = wiki.uri();
+        let app = crate::build_router(state);
+
+        for (method, uri, body) in [
+            ("GET", "/api/v1/knowledge/documents", None),
+            ("GET", "/api/v1/knowledge/source-list", None),
+            (
+                "POST",
+                "/api/v1/knowledge/retrieve/chunks",
+                Some(json!({ "document_id": "doc-1" })),
+            ),
+            ("GET", "/api/v1/knowledge/wiki/pages", None),
+        ] {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", "idknuten.sid=session");
+            let request_body = match body {
+                Some(value) => {
+                    builder = builder.header("content-type", "application/json");
+                    Body::from(serde_json::to_vec(&value).unwrap())
+                }
+                None => Body::empty(),
+            };
+            let response = app
+                .clone()
+                .oneshot(builder.body(request_body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+        }
+
+        let navbar_search = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/navbar/search?q=budget")
+                    .header("cookie", "idknuten.sid=session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(navbar_search.status(), StatusCode::OK);
+        let navbar_body: Value = serde_json::from_slice(
+            &http_body_util::BodyExt::collect(navbar_search.into_body())
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(navbar_body["data"]["results"][0]["id"], "chunk-1");
+        assert_eq!(navbar_body["data"]["results"][0]["label"], "Budget plan");
+        assert_eq!(
+            navbar_body["data"]["results"][0]["excerpt"],
+            "Budget evidence"
+        );
+
+        let retrieval_requests = retrieval.received_requests().await.unwrap();
+        let search_request = retrieval_requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/knowledge/search")
+            .expect("navbar retrieval request");
+        let search_body: Value = serde_json::from_slice(&search_request.body).unwrap();
+        assert_eq!(search_body["org_id"], "org-1");
+        assert_eq!(search_body["top_k"], 6);
+        assert!(search_body["filters"].is_object());
+
+        for upstream in [&documents, &retrieval, &wiki] {
+            for request in upstream.received_requests().await.unwrap() {
+                assert!(
+                    request.headers.get("x-internal-api-key").is_none(),
+                    "interactive Data Plane calls must not fall back to a shared internal key"
+                );
+            }
+        }
+
+        let token_requests = auth
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/api/data-plane/token")
+            .count();
+        assert_eq!(token_requests, 5);
+    }
+
+    #[tokio::test]
+    async fn knowledge_routes_fail_closed_when_data_plane_token_cannot_be_minted() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "user-1", "email": "user@example.com", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-1" }
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/data-plane/token"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&auth)
+            .await;
+
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1",
+                "orgId": "org-1",
+                "role": "member",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+
+        let documents = MockServer::start().await;
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.documents_api_url = documents.uri();
+
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/knowledge/documents")
+                    .header("cookie", "idknuten.sid=session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "delegated_auth_unavailable");
+        assert!(documents.received_requests().await.unwrap().is_empty());
     }
 }

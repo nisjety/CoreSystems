@@ -13,6 +13,7 @@ use crate::{config::AppState, middleware::require_session};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/api/v1/orgs", get(switch::list_orgs))
         // Static "switch-active" must be registered before the ":id" param routes
         .route(
             "/api/v1/orgs/switch-active",
@@ -43,11 +44,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             patch(members::update_member_role),
         )
         // Roles
+        // Custom role writes are intentionally not exposed: Auth Core owns
+        // canonical memberships and the MVP supports its built-in roles only.
         .route("/api/v1/orgs/:id/roles", get(roles::list_roles))
-        .route("/api/v1/orgs/:id/roles", post(roles::create_role))
-        .route(
-            "/api/v1/orgs/:id/roles/:role_name",
-            patch(roles::update_role),
-        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

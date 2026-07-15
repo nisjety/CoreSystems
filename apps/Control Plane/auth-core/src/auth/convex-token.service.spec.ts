@@ -1,4 +1,8 @@
 import { ConvexTokenService } from './convex-token.service';
+import { generateKeyPairSync } from 'crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 const keyEnvNames = [
   'CONVEX_AUTH_PRIVATE_KEY_FILE',
@@ -21,6 +25,86 @@ describe('ConvexTokenService production key and principal posture', () => {
     expect(() => new ConvexTokenService()).toThrow(
       /stable RS256 signing keypair/i,
     );
+  });
+
+  it('refuses production startup when the configured public key does not match the private key', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'auth-keypair-test-'));
+    const first = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const second = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const privatePath = join(directory, 'private.pem');
+    const publicPath = join(directory, 'public.pem');
+
+    try {
+      writeFileSync(
+        privatePath,
+        first.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      );
+      writeFileSync(
+        publicPath,
+        second.publicKey.export({ type: 'spki', format: 'pem' }),
+      );
+      process.env.NODE_ENV = 'production';
+      process.env.CONVEX_AUTH_PRIVATE_KEY_FILE = privatePath;
+      process.env.CONVEX_AUTH_PUBLIC_KEY_FILE = publicPath;
+      delete process.env.CONVEX_AUTH_PRIVATE_KEY_PEM;
+      delete process.env.CONVEX_AUTH_PUBLIC_KEY_PEM;
+
+      expect(() => new ConvexTokenService()).toThrow(/keypair does not match/i);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: 'an EC keypair',
+      generate: () => generateKeyPairSync('ec', { namedCurve: 'P-256' }),
+    },
+    {
+      name: 'a weak RSA keypair',
+      generate: () => generateKeyPairSync('rsa', { modulusLength: 1024 }),
+    },
+  ])('refuses production startup with $name', ({ generate }) => {
+    const directory = mkdtempSync(join(tmpdir(), 'auth-key-strength-test-'));
+    const keyPair = generate();
+    const privatePath = join(directory, 'private.pem');
+    const publicPath = join(directory, 'public.pem');
+
+    try {
+      writeFileSync(
+        privatePath,
+        keyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      );
+      writeFileSync(
+        publicPath,
+        keyPair.publicKey.export({ type: 'spki', format: 'pem' }),
+      );
+      process.env.NODE_ENV = 'production';
+      process.env.CONVEX_AUTH_PRIVATE_KEY_FILE = privatePath;
+      process.env.CONVEX_AUTH_PUBLIC_KEY_FILE = publicPath;
+      delete process.env.CONVEX_AUTH_PRIVATE_KEY_PEM;
+      delete process.env.CONVEX_AUTH_PUBLIC_KEY_PEM;
+
+      expect(() => new ConvexTokenService()).toThrow(/RSA.*2048/i);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a configured production key file is unreadable', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.CONVEX_AUTH_PRIVATE_KEY_FILE = join(
+      tmpdir(),
+      'missing-auth-private-key.pem',
+    );
+    process.env.CONVEX_AUTH_PUBLIC_KEY_FILE = join(
+      tmpdir(),
+      'missing-auth-public-key.pem',
+    );
+    delete process.env.CONVEX_AUTH_PRIVATE_KEY_PEM;
+    delete process.env.CONVEX_AUTH_PUBLIC_KEY_PEM;
+
+    expect(() => new ConvexTokenService()).toThrow(/key file is not readable/i);
   });
 
   it('stamps an unambiguous bounded service principal into plane tokens', () => {
@@ -47,6 +131,29 @@ describe('ConvexTokenService production key and principal posture', () => {
       scopes: ['graph:read'],
     });
     expect(payload).not.toHaveProperty('user_id');
+  });
+
+  it('accepts non-ZDR posture only through the service-policy authority marker', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const bundle = service.issuePlaneToken('data-plane', {
+      userId: 'service:ingestion-writer',
+      orgId: 'org-a',
+      scopes: ['documents:write'],
+      principalType: 'service',
+      serviceId: 'ingestion-writer',
+      reason: 'persist approved ingestion',
+      retentionPosture: {
+        zdr: false,
+        authority: 'service-principal-policy',
+      },
+    });
+    const payload = JSON.parse(
+      Buffer.from(bundle.token.split('.')[1], 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+
+    expect(payload.zdr).toBe(false);
   });
 
   it('reserves the control-policy audience for service-principal issuance', () => {

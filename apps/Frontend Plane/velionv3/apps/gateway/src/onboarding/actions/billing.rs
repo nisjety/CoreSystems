@@ -11,6 +11,7 @@ use crate::{
     auth::actor_from_request,
     config::AppState,
     contracts::{ConfirmCheckoutRequest, SetPlanRequest, StartCheckoutRequest},
+    domains::billing::canonical_checkout_body,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
     onboarding::session::canonical_membership_role,
@@ -65,11 +66,20 @@ pub(crate) async fn start_checkout(
     {
         return response;
     }
-    let body = json!({
-        "plan": input.plan,
-        "success_url": input.success_url,
-        "cancel_url": input.cancel_url,
-    });
+    let body = match canonical_checkout_body(
+        &json!({ "plan": input.plan }),
+        &state.velion_public_origin,
+        "/onboarding",
+    ) {
+        Ok(body) => body,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("invalid_checkout_request", message)),
+            )
+                .into_response()
+        }
+    };
 
     proxy_json(
         &state,

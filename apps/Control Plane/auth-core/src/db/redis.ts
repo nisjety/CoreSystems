@@ -1,6 +1,8 @@
 import { createClient, RedisClientType } from 'redis';
 import * as dotenv from 'dotenv';
 
+import { atomicIncrementWithExpiry } from './atomic-rate-limit';
+
 dotenv.config();
 
 // Dragonfly speaks the Redis protocol, so the Node redis client is still used.
@@ -75,7 +77,7 @@ export const redisSecondaryStorage = {
       return value ? value : null;
     } catch (error) {
       console.error('❌ Cache GET error:', error);
-      return null;
+      throw error;
     }
   },
 
@@ -98,6 +100,13 @@ export const redisSecondaryStorage = {
       console.error('❌ Cache SET error:', error);
       throw error;
     }
+  },
+
+  // Better Auth uses this primitive for atomic request-phase rate limiting.
+  // The legacy get/set fallback is a check-then-write race under concurrency.
+  increment: async (key: string, ttl: number): Promise<number> => {
+    await connectRedis();
+    return atomicIncrementWithExpiry(redis, key, ttl);
   },
 
   delete: async (key: string): Promise<void> => {

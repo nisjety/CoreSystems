@@ -1,4 +1,5 @@
-import { betterAuth } from 'better-auth';
+import { betterAuth, type BetterAuthOptions } from 'better-auth';
+import { APIError, createAuthMiddleware } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import {
   emailOTP,
@@ -36,11 +37,25 @@ import { auditPlugin } from './audit-plugin';
 import { userServiceIntegrationPlugin } from './user-service-integration.plugin';
 import { organizationEventsPlugin } from './organization-events.plugin';
 import { normalizeIdentityEmail } from './account-linking.policy';
+import {
+  buildInvitationLink,
+  canonicalPublicOrigin,
+  escapeInvitationHtml,
+} from './invitation-email';
+import { verifyInvitationAcceptanceInternalMarker } from './invitation-acceptance-rate-limit';
 
 // Ensure environment variables are loaded
 dotenv.config();
 
 const isProductionLike = process.env.NODE_ENV === 'production';
+const betterAuthPublicOrigin = canonicalPublicOrigin(
+  process.env.BETTER_AUTH_URL || 'http://localhost:3011',
+  isProductionLike,
+);
+const frontendPublicOrigin = canonicalPublicOrigin(
+  process.env.FRONTEND_URL || 'http://localhost:3000',
+  isProductionLike,
+);
 
 function envFlag(name: string, defaultValue = false): boolean {
   const value = process.env[name];
@@ -95,22 +110,19 @@ function uniqueOrigins(values: Array<string | undefined>) {
     new Set(
       values
         .flatMap((value) => splitEnvList(value))
-        .filter(
-          (origin) =>
-            origin.startsWith('http://') || origin.startsWith('https://'),
-        ),
+        .map((origin) => canonicalPublicOrigin(origin, isProductionLike)),
     ),
   );
 }
 
 const trustedOrigins = uniqueOrigins([
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-  'http://localhost:3107',
-  'http://127.0.0.1:3107',
+  !isProductionLike ? 'http://localhost:3000' : undefined,
+  !isProductionLike ? 'http://127.0.0.1:3000' : undefined,
+  !isProductionLike ? 'http://localhost:3107' : undefined,
+  !isProductionLike ? 'http://127.0.0.1:3107' : undefined,
   process.env.APPLE_CLIENT_ID ? 'https://appleid.apple.com' : undefined,
-  process.env.BETTER_AUTH_URL || 'http://localhost:3011',
-  process.env.FRONTEND_URL || 'http://localhost:3000',
+  betterAuthPublicOrigin,
+  frontendPublicOrigin,
   process.env.NEXT_PUBLIC_APP_URL,
   process.env.BETTER_AUTH_TRUSTED_ORIGINS,
   process.env.AUTH_ALLOWED_ORIGINS,
@@ -206,21 +218,6 @@ interface OktaUserInfo {
   family_name?: string;
   picture?: string;
   email_verified?: boolean;
-}
-
-// Define interface for OIDC user with metadata
-interface OIDCUser {
-  metadata?: {
-    department?: string;
-    jobTitle?: string;
-  };
-}
-
-// Define interface for OIDC client with metadata
-interface OIDCClient {
-  metadata?: {
-    organization?: string;
-  };
 }
 
 // Define interface for admin user
@@ -382,16 +379,46 @@ async function appleSocialProviderConfig() {
   };
 }
 
-export const auth: any = betterAuth({
+const authOptions: BetterAuthOptions = {
   database: drizzleAdapter(db, {
     provider: 'pg',
+    // Organization invitation acceptance performs a status transition, member
+    // insert, and active-org update. These must commit or roll back together.
+    transaction: true,
     schema,
   }),
   secondaryStorage: redisSecondaryStorage,
   appName: 'ID-Knuten',
   secret: process.env.BETTER_AUTH_SECRET,
-  baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:3011',
+  baseURL: betterAuthPublicOrigin,
   trustedOrigins,
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      await Promise.resolve();
+      if (ctx.path !== '/organization/accept-invitation') return;
+      const requestBody: unknown = ctx.body as unknown;
+      const invitationId =
+        typeof requestBody === 'object' &&
+        requestBody !== null &&
+        'invitationId' in requestBody &&
+        typeof requestBody.invitationId === 'string'
+          ? requestBody.invitationId
+          : '';
+      const marker = ctx.request?.headers.get('x-velion-invitation-acceptance');
+      if (
+        !verifyInvitationAcceptanceInternalMarker(
+          marker,
+          invitationId,
+          process.env.BETTER_AUTH_SECRET ?? '',
+        )
+      ) {
+        throw new APIError('BAD_REQUEST', {
+          code: 'INVITATION_NOT_FOUND',
+          message: 'Invitation is invalid, expired, or unavailable.',
+        });
+      }
+    }),
+  },
 
   // Rate limiting configuration with IP detection
   rateLimit: {
@@ -411,6 +438,13 @@ export const auth: any = betterAuth({
       '/get-session': {
         window: 60,
         max: parsePositiveInt(process.env.RATE_LIMIT_SESSION_MAX, 1000),
+      },
+      '/organization/accept-invitation': {
+        window: parsePositiveInt(
+          process.env.RATE_LIMIT_INVITATION_ACCEPT_WINDOW,
+          60,
+        ),
+        max: parsePositiveInt(process.env.RATE_LIMIT_INVITATION_ACCEPT_MAX, 10),
       },
       '/sign-in/email': {
         window: 10,
@@ -545,8 +579,9 @@ export const auth: any = betterAuth({
         throw error;
       }
     },
-    onPasswordReset: async ({ user }: { user: { email: string } }) => {
+    onPasswordReset: ({ user }: { user: { email: string } }) => {
       console.log(`Password reset for ${user.email}`);
+      return Promise.resolve();
     },
   },
 
@@ -556,8 +591,6 @@ export const auth: any = betterAuth({
     // account is permanently stuck at EMAIL_NOT_VERIFIED.
     sendOnSignUp: true,
     autoSignInAfterVerification: false, // Auto sign in after email verification
-    callbackURL:
-      (process.env.FRONTEND_URL || 'http://localhost:3000') + '/dashboard', // Redirect to frontend after verification
     sendVerificationEmail: async ({
       user,
       url,
@@ -567,9 +600,10 @@ export const auth: any = betterAuth({
     }) => {
       console.log('🚀 Sending verification email to:', user.email);
 
-      // The verification URL should already point to frontend because of callbackURL config
-      // But let's ensure it uses the correct frontend URL
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+      // Better Auth 1.6 receives callbackURL per request rather than in this
+      // configuration block. Keep the user-facing verification route on the
+      // canonical frontend origin without changing the signed query string.
+      const frontendUrl = frontendPublicOrigin;
       let verificationUrl = url;
 
       // If the URL points to backend, replace it with frontend
@@ -613,7 +647,7 @@ export const auth: any = betterAuth({
   user: {
     changeEmail: {
       enabled: true,
-      async sendChangeEmailVerification({
+      async sendChangeEmailConfirmation({
         user,
         newEmail,
         url,
@@ -688,24 +722,26 @@ export const auth: any = betterAuth({
   databaseHooks: {
     user: {
       create: {
-        async before(user) {
-          return {
+        before(user) {
+          return Promise.resolve({
             data: { ...user, email: normalizeIdentityEmail(user.email) },
-          };
+          });
         },
       },
       update: {
-        async before(user) {
-          if (typeof user.email !== 'string') return { data: user };
-          return {
+        before(user) {
+          if (typeof user.email !== 'string') {
+            return Promise.resolve({ data: user });
+          }
+          return Promise.resolve({
             data: { ...user, email: normalizeIdentityEmail(user.email) },
-          };
+          });
         },
       },
     },
     account: {
       create: {
-        async before(account) {
+        before(account) {
           const result = { ...account };
           if (typeof account.accessToken === 'string') {
             result.accessToken = encryptToken(account.accessToken);
@@ -713,11 +749,11 @@ export const auth: any = betterAuth({
           if (typeof account.refreshToken === 'string') {
             result.refreshToken = encryptToken(account.refreshToken);
           }
-          return { data: result };
+          return Promise.resolve({ data: result });
         },
       },
       update: {
-        async before(account) {
+        before(account) {
           const result = { ...account };
           if (typeof account.accessToken === 'string') {
             result.accessToken = encryptToken(account.accessToken);
@@ -725,7 +761,7 @@ export const auth: any = betterAuth({
           if (typeof account.refreshToken === 'string') {
             result.refreshToken = encryptToken(account.refreshToken);
           }
-          return { data: result };
+          return Promise.resolve({ data: result });
         },
       },
     },
@@ -740,10 +776,6 @@ export const auth: any = betterAuth({
       enabled: process.env.SESSION_COOKIE_CACHE_ENABLED !== 'false', // ON by default; set SESSION_COOKIE_CACHE_ENABLED=false to disable
       maxAge: parsePositiveInt(process.env.SESSION_COOKIE_CACHE_MAX_AGE, 300),
     },
-    // Store session ID in Redis for better state management
-    storeSessionId: true,
-    // Cleanup expired sessions automatically
-    cleanupExpiredSessions: true,
   },
 
   // Expose account linking and unlinking
@@ -792,7 +824,7 @@ export const auth: any = betterAuth({
                 scopes: ['openid', 'email', 'name', 'address', 'phoneNumber'],
                 redirectURI:
                   process.env.VIPPS_REDIRECT_URI ||
-                  `${process.env.BETTER_AUTH_URL}/api/auth/callback/vipps`,
+                  `${betterAuthPublicOrigin}/api/auth/callback/vipps`,
                 // Custom user info mapping for Vipps
                 getUserInfo: async (tokens: OAuthTokens) => {
                   const userInfoUrl =
@@ -836,7 +868,7 @@ export const auth: any = betterAuth({
                       clientSecret: process.env.OKTA_CLIENT_SECRET,
                       discoveryUrl: `https://${process.env.OKTA_DOMAIN}/.well-known/openid-configuration`,
                       scopes: ['openid', 'email', 'profile', 'groups'],
-                      redirectURI: `${process.env.BETTER_AUTH_URL}/api/auth/callback/okta`,
+                      redirectURI: `${betterAuthPublicOrigin}/api/auth/callback/okta`,
                       // Custom user info mapping for Okta with JIT provisioning
                       getUserInfo: async (tokens: OAuthTokens) => {
                         const userInfoUrl = `https://${process.env.OKTA_DOMAIN}/oauth2/v1/userinfo`;
@@ -905,7 +937,22 @@ export const auth: any = betterAuth({
               const supportEmail =
                 process.env.RESEND_SUPPORT_EMAIL || 'support@id-knuten.no';
 
-              const inviteLink = `${process.env.BETTER_AUTH_URL}/accept-invitation/${data.id}`;
+              const inviteLink = buildInvitationLink(
+                frontendPublicOrigin,
+                data.id,
+              );
+              const inviteLinkHtml = escapeInvitationHtml(inviteLink);
+              const inviterNameHtml = escapeInvitationHtml(
+                data.inviter.user.name,
+              );
+              const inviterEmailHtml = escapeInvitationHtml(
+                data.inviter.user.email,
+              );
+              const organizationNameHtml = escapeInvitationHtml(
+                data.organization.name,
+              );
+              const supportEmailHtml = escapeInvitationHtml(supportEmail);
+              const companyNameHtml = escapeInvitationHtml(companyName);
 
               await resend.emails.send({
                 from: `${process.env.RESEND_FROM_NAME} <${process.env.RESEND_FROM_EMAIL}>`,
@@ -915,12 +962,12 @@ export const auth: any = betterAuth({
                   <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
                     <h2>Organization Invitation</h2>
                     <p>Hello!</p>
-                    <p>You've been invited by <strong>${data.inviter.user.name}</strong> (${data.inviter.user.email}) to join the organization <strong>${data.organization.name}</strong>.</p>
+                    <p>You've been invited by <strong>${inviterNameHtml}</strong> (${inviterEmailHtml}) to join the organization <strong>${organizationNameHtml}</strong>.</p>
                     <p>Click the link below to accept the invitation:</p>
-                    <a href="${inviteLink}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Accept Invitation</a>
+                    <a href="${inviteLinkHtml}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Accept Invitation</a>
                     <p>This invitation will expire in 48 hours.</p>
-                    <p>If you have any questions, please contact our support team at ${supportEmail}.</p>
-                    <p>Best regards,<br>${companyName} Team</p>
+                    <p>If you have any questions, please contact our support team at ${supportEmailHtml}.</p>
+                    <p>Best regards,<br>${companyNameHtml} Team</p>
                   </div>
                 `,
                 text: `
@@ -944,7 +991,7 @@ export const auth: any = betterAuth({
     ...(process.env.SSO_ENABLED === 'true'
       ? [
           sso({
-            provisionUser: async ({ user, provider }) => {
+            provisionUser: ({ user, provider }) => {
               console.log(
                 `🏢 Provisioning SSO user: ${user.email} via ${provider.providerId}`,
               );
@@ -956,7 +1003,7 @@ export const auth: any = betterAuth({
               defaultRole: (process.env.SSO_DEFAULT_ROLE || 'member') as
                 | 'admin'
                 | 'member',
-              getRole: async ({
+              getRole: ({
                 userInfo,
               }: {
                 userInfo: {
@@ -973,15 +1020,15 @@ export const auth: any = betterAuth({
                   jobTitle?.toLowerCase().includes('director') ||
                   jobTitle?.toLowerCase().includes('admin')
                 ) {
-                  return 'admin';
+                  return Promise.resolve<'admin' | 'member'>('admin');
                 }
 
                 // IT department gets admin access
                 if (department?.toLowerCase() === 'it') {
-                  return 'admin';
+                  return Promise.resolve<'admin' | 'member'>('admin');
                 }
 
-                return 'member';
+                return Promise.resolve<'admin' | 'member'>('member');
               },
             },
           }),
@@ -998,31 +1045,33 @@ export const auth: any = betterAuth({
               process.env.OIDC_ALLOW_DYNAMIC_REGISTRATION === 'true',
             useJWTPlugin: process.env.OIDC_USE_JWT_PLUGIN === 'true',
             trustedClients: process.env.OIDC_TRUSTED_CLIENTS
-              ? (JSON.parse(process.env.OIDC_TRUSTED_CLIENTS) as any[])
+              ? (JSON.parse(process.env.OIDC_TRUSTED_CLIENTS) as NonNullable<
+                  Parameters<typeof oidcProvider>[0]['trustedClients']
+                >)
               : [],
-            getAdditionalUserInfoClaim: (
-              user: any,
-              scopes: string[],
-              client: any,
-            ) => {
+            getAdditionalUserInfoClaim: (user, scopes, client) => {
               const additionalClaims: Record<string, unknown> = {};
+              const userMetadata = (
+                user as typeof user & {
+                  metadata?: { department?: string; jobTitle?: string };
+                }
+              ).metadata;
+              const clientMetadata = (
+                client as typeof client & {
+                  metadata?: { organization?: string };
+                }
+              ).metadata;
 
               if (scopes.includes('profile')) {
-                additionalClaims.department = (
-                  user as OIDCUser
-                ).metadata?.department;
-                additionalClaims.job_title = (
-                  user as OIDCUser
-                ).metadata?.jobTitle;
+                additionalClaims.department = userMetadata?.department;
+                additionalClaims.job_title = userMetadata?.jobTitle;
               }
 
               if (
                 scopes.includes('organization') &&
-                (client as OIDCClient).metadata?.organization
+                clientMetadata?.organization
               ) {
-                additionalClaims.organization = (
-                  client as OIDCClient
-                ).metadata?.organization;
+                additionalClaims.organization = clientMetadata.organization;
               }
 
               return additionalClaims;
@@ -1375,4 +1424,6 @@ export const auth: any = betterAuth({
         }
       : {}),
   },
-});
+};
+
+export const auth = betterAuth(authOptions);

@@ -128,6 +128,9 @@ services:
       - ./convex-core/.env.local
     environment:
       CONVEX_BACKEND_URL: http://convex-backend:3210
+      CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
+      CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
+      CONVEX_RECONCILIATION_KEY: ${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}
     networks:
       - app-net
     healthcheck:
@@ -176,18 +179,21 @@ services:
     env_file:
       - ./convex-core/.env.local
     environment:
-      # Cross-plane NATS bus and Convex URL — NATS_URL/NATS_TOKEN come from env_file above
+      # Auth-canonical Control projections use a scoped, pre-provisioned
+      # consumer on the Control shared broker.
       CONVEX_BACKEND_URL: http://convex-backend:3210
-      CONVEX_API_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}}
-      NATS_URL: nats://velion-nats:4222    # inter-plane-bus shared bus — all ingestion/org events publish here
-      NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
+      NATS_URL: nats://control-shared-nats:4222
+      NATS_USER: application-convex-control
+      NATS_PASSWORD: ${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:?APPLICATION_CONVEX_CONTROL_NATS_PASSWORD must be set}
       # W4-2 (ui-ux-velion-gap.md §13): Model Plane orchestrator-core
       # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
       # (model-nats). The subscriber dual-connects here so the
       # agent run lifecycle mirror actually receives events in prod.
       # `model-nats` is the stable alias on `inter-plane-bus`.
       MODEL_PLANE_NATS_URL: nats://model-nats:4222
-      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:?MODEL_PLANE_NATS_TOKEN must match Model Plane MODEL_NATS_TOKEN}
+      MODEL_PLANE_NATS_USER: application-convex-model
+      MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD must be set}
     networks:
       - app-net
       - inter-plane-bus
@@ -386,8 +392,9 @@ services:
       DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       CONVERSATION_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
       CONVERSATION_CORE_INGEST_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must be set for signed ingest delegation}
-      VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      VELION_NATS_URL: nats://application-nats:4222
+      NATS_USER: application-conversation
+      NATS_PASSWORD: ${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD must be set}
       # Ingestion Plane outbound client: draft.reply sends (task #22) and the
       # webhook_received inbound consumer (task #24) both need this to reach
       # integration-corev2 across the shared inter-plane-bus network. The
@@ -405,6 +412,8 @@ services:
       CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
       CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID must match the integration-corev2 verifier key ring}
     depends_on:
+      nats:
+        condition: service_healthy
       application-postgres:
         condition: service_healthy
     ports:
@@ -489,8 +498,9 @@ services:
       DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-      VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      VELION_NATS_URL: nats://application-nats:4222
+      NATS_USER: application-social
+      NATS_PASSWORD: ${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD must be set}
       SOCIAL_PUBLISH_WORKER_ENABLED: ${SOCIAL_PUBLISH_WORKER_ENABLED:-true}
       SOCIAL_PUBLISH_WORKER_POLL_INTERVAL: ${SOCIAL_PUBLISH_WORKER_POLL_INTERVAL:-5s}
       SOCIAL_PUBLISH_WORKER_BATCH_SIZE: ${SOCIAL_PUBLISH_WORKER_BATCH_SIZE:-10}
@@ -502,6 +512,8 @@ services:
       TIKTOK_API_BASE_URL: ${TIKTOK_API_BASE_URL:-https://open.tiktokapis.com}
       SNAPCHAT_API_BASE_URL: ${SNAPCHAT_API_BASE_URL:-https://adsapi.snapchat.com/v1}
     depends_on:
+      nats:
+        condition: service_healthy
       application-postgres:
         condition: service_healthy
     ports:
@@ -537,8 +549,7 @@ services:
     container_name: insight-core
     restart: unless-stopped
     # W3 Market-Intelligence service. Durable metric store on application-postgres
-    # (DATABASE_URL) + a JetStream metric subscriber on the shared application bus
-    # (NATS_URL=velion-nats, where conversation-core publishes velion.application.>).
+    # (DATABASE_URL) + a JetStream metric subscriber on the plane-local broker.
     # The connector registry remains in-memory; do NOT scale this beyond one
     # instance while that registry is process-local (container_name pins it).
     environment:
@@ -562,15 +573,17 @@ services:
       # Subscribe to the SAME bus conversation-core publishes velion.application.> to
       # (its config resolves VELION_NATS_URL first), so the metric subscriber binds
       # the existing JetStream stream rather than a divergent one.
-      NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      NATS_URL: nats://application-nats:4222
+      NATS_USER: application-insight
+      NATS_PASSWORD: ${APPLICATION_INSIGHT_NATS_PASSWORD:?APPLICATION_INSIGHT_NATS_PASSWORD must be set}
       # Phase 7 B12 — the model-plane-agents producer leg. The Model Plane runs
       # on its own isolated NATS cluster; the agent subscriber dual-connects via
       # the inter-plane-bus alias and records run/tool/approval lifecycle events
       # (mp.v1.run.*.event) as surface=agents metrics. Without this the agents
       # surface stays empty even when agent runs are executing.
       MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-nats:4222}
-      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:?MODEL_PLANE_NATS_TOKEN must match Model Plane MODEL_NATS_TOKEN}
+      MODEL_PLANE_NATS_USER: application-insight-model
+      MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD must be set}
       # Task #28: metrics.snapshotted carries only a summary count; the metric
       # subscriber fetches the real per-metric values from social-core's
       # GET /api/v1/social/metrics using this URL + the shared internal key.
@@ -578,6 +591,8 @@ services:
     ports:
       - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INSIGHT_CORE_HOST_PORT:-3163}:3163"
     depends_on:
+      nats:
+        condition: service_healthy
       application-postgres:
         condition: service_healthy
     networks:
@@ -612,7 +627,8 @@ services:
     restart: unless-stopped
     # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
     # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
-    # event on the inter-plane bus (audit-core subscribes velion.audit.v1.>).
+    # event on the plane-local broker consumed by audit-core under the pinned
+    # `application` authority.
     #
     # Provider lead sync: LinkedIn Lead Gen form responses via integration-corev2's
     # actions gateway (integration-api on the inter-plane bus, same route as
@@ -623,14 +639,17 @@ services:
       SERVICE_NAME: leads-core
       DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-      NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      NATS_URL: nats://application-nats:4222
+      NATS_USER: application-leads
+      NATS_PASSWORD: ${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD must be set}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
       PROVIDER_LEAD_SYNC_ENABLED: ${PROVIDER_LEAD_SYNC_ENABLED:-true}
       PROVIDER_LEAD_SYNC_INTERVAL: ${PROVIDER_LEAD_SYNC_INTERVAL:-1h}
     ports:
       - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
     depends_on:
+      nats:
+        condition: service_healthy
       application-postgres:
         condition: service_healthy
     networks:
@@ -709,12 +728,8 @@ services:
       NATS_URL: nats://nats:4222          # override env_file — local app-nats for own publisher
       NATS_SHARED_URL: nats://nats:4222   # priority 2 in Go config chain
       VELION_NATS_URL: nats://nats:4222   # priority 1 in Go config chain — must override env_file
-      VELION_NATS_TOKEN: ${APPLICATION_NATS_TOKEN:?APPLICATION_NATS_TOKEN must be set}
-      # G14: subscribe to cross-plane events (app.session.*) on the shared
-      # velion-nats bus. Without this, the in-app subscriber falls back to the
-      # local NATS connection, which doesn't carry those subjects.
-      SHARED_NATS_URL: nats://velion-nats:4222
-      SHARED_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
+      NATS_USER: application-notification
+      NATS_PASSWORD: ${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD must be set}
       NOTIFICATION_DELIVERY_MODE: ${NOTIFICATION_DELIVERY_MODE:-disabled}
       NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
       NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
@@ -758,11 +773,23 @@ services:
     image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
     container_name: app-nats
     restart: unless-stopped
-    command: ["-js", "-m", "8222", "-sd", "/data", "--auth", "${APPLICATION_NATS_TOKEN:?APPLICATION_NATS_TOKEN must be set}"]
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      APPLICATION_CONVERSATION_NATS_PASSWORD: "\"${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD is required}\""
+      APPLICATION_SOCIAL_NATS_PASSWORD: "\"${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD is required}\""
+      APPLICATION_INSIGHT_NATS_PASSWORD: "\"${APPLICATION_INSIGHT_NATS_PASSWORD:?APPLICATION_INSIGHT_NATS_PASSWORD is required}\""
+      APPLICATION_LEADS_NATS_PASSWORD: "\"${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD is required}\""
+      APPLICATION_NOTIFICATION_NATS_PASSWORD: "\"${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD is required}\""
+      AUDIT_APPLICATION_NATS_PASSWORD: "\"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}\""
+      APPLICATION_NATS_PROVISIONER_PASSWORD: "\"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}\""
     networks:
-      - app-net
+      app-net:
+      inter-plane-bus:
+        aliases:
+          - application-nats
     volumes:
       - app-nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
     deploy:
       resources:
         limits:

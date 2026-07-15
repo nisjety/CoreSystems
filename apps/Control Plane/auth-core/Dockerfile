@@ -40,7 +40,7 @@ ENV SOURCE_REVISION=$SOURCE_REVISION BUILD_DATE=$BUILD_DATE
 # Add postgresql-client BEFORE copying application files
 # (keeps this layer cached when app code changes)
 RUN set -e; \
-    if ! apk add --no-cache --quiet postgresql-client > /tmp/apk-add.log 2>&1; then \
+    if ! apk add --no-cache --quiet postgresql-client su-exec > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \
     fi; \
@@ -58,6 +58,7 @@ COPY --chown=appuser:appgroup --from=builder /app/node_modules ./node_modules
 COPY --chown=appuser:appgroup --from=builder /app/package*.json ./
 COPY --chown=appuser:appgroup --from=builder /app/migrations   ./migrations
 COPY --chown=appuser:appgroup --chmod=755 docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY --chown=appuser:appgroup --chmod=755 scripts/validate-lifecycle-preflight.sh /app/validate-lifecycle-preflight.sh
 
 ENV NODE_ENV=production
 

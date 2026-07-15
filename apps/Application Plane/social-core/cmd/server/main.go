@@ -41,18 +41,14 @@ func main() {
 	repository := social.NewRepository(db.Pool)
 	var eventPublisher social.EventPublisher
 	natsClient, err := appnats.NewClient(appnats.Config{
-		URL:   cfg.NATSURL,
-		Token: cfg.NATSToken,
-		Name:  cfg.ServiceName,
+		URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		InboxPrefix: "_INBOX.APPLICATION_SOCIAL", Name: cfg.ServiceName,
 	})
 	if err != nil {
 		log.Printf("social-core: nats unavailable at %s: %v", cfg.NATSURL, err)
 	} else {
 		defer natsClient.Close()
 		publisher := eventing.NewPublisher(natsClient.JS)
-		if err := publisher.EnsureStream(); err != nil {
-			log.Printf("social-core: ensure event stream: %v", err)
-		}
 		eventPublisher = publisher
 	}
 	integrationClient := integration.NewClient(integration.Config{

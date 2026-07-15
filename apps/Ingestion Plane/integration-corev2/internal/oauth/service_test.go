@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -170,6 +171,31 @@ func TestAccessTokenForConnectionReturnsExactConnectionToken(t *testing.T) {
 	}
 }
 
+func TestAccessTokenForConnectionRejectsDisconnectingSagaState(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-disconnecting"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-disconnecting", ProviderKey: "github", ConnectorType: "github",
+		OrganizationID: "org-1", UserID: "user-1", Status: "disconnecting",
+		EncryptedAccessToken: encrypted, AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	service := NewService(config.Config{}, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+
+	if _, err := service.AccessTokenForConnection(t.Context(), "conn-disconnecting"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("AccessTokenForConnection error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestCompleteCallbackReconnectReusesConnectionAndUpgradesScopes(t *testing.T) {
 	cfg := testOAuthConfig()
 	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
@@ -252,6 +278,33 @@ func TestCompleteCallbackReconnectReusesConnectionAndUpgradesScopes(t *testing.T
 	}
 	if token.AccessToken != "new-access-token" {
 		t.Fatalf("AccessToken = %q, want new access token", token.AccessToken)
+	}
+}
+
+func TestPersistConnectionRollsBackWhenCreationAuditIntentFails(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(config.Config{}, failingAuditRepository{Repository: repo}, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	session := store.ConnectSession{
+		ID: "session-audit-rollback", ProviderKey: "test-provider", ConnectorType: "test-provider",
+		OrganizationID: "org-1", UserID: "user-1", UserEmail: "user@example.test",
+		Capabilities: []string{"profile.read"}, Scopes: []string{"profile"},
+	}
+	_, err = service.persistConnection(t.Context(), session, TokenResult{
+		AccessToken: "provider-access-token", RefreshToken: "provider-refresh-token", ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err == nil {
+		t.Fatal("persistConnection error = nil, want audit persistence failure")
+	}
+	connections, err := repo.ListConnections(t.Context(), store.ConnectionFilter{OrganizationID: "org-1"})
+	if err != nil {
+		t.Fatalf("ListConnections error: %v", err)
+	}
+	if len(connections) != 0 {
+		t.Fatalf("connection committed without creation audit: %#v", connections)
 	}
 }
 
@@ -415,10 +468,254 @@ func TestDisconnectConnectionPublishesLifecycleEvent(t *testing.T) {
 	}
 }
 
+type failingAuditTransaction struct {
+	store.AuditTransaction
+}
+
+func (failingAuditTransaction) InsertAuditEvent(context.Context, store.AuditEvent) error {
+	return errors.New("audit insert unavailable")
+}
+
+type failingAuditRepository struct {
+	store.Repository
+}
+
+func (r failingAuditRepository) WithAuditTransaction(ctx context.Context, fn func(store.AuditTransaction) error) error {
+	return r.Repository.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		return fn(failingAuditTransaction{AuditTransaction: tx})
+	})
+}
+
+type failCompletedDeleteOnceRepository struct {
+	store.Repository
+	failed atomic.Bool
+}
+
+func (r *failCompletedDeleteOnceRepository) WithAuditTransaction(ctx context.Context, fn func(store.AuditTransaction) error) error {
+	return r.Repository.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		return fn(failCompletedDeleteOnceTransaction{AuditTransaction: tx, parent: r})
+	})
+}
+
+type failCompletedDeleteOnceTransaction struct {
+	store.AuditTransaction
+	parent *failCompletedDeleteOnceRepository
+}
+
+func (tx failCompletedDeleteOnceTransaction) InsertAuditEvent(ctx context.Context, event store.AuditEvent) error {
+	if event.EventType == "connection.deleted" && tx.parent.failed.CompareAndSwap(false, true) {
+		return errors.New("simulated crash before delete finalization")
+	}
+	return tx.AuditTransaction.InsertAuditEvent(ctx, event)
+}
+
+func TestDisconnectConnectionStopsBeforeProviderWhenDeleteIntentCannotPersist(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-atomic-delete"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-atomic-delete",
+		ProviderKey:          "github",
+		ConnectorType:        "github",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		EncryptedAccessToken: encrypted,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	client := &revocationCountingClient{}
+	service := NewService(config.Config{}, failingAuditRepository{Repository: repo}, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	service.clients["github"] = client
+
+	if _, err := service.DisconnectConnection(t.Context(), "conn-atomic-delete", "test"); err == nil {
+		t.Fatal("DisconnectConnection error = nil, want audit persistence failure")
+	}
+	if got := client.revokeCalls.Load(); got != 0 {
+		t.Fatalf("provider revoke calls = %d, want 0 before durable delete intent", got)
+	}
+	connection, err := repo.GetConnection(t.Context(), "conn-atomic-delete")
+	if err != nil {
+		t.Fatalf("GetConnection error: %v", err)
+	}
+	if connection.Status != "active" || connection.DeletedAt != nil {
+		t.Fatalf("connection state = %q/%v, want active rollback", connection.Status, connection.DeletedAt)
+	}
+}
+
+func TestDisconnectConnectionResumesAfterProviderSuccessBeforeDeleteFinalization(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-resumable-delete"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-resumable-delete",
+		ProviderKey:          "github",
+		ConnectorType:        "github",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		EncryptedAccessToken: encrypted,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	client := &revocationCountingClient{}
+	guardedRepo := &failCompletedDeleteOnceRepository{Repository: repo}
+	service := NewService(config.Config{}, guardedRepo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	service.clients["github"] = client
+
+	if _, err := service.DisconnectConnection(t.Context(), "conn-resumable-delete", "test"); err == nil {
+		t.Fatal("first DisconnectConnection error = nil, want simulated finalization failure")
+	}
+	interrupted, err := repo.GetConnection(t.Context(), "conn-resumable-delete")
+	if err != nil {
+		t.Fatalf("GetConnection interrupted state: %v", err)
+	}
+	if interrupted.Status != "disconnecting" || interrupted.DeletedAt != nil || interrupted.EncryptedAccessToken == "" {
+		t.Fatalf("interrupted state = %q/%v token_empty=%v, want resumable disconnecting state", interrupted.Status, interrupted.DeletedAt, interrupted.EncryptedAccessToken == "")
+	}
+
+	deleted, err := service.DisconnectConnection(t.Context(), "conn-resumable-delete", "test")
+	if err != nil {
+		t.Fatalf("retry DisconnectConnection error: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt == nil || deleted.EncryptedAccessToken != "" {
+		t.Fatalf("retry state = %q/%v token_empty=%v, want deleted", deleted.Status, deleted.DeletedAt, deleted.EncryptedAccessToken == "")
+	}
+	if got := client.revokeCalls.Load(); got != 2 {
+		t.Fatalf("provider revoke calls = %d, want 2 idempotent attempts across resume", got)
+	}
+}
+
+func TestDisconnectConnectionRetainsCredentialsAndRetriesRevocationFailure(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-revocation-retry"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-revocation-retry", ProviderKey: "github", ConnectorType: "github",
+		OrganizationID: "org-1", UserID: "user-1", Status: "active",
+		EncryptedAccessToken: encrypted, AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	client := &revocationSequenceClient{errors: []error{errors.New("provider unavailable"), nil}}
+	service := NewService(config.Config{}, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	service.clients["github"] = client
+
+	if _, err := service.DisconnectConnection(t.Context(), "conn-revocation-retry", "test"); err == nil {
+		t.Fatal("first DisconnectConnection error = nil, want retryable revocation failure")
+	}
+	failed, err := repo.GetConnection(t.Context(), "conn-revocation-retry")
+	if err != nil {
+		t.Fatalf("GetConnection failed state: %v", err)
+	}
+	if failed.Status != "revocation_failed" || failed.DeletedAt != nil || failed.EncryptedAccessToken == "" {
+		t.Fatalf("failed state = %q/%v token_empty=%v, want non-leasable retained credentials", failed.Status, failed.DeletedAt, failed.EncryptedAccessToken == "")
+	}
+	if _, err := service.AccessTokenForConnection(t.Context(), failed.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("AccessTokenForConnection error = %v, want non-leasable ErrNotFound", err)
+	}
+
+	deleted, err := service.DisconnectConnection(t.Context(), failed.ID, "test")
+	if err != nil {
+		t.Fatalf("retry DisconnectConnection error: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt == nil || deleted.EncryptedAccessToken != "" {
+		t.Fatalf("retry state = %q/%v token_empty=%v, want deleted after verified revocation", deleted.Status, deleted.DeletedAt, deleted.EncryptedAccessToken == "")
+	}
+	if client.calls.Load() != 2 {
+		t.Fatalf("revoke calls = %d, want 2", client.calls.Load())
+	}
+}
+
+func TestDisconnectConnectionAppliesExplicitUnsupportedProviderPolicy(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	encrypted, err := vault.Encrypt("access-token", []byte("conn-unsupported-revocation"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-unsupported-revocation", ProviderKey: "notion", ConnectorType: "notion",
+		OrganizationID: "org-1", UserID: "user-1", Status: "active",
+		EncryptedAccessToken: encrypted,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	service := NewService(config.Config{}, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	service.clients["notion"] = &revocationSequenceClient{errors: []error{ErrRevocationUnsupported}}
+
+	deleted, err := service.DisconnectConnection(t.Context(), "conn-unsupported-revocation", "test")
+	if err != nil {
+		t.Fatalf("DisconnectConnection error: %v", err)
+	}
+	if deleted.Status != "deleted" || deleted.DeletedAt == nil || deleted.EncryptedAccessToken != "" {
+		t.Fatalf("unsupported policy state = %q/%v token_empty=%v, want explicit local deletion", deleted.Status, deleted.DeletedAt, deleted.EncryptedAccessToken == "")
+	}
+	event, found, err := repo.ClaimAuditEvent(t.Context())
+	for err == nil && found && event.EventType != "connection.deleted" {
+		event, found, err = repo.ClaimAuditEvent(t.Context())
+	}
+	if err != nil || !found {
+		t.Fatalf("claim connection.deleted audit = (%v, %v)", found, err)
+	}
+	if event.Metadata["revoke_status"] != "unsupported_provider_policy" {
+		t.Fatalf("revoke_status = %#v, want explicit unsupported policy", event.Metadata["revoke_status"])
+	}
+}
+
 type countingRefreshClient struct {
 	calls     atomic.Int32
 	wait      time.Duration
 	expiresAt time.Time
+}
+
+type revocationCountingClient struct {
+	callbackClient
+	revokeCalls atomic.Int32
+}
+
+type revocationSequenceClient struct {
+	callbackClient
+	calls  atomic.Int32
+	errors []error
+}
+
+func (c *revocationSequenceClient) Revoke(context.Context, string, map[string]string) error {
+	index := int(c.calls.Add(1)) - 1
+	if index >= len(c.errors) {
+		return nil
+	}
+	return c.errors[index]
+}
+
+func (c *revocationCountingClient) Revoke(context.Context, string, map[string]string) error {
+	c.revokeCalls.Add(1)
+	return nil
 }
 
 type refreshLockRepo struct {

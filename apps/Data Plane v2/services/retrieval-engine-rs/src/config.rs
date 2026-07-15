@@ -20,6 +20,14 @@ pub struct Config {
     pub model_plane_embedding_provider: String,
     #[serde(default = "default_model_plane_embedding_timeout_ms")]
     pub model_plane_embedding_timeout_ms: u64,
+    #[serde(default = "default_model_plane_inference_token_url")]
+    pub model_plane_inference_token_url: String,
+    #[serde(default = "default_model_plane_inference_token_issuer")]
+    pub model_plane_inference_token_issuer: String,
+    #[serde(default)]
+    pub model_plane_inference_service_id: String,
+    #[serde(default)]
+    pub model_plane_inference_service_api_key: String,
 
     #[serde(default)]
     pub azure_openai_api_key: String,
@@ -131,9 +139,14 @@ pub struct Config {
     pub grpc_max_concurrent: u32,
 
     #[serde(default)]
-    pub internal_api_key: Option<String>,
-    #[serde(default)]
     pub user_core_service_token: Option<String>,
+
+    #[serde(default)]
+    pub documents_event_public_key_path: String,
+    #[serde(default)]
+    pub retrieval_event_private_key_path: String,
+    #[serde(default = "default_event_auth_audience")]
+    pub event_auth_audience: String,
 
     // gRPC TLS (env-gated). When both paths point to readable PEM files
     // AND the binary was built with the `grpc-tls` feature, the Tonic server
@@ -174,6 +187,12 @@ fn default_model_plane_embedding_provider() -> String {
 }
 fn default_model_plane_embedding_timeout_ms() -> u64 {
     30_000
+}
+fn default_model_plane_inference_token_url() -> String {
+    "http://auth-core:3011/api/inference-core/internal-token".into()
+}
+fn default_model_plane_inference_token_issuer() -> String {
+    "http://localhost:3011/api/convex-auth".into()
 }
 fn default_embedding_dim() -> usize {
     3072
@@ -258,6 +277,9 @@ fn default_grpc_timeout() -> u32 {
 }
 fn default_grpc_max_concurrent() -> u32 {
     256
+}
+fn default_event_auth_audience() -> String {
+    "dataplane-events".into()
 }
 
 impl Config {

@@ -24,6 +24,14 @@ service SessionCore {
   // Record completion of a single step within a run.
   rpc CompleteStep(CompleteStepRequest) returns (CompleteStepResponse);
 
+  // Durably reserve an inline tool-action audit intent before the tool runs.
+  // This does not advance or terminate the run/plan.
+  rpc ReserveToolAction(ReserveToolActionRequest) returns (ReserveToolActionResponse);
+
+  // Finalize a previously reserved inline tool action after execution.
+  // This persists the final audit event without changing run/plan lifecycle.
+  rpc FinalizeToolAction(FinalizeToolActionRequest) returns (FinalizeToolActionResponse);
+
   // Persist a checkpoint snapshot for a run.
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
 
@@ -147,6 +155,8 @@ message StartRunResponse {
 
 // --- CompleteStep ---
 
+// CompleteStepRequest records one immutable execution step and optionally the
+// single terminal transition for its run.
 message CompleteStepRequest {
   // Run this step belongs to.
   string run_id = 1;
@@ -162,11 +172,56 @@ message CompleteStepRequest {
 
   // Error message if status is "failed".
   string error = 5;
+
+  // True only for the single final step that closes the run and its plan.
+  // Per-tool and ordinary execution steps must leave this false.
+  bool terminal = 6;
 }
 
+// CompleteStepResponse returns the stable ordinal assigned to the step.
 message CompleteStepResponse {
   // Acknowledged step sequence within the run.
   uint32 step_index = 1;
+}
+
+// --- Inline tool audit lifecycle ---
+
+// ReserveToolActionRequest durably binds an inline tool action before execution.
+message ReserveToolActionRequest {
+  // Run that owns the tool action.
+  string run_id = 1;
+  // Stable opaque identifier derived from the original tool call identity.
+  string action_id = 2;
+  // Gateway request that produced the tool action.
+  string request_id = 3;
+  // Canonical tool name selected by the model.
+  string tool = 4;
+  // Data-governance category attached to the action.
+  string data_category = 5;
+  // Effective Zero Data Retention posture for the action.
+  bool zdr = 6;
+}
+
+// ReserveToolActionResponse reports whether a new reservation was created.
+message ReserveToolActionResponse {
+  // False means an exact prior reservation was replayed idempotently.
+  bool created = 1;
+}
+
+// FinalizeToolActionRequest assigns the single immutable result of a reservation.
+message FinalizeToolActionRequest {
+  // Run that owns the reserved action.
+  string run_id = 1;
+  // Stable action identifier supplied during reservation.
+  string action_id = 2;
+  // "completed" or "failed".
+  string outcome = 3;
+}
+
+// FinalizeToolActionResponse reports whether the reservation changed state.
+message FinalizeToolActionResponse {
+  // False means an exact prior finalization was replayed idempotently.
+  bool updated = 1;
 }
 
 // --- SaveCheckpoint ---

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,6 +14,10 @@ import (
 
 type SourceObjectRepo struct {
 	pool *pgxpool.Pool
+}
+
+type sourceObjectQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 func NewSourceObjectRepo(pool *pgxpool.Pool) *SourceObjectRepo {
@@ -40,12 +45,20 @@ func sourceObjectContentChanged(inserted bool, oldHash, newHash string) bool {
 }
 
 func (r *SourceObjectRepo) Upsert(ctx context.Context, input model.UpsertSourceObjectInput) (*UpsertSourceObjectResult, error) {
+	result, err := upsertSourceObject(ctx, r.pool, input)
+	if err == nil {
+		r.bumpOrgVersion(ctx, input.OrgID)
+	}
+	return result, err
+}
+
+func upsertSourceObject(ctx context.Context, q sourceObjectQuerier, input model.UpsertSourceObjectInput) (*UpsertSourceObjectResult, error) {
 	meta := input.Metadata
 	if len(meta) == 0 {
 		meta = json.RawMessage(`{}`)
 	}
 
-	row := r.pool.QueryRow(ctx, `
+	row := q.QueryRow(ctx, `
 		WITH prev AS (
 			SELECT content_hash AS old_content_hash
 			FROM source_objects
@@ -123,7 +136,6 @@ func (r *SourceObjectRepo) Upsert(ctx context.Context, input model.UpsertSourceO
 		return nil, fmt.Errorf("upsert source object: %w", err)
 	}
 
-	r.bumpOrgVersion(ctx, input.OrgID)
 	return &UpsertSourceObjectResult{
 		SourceObject:   &obj,
 		Inserted:       inserted,
@@ -132,9 +144,17 @@ func (r *SourceObjectRepo) Upsert(ctx context.Context, input model.UpsertSourceO
 }
 
 func (r *SourceObjectRepo) SoftDelete(ctx context.Context, input model.DeleteSourceObjectInput) (*model.SourceObject, error) {
+	obj, err := softDeleteSourceObject(ctx, r.pool, input)
+	if err == nil {
+		r.bumpOrgVersion(ctx, input.OrgID)
+	}
+	return obj, err
+}
+
+func softDeleteSourceObject(ctx context.Context, q sourceObjectQuerier, input model.DeleteSourceObjectInput) (*model.SourceObject, error) {
 	var row pgx.Row
 	if input.SourceObjectID != "" {
-		row = r.pool.QueryRow(ctx, `
+		row = q.QueryRow(ctx, `
 			UPDATE source_objects
 			   SET deleted_at = COALESCE(deleted_at, NOW())
 			 WHERE org_id = $1 AND source_object_id = $2
@@ -146,7 +166,7 @@ func (r *SourceObjectRepo) SoftDelete(ctx context.Context, input model.DeleteSou
 			           modified_at, discovered_at, deleted_at, updated_at
 		`, input.OrgID, input.SourceObjectID)
 	} else {
-		row = r.pool.QueryRow(ctx, `
+		row = q.QueryRow(ctx, `
 			UPDATE source_objects
 			   SET deleted_at = COALESCE(deleted_at, NOW())
 			 WHERE org_id = $1 AND connector = $2 AND external_id = $3
@@ -170,8 +190,131 @@ func (r *SourceObjectRepo) SoftDelete(ctx context.Context, input model.DeleteSou
 		return nil, fmt.Errorf("soft delete source object: %w", err)
 	}
 
-	r.bumpOrgVersion(ctx, input.OrgID)
 	return &obj, nil
+}
+
+// UpsertWithOutbox atomically commits the source projection, tenant cache
+// version, and signed-event intent. A missing outbox table or any event-build
+// failure rolls the source mutation back.
+func (r *SourceObjectRepo) UpsertWithOutbox(
+	ctx context.Context,
+	input model.UpsertSourceObjectInput,
+	eventType, userID string,
+) (*UpsertSourceObjectResult, error) {
+	if strings.TrimSpace(input.OrgID) == "" || strings.TrimSpace(eventType) == "" {
+		return nil, fmt.Errorf("source-object upsert outbox requires tenant and event type")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin source-object upsert: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := upsertSourceObject(ctx, tx, input)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := sourceObjectChangedPayload(result, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := enqueueSourceObjectEventTx(ctx, tx, input.OrgID, eventType, payload); err != nil {
+		return nil, err
+	}
+	if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit source-object upsert and outbox: %w", err)
+	}
+	return result, nil
+}
+
+// SoftDeleteWithOutbox atomically commits the scoped tombstone, cache-version
+// bump, and deletion intent.
+func (r *SourceObjectRepo) SoftDeleteWithOutbox(
+	ctx context.Context,
+	input model.DeleteSourceObjectInput,
+	eventType, userID string,
+) (*model.SourceObject, error) {
+	if strings.TrimSpace(input.OrgID) == "" || strings.TrimSpace(eventType) == "" {
+		return nil, fmt.Errorf("source-object delete outbox requires tenant and event type")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin source-object delete: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	obj, err := softDeleteSourceObject(ctx, tx, input)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := sourceObjectDeletedPayload(obj, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := enqueueSourceObjectEventTx(ctx, tx, input.OrgID, eventType, payload); err != nil {
+		return nil, err
+	}
+	if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit source-object delete and outbox: %w", err)
+	}
+	return obj, nil
+}
+
+func sourceObjectChangedPayload(result *UpsertSourceObjectResult, userID string) ([]byte, error) {
+	if result == nil || result.SourceObject == nil {
+		return nil, fmt.Errorf("source-object changed event requires a result")
+	}
+	payload := map[string]any{
+		"source_object_id": result.SourceObject.SourceObjectID,
+		"org_id":           result.SourceObject.OrgID,
+		"connector":        result.SourceObject.Connector,
+		"external_id":      result.SourceObject.ExternalID,
+		"inserted":         result.Inserted,
+		"content_hash":     result.SourceObject.ContentHash,
+		"content_changed":  result.Inserted || result.ContentChanged,
+		"zdr":              false,
+	}
+	if strings.TrimSpace(userID) != "" {
+		payload["user_id"] = strings.TrimSpace(userID)
+	}
+	return json.Marshal(payload)
+}
+
+func sourceObjectDeletedPayload(obj *model.SourceObject, userID string) ([]byte, error) {
+	if obj == nil {
+		return nil, fmt.Errorf("source-object deleted event requires an object")
+	}
+	payload := map[string]any{
+		"source_object_id": obj.SourceObjectID,
+		"org_id":           obj.OrgID,
+		"connector":        obj.Connector,
+		"external_id":      obj.ExternalID,
+		"zdr":              false,
+	}
+	if strings.TrimSpace(userID) != "" {
+		payload["user_id"] = strings.TrimSpace(userID)
+	}
+	return json.Marshal(payload)
+}
+
+func enqueueSourceObjectEventTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	orgID, eventType string,
+	payload []byte,
+) error {
+	if !json.Valid(payload) {
+		return fmt.Errorf("source-object event payload is invalid")
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO documents_outbox (org_id,event_type,payload)
+		VALUES ($1,$2,$3::jsonb)`, orgID, eventType, string(payload)); err != nil {
+		return fmt.Errorf("enqueue source-object lifecycle event: %w", err)
+	}
+	return nil
 }
 
 func (r *SourceObjectRepo) Duplicates(ctx context.Context, input model.ListSourceObjectDuplicatesInput) ([]model.SourceObjectDuplicateGroup, error) {

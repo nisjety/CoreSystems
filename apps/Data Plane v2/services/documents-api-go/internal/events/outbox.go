@@ -13,7 +13,9 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,7 +28,8 @@ const (
 	defaultOutboxPollInterval = 500 * time.Millisecond
 	// Cap the per-tick batch so a runaway producer doesn't starve other
 	// queries on the connection pool.
-	maxOutboxBatchSize = 200
+	maxOutboxBatchSize     = 200
+	sourceObjectStreamName = "DATAPLANE_SOURCE_OBJECTS"
 )
 
 type OutboxPublisher struct {
@@ -42,6 +45,11 @@ type jetStreamPublisher interface {
 	Publish(subject string, data []byte, opts ...nats.PubOpt) (*nats.PubAck, error)
 }
 
+type sourceStreamManager interface {
+	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
+	AddStream(cfg *nats.StreamConfig, opts ...nats.JSOpt) (*nats.StreamInfo, error)
+}
+
 func NewOutboxPublisher(pool *pgxpool.Pool, nc *nats.Conn, signer interface {
 	Sign(eventType string, payload []byte) ([]byte, error)
 }) (*OutboxPublisher, error) {
@@ -52,12 +60,79 @@ func NewOutboxPublisher(pool *pgxpool.Pool, nc *nats.Conn, signer interface {
 	if err != nil {
 		return nil, fmt.Errorf("initialize JetStream outbox publisher: %w", err)
 	}
+	if err := ensureSourceObjectStream(js); err != nil {
+		return nil, err
+	}
 	return &OutboxPublisher{
 		pool:         pool,
 		js:           js,
 		pollInterval: defaultOutboxPollInterval,
 		signer:       signer,
 	}, nil
+}
+
+func sourceObjectStreamConfig() nats.StreamConfig {
+	return nats.StreamConfig{
+		Name:        sourceObjectStreamName,
+		Description: "Bounded durable source-object lifecycle events owned by documents-api",
+		Subjects: []string{
+			SubjectSourceObjectChanged,
+			SubjectSourceObjectDeleted,
+		},
+		Retention:  nats.LimitsPolicy,
+		MaxMsgs:    100_000,
+		MaxBytes:   256 * 1024 * 1024,
+		Discard:    nats.DiscardOld,
+		MaxAge:     7 * 24 * time.Hour,
+		MaxMsgSize: 1024 * 1024,
+		Storage:    nats.FileStorage,
+		Replicas:   1,
+		Duplicates: 10 * time.Minute,
+		DenyDelete: true,
+		DenyPurge:  true,
+	}
+}
+
+func ensureSourceObjectStream(js sourceStreamManager) error {
+	if js == nil {
+		return fmt.Errorf("source-object JetStream manager is unavailable")
+	}
+	want := sourceObjectStreamConfig()
+	info, err := js.StreamInfo(want.Name)
+	if err != nil {
+		if !errors.Is(err, nats.ErrStreamNotFound) {
+			return fmt.Errorf("inspect source-object stream: %w", err)
+		}
+		info, err = js.AddStream(&want)
+		if err != nil {
+			// Multiple replicas may race to create the same owned stream. Only
+			// accept the race when the resulting stream is present and safe.
+			info, err = js.StreamInfo(want.Name)
+			if err != nil {
+				return fmt.Errorf("create source-object stream: %w", err)
+			}
+		}
+	}
+	if info == nil {
+		return fmt.Errorf("source-object stream inspection returned no configuration")
+	}
+	if err := validateSourceObjectStream(info.Config, want); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateSourceObjectStream(got, want nats.StreamConfig) error {
+	if got.Name != want.Name || !reflect.DeepEqual(got.Subjects, want.Subjects) ||
+		got.Retention != want.Retention || got.MaxMsgs != want.MaxMsgs ||
+		got.MaxBytes != want.MaxBytes || got.Discard != want.Discard ||
+		got.MaxAge != want.MaxAge || got.MaxMsgSize != want.MaxMsgSize ||
+		got.Storage != want.Storage || got.Replicas != want.Replicas ||
+		got.Duplicates != want.Duplicates || got.DenyDelete != want.DenyDelete ||
+		got.DenyPurge != want.DenyPurge {
+		return fmt.Errorf("source-object stream configuration is unsafe or incompatible")
+	}
+	return nil
 }
 
 // Start kicks off the background loop. Returns immediately; honors ctx

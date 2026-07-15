@@ -424,6 +424,30 @@ pub struct CapabilityDetail {
     /// Registry scope: "agent", "workspace", "user", "global".
     #[prost(string, tag="8")]
     pub scope: ::prost::alloc::string::String,
+    /// Runtime state: "available", "disabled", "unhealthy",
+    /// "approval_required", "unavailable", or "not_configured". Registry
+    /// presence/enabled alone never implies available.
+    #[prost(string, tag="9")]
+    pub state: ::prost::alloc::string::String,
+    /// Stable machine-readable explanation for state.
+    #[prost(string, tag="10")]
+    pub reason_code: ::prost::alloc::string::String,
+    /// Optional user-safe state explanation. Never contains secret/config data.
+    #[prost(string, tag="11")]
+    pub reason: ::prost::alloc::string::String,
+    /// True when execution must pause for durable human approval.
+    #[prost(bool, tag="12")]
+    pub requires_approval: bool,
+    /// Governed execution path: "direct_read", "agentic", or "unavailable".
+    #[prost(string, tag="13")]
+    pub execution_mode: ::prost::alloc::string::String,
+    /// Coarse price disclosure: "bounded", "variable", or "unknown".
+    #[prost(string, tag="14")]
+    pub cost_class: ::prost::alloc::string::String,
+    /// RFC3339 timestamp for the runtime health attestation; empty means no
+    /// attestation and MUST derive to unavailable.
+    #[prost(string, tag="15")]
+    pub health_checked_at: ::prost::alloc::string::String,
 }
 /// EvaluatePolicy — check whether a tool invocation is allowed.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -434,15 +458,19 @@ pub struct EvaluatePolicyRequest {
     /// Run requesting invocation.
     #[prost(string, tag="2")]
     pub run_id: ::prost::alloc::string::String,
-    /// Agent making the request.
+    /// Caller-supplied agent label for audit/context. This field is not a trusted
+    /// agent identity and cannot currently authorize agent-scoped evaluation.
     #[prost(string, tag="3")]
     pub agent_id: ::prost::alloc::string::String,
     /// Tenant context.
     #[prost(string, tag="4")]
     pub org_id: ::prost::alloc::string::String,
-    /// Effective scope at invocation time. Must match one of the capability's
-    /// EnabledForScopes entries. Canonical values: "run", "thread", "workspace",
-    /// "user", "org", "global". Empty = backwards-compatible (scope check skipped).
+    /// Effective scope at invocation time. Currently authorized values are
+    /// "global" and "org"; org derives its concrete value from the verified
+    /// tenant and requires a durable grant when the resolver is configured.
+    /// "agent", "run", "thread", "workspace", and "user" are reserved but
+    /// rejected until trusted identity/resource bindings are carried or resolved
+    /// by this contract. Empty, reserved, and unknown values fail closed.
     #[prost(string, tag="5")]
     pub scope: ::prost::alloc::string::String,
 }
@@ -873,6 +901,20 @@ pub struct CancelRunResponse {
     #[prost(bool, tag="1")]
     pub cancelled: bool,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveRunOwnerRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub user_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveRunOwnerResponse {
+    #[prost(bool, tag="1")]
+    pub authorized: bool,
+}
 /// RunDetail — full run metadata.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RunDetail {
@@ -922,2034 +964,6 @@ pub struct RunDetail {
     /// Arbitrary metadata.
     #[prost(message, optional, tag="16")]
     pub metadata: ::core::option::Option<::prost_types::Struct>,
-}
-/// RunAgentRequest — drive one agent run from goal to terminal answer.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RunAgentRequest {
-    /// Run to drive (created by session-core StartRun).
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// Thread the run belongs to (assistant answer is appended here).
-    #[prost(string, tag="2")]
-    pub thread_id: ::prost::alloc::string::String,
-    /// User goal / prompt for this turn.
-    #[prost(string, tag="3")]
-    pub goal: ::prost::alloc::string::String,
-    /// Tenant identifier.
-    #[prost(string, tag="4")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Acting user identifier.
-    #[prost(string, tag="5")]
-    pub user_id: ::prost::alloc::string::String,
-    /// Requested model (empty / "velion-*" lets inference-core's intent layer
-    /// resolve a concrete model).
-    #[prost(string, tag="6")]
-    pub model: ::prost::alloc::string::String,
-    /// Run mode hint: "execute", etc.
-    #[prost(string, tag="7")]
-    pub mode: ::prost::alloc::string::String,
-    /// Maximum agent rounds (reserved for the multi-tool loop; the MVP no-tool
-    /// slice executes a single round).
-    #[prost(uint32, tag="8")]
-    pub max_rounds: u32,
-    /// Zero-Data-Retention flag for this run. When true, the driver threads it
-    /// into every inference round and onto each tool step's GDPR audit detail so
-    /// no run content is retained durably. Sourced from the chat request's `zdr`
-    /// flag (model-gateway), OR'd with any org-level ZDR default.
-    #[prost(bool, tag="9")]
-    pub zdr: bool,
-}
-/// RunAgentResponse — terminal outcome of a driven agent run.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RunAgentResponse {
-    /// Terminal status: "completed" or "failed".
-    #[prost(string, tag="1")]
-    pub status: ::prost::alloc::string::String,
-    /// The persisted assistant answer (or graceful error sentence on failure).
-    #[prost(string, tag="2")]
-    pub final_output: ::prost::alloc::string::String,
-    /// Number of agent rounds actually executed.
-    #[prost(uint32, tag="3")]
-    pub rounds_executed: u32,
-}
-/// ExecuteStepRequest — request to execute one step in the agent loop.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecuteStepRequest {
-    /// Run this step belongs to.
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// Step identifier (ULID).
-    #[prost(string, tag="2")]
-    pub step_id: ::prost::alloc::string::String,
-    /// Tool to invoke (empty for reasoning-only steps).
-    #[prost(string, tag="3")]
-    pub tool_name: ::prost::alloc::string::String,
-    /// Tool input as JSON string.
-    #[prost(string, tag="4")]
-    pub tool_input: ::prost::alloc::string::String,
-    /// Permission mode: "auto", "ask", "deny".
-    #[prost(string, tag="5")]
-    pub permission_mode: ::prost::alloc::string::String,
-    /// Hook context as JSON string (hooks evaluated before execution).
-    #[prost(string, tag="6")]
-    pub hook_context: ::prost::alloc::string::String,
-    /// Tenant identifier.
-    #[prost(string, tag="7")]
-    pub org_id: ::prost::alloc::string::String,
-}
-/// ExecuteStepResponse — result of a single step execution.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecuteStepResponse {
-    /// Step identifier echoed back.
-    #[prost(string, tag="1")]
-    pub step_id: ::prost::alloc::string::String,
-    /// Step status: "completed", "failed", "permission_denied", "awaiting_approval".
-    #[prost(string, tag="2")]
-    pub status: ::prost::alloc::string::String,
-    /// Tool output (populated on success).
-    #[prost(string, tag="3")]
-    pub output: ::prost::alloc::string::String,
-    /// Error message (populated on failure).
-    #[prost(string, tag="4")]
-    pub error: ::prost::alloc::string::String,
-    /// Whether this step triggered a compaction.
-    #[prost(bool, tag="5")]
-    pub compaction_triggered: bool,
-}
-/// ResumeRunRequest — resume a paused or checkpointed run.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ResumeRunRequest {
-    /// Run to resume.
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// Optional checkpoint to resume from (empty = latest).
-    #[prost(string, tag="2")]
-    pub checkpoint_id: ::prost::alloc::string::String,
-    /// Tenant identifier.
-    #[prost(string, tag="3")]
-    pub org_id: ::prost::alloc::string::String,
-}
-/// ResumeRunResponse — acknowledgement that the run has been resumed.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ResumeRunResponse {
-    /// True if the run was successfully resumed.
-    #[prost(bool, tag="1")]
-    pub resumed: bool,
-    /// Current step index after resume.
-    #[prost(uint32, tag="2")]
-    pub step_index: u32,
-}
-/// State machine: queued -> running -> (succeeded | failed | cancelled).
-/// `succeeded` requires a non-empty fine_tuned_model + deployment_name.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct FinetuneJob {
-    #[prost(string, tag="1")]
-    pub job_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub agent_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub base_model: ::prost::alloc::string::String,
-    /// Provider artefacts.
-    ///
-    /// empty until upload completes
-    #[prost(string, tag="5")]
-    pub azure_file_id: ::prost::alloc::string::String,
-    /// empty until provider responds
-    #[prost(string, tag="6")]
-    pub azure_job_id: ::prost::alloc::string::String,
-    /// empty until status=succeeded
-    #[prost(string, tag="7")]
-    pub fine_tuned_model: ::prost::alloc::string::String,
-    /// empty until deployment provisioned
-    #[prost(string, tag="8")]
-    pub deployment_name: ::prost::alloc::string::String,
-    /// Lifecycle.
-    ///
-    /// queued | running | succeeded | failed | cancelled
-    #[prost(string, tag="9")]
-    pub status: ::prost::alloc::string::String,
-    #[prost(string, tag="10")]
-    pub error_message: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="11")]
-    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(message, optional, tag="12")]
-    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(message, optional, tag="13")]
-    pub completed_at: ::core::option::Option<::prost_types::Timestamp>,
-    /// Job inputs / accounting.
-    ///
-    /// raw JSON; empty = provider defaults
-    #[prost(string, tag="14")]
-    pub hyperparameters_json: ::prost::alloc::string::String,
-    #[prost(int32, tag="15")]
-    pub training_example_count: i32,
-    #[prost(double, tag="16")]
-    pub estimated_cost_usd: f64,
-    #[prost(double, tag="17")]
-    pub actual_cost_usd: f64,
-    /// user_id from JWT claims
-    #[prost(string, tag="18")]
-    pub created_by: ::prost::alloc::string::String,
-    /// Hosting SKU tier of the deployment. `developer` ($0/hr, auto-deletes in
-    /// 24h) on auto-deploy; `production` (paid Standard hosting) after an explicit
-    /// operator promote. Defaults to `developer`.
-    ///
-    /// developer | production
-    #[prost(string, tag="19")]
-    pub deployment_tier: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CreateFinetuneJobRequest {
-    /// Caller supplies the job_id (ULID). The gateway generates it before
-    /// calling the provider so the row can be persisted before the provider
-    /// call returns — protects against orphan provider jobs on session-core
-    /// restart.
-    #[prost(string, tag="1")]
-    pub job_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub agent_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub base_model: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub azure_file_id: ::prost::alloc::string::String,
-    #[prost(string, tag="6")]
-    pub azure_job_id: ::prost::alloc::string::String,
-    #[prost(string, tag="7")]
-    pub hyperparameters_json: ::prost::alloc::string::String,
-    #[prost(int32, tag="8")]
-    pub training_example_count: i32,
-    #[prost(double, tag="9")]
-    pub estimated_cost_usd: f64,
-    #[prost(string, tag="10")]
-    pub created_by: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetFinetuneJobRequest {
-    #[prost(string, tag="1")]
-    pub job_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListFinetuneJobsRequest {
-    #[prost(string, tag="1")]
-    pub org_id: ::prost::alloc::string::String,
-    /// optional; empty = all jobs for org
-    #[prost(string, tag="2")]
-    pub agent_id: ::prost::alloc::string::String,
-    /// default 50, max 200
-    #[prost(int32, tag="3")]
-    pub limit: i32,
-    #[prost(int32, tag="4")]
-    pub offset: i32,
-    /// optional filter
-    #[prost(string, tag="5")]
-    pub status: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListFinetuneJobsResponse {
-    #[prost(message, repeated, tag="1")]
-    pub jobs: ::prost::alloc::vec::Vec<FinetuneJob>,
-    #[prost(int32, tag="2")]
-    pub total: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetOrgMonthlySpendRequest {
-    #[prost(string, tag="1")]
-    pub org_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct GetOrgMonthlySpendResponse {
-    /// Sum, in USD, of in-flight estimated_cost_usd + terminal actual_cost_usd
-    /// for the calling org in the current calendar month (UTC).
-    #[prost(double, tag="1")]
-    pub total_usd: f64,
-    /// Distinct count of jobs contributing to the sum — helpful for UI surfacing
-    /// ("3 jobs this month, $42 of $50 budget used").
-    #[prost(int32, tag="2")]
-    pub job_count: i32,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListActiveFinetuneJobsRequest {
-    /// Soft cap on the number of rows returned per poll. The handler clamps to
-    /// a server-side maximum (default 500) to bound work per tick. 0 = use default.
-    #[prost(int32, tag="1")]
-    pub limit: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListActiveFinetuneJobsResponse {
-    #[prost(message, repeated, tag="1")]
-    pub jobs: ::prost::alloc::vec::Vec<FinetuneJob>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct UpdateFinetuneJobStatusRequest {
-    #[prost(string, tag="1")]
-    pub job_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub status: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub error_message: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub fine_tuned_model: ::prost::alloc::string::String,
-    #[prost(string, tag="6")]
-    pub deployment_name: ::prost::alloc::string::String,
-    #[prost(double, tag="7")]
-    pub actual_cost_usd: f64,
-    /// When true the server stamps completed_at = now() and persists. Set on
-    /// any terminal state (succeeded/failed/cancelled).
-    #[prost(bool, tag="8")]
-    pub set_completed: bool,
-    /// New deployment tier (developer | production). Empty = leave unchanged.
-    /// The promote route sets this alongside deployment_name when an operator
-    /// provisions a paid production deployment.
-    #[prost(string, tag="9")]
-    pub deployment_tier: ::prost::alloc::string::String,
-}
-/// InvokeRequest — normalized inference request entering the gateway.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct InvokeRequest {
-    /// Client-supplied request identifier for tracing.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Tenant identifier (extracted from auth token).
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Session key for routing continuity.
-    #[prost(string, tag="3")]
-    pub session_key: ::prost::alloc::string::String,
-    /// Thread to append this interaction to (optional — gateway creates if empty).
-    #[prost(string, tag="4")]
-    pub thread_id: ::prost::alloc::string::String,
-    /// The user prompt content.
-    #[prost(string, tag="5")]
-    pub content: ::prost::alloc::string::String,
-    /// Model hint (optional — routing may override).
-    #[prost(string, tag="6")]
-    pub model: ::prost::alloc::string::String,
-    /// Provider hint (optional).
-    #[prost(string, tag="7")]
-    pub provider: ::prost::alloc::string::String,
-    /// Maximum tokens to generate.
-    #[prost(int32, tag="8")]
-    pub max_tokens: i32,
-    /// Sampling temperature.
-    #[prost(float, tag="9")]
-    pub temperature: f32,
-    /// Whether to stream the response.
-    #[prost(bool, tag="10")]
-    pub stream: bool,
-    /// Arbitrary metadata passed through to downstream services.
-    #[prost(message, optional, tag="11")]
-    pub metadata: ::core::option::Option<::prost_types::Struct>,
-    /// Optional JSON Schema for structured output conformance.
-    /// Forwarded to inference-core as-is; the model provider enforces conformance.
-    #[prost(string, tag="12")]
-    pub structured_output_schema: ::prost::alloc::string::String,
-    /// Zero Data Retention mode. When true, no durable artifacts or events are stored.
-    #[prost(bool, tag="13")]
-    pub zdr: bool,
-    /// Maximum cost in USD for this request. Gateway checks against cost-core before forwarding.
-    #[prost(double, tag="14")]
-    pub max_cost_usd: f64,
-    /// Maximum total tokens (input + output) budget for this request.
-    #[prost(int32, tag="15")]
-    pub max_tokens_budget: i32,
-    // ===== Chat-parity additive fields (docs/chat-parity-audit.md §4) =====
-
-    /// Multimodal content parts. When non-empty, supersedes `content` (which
-    /// stays for the plain-text path) so a turn can mix text + images + files.
-    #[prost(message, repeated, tag="16")]
-    pub content_parts: ::prost::alloc::vec::Vec<ContentPart>,
-    /// Tool / function schemas the model may call this turn.
-    #[prost(message, repeated, tag="17")]
-    pub tools: ::prost::alloc::vec::Vec<ToolSpec>,
-    /// Attachment references (uploaded files/images) for grounding.
-    #[prost(message, repeated, tag="18")]
-    pub attachments: ::prost::alloc::vec::Vec<AttachmentRef>,
-    /// Opt-in SSE event families the client understands (e.g. "reasoning",
-    /// "tools", "citations", "artifacts", "steps", "usage"). EMPTY = the plain
-    /// chat stream (connected/delta/done/error only) — protects profile:"chat".
-    #[prost(string, repeated, tag="19")]
-    pub features: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// Idempotency key for safe regenerate / retry (defaults to request_id).
-    #[prost(string, tag="20")]
-    pub idempotency_key: ::prost::alloc::string::String,
-    /// Parent message id for edit-and-resubmit / branch (thread fork).
-    #[prost(string, tag="21")]
-    pub parent_message_id: ::prost::alloc::string::String,
-}
-/// ContentPart — one piece of a multimodal turn (chat-parity §9 vision).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ContentPart {
-    /// "text" | "image" | "file".
-    #[prost(string, tag="1")]
-    pub r#type: ::prost::alloc::string::String,
-    /// Text content (type=text).
-    #[prost(string, tag="2")]
-    pub text: ::prost::alloc::string::String,
-    /// Image/file URL or data ref (type=image|file).
-    #[prost(string, tag="3")]
-    pub url: ::prost::alloc::string::String,
-    /// MIME type (type=image|file).
-    #[prost(string, tag="4")]
-    pub mime: ::prost::alloc::string::String,
-}
-/// ToolSpec — a callable tool/function the model may invoke (chat-parity §12).
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ToolSpec {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub description: ::prost::alloc::string::String,
-    /// JSON Schema for the tool's arguments.
-    #[prost(message, optional, tag="3")]
-    pub json_schema: ::core::option::Option<::prost_types::Struct>,
-}
-/// AttachmentRef — an uploaded asset referenced by a turn (chat-parity §8 RAG).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AttachmentRef {
-    #[prost(string, tag="1")]
-    pub id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub mime: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub url: ::prost::alloc::string::String,
-    #[prost(int64, tag="5")]
-    pub size: i64,
-}
-/// SourceTrace records the provenance of a piece of generated content.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SourceTrace {
-    /// Identifier for the source document or artifact.
-    #[prost(string, tag="1")]
-    pub source_id: ::prost::alloc::string::String,
-    /// Human-readable title or label.
-    #[prost(string, tag="2")]
-    pub title: ::prost::alloc::string::String,
-    /// URI or path to the original source.
-    #[prost(string, tag="3")]
-    pub uri: ::prost::alloc::string::String,
-    /// Relevance score (0.0–1.0) indicating how strongly this source contributed.
-    #[prost(float, tag="4")]
-    pub relevance: f32,
-    /// The specific excerpt used from the source.
-    #[prost(string, tag="5")]
-    pub excerpt: ::prost::alloc::string::String,
-}
-/// InvokeResponse — complete response from a unary invoke.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct InvokeResponse {
-    /// Echoed request identifier.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Generated content.
-    #[prost(string, tag="2")]
-    pub content: ::prost::alloc::string::String,
-    /// Model that actually served the request.
-    #[prost(string, tag="3")]
-    pub model_used: ::prost::alloc::string::String,
-    /// Why generation stopped.
-    #[prost(string, tag="4")]
-    pub stop_reason: ::prost::alloc::string::String,
-    /// Token counts for usage tracking.
-    #[prost(int32, tag="5")]
-    pub input_tokens: i32,
-    #[prost(int32, tag="6")]
-    pub output_tokens: i32,
-    /// Source provenance traces for the generated content.
-    #[prost(message, repeated, tag="7")]
-    pub sources: ::prost::alloc::vec::Vec<SourceTrace>,
-}
-/// InvokeChunk — a single chunk in a streaming response.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct InvokeChunk {
-    /// Echoed request identifier.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Incremental content delta.
-    #[prost(string, tag="2")]
-    pub delta: ::prost::alloc::string::String,
-    /// True when this is the final chunk.
-    #[prost(bool, tag="3")]
-    pub done: bool,
-    /// Model that served the request (populated on final chunk).
-    #[prost(string, tag="4")]
-    pub model_used: ::prost::alloc::string::String,
-    /// Token counts (populated on final chunk).
-    #[prost(int32, tag="5")]
-    pub input_tokens: i32,
-    #[prost(int32, tag="6")]
-    pub output_tokens: i32,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct HealthRequest {
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct HealthResponse {
-    /// "ok" when the service is healthy.
-    #[prost(string, tag="1")]
-    pub status: ::prost::alloc::string::String,
-}
-/// RenderHints — browser-driver options forwarded to Quarry's
-/// ScrapeRequest.render. Ignored by static / TLS-profile fetches.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RenderHints {
-    /// CSS selector to block on after navigation. The browser driver
-    /// calls wait_for(selector, timeout_ms) between goto and content.
-    #[prost(string, tag="1")]
-    pub wait_for_selector: ::prost::alloc::string::String,
-    /// Timeout for wait_for_selector in milliseconds. 0 → driver default
-    /// (currently 5000 ms in quarry-runtime).
-    #[prost(int32, tag="2")]
-    pub wait_for_timeout_ms: i32,
-}
-/// FetchRequest — pure web fetch through Quarry. The gateway does not
-/// touch the LLM path for this RPC.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FetchRequest {
-    /// Tracing identifier — echoed in the response.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Tenant identifier (extracted from auth token). Forwarded to
-    /// Quarry as X-Quarry-Org for sticky proxy-pool routing.
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// URL to fetch. Must start with http:// or <https://.> Validated by
-    /// Quarry's SSRF + scheme guards before any network call.
-    #[prost(string, tag="3")]
-    pub url: ::prost::alloc::string::String,
-    /// Optional render hints (browser driver only).
-    #[prost(message, optional, tag="4")]
-    pub render: ::core::option::Option<RenderHints>,
-    /// Opt in to HTTP/3 transport at Quarry. Forward-compatible — when
-    /// the edge is built without --features http3 the flag is ignored.
-    #[prost(bool, tag="5")]
-    pub prefer_http3: bool,
-}
-/// FetchResponse — projected ScrapeResult from Quarry.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FetchResponse {
-    /// Echoed request identifier.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Originally-requested URL.
-    #[prost(string, tag="2")]
-    pub url: ::prost::alloc::string::String,
-    /// URL after redirect chain (Quarry follows up to 5 hops).
-    #[prost(string, tag="3")]
-    pub final_url: ::prost::alloc::string::String,
-    /// HTTP status from the upstream.
-    #[prost(int32, tag="4")]
-    pub status: i32,
-    /// Content-Type header (best-effort).
-    #[prost(string, tag="5")]
-    pub content_type: ::prost::alloc::string::String,
-    /// <title> when parseable.
-    #[prost(string, tag="6")]
-    pub title: ::prost::alloc::string::String,
-    /// Markdown projection of the page body. Empty for binary content.
-    #[prost(string, tag="7")]
-    pub markdown: ::prost::alloc::string::String,
-    /// Plain-text projection. May equal markdown for some content
-    /// types — both fields are populated so callers can pick.
-    #[prost(string, tag="8")]
-    pub text: ::prost::alloc::string::String,
-    /// Stable content fingerprint (blake3:xxxx) for change detection.
-    #[prost(string, tag="9")]
-    pub fingerprint: ::prost::alloc::string::String,
-    /// Detected page language (ISO-639-1). May be empty.
-    #[prost(string, tag="10")]
-    pub language: ::prost::alloc::string::String,
-}
-/// ExtractStructuredRequest — fetch + LLM-coerced typed output.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExtractStructuredRequest {
-    /// Tracing identifier — echoed in the response.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Tenant identifier. Honoured for both Quarry fetch and inference
-    /// calls (separate auth contexts but same tenant boundary).
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// URL to extract from. Same validation as FetchRequest.url.
-    #[prost(string, tag="3")]
-    pub url: ::prost::alloc::string::String,
-    /// JSON Schema describing the target shape as a string. The gateway
-    /// forwards it verbatim as InferRequest.structured_output_schema so
-    /// the model provider (OpenAI / Anthropic / etc.) does the actual
-    /// coercion.
-    #[prost(string, tag="4")]
-    pub schema_json: ::prost::alloc::string::String,
-    /// Optional natural-language guidance prepended to the LLM prompt
-    /// ("prefer the price in NOK", "extract only the primary author").
-    #[prost(string, tag="5")]
-    pub instructions: ::prost::alloc::string::String,
-    /// Optional render hints for the fetch step.
-    #[prost(message, optional, tag="6")]
-    pub render: ::core::option::Option<RenderHints>,
-    /// Model + provider hints forwarded to inference-core. Empty → use
-    /// service defaults.
-    #[prost(string, tag="7")]
-    pub model: ::prost::alloc::string::String,
-    #[prost(string, tag="8")]
-    pub provider: ::prost::alloc::string::String,
-    /// Zero Data Retention — no durable artifact or event on either the
-    /// fetch path (Quarry zdr) or the inference path.
-    #[prost(bool, tag="9")]
-    pub zdr: bool,
-}
-/// ExtractStructuredResponse — LLM output coerced to the requested schema.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExtractStructuredResponse {
-    /// Echoed request identifier.
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Originally-requested URL.
-    #[prost(string, tag="2")]
-    pub url: ::prost::alloc::string::String,
-    /// URL after redirect chain.
-    #[prost(string, tag="3")]
-    pub final_url: ::prost::alloc::string::String,
-    /// Page title (carried through from the fetch step).
-    #[prost(string, tag="4")]
-    pub title: ::prost::alloc::string::String,
-    /// Content fingerprint (carried through). Use this to invalidate
-    /// downstream caches when the source page changes.
-    #[prost(string, tag="5")]
-    pub source_fingerprint: ::prost::alloc::string::String,
-    /// The structured output as a JSON string. Always a JSON object
-    /// matching `schema_json`. Empty when the model failed to produce
-    /// valid output — see `error_message`.
-    #[prost(string, tag="6")]
-    pub extracted_json: ::prost::alloc::string::String,
-    /// Model that served the inference request.
-    #[prost(string, tag="7")]
-    pub model_used: ::prost::alloc::string::String,
-    /// Token counts for usage tracking.
-    #[prost(int32, tag="8")]
-    pub input_tokens: i32,
-    #[prost(int32, tag="9")]
-    pub output_tokens: i32,
-    /// Non-empty when extraction failed at the LLM step (fetch succeeded
-    /// but the model could not satisfy the schema). Gateway returns
-    /// gRPC OK in this case so callers see a structured failure rather
-    /// than a generic Internal error.
-    #[prost(string, tag="10")]
-    pub error_message: ::prost::alloc::string::String,
-}
-// =============================================================
-// Wave 10a — trivial tool RPCs
-// =============================================================
-
-/// WebSearchRequest — proxy to Quarry's /v1/search SmartSearchRouter.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WebSearchRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub query: ::prost::alloc::string::String,
-    /// Maximum results to return. Capped at 50 server-side.
-    #[prost(int32, tag="4")]
-    pub limit: i32,
-    /// Optional intent classifier hint: "factual" | "research" |
-    /// "navigational". Empty → auto-classify via rule-based router.
-    #[prost(string, tag="5")]
-    pub intent: ::prost::alloc::string::String,
-}
-/// WebSearchResult — single result row.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WebSearchResult {
-    #[prost(string, tag="1")]
-    pub url: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub title: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub snippet: ::prost::alloc::string::String,
-    /// Provider that served this result (e.g. "tavily", "tantivy_local").
-    #[prost(string, tag="4")]
-    pub source: ::prost::alloc::string::String,
-    /// Relevance score 0.0–1.0 (provider-specific).
-    #[prost(float, tag="5")]
-    pub score: f32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WebSearchResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub results: ::prost::alloc::vec::Vec<WebSearchResult>,
-    /// Total result count before pagination (some providers report this).
-    #[prost(int32, tag="3")]
-    pub total: i32,
-}
-/// SleepRequest — pause execution for `duration_ms` milliseconds.
-/// Capped at 60 s server-side to prevent loops abusing it.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SleepRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(int32, tag="3")]
-    pub duration_ms: i32,
-    /// Optional reason for tracing/observability.
-    #[prost(string, tag="4")]
-    pub reason: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SleepResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub actual_ms: i32,
-}
-/// RemoteTriggerRequest — outbound HTTP webhook fired with SSRF guard
-/// via the Quarry edge. Body bytes are passed verbatim; Content-Type
-/// must be set explicitly.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RemoteTriggerRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub url: ::prost::alloc::string::String,
-    /// GET / POST / PUT / DELETE. Default POST.
-    #[prost(string, tag="4")]
-    pub method: ::prost::alloc::string::String,
-    /// application/json | application/x-www-form-urlencoded | text/plain.
-    #[prost(string, tag="5")]
-    pub content_type: ::prost::alloc::string::String,
-    /// Body bytes (may be empty for GET / DELETE).
-    #[prost(bytes="vec", tag="6")]
-    pub body: ::prost::alloc::vec::Vec<u8>,
-    /// Per-call timeout in ms. Capped at 30 s.
-    #[prost(int32, tag="7")]
-    pub timeout_ms: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RemoteTriggerResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub status_code: i32,
-    #[prost(bytes="vec", tag="3")]
-    pub body: ::prost::alloc::vec::Vec<u8>,
-    /// Best-effort Content-Type from the upstream response.
-    #[prost(string, tag="4")]
-    pub content_type: ::prost::alloc::string::String,
-    /// Echo of the final URL after redirects.
-    #[prost(string, tag="5")]
-    pub final_url: ::prost::alloc::string::String,
-}
-/// SendMessageRequest — publish a JSON-encoded payload to a NATS
-/// subject. Subject prefixes are enforced server-side: only
-/// `agents.>`, `org.>`, and `notify.>` are allowed for now.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendMessageRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub subject: ::prost::alloc::string::String,
-    /// JSON-encoded payload. Empty string → no payload.
-    #[prost(string, tag="4")]
-    pub payload_json: ::prost::alloc::string::String,
-    /// Idempotency key — repeat publishes with the same key within
-    /// 5 minutes are dropped.
-    #[prost(string, tag="5")]
-    pub idempotency_key: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SendMessageResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Set to false if the publish was dropped because the idempotency
-    /// key was already seen; true otherwise.
-    #[prost(bool, tag="2")]
-    pub published: bool,
-}
-/// SyntheticOutputRequest — echo a fixed payload back. Test/dev only.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SyntheticOutputRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Caller-supplied payload to echo back verbatim.
-    #[prost(string, tag="3")]
-    pub payload: ::prost::alloc::string::String,
-    /// Optional simulated delay in ms before responding.
-    #[prost(int32, tag="4")]
-    pub delay_ms: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SyntheticOutputResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub echoed_payload: ::prost::alloc::string::String,
-}
-// =============================================================
-// Wave 10b — plan mode + team coordination
-// =============================================================
-
-/// EnterPlanModeRequest — flag a run as "in plan mode" so write-class
-/// tools route through the approval queue instead of executing
-/// directly. The flag is keyed on (run_id, session_id) so two runs
-/// inside the same session can be in different modes.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EnterPlanModeRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub session_id: ::prost::alloc::string::String,
-    /// Human-readable rationale. Surfaced in approval UI and in events.
-    #[prost(string, tag="5")]
-    pub rationale: ::prost::alloc::string::String,
-    /// Optional TTL in seconds. 0 → 3600 (1 hour) default. Plan mode
-    /// auto-clears after the TTL so an abandoned run doesn't gate every
-    /// future call from the same session forever.
-    #[prost(int32, tag="6")]
-    pub ttl_seconds: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EnterPlanModeResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Unix epoch seconds when the plan mode flag will auto-expire.
-    #[prost(int64, tag="2")]
-    pub expires_at_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExitPlanModeRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub session_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExitPlanModeResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// True when there was an active plan-mode flag that we cleared;
-    /// false when no flag was set (idempotent — not an error).
-    #[prost(bool, tag="2")]
-    pub was_active: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct IsPlanModeRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub run_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct IsPlanModeResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(bool, tag="2")]
-    pub in_plan_mode: bool,
-    #[prost(string, tag="3")]
-    pub rationale: ::prost::alloc::string::String,
-    #[prost(int64, tag="4")]
-    pub expires_at_unix: i64,
-}
-/// TeamCreateRequest — coordinator-mode worker task creation. The
-/// resulting worker_id is opaque (ULID); pass it to TeamDelete /
-/// TeamList to manage the worker's lifecycle.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TeamCreateRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// What the worker should accomplish. Required.
-    #[prost(string, tag="3")]
-    pub objective: ::prost::alloc::string::String,
-    /// Caller-supplied context (assumptions, prior decisions). Optional.
-    #[prost(string, tag="4")]
-    pub context: ::prost::alloc::string::String,
-    /// How to determine success. Optional but recommended.
-    #[prost(string, tag="5")]
-    pub success_criteria: ::prost::alloc::string::String,
-}
-/// TeamWorker — current state of a single worker task. Returned by
-/// TeamCreate, TeamDelete, and TeamList so callers don't need a
-/// separate "get" RPC.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TeamWorker {
-    #[prost(string, tag="1")]
-    pub worker_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub objective: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub context: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub success_criteria: ::prost::alloc::string::String,
-    /// "pending" | "running" | "completed" | "failed".
-    #[prost(string, tag="6")]
-    pub state: ::prost::alloc::string::String,
-    /// Set when state transitions to completed/failed.
-    #[prost(string, tag="7")]
-    pub summary: ::prost::alloc::string::String,
-    /// Error message when state == "failed".
-    #[prost(string, tag="8")]
-    pub error: ::prost::alloc::string::String,
-    /// Unix epoch seconds.
-    #[prost(int64, tag="9")]
-    pub created_at_unix: i64,
-    #[prost(int64, tag="10")]
-    pub updated_at_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TeamCreateResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub worker: ::core::option::Option<TeamWorker>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TeamDeleteRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub worker_id: ::prost::alloc::string::String,
-    /// "completed" | "failed".
-    #[prost(string, tag="4")]
-    pub outcome: ::prost::alloc::string::String,
-    /// Summary or error message.
-    #[prost(string, tag="5")]
-    pub summary: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TeamDeleteResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub worker: ::core::option::Option<TeamWorker>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TeamListRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Optional state filter ("pending" | "running" | "completed" | "failed").
-    /// Empty → return all states for the org.
-    #[prost(string, tag="3")]
-    pub state_filter: ::prost::alloc::string::String,
-    /// Max results. 0 → 100 default, capped at 500.
-    #[prost(int32, tag="4")]
-    pub limit: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TeamListResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub workers: ::prost::alloc::vec::Vec<TeamWorker>,
-    /// Total count for the org (pre-limit). UIs use this for pagination.
-    #[prost(int32, tag="3")]
-    pub total: i32,
-}
-// =============================================================
-// Wave 10c — LSP
-// =============================================================
-
-/// LspQueryRequest — single LSP query against a bridge. The four
-/// operations match v2's tool surface 1:1.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LspQueryRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// "diagnostics" | "hover" | "definition" | "completion".
-    #[prost(string, tag="3")]
-    pub operation: ::prost::alloc::string::String,
-    /// Absolute path on the bridge's filesystem (the bridge resolves
-    /// relative paths against its workspace root if needed).
-    #[prost(string, tag="4")]
-    pub file_path: ::prost::alloc::string::String,
-    /// 0-based line/column. Ignored for `diagnostics`.
-    #[prost(int32, tag="5")]
-    pub line: i32,
-    #[prost(int32, tag="6")]
-    pub column: i32,
-}
-/// LspDiagnostic — one error/warning entry from the language server.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LspDiagnostic {
-    /// "error" | "warning" | "info" | "hint".
-    #[prost(string, tag="1")]
-    pub severity: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub line: i32,
-    #[prost(int32, tag="3")]
-    pub column: i32,
-    #[prost(int32, tag="4")]
-    pub end_line: i32,
-    #[prost(int32, tag="5")]
-    pub end_column: i32,
-    #[prost(string, tag="6")]
-    pub message: ::prost::alloc::string::String,
-    /// LSP source code (e.g. "ts(2304)", "E0382").
-    #[prost(string, tag="7")]
-    pub code: ::prost::alloc::string::String,
-}
-/// LspLocation — for go-to-definition results.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LspLocation {
-    #[prost(string, tag="1")]
-    pub file_path: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub line: i32,
-    #[prost(int32, tag="3")]
-    pub column: i32,
-}
-/// LspCompletion — single completion candidate.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct LspCompletion {
-    #[prost(string, tag="1")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub detail: ::prost::alloc::string::String,
-    /// 1=Text, 2=Method, 3=Function, ... (LSP CompletionItemKind).
-    #[prost(int32, tag="3")]
-    pub kind: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct LspQueryResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Populated when operation == "diagnostics".
-    #[prost(message, repeated, tag="2")]
-    pub diagnostics: ::prost::alloc::vec::Vec<LspDiagnostic>,
-    /// Populated when operation == "hover". May be empty.
-    #[prost(string, tag="3")]
-    pub hover_text: ::prost::alloc::string::String,
-    /// Populated when operation == "definition".
-    #[prost(message, repeated, tag="4")]
-    pub locations: ::prost::alloc::vec::Vec<LspLocation>,
-    /// Populated when operation == "completion". Capped at 20 by the
-    /// bridge to keep responses sane.
-    #[prost(message, repeated, tag="5")]
-    pub completions: ::prost::alloc::vec::Vec<LspCompletion>,
-    /// Non-empty when the bridge returned a structured error (file not
-    /// found, language not supported, etc.). Gateway returns gRPC OK so
-    /// callers can branch.
-    #[prost(string, tag="6")]
-    pub error_message: ::prost::alloc::string::String,
-}
-// =============================================================
-// Wave 10e — approvals
-// =============================================================
-
-/// GatewayApproval — single approval record. Returned by RequestApproval,
-/// ApproveApproval, DenyApproval, ListPendingApprovals so callers
-/// don't need a separate "get" RPC. Distinct from the orchestration-
-/// level `Approval` (orchestration.proto) which models durable plan-
-/// step approvals; this one is a lighter in-memory tool-gate record.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GatewayApproval {
-    #[prost(string, tag="1")]
-    pub approval_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub session_id: ::prost::alloc::string::String,
-    /// Identifier of the agent action that needs approval.
-    #[prost(string, tag="5")]
-    pub action_id: ::prost::alloc::string::String,
-    /// Human-readable action name (e.g. "bash", "file_write").
-    #[prost(string, tag="6")]
-    pub action_name: ::prost::alloc::string::String,
-    /// "tool_execution" | "plan_execution" | "destructive_action" | "custom".
-    #[prost(string, tag="7")]
-    pub kind: ::prost::alloc::string::String,
-    /// Why approval is needed (LLM rationale).
-    #[prost(string, tag="8")]
-    pub reason: ::prost::alloc::string::String,
-    /// "pending" | "approved" | "denied" | "expired".
-    #[prost(string, tag="9")]
-    pub status: ::prost::alloc::string::String,
-    /// Set when status leaves pending. Identifier of the human/system
-    /// that resolved the approval.
-    #[prost(string, tag="10")]
-    pub decided_by: ::prost::alloc::string::String,
-    /// Optional resolver comment.
-    #[prost(string, tag="11")]
-    pub comment: ::prost::alloc::string::String,
-    #[prost(int64, tag="12")]
-    pub created_at_unix: i64,
-    #[prost(int64, tag="13")]
-    pub resolved_at_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RequestApprovalRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub session_id: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub action_id: ::prost::alloc::string::String,
-    #[prost(string, tag="6")]
-    pub action_name: ::prost::alloc::string::String,
-    #[prost(string, tag="7")]
-    pub kind: ::prost::alloc::string::String,
-    #[prost(string, tag="8")]
-    pub reason: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RequestApprovalResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub approval: ::core::option::Option<GatewayApproval>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ApproveApprovalRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub approval_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub decided_by: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub comment: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ApproveApprovalResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub approval: ::core::option::Option<GatewayApproval>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DenyApprovalRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub approval_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub decided_by: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub comment: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct DenyApprovalResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub approval: ::core::option::Option<GatewayApproval>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListPendingApprovalsRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Optional — when set, only approvals for this run are returned.
-    /// Empty → all pending approvals for the org.
-    #[prost(string, tag="3")]
-    pub run_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListPendingApprovalsResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub approvals: ::prost::alloc::vec::Vec<GatewayApproval>,
-}
-// =============================================================
-// Wave 10f — trajectory recording
-// =============================================================
-
-/// TrajectoryAction — one entry in the executed-actions sequence.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TrajectoryAction {
-    /// Tool / function name that was invoked.
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// "completed" | "failed" | "skipped".
-    #[prost(string, tag="2")]
-    pub status: ::prost::alloc::string::String,
-    /// Optional JSON-encoded inputs (caller-supplied, may be truncated).
-    #[prost(string, tag="3")]
-    pub input_json: ::prost::alloc::string::String,
-    /// Optional JSON-encoded outputs (provider-returned, may be truncated).
-    #[prost(string, tag="4")]
-    pub output_json: ::prost::alloc::string::String,
-    #[prost(int32, tag="5")]
-    pub duration_ms: i32,
-}
-/// Trajectory — full record of a single run for RL training + analytics.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Trajectory {
-    #[prost(string, tag="1")]
-    pub trajectory_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub run_id: ::prost::alloc::string::String,
-    /// Normalised task pattern (v2 derived this from the goal via
-    /// `patterns.normalize_goal`). Optional — empty is acceptable.
-    #[prost(string, tag="4")]
-    pub task_pattern: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub goal: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="6")]
-    pub planned_actions: ::prost::alloc::vec::Vec<TrajectoryAction>,
-    #[prost(message, repeated, tag="7")]
-    pub executed_actions: ::prost::alloc::vec::Vec<TrajectoryAction>,
-    /// "success" | "partial" | "failure".
-    #[prost(string, tag="8")]
-    pub outcome: ::prost::alloc::string::String,
-    #[prost(float, tag="9")]
-    pub duration_sec: f32,
-    #[prost(string, repeated, tag="10")]
-    pub skills_used: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// USD cost rolled up from cost-core. 0 when not provided.
-    #[prost(double, tag="11")]
-    pub cost_usd: f64,
-    /// Model that served the bulk of the run, if any.
-    #[prost(string, tag="12")]
-    pub model: ::prost::alloc::string::String,
-    #[prost(int64, tag="13")]
-    pub created_at_unix: i64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RecordTrajectoryRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub trajectory: ::core::option::Option<Trajectory>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RecordTrajectoryResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// Assigned ULID — useful for cross-referencing in exports.
-    #[prost(string, tag="2")]
-    pub trajectory_id: ::prost::alloc::string::String,
-    /// True when also published to NATS (best-effort; non-fatal failures
-    /// are reported as false but the in-memory record is still stored).
-    #[prost(bool, tag="3")]
-    pub published: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListTrajectoriesRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Optional outcome filter: "success" | "partial" | "failure". Empty
-    /// → all outcomes.
-    #[prost(string, tag="3")]
-    pub outcome_filter: ::prost::alloc::string::String,
-    /// Optional pattern filter (exact match). Empty → all patterns.
-    #[prost(string, tag="4")]
-    pub pattern_filter: ::prost::alloc::string::String,
-    /// Only trajectories created at or after this unix second. 0 → all.
-    #[prost(int64, tag="5")]
-    pub since_unix: i64,
-    /// Max results. 0 → 100, capped at 500.
-    #[prost(int32, tag="6")]
-    pub limit: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListTrajectoriesResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub trajectories: ::prost::alloc::vec::Vec<Trajectory>,
-    #[prost(int32, tag="3")]
-    pub total: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExportTrajectoriesRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Lower bound (inclusive). 0 → no lower bound.
-    #[prost(int64, tag="3")]
-    pub since_unix: i64,
-    /// Upper bound (exclusive). 0 → now.
-    #[prost(int64, tag="4")]
-    pub until_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExportTrajectoriesResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// JSONL bytes, one trajectory per line. Decoded UTF-8 (not gzip).
-    /// Compress at the caller if the response is large; the gateway
-    /// refuses to serialise more than 10 MB inline.
-    #[prost(bytes="vec", tag="2")]
-    pub jsonl: ::prost::alloc::vec::Vec<u8>,
-    #[prost(int32, tag="3")]
-    pub count: i32,
-}
-// =============================================================
-// Wave 10d — skills loader
-// =============================================================
-
-/// Skill — one entry loaded from the skills directory. v2's auto-loader
-/// scanned `SKILL.md` and `<name>.skill.md` files; v1 keeps the same
-/// shape so callers ported from v2 see no behavioural change.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Skill {
-    #[prost(string, tag="1")]
-    pub id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    /// Markdown body shown to the agent as system context when the skill
-    /// is selected.
-    #[prost(string, tag="3")]
-    pub body: ::prost::alloc::string::String,
-    /// Tags / keywords used by MatchSkills for relevance scoring.
-    #[prost(string, repeated, tag="4")]
-    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// Source path on the bridge's filesystem. Empty for bundled skills.
-    #[prost(string, tag="5")]
-    pub source_path: ::prost::alloc::string::String,
-    /// Relevance threshold (0.0-1.0) for auto-injection.
-    #[prost(float, tag="6")]
-    pub min_score: f32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListSkillsRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListSkillsResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub skills: ::prost::alloc::vec::Vec<Skill>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetSkillRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub skill_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetSkillResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub skill: ::core::option::Option<Skill>,
-}
-/// MatchSkillsRequest — find skills relevant to a query. v2 used a
-/// keyword + threshold match; v1 keeps the same simple scoring.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MatchSkillsRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub query: ::prost::alloc::string::String,
-    /// Max results. 0 → 5, capped at 20.
-    #[prost(int32, tag="4")]
-    pub limit: i32,
-    /// Minimum score to include. 0 → use each skill's min_score.
-    #[prost(float, tag="5")]
-    pub min_score: f32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SkillMatch {
-    #[prost(message, optional, tag="1")]
-    pub skill: ::core::option::Option<Skill>,
-    #[prost(float, tag="2")]
-    pub score: f32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MatchSkillsResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub matches: ::prost::alloc::vec::Vec<SkillMatch>,
-}
-// =============================================================
-// Wave 10g — MCP server hosting
-// =============================================================
-
-/// McpServer — registered external MCP server endpoint. Once
-/// registered, its tools become callable via `ProxyMcpTool`.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct McpServer {
-    #[prost(string, tag="1")]
-    pub server_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    /// Transport URL — `<http://...`> for streamable HTTP, `stdio:///...`
-    /// for a local subprocess (path to executable + args).
-    #[prost(string, tag="3")]
-    pub url: ::prost::alloc::string::String,
-    /// "http" | "stdio" | "sse"
-    #[prost(string, tag="4")]
-    pub transport: ::prost::alloc::string::String,
-    /// Bearer / OAuth token when the server requires auth.
-    #[prost(string, tag="5")]
-    pub token: ::prost::alloc::string::String,
-    /// Optional list of tool name prefixes the server is allowed to
-    /// expose. Empty → all tools allowed.
-    #[prost(string, repeated, tag="6")]
-    pub tool_allowlist: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(bool, tag="7")]
-    pub enabled: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RegisterMcpServerRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="3")]
-    pub server: ::core::option::Option<McpServer>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RegisterMcpServerResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub server: ::core::option::Option<McpServer>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListMcpServersRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListMcpServersResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub servers: ::prost::alloc::vec::Vec<McpServer>,
-}
-/// ProxyMcpToolRequest — invoke a tool exposed by a registered MCP
-/// server. The gateway forwards the call and returns the result.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProxyMcpToolRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub server_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub tool_name: ::prost::alloc::string::String,
-    /// JSON-encoded tool input.
-    #[prost(string, tag="5")]
-    pub input_json: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ProxyMcpToolResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    /// JSON-encoded tool output (provider-shaped).
-    #[prost(string, tag="2")]
-    pub output_json: ::prost::alloc::string::String,
-    /// Non-empty when the proxy or remote server returned an error.
-    #[prost(string, tag="3")]
-    pub error_message: ::prost::alloc::string::String,
-}
-// =============================================================
-// Wave 10h — plugins
-// =============================================================
-
-/// Plugin — third-party extension registered against an org. Each
-/// plugin can expose tools, skills, or hook handlers depending on its
-/// manifest.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Plugin {
-    #[prost(string, tag="1")]
-    pub plugin_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub version: ::prost::alloc::string::String,
-    /// "tool" | "skill" | "hook" | "mcp_server" — informational only.
-    #[prost(string, tag="4")]
-    pub kind: ::prost::alloc::string::String,
-    /// Plugin manifest URL (JSON manifest the bridge fetches once).
-    #[prost(string, tag="5")]
-    pub manifest_url: ::prost::alloc::string::String,
-    #[prost(bool, tag="6")]
-    pub enabled: bool,
-    /// Last-known status string ("active", "stale", "missing").
-    #[prost(string, tag="7")]
-    pub status: ::prost::alloc::string::String,
-    #[prost(int64, tag="8")]
-    pub installed_at_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RegisterPluginRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="3")]
-    pub plugin: ::core::option::Option<Plugin>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RegisterPluginResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub plugin: ::core::option::Option<Plugin>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListPluginsRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Optional kind filter ("tool" | "skill" | "hook" | "mcp_server").
-    #[prost(string, tag="3")]
-    pub kind_filter: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListPluginsResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub plugins: ::prost::alloc::vec::Vec<Plugin>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetPluginEnabledRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub plugin_id: ::prost::alloc::string::String,
-    #[prost(bool, tag="4")]
-    pub enabled: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetPluginEnabledResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub plugin: ::core::option::Option<Plugin>,
-}
-// =============================================================
-// Wave 10i — commands + hooks + permissions + policy
-// =============================================================
-
-/// Command — slash-command surface. Each command resolves to either a
-/// builtin tool name (`tool_name` set) or a remote URL (`remote_url`
-/// set; rare). The bridge handles dispatch.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Command {
-    #[prost(string, tag="1")]
-    pub command_id: ::prost::alloc::string::String,
-    /// "/<name>" form, e.g. "/plan" or "/init".
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub description: ::prost::alloc::string::String,
-    /// Either-or: tool_name OR remote_url.
-    #[prost(string, tag="4")]
-    pub tool_name: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub remote_url: ::prost::alloc::string::String,
-    /// Default JSON-encoded payload merged into the tool input.
-    #[prost(string, tag="6")]
-    pub default_payload_json: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListCommandsRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListCommandsResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub commands: ::prost::alloc::vec::Vec<Command>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecuteCommandRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub command_name: ::prost::alloc::string::String,
-    /// JSON-encoded arg payload merged with the command's default_payload.
-    #[prost(string, tag="4")]
-    pub args_json: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecuteCommandResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub output_json: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub error_message: ::prost::alloc::string::String,
-}
-/// Hook — pre/post lifecycle handler for tool calls. Hooks are run by
-/// execution-core's middleware; the gateway holds the registry.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Hook {
-    #[prost(string, tag="1")]
-    pub hook_id: ::prost::alloc::string::String,
-    /// "pre_tool" | "post_tool" | "on_error" | "on_complete".
-    #[prost(string, tag="2")]
-    pub event: ::prost::alloc::string::String,
-    /// Tool name to scope to, or empty for all tools.
-    #[prost(string, tag="3")]
-    pub tool_scope: ::prost::alloc::string::String,
-    /// URL the bridge POSTs to with the hook payload.
-    #[prost(string, tag="4")]
-    pub callback_url: ::prost::alloc::string::String,
-    #[prost(bool, tag="5")]
-    pub enabled: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RegisterHookRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="3")]
-    pub hook: ::core::option::Option<Hook>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RegisterHookResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub hook: ::core::option::Option<Hook>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListHooksRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Optional event filter.
-    #[prost(string, tag="3")]
-    pub event_filter: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListHooksResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub hooks: ::prost::alloc::vec::Vec<Hook>,
-}
-/// Permissions — per-org tool ACL. By default all tools are allowed;
-/// explicit deny entries take precedence.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CheckPermissionRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub tool_name: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CheckPermissionResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(bool, tag="2")]
-    pub allowed: bool,
-    /// Non-empty when allowed=false; explains the policy decision.
-    #[prost(string, tag="3")]
-    pub reason: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetPermissionRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub tool_name: ::prost::alloc::string::String,
-    /// "allow" | "deny".
-    #[prost(string, tag="4")]
-    pub verdict: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub reason: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetPermissionResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-}
-/// Policy — per-org runtime guardrails. Operators tune via SetPolicy;
-/// the run-loop fetches via GetPolicy at session start.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OrgPolicy {
-    #[prost(string, tag="1")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Hard cap on USD spend per run.
-    #[prost(double, tag="2")]
-    pub max_cost_per_run_usd: f64,
-    /// Hard cap on total tokens per run.
-    #[prost(int32, tag="3")]
-    pub max_tokens_per_run: i32,
-    /// Comma-separated list of allowed models. Empty → all.
-    #[prost(string, tag="4")]
-    pub allowed_models: ::prost::alloc::string::String,
-    /// Comma-separated list of denied tool names. Empty → none denied.
-    #[prost(string, tag="5")]
-    pub denied_tools: ::prost::alloc::string::String,
-    /// Requests-per-minute cap for the org.
-    #[prost(int32, tag="6")]
-    pub rate_limit_rpm: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetPolicyRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetPolicyResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub policy: ::core::option::Option<OrgPolicy>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SetPolicyRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub policy: ::core::option::Option<OrgPolicy>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SetPolicyResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub policy: ::core::option::Option<OrgPolicy>,
-}
-// =============================================================
-// Wave 10j — messages + analytics + voice + tasks
-// =============================================================
-
-/// ThreadMessage — single entry in a thread. Persistence is by the
-/// existing session-core memory tables; the gateway routes here.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ThreadMessage {
-    #[prost(string, tag="1")]
-    pub message_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub thread_id: ::prost::alloc::string::String,
-    /// "user" | "assistant" | "system" | "tool"
-    #[prost(string, tag="3")]
-    pub role: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub content: ::prost::alloc::string::String,
-    #[prost(int64, tag="5")]
-    pub created_at_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AppendThreadMessageRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub thread_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub role: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub content: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AppendThreadMessageResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub message: ::core::option::Option<ThreadMessage>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListThreadMessagesRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub thread_id: ::prost::alloc::string::String,
-    /// 0 → 50, capped at 500
-    #[prost(int32, tag="4")]
-    pub limit: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListThreadMessagesResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub messages: ::prost::alloc::vec::Vec<ThreadMessage>,
-}
-/// Analytics — rollups over the gateway's in-memory counters. v2's
-/// app/analytics had per-org/per-tool counters; v1 keeps the same
-/// shape so dashboards port cleanly.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetAnalyticsRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Time window in seconds back from now. 0 → 86400 (24 h).
-    #[prost(int32, tag="3")]
-    pub window_secs: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ToolCallCount {
-    #[prost(string, tag="1")]
-    pub tool_name: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub count: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetAnalyticsResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub total_runs: i32,
-    #[prost(int32, tag="3")]
-    pub total_invocations: i32,
-    #[prost(double, tag="4")]
-    pub total_cost_usd: f64,
-    #[prost(int64, tag="5")]
-    pub total_input_tokens: i64,
-    #[prost(int64, tag="6")]
-    pub total_output_tokens: i64,
-    #[prost(message, repeated, tag="7")]
-    pub tool_calls: ::prost::alloc::vec::Vec<ToolCallCount>,
-}
-/// Voice — text-to-speech / speech-to-text passthroughs. Proxy to the
-/// inference-core speech provider.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TextToSpeechRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub text: ::prost::alloc::string::String,
-    /// Provider voice id (e.g. "alloy", "echo"). Empty → provider default.
-    #[prost(string, tag="4")]
-    pub voice: ::prost::alloc::string::String,
-    /// Output audio format ("mp3" | "wav" | "opus"). Empty → "mp3".
-    #[prost(string, tag="5")]
-    pub format: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TextToSpeechResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="2")]
-    pub audio: ::prost::alloc::vec::Vec<u8>,
-    #[prost(string, tag="3")]
-    pub format: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub error_message: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SpeechToTextRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="3")]
-    pub audio: ::prost::alloc::vec::Vec<u8>,
-    /// input audio format
-    #[prost(string, tag="4")]
-    pub format: ::prost::alloc::string::String,
-    /// Optional language hint (ISO-639-1). Empty → auto-detect.
-    #[prost(string, tag="5")]
-    pub language: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SpeechToTextResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub text: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub detected_language: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub error_message: ::prost::alloc::string::String,
-}
-/// Tasks — proxy to task-core. Gateway-level convenience so callers
-/// don't need a separate task-core client.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CreateTaskRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub description: ::prost::alloc::string::String,
-    /// Optional parent run id.
-    #[prost(string, tag="4")]
-    pub parent_run_id: ::prost::alloc::string::String,
-    /// Optional cron expression — when set, task-core schedules it.
-    #[prost(string, tag="5")]
-    pub cron: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TaskRecord {
-    #[prost(string, tag="1")]
-    pub task_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub description: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub status: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub parent_run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="6")]
-    pub cron: ::prost::alloc::string::String,
-    #[prost(int64, tag="7")]
-    pub created_at_unix: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CreateTaskResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub task: ::core::option::Option<TaskRecord>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListTasksRequest {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub org_id: ::prost::alloc::string::String,
-    /// Optional status filter.
-    #[prost(string, tag="3")]
-    pub status_filter: ::prost::alloc::string::String,
-    #[prost(int32, tag="4")]
-    pub limit: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListTasksResponse {
-    #[prost(string, tag="1")]
-    pub request_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub tasks: ::prost::alloc::vec::Vec<TaskRecord>,
-}
-// Canonical identifiers for the Model Plane.
-// All IDs use ULID format (26-character Crockford Base32).
-// Immutability: once created, an ID value MUST NOT change.
-// Single-writer: each resource type has exactly one owning service.
-
-/// AgentId — identifies an agent definition (capability-core owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AgentId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// ThreadId — identifies a conversation thread (session-core owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ThreadId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// SessionKey — groups threads within a user interaction session (session-core owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SessionKey {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// RunId — identifies a single agent run within a thread (session-core owns metadata, execution-core owns state).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RunId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// StepId — identifies one step within a run (execution-core owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct StepId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// CheckpointId — identifies a resumable snapshot of run state (session-core owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CheckpointId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// SandboxLeaseId — identifies an active sandbox lease (sandbox-manager owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SandboxLeaseId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
-}
-/// BrowserLeaseId — identifies an active browser grant (browser-broker owns).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct BrowserLeaseId {
-    /// ULID string, immutable after creation.
-    #[prost(string, tag="1")]
-    pub value: ::prost::alloc::string::String,
 }
 /// InferRequest — a single inference request to be routed to a provider.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -4016,6 +2030,2107 @@ pub struct StreamVideoGenerationContentResponse {
     #[prost(string, tag="7")]
     pub provider_used: ::prost::alloc::string::String,
 }
+/// RunAgentRequest — drive one agent run from goal to terminal answer.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunAgentRequest {
+    /// Run to drive (created by session-core StartRun).
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Thread the run belongs to (assistant answer is appended here).
+    #[prost(string, tag="2")]
+    pub thread_id: ::prost::alloc::string::String,
+    /// User goal / prompt for this turn.
+    #[prost(string, tag="3")]
+    pub goal: ::prost::alloc::string::String,
+    /// Tenant identifier.
+    #[prost(string, tag="4")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Acting user identifier.
+    #[prost(string, tag="5")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Requested model (empty / "velion-*" lets inference-core's intent layer
+    /// resolve a concrete model).
+    #[prost(string, tag="6")]
+    pub model: ::prost::alloc::string::String,
+    /// Run mode hint: "execute", etc.
+    #[prost(string, tag="7")]
+    pub mode: ::prost::alloc::string::String,
+    /// Maximum agent rounds (reserved for the multi-tool loop; the MVP no-tool
+    /// slice executes a single round).
+    #[prost(uint32, tag="8")]
+    pub max_rounds: u32,
+    /// Zero-Data-Retention flag for this run. When true, the driver threads it
+    /// into every inference round and onto each tool step's GDPR audit detail so
+    /// no run content is retained durably. Sourced from the chat request's `zdr`
+    /// flag (model-gateway), OR'd with any org-level ZDR default.
+    #[prost(bool, tag="9")]
+    pub zdr: bool,
+    /// Client-supplied tool definitions for this turn (chat-parity: the same
+    /// ToolSpec\[\] the inline chat loop accepts). Merged with execution-core's
+    /// built-in read/action tools and the org's registered MCP tools, then
+    /// offered to the model AND admitted into the purpose-lock allowlist. Every
+    /// client tool still executes through the SAME governed execute_step path
+    /// (permission gate + HITL), so forwarding them cannot bypass approval; a
+    /// client tool that resolves to no executor returns a graceful error the
+    /// ReAct loop feeds back. Empty → only the server-side set is offered.
+    #[prost(message, repeated, tag="10")]
+    pub tools: ::prost::alloc::vec::Vec<ToolDefinition>,
+}
+/// RunAgentResponse — terminal outcome of a driven agent run.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunAgentResponse {
+    /// Terminal status: "completed" or "failed".
+    #[prost(string, tag="1")]
+    pub status: ::prost::alloc::string::String,
+    /// The persisted assistant answer (or graceful error sentence on failure).
+    #[prost(string, tag="2")]
+    pub final_output: ::prost::alloc::string::String,
+    /// Number of agent rounds actually executed.
+    #[prost(uint32, tag="3")]
+    pub rounds_executed: u32,
+}
+/// ExecuteStepRequest — request to execute one step in the agent loop.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecuteStepRequest {
+    /// Run this step belongs to.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Step identifier (ULID).
+    #[prost(string, tag="2")]
+    pub step_id: ::prost::alloc::string::String,
+    /// Tool to invoke (empty for reasoning-only steps).
+    #[prost(string, tag="3")]
+    pub tool_name: ::prost::alloc::string::String,
+    /// Tool input as JSON string.
+    #[prost(string, tag="4")]
+    pub tool_input: ::prost::alloc::string::String,
+    /// Permission mode: "auto", "ask", "deny".
+    #[prost(string, tag="5")]
+    pub permission_mode: ::prost::alloc::string::String,
+    /// Hook context as JSON string (hooks evaluated before execution).
+    #[prost(string, tag="6")]
+    pub hook_context: ::prost::alloc::string::String,
+    /// Tenant identifier.
+    #[prost(string, tag="7")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Acting user identifier (viewer). Threaded into the step so knowledge-search
+    /// (and any other viewer-scoped tool) filters to the caller's visible set, not
+    /// the whole org. Empty = org-scoped only (legacy/unauthenticated primitive).
+    #[prost(string, tag="8")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Zero-Data-Retention posture. The executor must not create durable run,
+    /// step, audit-content, cache, or tool-output state when true.
+    #[prost(bool, tag="9")]
+    pub zdr: bool,
+}
+/// ExecuteStepResponse — result of a single step execution.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecuteStepResponse {
+    /// Step identifier echoed back.
+    #[prost(string, tag="1")]
+    pub step_id: ::prost::alloc::string::String,
+    /// Step status: "completed", "failed", "permission_denied", "awaiting_approval".
+    #[prost(string, tag="2")]
+    pub status: ::prost::alloc::string::String,
+    /// Tool output (populated on success).
+    #[prost(string, tag="3")]
+    pub output: ::prost::alloc::string::String,
+    /// Error message (populated on failure).
+    #[prost(string, tag="4")]
+    pub error: ::prost::alloc::string::String,
+    /// Whether this step triggered a compaction.
+    #[prost(bool, tag="5")]
+    pub compaction_triggered: bool,
+}
+/// ResumeRunRequest — resume a paused or checkpointed run.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResumeRunRequest {
+    /// Run to resume.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Optional checkpoint to resume from (empty = latest).
+    #[prost(string, tag="2")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    /// Tenant identifier.
+    #[prost(string, tag="3")]
+    pub org_id: ::prost::alloc::string::String,
+}
+/// ResumeRunResponse — acknowledgement that the run has been resumed.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResumeRunResponse {
+    /// True if the run was successfully resumed.
+    #[prost(bool, tag="1")]
+    pub resumed: bool,
+    /// Current step index after resume.
+    #[prost(uint32, tag="2")]
+    pub step_index: u32,
+}
+/// PauseRunRequest — pause an active run (Phase 2 B5).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PauseRunRequest {
+    /// Run to pause.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Tenant identifier.
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+/// PauseRunResponse — acknowledgement that the run has been paused.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PauseRunResponse {
+    /// True if the run was successfully paused.
+    #[prost(bool, tag="1")]
+    pub paused: bool,
+}
+/// State machine: queued -> running -> (succeeded | failed | cancelled).
+/// `succeeded` requires a non-empty fine_tuned_model + deployment_name.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FinetuneJob {
+    #[prost(string, tag="1")]
+    pub job_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub base_model: ::prost::alloc::string::String,
+    /// Provider artefacts.
+    ///
+    /// empty until upload completes
+    #[prost(string, tag="5")]
+    pub azure_file_id: ::prost::alloc::string::String,
+    /// empty until provider responds
+    #[prost(string, tag="6")]
+    pub azure_job_id: ::prost::alloc::string::String,
+    /// empty until status=succeeded
+    #[prost(string, tag="7")]
+    pub fine_tuned_model: ::prost::alloc::string::String,
+    /// empty until deployment provisioned
+    #[prost(string, tag="8")]
+    pub deployment_name: ::prost::alloc::string::String,
+    /// Lifecycle.
+    ///
+    /// queued | running | succeeded | failed | cancelled
+    #[prost(string, tag="9")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag="10")]
+    pub error_message: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="11")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="12")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="13")]
+    pub completed_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Job inputs / accounting.
+    ///
+    /// raw JSON; empty = provider defaults
+    #[prost(string, tag="14")]
+    pub hyperparameters_json: ::prost::alloc::string::String,
+    #[prost(int32, tag="15")]
+    pub training_example_count: i32,
+    #[prost(double, tag="16")]
+    pub estimated_cost_usd: f64,
+    #[prost(double, tag="17")]
+    pub actual_cost_usd: f64,
+    /// user_id from JWT claims
+    #[prost(string, tag="18")]
+    pub created_by: ::prost::alloc::string::String,
+    /// Hosting SKU tier of the deployment. `developer` ($0/hr, auto-deletes in
+    /// 24h) on auto-deploy; `production` (paid Standard hosting) after an explicit
+    /// operator promote. Defaults to `developer`.
+    ///
+    /// developer | production
+    #[prost(string, tag="19")]
+    pub deployment_tier: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateFinetuneJobRequest {
+    /// Caller supplies the job_id (ULID). The gateway generates it before
+    /// calling the provider so the row can be persisted before the provider
+    /// call returns — protects against orphan provider jobs on session-core
+    /// restart.
+    #[prost(string, tag="1")]
+    pub job_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub base_model: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub azure_file_id: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub azure_job_id: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub hyperparameters_json: ::prost::alloc::string::String,
+    #[prost(int32, tag="8")]
+    pub training_example_count: i32,
+    #[prost(double, tag="9")]
+    pub estimated_cost_usd: f64,
+    #[prost(string, tag="10")]
+    pub created_by: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetFinetuneJobRequest {
+    #[prost(string, tag="1")]
+    pub job_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListFinetuneJobsRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// optional; empty = all jobs for org
+    #[prost(string, tag="2")]
+    pub agent_id: ::prost::alloc::string::String,
+    /// default 50, max 200
+    #[prost(int32, tag="3")]
+    pub limit: i32,
+    #[prost(int32, tag="4")]
+    pub offset: i32,
+    /// optional filter
+    #[prost(string, tag="5")]
+    pub status: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListFinetuneJobsResponse {
+    #[prost(message, repeated, tag="1")]
+    pub jobs: ::prost::alloc::vec::Vec<FinetuneJob>,
+    #[prost(int32, tag="2")]
+    pub total: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetOrgMonthlySpendRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct GetOrgMonthlySpendResponse {
+    /// Sum, in USD, of in-flight estimated_cost_usd + terminal actual_cost_usd
+    /// for the calling org in the current calendar month (UTC).
+    #[prost(double, tag="1")]
+    pub total_usd: f64,
+    /// Distinct count of jobs contributing to the sum — helpful for UI surfacing
+    /// ("3 jobs this month, $42 of $50 budget used").
+    #[prost(int32, tag="2")]
+    pub job_count: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListActiveFinetuneJobsRequest {
+    /// Soft cap on the number of rows returned per poll. The handler clamps to
+    /// a server-side maximum (default 500) to bound work per tick. 0 = use default.
+    #[prost(int32, tag="1")]
+    pub limit: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListActiveFinetuneJobsResponse {
+    #[prost(message, repeated, tag="1")]
+    pub jobs: ::prost::alloc::vec::Vec<FinetuneJob>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateFinetuneJobStatusRequest {
+    #[prost(string, tag="1")]
+    pub job_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub error_message: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub fine_tuned_model: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub deployment_name: ::prost::alloc::string::String,
+    #[prost(double, tag="7")]
+    pub actual_cost_usd: f64,
+    /// When true the server stamps completed_at = now() and persists. Set on
+    /// any terminal state (succeeded/failed/cancelled).
+    #[prost(bool, tag="8")]
+    pub set_completed: bool,
+    /// New deployment tier (developer | production). Empty = leave unchanged.
+    /// The promote route sets this alongside deployment_name when an operator
+    /// provisions a paid production deployment.
+    #[prost(string, tag="9")]
+    pub deployment_tier: ::prost::alloc::string::String,
+}
+/// InvokeRequest — normalized inference request entering the gateway.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InvokeRequest {
+    /// Client-supplied request identifier for tracing.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Tenant identifier (extracted from auth token).
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Session key for routing continuity.
+    #[prost(string, tag="3")]
+    pub session_key: ::prost::alloc::string::String,
+    /// Thread to append this interaction to (optional — gateway creates if empty).
+    #[prost(string, tag="4")]
+    pub thread_id: ::prost::alloc::string::String,
+    /// The user prompt content.
+    #[prost(string, tag="5")]
+    pub content: ::prost::alloc::string::String,
+    /// Model hint (optional — routing may override).
+    #[prost(string, tag="6")]
+    pub model: ::prost::alloc::string::String,
+    /// Provider hint (optional).
+    #[prost(string, tag="7")]
+    pub provider: ::prost::alloc::string::String,
+    /// Maximum tokens to generate.
+    #[prost(int32, tag="8")]
+    pub max_tokens: i32,
+    /// Sampling temperature.
+    #[prost(float, tag="9")]
+    pub temperature: f32,
+    /// Whether to stream the response.
+    #[prost(bool, tag="10")]
+    pub stream: bool,
+    /// Arbitrary metadata passed through to downstream services.
+    #[prost(message, optional, tag="11")]
+    pub metadata: ::core::option::Option<::prost_types::Struct>,
+    /// Optional JSON Schema for structured output conformance.
+    /// Forwarded to inference-core as-is; the model provider enforces conformance.
+    #[prost(string, tag="12")]
+    pub structured_output_schema: ::prost::alloc::string::String,
+    /// Zero Data Retention mode. When true, no durable artifacts or events are stored.
+    #[prost(bool, tag="13")]
+    pub zdr: bool,
+    /// Maximum cost in USD for this request. Gateway checks against cost-core before forwarding.
+    #[prost(double, tag="14")]
+    pub max_cost_usd: f64,
+    /// Maximum total tokens (input + output) budget for this request.
+    #[prost(int32, tag="15")]
+    pub max_tokens_budget: i32,
+    // ===== Chat-parity additive fields (docs/chat-parity-audit.md §4) =====
+
+    /// Multimodal content parts. When non-empty, supersedes `content` (which
+    /// stays for the plain-text path) so a turn can mix text + images + files.
+    #[prost(message, repeated, tag="16")]
+    pub content_parts: ::prost::alloc::vec::Vec<ContentPart>,
+    /// Tool / function schemas the model may call this turn.
+    #[prost(message, repeated, tag="17")]
+    pub tools: ::prost::alloc::vec::Vec<ToolSpec>,
+    /// Attachment references (uploaded files/images) for grounding.
+    #[prost(message, repeated, tag="18")]
+    pub attachments: ::prost::alloc::vec::Vec<AttachmentRef>,
+    /// Opt-in SSE event families the client understands (e.g. "reasoning",
+    /// "tools", "citations", "artifacts", "steps", "usage"). EMPTY = the plain
+    /// chat stream (connected/delta/done/error only) — protects profile:"chat".
+    #[prost(string, repeated, tag="19")]
+    pub features: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Idempotency key for safe regenerate / retry (defaults to request_id).
+    #[prost(string, tag="20")]
+    pub idempotency_key: ::prost::alloc::string::String,
+    /// Parent message id for edit-and-resubmit / branch (thread fork).
+    #[prost(string, tag="21")]
+    pub parent_message_id: ::prost::alloc::string::String,
+}
+/// ContentPart — one piece of a multimodal turn (chat-parity §9 vision).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContentPart {
+    /// "text" | "image" | "file".
+    #[prost(string, tag="1")]
+    pub r#type: ::prost::alloc::string::String,
+    /// Text content (type=text).
+    #[prost(string, tag="2")]
+    pub text: ::prost::alloc::string::String,
+    /// Image/file URL or data ref (type=image|file).
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// MIME type (type=image|file).
+    #[prost(string, tag="4")]
+    pub mime: ::prost::alloc::string::String,
+}
+/// ToolSpec — a callable tool/function the model may invoke (chat-parity §12).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ToolSpec {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub description: ::prost::alloc::string::String,
+    /// JSON Schema for the tool's arguments.
+    #[prost(message, optional, tag="3")]
+    pub json_schema: ::core::option::Option<::prost_types::Struct>,
+}
+/// AttachmentRef — an uploaded asset referenced by a turn (chat-parity §8 RAG).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AttachmentRef {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub mime: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub url: ::prost::alloc::string::String,
+    #[prost(int64, tag="5")]
+    pub size: i64,
+}
+/// SourceTrace records the provenance of a piece of generated content.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SourceTrace {
+    /// Identifier for the source document or artifact.
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+    /// Human-readable title or label.
+    #[prost(string, tag="2")]
+    pub title: ::prost::alloc::string::String,
+    /// URI or path to the original source.
+    #[prost(string, tag="3")]
+    pub uri: ::prost::alloc::string::String,
+    /// Relevance score (0.0–1.0) indicating how strongly this source contributed.
+    #[prost(float, tag="4")]
+    pub relevance: f32,
+    /// The specific excerpt used from the source.
+    #[prost(string, tag="5")]
+    pub excerpt: ::prost::alloc::string::String,
+}
+/// InvokeResponse — complete response from a unary invoke.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InvokeResponse {
+    /// Echoed request identifier.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Generated content.
+    #[prost(string, tag="2")]
+    pub content: ::prost::alloc::string::String,
+    /// Model that actually served the request.
+    #[prost(string, tag="3")]
+    pub model_used: ::prost::alloc::string::String,
+    /// Why generation stopped.
+    #[prost(string, tag="4")]
+    pub stop_reason: ::prost::alloc::string::String,
+    /// Token counts for usage tracking.
+    #[prost(int32, tag="5")]
+    pub input_tokens: i32,
+    #[prost(int32, tag="6")]
+    pub output_tokens: i32,
+    /// Source provenance traces for the generated content.
+    #[prost(message, repeated, tag="7")]
+    pub sources: ::prost::alloc::vec::Vec<SourceTrace>,
+}
+/// InvokeChunk — a single chunk in a streaming response.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InvokeChunk {
+    /// Echoed request identifier.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Incremental content delta.
+    #[prost(string, tag="2")]
+    pub delta: ::prost::alloc::string::String,
+    /// True when this is the final chunk.
+    #[prost(bool, tag="3")]
+    pub done: bool,
+    /// Model that served the request (populated on final chunk).
+    #[prost(string, tag="4")]
+    pub model_used: ::prost::alloc::string::String,
+    /// Token counts (populated on final chunk).
+    #[prost(int32, tag="5")]
+    pub input_tokens: i32,
+    #[prost(int32, tag="6")]
+    pub output_tokens: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HealthRequest {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HealthResponse {
+    /// "ok" when the service is healthy.
+    #[prost(string, tag="1")]
+    pub status: ::prost::alloc::string::String,
+}
+/// RenderHints — browser-driver options forwarded to Quarry's
+/// ScrapeRequest.render. Ignored by static / TLS-profile fetches.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RenderHints {
+    /// CSS selector to block on after navigation. The browser driver
+    /// calls wait_for(selector, timeout_ms) between goto and content.
+    #[prost(string, tag="1")]
+    pub wait_for_selector: ::prost::alloc::string::String,
+    /// Timeout for wait_for_selector in milliseconds. 0 → driver default
+    /// (currently 5000 ms in quarry-runtime).
+    #[prost(int32, tag="2")]
+    pub wait_for_timeout_ms: i32,
+}
+/// FetchRequest — pure web fetch through Quarry. The gateway does not
+/// touch the LLM path for this RPC.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FetchRequest {
+    /// Tracing identifier — echoed in the response.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Tenant identifier (extracted from auth token). Forwarded to
+    /// Quarry as X-Quarry-Org for sticky proxy-pool routing.
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// URL to fetch. Must start with http:// or <https://.> Validated by
+    /// Quarry's SSRF + scheme guards before any network call.
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// Optional render hints (browser driver only).
+    #[prost(message, optional, tag="4")]
+    pub render: ::core::option::Option<RenderHints>,
+    /// Opt in to HTTP/3 transport at Quarry. Forward-compatible — when
+    /// the edge is built without --features http3 the flag is ignored.
+    #[prost(bool, tag="5")]
+    pub prefer_http3: bool,
+    /// Zero Data Retention — disables Quarry cache/event persistence.
+    #[prost(bool, tag="6")]
+    pub zdr: bool,
+}
+/// FetchResponse — projected ScrapeResult from Quarry.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FetchResponse {
+    /// Echoed request identifier.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Originally-requested URL.
+    #[prost(string, tag="2")]
+    pub url: ::prost::alloc::string::String,
+    /// URL after redirect chain (Quarry follows up to 5 hops).
+    #[prost(string, tag="3")]
+    pub final_url: ::prost::alloc::string::String,
+    /// HTTP status from the upstream.
+    #[prost(int32, tag="4")]
+    pub status: i32,
+    /// Content-Type header (best-effort).
+    #[prost(string, tag="5")]
+    pub content_type: ::prost::alloc::string::String,
+    /// <title> when parseable.
+    #[prost(string, tag="6")]
+    pub title: ::prost::alloc::string::String,
+    /// Markdown projection of the page body. Empty for binary content.
+    #[prost(string, tag="7")]
+    pub markdown: ::prost::alloc::string::String,
+    /// Plain-text projection. May equal markdown for some content
+    /// types — both fields are populated so callers can pick.
+    #[prost(string, tag="8")]
+    pub text: ::prost::alloc::string::String,
+    /// Stable content fingerprint (blake3:xxxx) for change detection.
+    #[prost(string, tag="9")]
+    pub fingerprint: ::prost::alloc::string::String,
+    /// Detected page language (ISO-639-1). May be empty.
+    #[prost(string, tag="10")]
+    pub language: ::prost::alloc::string::String,
+}
+/// ExtractStructuredRequest — fetch + LLM-coerced typed output.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExtractStructuredRequest {
+    /// Tracing identifier — echoed in the response.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Tenant identifier. Honoured for both Quarry fetch and inference
+    /// calls (separate auth contexts but same tenant boundary).
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// URL to extract from. Same validation as FetchRequest.url.
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// JSON Schema describing the target shape as a string. The gateway
+    /// forwards it verbatim as InferRequest.structured_output_schema so
+    /// the model provider (OpenAI / Anthropic / etc.) does the actual
+    /// coercion.
+    #[prost(string, tag="4")]
+    pub schema_json: ::prost::alloc::string::String,
+    /// Optional natural-language guidance prepended to the LLM prompt
+    /// ("prefer the price in NOK", "extract only the primary author").
+    #[prost(string, tag="5")]
+    pub instructions: ::prost::alloc::string::String,
+    /// Optional render hints for the fetch step.
+    #[prost(message, optional, tag="6")]
+    pub render: ::core::option::Option<RenderHints>,
+    /// Model + provider hints forwarded to inference-core. Empty → use
+    /// service defaults.
+    #[prost(string, tag="7")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag="8")]
+    pub provider: ::prost::alloc::string::String,
+    /// Zero Data Retention — no durable artifact or event on either the
+    /// fetch path (Quarry zdr) or the inference path.
+    #[prost(bool, tag="9")]
+    pub zdr: bool,
+}
+/// ExtractStructuredResponse — LLM output coerced to the requested schema.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExtractStructuredResponse {
+    /// Echoed request identifier.
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Originally-requested URL.
+    #[prost(string, tag="2")]
+    pub url: ::prost::alloc::string::String,
+    /// URL after redirect chain.
+    #[prost(string, tag="3")]
+    pub final_url: ::prost::alloc::string::String,
+    /// Page title (carried through from the fetch step).
+    #[prost(string, tag="4")]
+    pub title: ::prost::alloc::string::String,
+    /// Content fingerprint (carried through). Use this to invalidate
+    /// downstream caches when the source page changes.
+    #[prost(string, tag="5")]
+    pub source_fingerprint: ::prost::alloc::string::String,
+    /// The structured output as a JSON string. Always a JSON object
+    /// matching `schema_json`. Empty when the model failed to produce
+    /// valid output — see `error_message`.
+    #[prost(string, tag="6")]
+    pub extracted_json: ::prost::alloc::string::String,
+    /// Model that served the inference request.
+    #[prost(string, tag="7")]
+    pub model_used: ::prost::alloc::string::String,
+    /// Token counts for usage tracking.
+    #[prost(int32, tag="8")]
+    pub input_tokens: i32,
+    #[prost(int32, tag="9")]
+    pub output_tokens: i32,
+    /// Non-empty when extraction failed at the LLM step (fetch succeeded
+    /// but the model could not satisfy the schema). Gateway returns
+    /// gRPC OK in this case so callers see a structured failure rather
+    /// than a generic Internal error.
+    #[prost(string, tag="10")]
+    pub error_message: ::prost::alloc::string::String,
+}
+// =============================================================
+// Wave 10a — trivial tool RPCs
+// =============================================================
+
+/// WebSearchRequest — proxy to Quarry's /v1/search SmartSearchRouter.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WebSearchRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub query: ::prost::alloc::string::String,
+    /// Maximum results to return. Capped at 50 server-side.
+    #[prost(int32, tag="4")]
+    pub limit: i32,
+    /// Optional intent classifier hint: "factual" | "research" |
+    /// "navigational". Empty → auto-classify via rule-based router.
+    #[prost(string, tag="5")]
+    pub intent: ::prost::alloc::string::String,
+    /// Zero Data Retention — disables Quarry cache/event persistence.
+    #[prost(bool, tag="6")]
+    pub zdr: bool,
+}
+/// WebSearchResult — single result row.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WebSearchResult {
+    #[prost(string, tag="1")]
+    pub url: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub title: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub snippet: ::prost::alloc::string::String,
+    /// Provider that served this result (e.g. "tavily", "tantivy_local").
+    #[prost(string, tag="4")]
+    pub source: ::prost::alloc::string::String,
+    /// Relevance score 0.0–1.0 (provider-specific).
+    #[prost(float, tag="5")]
+    pub score: f32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WebSearchResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub results: ::prost::alloc::vec::Vec<WebSearchResult>,
+    /// Total result count before pagination (some providers report this).
+    #[prost(int32, tag="3")]
+    pub total: i32,
+}
+/// SleepRequest — pause execution for `duration_ms` milliseconds.
+/// Capped at 60 s server-side to prevent loops abusing it.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SleepRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="3")]
+    pub duration_ms: i32,
+    /// Optional reason for tracing/observability.
+    #[prost(string, tag="4")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SleepResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub actual_ms: i32,
+}
+/// RemoteTriggerRequest — outbound HTTP webhook fired with SSRF guard
+/// via the Quarry edge. Body bytes are passed verbatim; Content-Type
+/// must be set explicitly.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoteTriggerRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// GET / POST / PUT / DELETE. Default POST.
+    #[prost(string, tag="4")]
+    pub method: ::prost::alloc::string::String,
+    /// application/json | application/x-www-form-urlencoded | text/plain.
+    #[prost(string, tag="5")]
+    pub content_type: ::prost::alloc::string::String,
+    /// Body bytes (may be empty for GET / DELETE).
+    #[prost(bytes="vec", tag="6")]
+    pub body: ::prost::alloc::vec::Vec<u8>,
+    /// Per-call timeout in ms. Capped at 30 s.
+    #[prost(int32, tag="7")]
+    pub timeout_ms: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoteTriggerResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub status_code: i32,
+    #[prost(bytes="vec", tag="3")]
+    pub body: ::prost::alloc::vec::Vec<u8>,
+    /// Best-effort Content-Type from the upstream response.
+    #[prost(string, tag="4")]
+    pub content_type: ::prost::alloc::string::String,
+    /// Echo of the final URL after redirects.
+    #[prost(string, tag="5")]
+    pub final_url: ::prost::alloc::string::String,
+}
+/// SendMessageRequest — publish a JSON-encoded payload to a NATS
+/// subject. Subject prefixes are enforced server-side: only
+/// `agents.>`, `org.>`, and `notify.>` are allowed for now.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SendMessageRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub subject: ::prost::alloc::string::String,
+    /// JSON-encoded payload. Empty string → no payload.
+    #[prost(string, tag="4")]
+    pub payload_json: ::prost::alloc::string::String,
+    /// Idempotency key — repeat publishes with the same key within
+    /// 5 minutes are dropped.
+    #[prost(string, tag="5")]
+    pub idempotency_key: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SendMessageResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Set to false if the publish was dropped because the idempotency
+    /// key was already seen; true otherwise.
+    #[prost(bool, tag="2")]
+    pub published: bool,
+}
+/// SyntheticOutputRequest — echo a fixed payload back. Test/dev only.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SyntheticOutputRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Caller-supplied payload to echo back verbatim.
+    #[prost(string, tag="3")]
+    pub payload: ::prost::alloc::string::String,
+    /// Optional simulated delay in ms before responding.
+    #[prost(int32, tag="4")]
+    pub delay_ms: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SyntheticOutputResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub echoed_payload: ::prost::alloc::string::String,
+}
+// =============================================================
+// Wave 10b — plan mode + team coordination
+// =============================================================
+
+/// EnterPlanModeRequest — flag a run as "in plan mode" so write-class
+/// tools route through the approval queue instead of executing
+/// directly. The flag is keyed on (run_id, session_id) so two runs
+/// inside the same session can be in different modes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EnterPlanModeRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub session_id: ::prost::alloc::string::String,
+    /// Human-readable rationale. Surfaced in approval UI and in events.
+    #[prost(string, tag="5")]
+    pub rationale: ::prost::alloc::string::String,
+    /// Optional TTL in seconds. 0 → 3600 (1 hour) default. Plan mode
+    /// auto-clears after the TTL so an abandoned run doesn't gate every
+    /// future call from the same session forever.
+    #[prost(int32, tag="6")]
+    pub ttl_seconds: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EnterPlanModeResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Unix epoch seconds when the plan mode flag will auto-expire.
+    #[prost(int64, tag="2")]
+    pub expires_at_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExitPlanModeRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub session_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExitPlanModeResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// True when there was an active plan-mode flag that we cleared;
+    /// false when no flag was set (idempotent — not an error).
+    #[prost(bool, tag="2")]
+    pub was_active: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IsPlanModeRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Tenant identifier from the verified caller. Added wire-compatibly so the
+    /// formerly global run-id lookup can be authorized and tenant-scoped.
+    #[prost(string, tag="3")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IsPlanModeResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub in_plan_mode: bool,
+    #[prost(string, tag="3")]
+    pub rationale: ::prost::alloc::string::String,
+    #[prost(int64, tag="4")]
+    pub expires_at_unix: i64,
+}
+/// TeamCreateRequest — coordinator-mode worker task creation. The
+/// resulting worker_id is opaque (ULID); pass it to TeamDelete /
+/// TeamList to manage the worker's lifecycle.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TeamCreateRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// What the worker should accomplish. Required.
+    #[prost(string, tag="3")]
+    pub objective: ::prost::alloc::string::String,
+    /// Caller-supplied context (assumptions, prior decisions). Optional.
+    #[prost(string, tag="4")]
+    pub context: ::prost::alloc::string::String,
+    /// How to determine success. Optional but recommended.
+    #[prost(string, tag="5")]
+    pub success_criteria: ::prost::alloc::string::String,
+}
+/// TeamWorker — current state of a single worker task. Returned by
+/// TeamCreate, TeamDelete, and TeamList so callers don't need a
+/// separate "get" RPC.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TeamWorker {
+    #[prost(string, tag="1")]
+    pub worker_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub objective: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub context: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub success_criteria: ::prost::alloc::string::String,
+    /// "pending" | "running" | "completed" | "failed".
+    #[prost(string, tag="6")]
+    pub state: ::prost::alloc::string::String,
+    /// Set when state transitions to completed/failed.
+    #[prost(string, tag="7")]
+    pub summary: ::prost::alloc::string::String,
+    /// Error message when state == "failed".
+    #[prost(string, tag="8")]
+    pub error: ::prost::alloc::string::String,
+    /// Unix epoch seconds.
+    #[prost(int64, tag="9")]
+    pub created_at_unix: i64,
+    #[prost(int64, tag="10")]
+    pub updated_at_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TeamCreateResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub worker: ::core::option::Option<TeamWorker>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TeamDeleteRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub worker_id: ::prost::alloc::string::String,
+    /// "completed" | "failed".
+    #[prost(string, tag="4")]
+    pub outcome: ::prost::alloc::string::String,
+    /// Summary or error message.
+    #[prost(string, tag="5")]
+    pub summary: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TeamDeleteResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub worker: ::core::option::Option<TeamWorker>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TeamListRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Optional state filter ("pending" | "running" | "completed" | "failed").
+    /// Empty → return all states for the org.
+    #[prost(string, tag="3")]
+    pub state_filter: ::prost::alloc::string::String,
+    /// Max results. 0 → 100 default, capped at 500.
+    #[prost(int32, tag="4")]
+    pub limit: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TeamListResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub workers: ::prost::alloc::vec::Vec<TeamWorker>,
+    /// Total count for the org (pre-limit). UIs use this for pagination.
+    #[prost(int32, tag="3")]
+    pub total: i32,
+}
+// =============================================================
+// Wave 10c — LSP
+// =============================================================
+
+/// LspQueryRequest — single LSP query against a bridge. The four
+/// operations match v2's tool surface 1:1.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LspQueryRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// "diagnostics" | "hover" | "definition" | "completion".
+    #[prost(string, tag="3")]
+    pub operation: ::prost::alloc::string::String,
+    /// Absolute path on the bridge's filesystem (the bridge resolves
+    /// relative paths against its workspace root if needed).
+    #[prost(string, tag="4")]
+    pub file_path: ::prost::alloc::string::String,
+    /// 0-based line/column. Ignored for `diagnostics`.
+    #[prost(int32, tag="5")]
+    pub line: i32,
+    #[prost(int32, tag="6")]
+    pub column: i32,
+}
+/// LspDiagnostic — one error/warning entry from the language server.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LspDiagnostic {
+    /// "error" | "warning" | "info" | "hint".
+    #[prost(string, tag="1")]
+    pub severity: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub line: i32,
+    #[prost(int32, tag="3")]
+    pub column: i32,
+    #[prost(int32, tag="4")]
+    pub end_line: i32,
+    #[prost(int32, tag="5")]
+    pub end_column: i32,
+    #[prost(string, tag="6")]
+    pub message: ::prost::alloc::string::String,
+    /// LSP source code (e.g. "ts(2304)", "E0382").
+    #[prost(string, tag="7")]
+    pub code: ::prost::alloc::string::String,
+}
+/// LspLocation — for go-to-definition results.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LspLocation {
+    #[prost(string, tag="1")]
+    pub file_path: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub line: i32,
+    #[prost(int32, tag="3")]
+    pub column: i32,
+}
+/// LspCompletion — single completion candidate.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LspCompletion {
+    #[prost(string, tag="1")]
+    pub label: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub detail: ::prost::alloc::string::String,
+    /// 1=Text, 2=Method, 3=Function, ... (LSP CompletionItemKind).
+    #[prost(int32, tag="3")]
+    pub kind: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LspQueryResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Populated when operation == "diagnostics".
+    #[prost(message, repeated, tag="2")]
+    pub diagnostics: ::prost::alloc::vec::Vec<LspDiagnostic>,
+    /// Populated when operation == "hover". May be empty.
+    #[prost(string, tag="3")]
+    pub hover_text: ::prost::alloc::string::String,
+    /// Populated when operation == "definition".
+    #[prost(message, repeated, tag="4")]
+    pub locations: ::prost::alloc::vec::Vec<LspLocation>,
+    /// Populated when operation == "completion". Capped at 20 by the
+    /// bridge to keep responses sane.
+    #[prost(message, repeated, tag="5")]
+    pub completions: ::prost::alloc::vec::Vec<LspCompletion>,
+    /// Non-empty when the bridge returned a structured error (file not
+    /// found, language not supported, etc.). Gateway returns gRPC OK so
+    /// callers can branch.
+    #[prost(string, tag="6")]
+    pub error_message: ::prost::alloc::string::String,
+}
+// =============================================================
+// Wave 10e — approvals
+// =============================================================
+
+/// GatewayApproval — single approval record. Returned by RequestApproval,
+/// ApproveApproval, DenyApproval, ListPendingApprovals so callers
+/// don't need a separate "get" RPC. Distinct from the orchestration-
+/// level `Approval` (orchestration.proto) which models durable plan-
+/// step approvals; this one is a lighter in-memory tool-gate record.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GatewayApproval {
+    #[prost(string, tag="1")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub session_id: ::prost::alloc::string::String,
+    /// Identifier of the agent action that needs approval.
+    #[prost(string, tag="5")]
+    pub action_id: ::prost::alloc::string::String,
+    /// Human-readable action name (e.g. "bash", "file_write").
+    #[prost(string, tag="6")]
+    pub action_name: ::prost::alloc::string::String,
+    /// "tool_execution" | "plan_execution" | "destructive_action" | "custom".
+    #[prost(string, tag="7")]
+    pub kind: ::prost::alloc::string::String,
+    /// Why approval is needed (LLM rationale).
+    #[prost(string, tag="8")]
+    pub reason: ::prost::alloc::string::String,
+    /// "pending" | "approved" | "denied" | "expired".
+    #[prost(string, tag="9")]
+    pub status: ::prost::alloc::string::String,
+    /// Set when status leaves pending. Identifier of the human/system
+    /// that resolved the approval.
+    #[prost(string, tag="10")]
+    pub decided_by: ::prost::alloc::string::String,
+    /// Optional resolver comment.
+    #[prost(string, tag="11")]
+    pub comment: ::prost::alloc::string::String,
+    #[prost(int64, tag="12")]
+    pub created_at_unix: i64,
+    #[prost(int64, tag="13")]
+    pub resolved_at_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RequestApprovalRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub action_id: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub action_name: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag="8")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RequestApprovalResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub approval: ::core::option::Option<GatewayApproval>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApproveApprovalRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub decided_by: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub comment: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApproveApprovalResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub approval: ::core::option::Option<GatewayApproval>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DenyApprovalRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub decided_by: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub comment: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DenyApprovalResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub approval: ::core::option::Option<GatewayApproval>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListPendingApprovalsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Optional — when set, only approvals for this run are returned.
+    /// Empty → all pending approvals for the org.
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPendingApprovalsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub approvals: ::prost::alloc::vec::Vec<GatewayApproval>,
+}
+// =============================================================
+// Wave 10f — trajectory recording
+// =============================================================
+
+/// TrajectoryAction — one entry in the executed-actions sequence.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TrajectoryAction {
+    /// Tool / function name that was invoked.
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// "completed" | "failed" | "skipped".
+    #[prost(string, tag="2")]
+    pub status: ::prost::alloc::string::String,
+    /// Optional JSON-encoded inputs (caller-supplied, may be truncated).
+    #[prost(string, tag="3")]
+    pub input_json: ::prost::alloc::string::String,
+    /// Optional JSON-encoded outputs (provider-returned, may be truncated).
+    #[prost(string, tag="4")]
+    pub output_json: ::prost::alloc::string::String,
+    #[prost(int32, tag="5")]
+    pub duration_ms: i32,
+}
+/// Trajectory — full record of a single run for RL training + analytics.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Trajectory {
+    #[prost(string, tag="1")]
+    pub trajectory_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Normalised task pattern (v2 derived this from the goal via
+    /// `patterns.normalize_goal`). Optional — empty is acceptable.
+    #[prost(string, tag="4")]
+    pub task_pattern: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub goal: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="6")]
+    pub planned_actions: ::prost::alloc::vec::Vec<TrajectoryAction>,
+    #[prost(message, repeated, tag="7")]
+    pub executed_actions: ::prost::alloc::vec::Vec<TrajectoryAction>,
+    /// "success" | "partial" | "failure".
+    #[prost(string, tag="8")]
+    pub outcome: ::prost::alloc::string::String,
+    #[prost(float, tag="9")]
+    pub duration_sec: f32,
+    #[prost(string, repeated, tag="10")]
+    pub skills_used: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// USD cost rolled up from cost-core. 0 when not provided.
+    #[prost(double, tag="11")]
+    pub cost_usd: f64,
+    /// Model that served the bulk of the run, if any.
+    #[prost(string, tag="12")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(int64, tag="13")]
+    pub created_at_unix: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RecordTrajectoryRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub trajectory: ::core::option::Option<Trajectory>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordTrajectoryResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Assigned ULID — useful for cross-referencing in exports.
+    #[prost(string, tag="2")]
+    pub trajectory_id: ::prost::alloc::string::String,
+    /// True when also published to NATS (best-effort; non-fatal failures
+    /// are reported as false but the in-memory record is still stored).
+    #[prost(bool, tag="3")]
+    pub published: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListTrajectoriesRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Optional outcome filter: "success" | "partial" | "failure". Empty
+    /// → all outcomes.
+    #[prost(string, tag="3")]
+    pub outcome_filter: ::prost::alloc::string::String,
+    /// Optional pattern filter (exact match). Empty → all patterns.
+    #[prost(string, tag="4")]
+    pub pattern_filter: ::prost::alloc::string::String,
+    /// Only trajectories created at or after this unix second. 0 → all.
+    #[prost(int64, tag="5")]
+    pub since_unix: i64,
+    /// Max results. 0 → 100, capped at 500.
+    #[prost(int32, tag="6")]
+    pub limit: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListTrajectoriesResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub trajectories: ::prost::alloc::vec::Vec<Trajectory>,
+    #[prost(int32, tag="3")]
+    pub total: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportTrajectoriesRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Lower bound (inclusive). 0 → no lower bound.
+    #[prost(int64, tag="3")]
+    pub since_unix: i64,
+    /// Upper bound (exclusive). 0 → now.
+    #[prost(int64, tag="4")]
+    pub until_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportTrajectoriesResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// JSONL bytes, one trajectory per line. Decoded UTF-8 (not gzip).
+    /// Compress at the caller if the response is large; the gateway
+    /// refuses to serialise more than 10 MB inline.
+    #[prost(bytes="vec", tag="2")]
+    pub jsonl: ::prost::alloc::vec::Vec<u8>,
+    #[prost(int32, tag="3")]
+    pub count: i32,
+}
+// =============================================================
+// Wave 10d — skills loader
+// =============================================================
+
+/// Skill — one entry loaded from the skills directory. v2's auto-loader
+/// scanned `SKILL.md` and `<name>.skill.md` files; v1 keeps the same
+/// shape so callers ported from v2 see no behavioural change.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Skill {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    /// Markdown body shown to the agent as system context when the skill
+    /// is selected.
+    #[prost(string, tag="3")]
+    pub body: ::prost::alloc::string::String,
+    /// Tags / keywords used by MatchSkills for relevance scoring.
+    #[prost(string, repeated, tag="4")]
+    pub tags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Source path on the bridge's filesystem. Empty for bundled skills.
+    #[prost(string, tag="5")]
+    pub source_path: ::prost::alloc::string::String,
+    /// Relevance threshold (0.0-1.0) for auto-injection.
+    #[prost(float, tag="6")]
+    pub min_score: f32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListSkillsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListSkillsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub skills: ::prost::alloc::vec::Vec<Skill>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSkillRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub skill_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetSkillResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub skill: ::core::option::Option<Skill>,
+}
+/// MatchSkillsRequest — find skills relevant to a query. v2 used a
+/// keyword + threshold match; v1 keeps the same simple scoring.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchSkillsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub query: ::prost::alloc::string::String,
+    /// Max results. 0 → 5, capped at 20.
+    #[prost(int32, tag="4")]
+    pub limit: i32,
+    /// Minimum score to include. 0 → use each skill's min_score.
+    #[prost(float, tag="5")]
+    pub min_score: f32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SkillMatch {
+    #[prost(message, optional, tag="1")]
+    pub skill: ::core::option::Option<Skill>,
+    #[prost(float, tag="2")]
+    pub score: f32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MatchSkillsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub matches: ::prost::alloc::vec::Vec<SkillMatch>,
+}
+// =============================================================
+// Wave 10g — MCP server hosting
+// =============================================================
+
+/// McpServer — registered external MCP server endpoint. Once
+/// registered, its tools become callable via `ProxyMcpTool`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct McpServer {
+    #[prost(string, tag="1")]
+    pub server_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    /// Transport URL — `<http://...`> for streamable HTTP, `stdio:///...`
+    /// for a local subprocess (path to executable + args).
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// "http" | "stdio" | "sse"
+    #[prost(string, tag="4")]
+    pub transport: ::prost::alloc::string::String,
+    /// Bearer / OAuth token when the server requires auth.
+    #[prost(string, tag="5")]
+    pub token: ::prost::alloc::string::String,
+    /// Optional list of tool name prefixes the server is allowed to
+    /// expose. Empty → all tools allowed.
+    #[prost(string, repeated, tag="6")]
+    pub tool_allowlist: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag="7")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterMcpServerRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="3")]
+    pub server: ::core::option::Option<McpServer>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterMcpServerResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub server: ::core::option::Option<McpServer>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListMcpServersRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListMcpServersResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub servers: ::prost::alloc::vec::Vec<McpServer>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListMcpToolsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// The run/caller user — exposure is filtered to tools this user may USE
+    /// (org-wide, owned, or shared-to-them); never another user's private tools.
+    #[prost(string, tag="3")]
+    pub user_id: ::prost::alloc::string::String,
+}
+/// ListMcpToolsResponse — agent-facing tool definitions discovered across the
+/// org's enabled MCP servers. `tools\[\].name` is the namespaced
+/// `mcp__<server_id>__<tool>`; `parameters_json` is the tool's JSON Schema.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListMcpToolsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub tools: ::prost::alloc::vec::Vec<ToolDefinition>,
+}
+/// ProxyMcpToolRequest — invoke a tool exposed by a registered MCP
+/// server. The gateway forwards the call and returns the result.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProxyMcpToolRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub server_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub tool_name: ::prost::alloc::string::String,
+    /// JSON-encoded tool input.
+    #[prost(string, tag="5")]
+    pub input_json: ::prost::alloc::string::String,
+    /// Acting user — the gateway re-authorizes that this user may USE the target
+    /// server (org-wide / owned / shared-to-them), mirroring the per-user filter
+    /// ListMcpTools applies at discovery. Without it, a client-declared
+    /// mcp__<other-users-server>__<tool> name bypasses the per-user allowlist.
+    #[prost(string, tag="6")]
+    pub user_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProxyMcpToolResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// JSON-encoded tool output (provider-shaped).
+    #[prost(string, tag="2")]
+    pub output_json: ::prost::alloc::string::String,
+    /// Non-empty when the proxy or remote server returned an error.
+    #[prost(string, tag="3")]
+    pub error_message: ::prost::alloc::string::String,
+}
+// =============================================================
+// Wave 10h — plugins
+// =============================================================
+
+/// Plugin — third-party extension registered against an org. Each
+/// plugin can expose tools, skills, or hook handlers depending on its
+/// manifest.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Plugin {
+    #[prost(string, tag="1")]
+    pub plugin_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub version: ::prost::alloc::string::String,
+    /// "tool" | "skill" | "hook" | "mcp_server" — informational only.
+    #[prost(string, tag="4")]
+    pub kind: ::prost::alloc::string::String,
+    /// Plugin manifest URL (JSON manifest the bridge fetches once).
+    #[prost(string, tag="5")]
+    pub manifest_url: ::prost::alloc::string::String,
+    #[prost(bool, tag="6")]
+    pub enabled: bool,
+    /// Last-known status string ("active", "stale", "missing").
+    #[prost(string, tag="7")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(int64, tag="8")]
+    pub installed_at_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterPluginRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="3")]
+    pub plugin: ::core::option::Option<Plugin>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterPluginResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub plugin: ::core::option::Option<Plugin>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListPluginsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Optional kind filter ("tool" | "skill" | "hook" | "mcp_server").
+    #[prost(string, tag="3")]
+    pub kind_filter: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListPluginsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub plugins: ::prost::alloc::vec::Vec<Plugin>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetPluginEnabledRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub plugin_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetPluginEnabledResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub plugin: ::core::option::Option<Plugin>,
+}
+// =============================================================
+// Wave 10i — commands + hooks + permissions + policy
+// =============================================================
+
+/// Command — slash-command surface. Each command resolves to either a
+/// builtin tool name (`tool_name` set) or a remote URL (`remote_url`
+/// set; rare). The bridge handles dispatch.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Command {
+    #[prost(string, tag="1")]
+    pub command_id: ::prost::alloc::string::String,
+    /// "/<name>" form, e.g. "/plan" or "/init".
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub description: ::prost::alloc::string::String,
+    /// Either-or: tool_name OR remote_url.
+    #[prost(string, tag="4")]
+    pub tool_name: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub remote_url: ::prost::alloc::string::String,
+    /// Default JSON-encoded payload merged into the tool input.
+    #[prost(string, tag="6")]
+    pub default_payload_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListCommandsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListCommandsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub commands: ::prost::alloc::vec::Vec<Command>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecuteCommandRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub command_name: ::prost::alloc::string::String,
+    /// JSON-encoded arg payload merged with the command's default_payload.
+    #[prost(string, tag="4")]
+    pub args_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecuteCommandResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub output_json: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub error_message: ::prost::alloc::string::String,
+}
+/// Hook — pre/post lifecycle handler for tool calls. Hooks are run by
+/// execution-core's middleware; the gateway holds the registry.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Hook {
+    #[prost(string, tag="1")]
+    pub hook_id: ::prost::alloc::string::String,
+    /// "pre_tool" | "post_tool" | "on_error" | "on_complete".
+    #[prost(string, tag="2")]
+    pub event: ::prost::alloc::string::String,
+    /// Tool name to scope to, or empty for all tools.
+    #[prost(string, tag="3")]
+    pub tool_scope: ::prost::alloc::string::String,
+    /// URL the bridge POSTs to with the hook payload.
+    #[prost(string, tag="4")]
+    pub callback_url: ::prost::alloc::string::String,
+    #[prost(bool, tag="5")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterHookRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="3")]
+    pub hook: ::core::option::Option<Hook>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RegisterHookResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub hook: ::core::option::Option<Hook>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListHooksRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Optional event filter.
+    #[prost(string, tag="3")]
+    pub event_filter: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListHooksResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub hooks: ::prost::alloc::vec::Vec<Hook>,
+}
+/// Permissions — per-org tool ACL. By default all tools are allowed;
+/// explicit deny entries take precedence.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckPermissionRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub tool_name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckPermissionResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub allowed: bool,
+    /// Non-empty when allowed=false; explains the policy decision.
+    #[prost(string, tag="3")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetPermissionRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub tool_name: ::prost::alloc::string::String,
+    /// "allow" | "deny".
+    #[prost(string, tag="4")]
+    pub verdict: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetPermissionResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+}
+/// Policy — per-org runtime guardrails. Operators tune via SetPolicy;
+/// the run-loop fetches via GetPolicy at session start.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OrgPolicy {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Hard cap on USD spend per run.
+    #[prost(double, tag="2")]
+    pub max_cost_per_run_usd: f64,
+    /// Hard cap on total tokens per run.
+    #[prost(int32, tag="3")]
+    pub max_tokens_per_run: i32,
+    /// Comma-separated list of allowed models. Empty → all.
+    #[prost(string, tag="4")]
+    pub allowed_models: ::prost::alloc::string::String,
+    /// Comma-separated list of denied tool names. Empty → none denied.
+    #[prost(string, tag="5")]
+    pub denied_tools: ::prost::alloc::string::String,
+    /// Requests-per-minute cap for the org.
+    #[prost(int32, tag="6")]
+    pub rate_limit_rpm: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetPolicyRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPolicyResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub policy: ::core::option::Option<OrgPolicy>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetPolicyRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub policy: ::core::option::Option<OrgPolicy>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetPolicyResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub policy: ::core::option::Option<OrgPolicy>,
+}
+// =============================================================
+// Wave 10j — messages + analytics + voice + tasks
+// =============================================================
+
+/// ThreadMessage — single entry in a thread. Persistence is by the
+/// existing session-core memory tables; the gateway routes here.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ThreadMessage {
+    #[prost(string, tag="1")]
+    pub message_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub thread_id: ::prost::alloc::string::String,
+    /// "user" | "assistant" | "system" | "tool"
+    #[prost(string, tag="3")]
+    pub role: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub content: ::prost::alloc::string::String,
+    #[prost(int64, tag="5")]
+    pub created_at_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppendThreadMessageRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub thread_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub role: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub content: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AppendThreadMessageResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub message: ::core::option::Option<ThreadMessage>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListThreadMessagesRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub thread_id: ::prost::alloc::string::String,
+    /// 0 → 50, capped at 500
+    #[prost(int32, tag="4")]
+    pub limit: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListThreadMessagesResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub messages: ::prost::alloc::vec::Vec<ThreadMessage>,
+}
+/// Analytics — rollups over the gateway's in-memory counters. v2's
+/// app/analytics had per-org/per-tool counters; v1 keeps the same
+/// shape so dashboards port cleanly.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAnalyticsRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Time window in seconds back from now. 0 → 86400 (24 h).
+    #[prost(int32, tag="3")]
+    pub window_secs: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ToolCallCount {
+    #[prost(string, tag="1")]
+    pub tool_name: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub count: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetAnalyticsResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub total_runs: i32,
+    #[prost(int32, tag="3")]
+    pub total_invocations: i32,
+    #[prost(double, tag="4")]
+    pub total_cost_usd: f64,
+    #[prost(int64, tag="5")]
+    pub total_input_tokens: i64,
+    #[prost(int64, tag="6")]
+    pub total_output_tokens: i64,
+    #[prost(message, repeated, tag="7")]
+    pub tool_calls: ::prost::alloc::vec::Vec<ToolCallCount>,
+}
+/// Voice — text-to-speech / speech-to-text passthroughs. Proxy to the
+/// inference-core speech provider.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TextToSpeechRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub text: ::prost::alloc::string::String,
+    /// Provider voice id (e.g. "alloy", "echo"). Empty → provider default.
+    #[prost(string, tag="4")]
+    pub voice: ::prost::alloc::string::String,
+    /// Output audio format ("mp3" | "wav" | "opus"). Empty → "mp3".
+    #[prost(string, tag="5")]
+    pub format: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TextToSpeechResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="2")]
+    pub audio: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag="3")]
+    pub format: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub error_message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechToTextRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="3")]
+    pub audio: ::prost::alloc::vec::Vec<u8>,
+    /// input audio format
+    #[prost(string, tag="4")]
+    pub format: ::prost::alloc::string::String,
+    /// Optional language hint (ISO-639-1). Empty → auto-detect.
+    #[prost(string, tag="5")]
+    pub language: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SpeechToTextResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub text: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub detected_language: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub error_message: ::prost::alloc::string::String,
+}
+/// Tasks — proxy to task-core. Gateway-level convenience so callers
+/// don't need a separate task-core client.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateTaskRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub description: ::prost::alloc::string::String,
+    /// Optional parent run id.
+    #[prost(string, tag="4")]
+    pub parent_run_id: ::prost::alloc::string::String,
+    /// Optional cron expression — when set, task-core schedules it.
+    #[prost(string, tag="5")]
+    pub cron: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskRecord {
+    #[prost(string, tag="1")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub description: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub parent_run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub cron: ::prost::alloc::string::String,
+    #[prost(int64, tag="7")]
+    pub created_at_unix: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateTaskResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub task: ::core::option::Option<TaskRecord>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListTasksRequest {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Optional status filter.
+    #[prost(string, tag="3")]
+    pub status_filter: ::prost::alloc::string::String,
+    #[prost(int32, tag="4")]
+    pub limit: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListTasksResponse {
+    #[prost(string, tag="1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub tasks: ::prost::alloc::vec::Vec<TaskRecord>,
+}
+// Canonical identifiers for the Model Plane.
+// All IDs use ULID format (26-character Crockford Base32).
+// Immutability: once created, an ID value MUST NOT change.
+// Single-writer: each resource type has exactly one owning service.
+
+/// AgentId — identifies an agent definition (capability-core owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AgentId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// ThreadId — identifies a conversation thread (session-core owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ThreadId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// SessionKey — groups threads within a user interaction session (session-core owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SessionKey {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// RunId — identifies a single agent run within a thread (session-core owns metadata, execution-core owns state).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// StepId — identifies one step within a run (execution-core owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StepId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// CheckpointId — identifies a resumable snapshot of run state (session-core owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckpointId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// SandboxLeaseId — identifies an active sandbox lease (sandbox-manager owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SandboxLeaseId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
+/// BrowserLeaseId — identifies an active browser grant (browser-broker owns).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BrowserLeaseId {
+    /// ULID string, immutable after creation.
+    #[prost(string, tag="1")]
+    pub value: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SearchMemoryRequest {
     /// Thread context for scoping.
@@ -4042,6 +4157,12 @@ pub struct SearchMemoryResponse {
     /// Matching memory entries ordered by relevance.
     #[prost(message, repeated, tag="1")]
     pub entries: ::prost::alloc::vec::Vec<MemoryEntry>,
+    /// True when local results are returned without verified semantic recall.
+    #[prost(bool, tag="2")]
+    pub degraded: bool,
+    /// Stable machine-readable reason, empty when semantic recall is ready.
+    #[prost(string, tag="3")]
+    pub degradation_reason: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MemoryEntry {
@@ -4084,15 +4205,27 @@ pub struct IndexMemoryResponse {
     /// Assigned memory entry identifier.
     #[prost(string, tag="1")]
     pub memory_id: ::prost::alloc::string::String,
+    /// True when local persistence succeeded but Letta synchronization did not.
+    #[prost(bool, tag="2")]
+    pub degraded: bool,
+    /// Stable machine-readable reason, empty when Letta synchronization is ready.
+    #[prost(string, tag="3")]
+    pub degradation_reason: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MemoryHealthRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MemoryHealthResponse {
-    /// "ok" when service is healthy.
+    /// Legacy summary/status code. New callers should use ready + memory_status.
     #[prost(string, tag="1")]
     pub status: ::prost::alloc::string::String,
+    /// Whether the configured semantic memory path has been verified ready.
+    #[prost(bool, tag="2")]
+    pub ready: bool,
+    /// Stable machine-readable semantic memory readiness state.
+    #[prost(string, tag="3")]
+    pub memory_status: ::prost::alloc::string::String,
 }
 // --- Records ---
 
@@ -4433,6 +4566,11 @@ pub struct ListApprovalsRequest {
     /// Optional step filter. Empty means run-level and all steps.
     #[prost(string, tag="2")]
     pub step_id: ::prost::alloc::string::String,
+    /// Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+    /// callers). Non-empty → only approvals owned by this org are returned,
+    /// regardless of what org the run itself belongs to.
+    #[prost(string, tag="3")]
+    pub org_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListApprovalsResponse {
@@ -4463,6 +4601,13 @@ pub struct GetApprovalRequest {
     /// Approval identifier.
     #[prost(string, tag="1")]
     pub approval_id: ::prost::alloc::string::String,
+    /// Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+    /// callers, e.g. session-core's own boot paths). Non-empty → the approval is
+    /// only returned when it belongs to this org; a mismatch is treated as
+    /// not-found (never a distinguishable "forbidden") so existence is not
+    /// leaked across tenants.
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetApprovalResponse {
@@ -4486,6 +4631,13 @@ pub struct DecideApprovalRequest {
     /// Optional free-form reason for the decision.
     #[prost(string, tag="4")]
     pub decision_reason: ::prost::alloc::string::String,
+    /// Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+    /// callers, e.g. the in-loop browser-agent timeout/cancel fail-closed
+    /// paths that already resolved the row themselves). Non-empty → the
+    /// decision is only applied when the approval belongs to this org; a
+    /// mismatch is treated as not-found, never a distinguishable "forbidden".
+    #[prost(string, tag="5")]
+    pub org_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DecideApprovalResponse {
@@ -4562,8 +4714,18 @@ pub struct OrchestrationEvent {
     #[prost(string, tag="2")]
     pub event_id: ::prost::alloc::string::String,
     /// Event payload. Tags 10-16 align with the original 7-variant Rust enum
-    /// order; tags 17-18 are additive browser-agent progress events (B4).
-    #[prost(oneof="orchestration_event::Event", tags="10, 11, 12, 13, 14, 15, 16, 17, 18")]
+    /// order; tags 17-18 are additive browser-agent progress events (B4); tags
+    /// 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
+    /// tags 21-22 are additive browser-specific HITL approval-gate events
+    /// (Phase 5 — "Approvals & policy"). Phase 5 reuses the general
+    /// CreateApproval/DecideApproval RPCs and the generic
+    /// RunPausedForApproval/RunResumedAfterApproval/ApprovalStateChanged events
+    /// above unchanged (a browser-action approval IS a normal Approval record,
+    /// kind=DESTRUCTIVE) — tags 21-22 are additive companions that carry the
+    /// browser-specific detail (which action, why it was classified risky) the
+    /// generic events don't, so the run timeline shows more than a bare
+    /// "risky tool" label.
+    #[prost(oneof="orchestration_event::Event", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
     pub event: ::core::option::Option<orchestration_event::Event>,
 }
 /// Nested message and enum types in `OrchestrationEvent`.
@@ -4652,6 +4814,10 @@ pub mod orchestration_event {
         /// Target URL for navigations. Empty for non-goto actions.
         #[prost(string, tag="5")]
         pub url: ::prost::alloc::string::String,
+        /// Model's rationale for choosing this action (Phase 2). Empty when the
+        /// planner is the deterministic fallback (no LLM reason available).
+        #[prost(string, tag="6")]
+        pub reason: ::prost::alloc::string::String,
     }
     /// The browser agent received an observation back from the executor (B4).
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4674,9 +4840,113 @@ pub mod orchestration_event {
         /// Page title after the action settled. Empty when unavailable.
         #[prost(string, tag="6")]
         pub page_title: ::prost::alloc::string::String,
+        /// Screenshot artifact reference id (Phase 2). Never inlined bytes — the
+        /// client fetches evidence via the existing artifact endpoint. Empty when
+        /// unavailable (e.g. a ZDR run that captured no persisted reference).
+        #[prost(string, tag="7")]
+        pub screenshot_ref: ::prost::alloc::string::String,
+        /// DOM snapshot artifact reference id (Phase 2). Same non-inlining rule as
+        /// `screenshot_ref`. Empty until Quarry captures DOM snapshot references.
+        #[prost(string, tag="8")]
+        pub dom_snapshot_ref: ::prost::alloc::string::String,
+    }
+    /// User-initiated run pause (Phase 2 B5) — distinct from the pre-existing
+    /// HITL `RunPausedForApproval`: this fires when a user explicitly pauses a
+    /// running browser-agent loop from the UI, not when a risky tool call is
+    /// gated behind approval.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct BrowserRunPaused {
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        #[prost(string, tag="2")]
+        pub plan_id: ::prost::alloc::string::String,
+    }
+    /// User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct BrowserRunResumed {
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        #[prost(string, tag="2")]
+        pub plan_id: ::prost::alloc::string::String,
+    }
+    /// A browser action was classified risky (login, checkout, posting a form,
+    /// a destructive operation, cross-domain navigation, or reuse of a
+    /// persistent cookie-bearing profile — plan capability #8) and is paused
+    /// for human approval (Phase 5). Fired by execution-core's in-loop gate
+    /// right before dispatch, via the SAME `CreateApproval` RPC the generic
+    /// tool-call HITL gate uses (`RunPausedForApproval`/`ApprovalStateChanged`
+    /// above are broadcast by that RPC as usual) — this event is the
+    /// browser-specific companion that names the actual action.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct BrowserActionApprovalRequired {
+        /// Run this browser session belongs to (stream key).
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        /// Browser-agent plan id driving this session.
+        #[prost(string, tag="2")]
+        pub plan_id: ::prost::alloc::string::String,
+        /// Id of the gated action. Empty for a run-level gate that isn't tied to
+        /// one specific dispatched action (e.g. persistent_cookie_use, gated once
+        /// at run start rather than per-action).
+        #[prost(string, tag="3")]
+        pub action_id: ::prost::alloc::string::String,
+        /// Action type slug: goto|click|type|extract|observe|scroll|wait, or a
+        /// synthetic slug for a run-level gate (e.g. "start_run").
+        #[prost(string, tag="4")]
+        pub action_type: ::prost::alloc::string::String,
+        /// Target URL, when known. Empty when not applicable.
+        #[prost(string, tag="5")]
+        pub url: ::prost::alloc::string::String,
+        /// CSS selector, when known. Empty when not applicable.
+        #[prost(string, tag="6")]
+        pub selector: ::prost::alloc::string::String,
+        /// Human-readable reason the action was classified risky.
+        #[prost(string, tag="7")]
+        pub reason: ::prost::alloc::string::String,
+        /// login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use
+        #[prost(string, tag="8")]
+        pub risk_category: ::prost::alloc::string::String,
+        /// Durable approval id (from the CreateApproval call this event
+        /// accompanies) — lets a UI jump straight to deciding it via the existing
+        /// generic `POST /v1/orchestration/approvals/{id}/decide` route.
+        #[prost(string, tag="9")]
+        pub approval_id: ::prost::alloc::string::String,
+    }
+    /// The pending browser-action approval above was decided (granted, denied,
+    /// or timed out). The durable decision and the generic
+    /// `ApprovalStateChanged`/`RunResumedAfterApproval` events are recorded by
+    /// the existing `DecideApproval` RPC as usual; this is the browser-specific
+    /// companion that carries the action back so the timeline can show
+    /// "checkout on example.com — granted", not just an approval id.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct BrowserActionDecided {
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        #[prost(string, tag="2")]
+        pub plan_id: ::prost::alloc::string::String,
+        #[prost(string, tag="3")]
+        pub action_id: ::prost::alloc::string::String,
+        #[prost(string, tag="4")]
+        pub approval_id: ::prost::alloc::string::String,
+        /// granted|denied|timed_out
+        #[prost(string, tag="5")]
+        pub decision: ::prost::alloc::string::String,
+        /// Principal who decided, when known. Empty for a system timeout.
+        #[prost(string, tag="6")]
+        pub decided_by: ::prost::alloc::string::String,
     }
     /// Event payload. Tags 10-16 align with the original 7-variant Rust enum
-    /// order; tags 17-18 are additive browser-agent progress events (B4).
+    /// order; tags 17-18 are additive browser-agent progress events (B4); tags
+    /// 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
+    /// tags 21-22 are additive browser-specific HITL approval-gate events
+    /// (Phase 5 — "Approvals & policy"). Phase 5 reuses the general
+    /// CreateApproval/DecideApproval RPCs and the generic
+    /// RunPausedForApproval/RunResumedAfterApproval/ApprovalStateChanged events
+    /// above unchanged (a browser-action approval IS a normal Approval record,
+    /// kind=DESTRUCTIVE) — tags 21-22 are additive companions that carry the
+    /// browser-specific detail (which action, why it was classified risky) the
+    /// generic events don't, so the run timeline shows more than a bare
+    /// "risky tool" label.
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Event {
         #[prost(message, tag="10")]
@@ -4697,6 +4967,14 @@ pub mod orchestration_event {
         BrowserActionDispatched(BrowserActionDispatched),
         #[prost(message, tag="18")]
         BrowserObservationReceived(BrowserObservationReceived),
+        #[prost(message, tag="19")]
+        BrowserRunPaused(BrowserRunPaused),
+        #[prost(message, tag="20")]
+        BrowserRunResumed(BrowserRunResumed),
+        #[prost(message, tag="21")]
+        BrowserActionApprovalRequired(BrowserActionApprovalRequired),
+        #[prost(message, tag="22")]
+        BrowserActionDecided(BrowserActionDecided),
     }
 }
 // --- RecordOrchestrationEvent ---
@@ -5214,6 +5492,8 @@ pub struct StartRunResponse {
 }
 // --- CompleteStep ---
 
+/// CompleteStepRequest records one immutable execution step and optionally the
+/// single terminal transition for its run.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CompleteStepRequest {
     /// Run this step belongs to.
@@ -5231,12 +5511,68 @@ pub struct CompleteStepRequest {
     /// Error message if status is "failed".
     #[prost(string, tag="5")]
     pub error: ::prost::alloc::string::String,
+    /// True only for the single final step that closes the run and its plan.
+    /// Per-tool and ordinary execution steps must leave this false.
+    #[prost(bool, tag="6")]
+    pub terminal: bool,
 }
+/// CompleteStepResponse returns the stable ordinal assigned to the step.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CompleteStepResponse {
     /// Acknowledged step sequence within the run.
     #[prost(uint32, tag="1")]
     pub step_index: u32,
+}
+// --- Inline tool audit lifecycle ---
+
+/// ReserveToolActionRequest durably binds an inline tool action before execution.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReserveToolActionRequest {
+    /// Run that owns the tool action.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Stable opaque identifier derived from the original tool call identity.
+    #[prost(string, tag="2")]
+    pub action_id: ::prost::alloc::string::String,
+    /// Gateway request that produced the tool action.
+    #[prost(string, tag="3")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Canonical tool name selected by the model.
+    #[prost(string, tag="4")]
+    pub tool: ::prost::alloc::string::String,
+    /// Data-governance category attached to the action.
+    #[prost(string, tag="5")]
+    pub data_category: ::prost::alloc::string::String,
+    /// Effective Zero Data Retention posture for the action.
+    #[prost(bool, tag="6")]
+    pub zdr: bool,
+}
+/// ReserveToolActionResponse reports whether a new reservation was created.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReserveToolActionResponse {
+    /// False means an exact prior reservation was replayed idempotently.
+    #[prost(bool, tag="1")]
+    pub created: bool,
+}
+/// FinalizeToolActionRequest assigns the single immutable result of a reservation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FinalizeToolActionRequest {
+    /// Run that owns the reserved action.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Stable action identifier supplied during reservation.
+    #[prost(string, tag="2")]
+    pub action_id: ::prost::alloc::string::String,
+    /// "completed" or "failed".
+    #[prost(string, tag="3")]
+    pub outcome: ::prost::alloc::string::String,
+}
+/// FinalizeToolActionResponse reports whether the reservation changed state.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FinalizeToolActionResponse {
+    /// False means an exact prior finalization was replayed idempotently.
+    #[prost(bool, tag="1")]
+    pub updated: bool,
 }
 // --- SaveCheckpoint ---
 

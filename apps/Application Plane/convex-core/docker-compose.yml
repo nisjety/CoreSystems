@@ -119,6 +119,9 @@ services:
       - ./.env.local
     environment:
       CONVEX_BACKEND_URL: http://convex-backend:3210
+      CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
+      CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
+      CONVEX_RECONCILIATION_KEY: ${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}
     # G49 (velion-gap.md §8.33): mount the host `./convex/` directory so
     # the dev server (running `npx convex dev` per startup.sh) picks up
     # function changes without requiring an image rebuild. Without this
@@ -177,14 +180,14 @@ services:
     env_file:
       - ./.env.local
     environment:
-      # controlplane-nats is now on inter-plane-bus — no more host.docker.internal hack
-      NATS_URL: nats://controlplane-nats:4222
-      VELION_NATS_URL: ${VELION_NATS_URL:-nats://velion-nats:4222}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN must be set}
-      # NATS_TOKEN is loaded from the required .env.local and must match
-      # Control Plane NATS_TOKEN. Model mirroring is optional in this standalone stack.
+      NATS_URL: nats://control-shared-nats:4222
+      NATS_USER: application-convex-control
+      NATS_PASSWORD: ${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:?APPLICATION_CONVEX_CONTROL_NATS_PASSWORD must be set}
+      CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
+      # Model mirroring is optional in this standalone stack.
       MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-}
-      MODEL_PLANE_NATS_TOKEN: ${MODEL_PLANE_NATS_TOKEN:-}
+      MODEL_PLANE_NATS_USER: application-convex-model
+      MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:-}
       CONVEX_BACKEND_URL: http://convex-backend:3210
     networks:
       - app-net
@@ -239,8 +242,6 @@ services:
       AFFINE_CORE_URL: ${AFFINE_CORE_URL:-}
       CONVEX_URL: http://convex-backend:3210
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set}
-      VELION_NATS_URL: ${VELION_NATS_URL}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN}
     networks:
       - app-net
       - inter-plane-bus

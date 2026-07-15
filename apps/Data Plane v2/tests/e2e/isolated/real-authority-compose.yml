@@ -1,0 +1,252 @@
+# Additive overlay for the disposable real Auth Core + User Core authority
+# proof. It deliberately keeps the existing authority mock available under an
+# opt-in profile while replacing its network aliases with real services for
+# this harness.
+services:
+  authority-mock:
+    profiles: ["mock-authority"]
+
+  authority-db-init:
+    image: postgres:16.14-alpine3.24
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ceu"]
+    command:
+      - |
+        export PGPASSWORD="$${POSTGRES_PASSWORD}"
+        attempt=0
+        until pg_isready --host=postgres --username="$${POSTGRES_USER}" --dbname=postgres >/dev/null 2>&1; do
+          attempt=$$((attempt + 1))
+          if [ "$${attempt}" -ge 60 ]; then
+            echo "authority database bootstrap timed out waiting for PostgreSQL" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        for database in auth_service user_service; do
+          if ! psql --host=postgres --username="$${POSTGRES_USER}" --dbname=postgres --tuples-only --no-align --command="SELECT 1 FROM pg_database WHERE datname = '$${database}'" | grep -qx 1; then
+            createdb --host=postgres --username="$${POSTGRES_USER}" --maintenance-db=postgres "$${database}"
+          fi
+        done
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dataplane}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:-dataplane}
+    networks:
+      - dpv2-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  audit-stream-init:
+    image: ${REAL_AUTHORITY_AUTH_IMAGE:?required}
+    restart: "no"
+    entrypoint: ["node", "/app/real-authority-fixture.mjs"]
+    command: ["provision-audit"]
+    environment:
+      NATS_URL: nats://data-nats:4222
+      NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?required}
+    volumes:
+      - ./tests/e2e/isolated/real-authority-fixture.mjs:/app/real-authority-fixture.mjs:ro
+    networks:
+      - dpv2-net
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  auth-core:
+    build:
+      context: ../Control Plane/auth-core
+      dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?required}
+        BUILD_DATE: ${BUILD_DATE:?required}
+    image: ${REAL_AUTHORITY_AUTH_IMAGE:?required}
+    restart: "no"
+    init: true
+    expose: ["3011", "50011"]
+    environment:
+      NODE_ENV: test
+      PORT: "3011"
+      GRPC_PORT: "50011"
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?required}@postgres:5432/auth_service?sslmode=disable
+      DB_USER: ${POSTGRES_USER:-dataplane}
+      DRAGONFLY_URL: redis://:${DATAPLANE_DRAGONFLY_PASSWORD:?required}@dragonfly:6379/3
+      NATS_URL: nats://data-nats:4222
+      NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?required}
+      NATS_ALLOW_TOKEN_FALLBACK: "1"
+      VELION_NATS_URL: ""
+      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+      INTERNAL_SERVICE_IDS: user-service,user-core
+      INTERNAL_SERVICE_SECRET: ${REAL_AUTHORITY_INTERNAL_SECRET:?required}
+      INTERNAL_API_KEY: ${REAL_AUTHORITY_INTERNAL_API_KEY:?required}
+      AUTH_GRPC_SERVICE_CREDENTIALS_FILE: /run/secrets/auth-grpc-service-credentials.json
+      AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE: /run/secrets/auth-internal-service-credentials.json
+      USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE: /run/secrets/auth-user-grpc-client.json
+      USER_CORE_GRPC_TLS_CA_FILE: /run/secrets/user-grpc-tls-ca.pem
+      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${REAL_AUTHORITY_MEMBERSHIP_TOKEN:?required}
+      APPLICATION_RECONCILER_AUTH_TOKEN: ${REAL_AUTHORITY_APPLICATION_TOKEN:?required}
+      USER_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_AUTH_TO_USER_TOKEN:?required}
+      USER_SERVICE_API_KEY: ${REAL_AUTHORITY_AUTH_TO_USER_TOKEN:?required}
+      USER_SERVICE_URL: http://user-core:3012
+      USER_SERVICE_GRPC_URL: user-core:50012
+      BETTER_AUTH_SECRET: ${REAL_AUTHORITY_BETTER_AUTH_SECRET:?required}
+      BETTER_AUTH_URL: ${REAL_AUTHORITY_PUBLIC_ORIGIN:-http://localhost:3011}
+      FRONTEND_URL: ${REAL_AUTHORITY_PUBLIC_ORIGIN:-http://localhost:3011}
+      BETTER_AUTH_TRUSTED_ORIGINS: ${REAL_AUTHORITY_PUBLIC_ORIGIN:-http://localhost:3011}
+      EMAIL_PASSWORD_ENABLED: "true"
+      BEARER_TOKEN_ENABLED: "true"
+      AUTO_SIGNIN_AFTER_SIGNUP: "false"
+      REQUIRE_EMAIL_VERIFICATION: "false"
+      ORGANIZATION_ENABLED: "true"
+      ALLOW_USER_CREATE_ORG: "true"
+      ORG_REQUIRE_EMAIL_VERIFICATION: "false"
+      CAPTCHA_ENABLED: "false"
+      PHONE_AUTH_ENABLED: "false"
+      SSO_ENABLED: "false"
+      API_KEY_ENABLED: "false"
+      RATE_LIMIT_ENABLED: "false"
+      SESSION_COOKIE_CACHE_ENABLED: "false"
+      DISPOSABLE_EMAIL_BLOCKLIST_ENABLED: "false"
+      RESEND_API_KEY: ${REAL_AUTHORITY_RESEND_API_KEY:?required}
+      RESEND_FROM_EMAIL: fixture@real-authority.invalid
+      RESEND_FROM_NAME: Real-Authority-Fixture
+      TOKEN_ENCRYPTION_KEY: ${REAL_AUTHORITY_TOKEN_ENCRYPTION_KEY:?required}
+      CONVEX_AUTH_PRIVATE_KEY_FILE: /app/keys/convex-auth.key
+      CONVEX_AUTH_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
+      CONVEX_AUTH_ISSUER: http://auth-core:3011/api/convex-auth
+      PLANE_TOKEN_ISSUER: http://auth-core:3011/api/convex-auth
+      DATA_PLANE_AUTH_AUDIENCE: data-plane
+      DATA_PLANE_POLICY_AUTH_AUDIENCE: control-policy
+      DATA_PLANE_POLICY_CALLER_SERVICE_ID: retrieval-engine
+      PLANE_TOKEN_TTL_DATA_PLANE_SECONDS: "300"
+      PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS: "300"
+      PLANE_SERVICE_PRINCIPALS_JSON: ${REAL_AUTHORITY_PLANE_PRINCIPALS_JSON:?required}
+      ORG_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_ORG_TOKEN:?required}
+      BILLING_CORE_SERVICE_TOKEN: ${REAL_AUTHORITY_BILLING_TOKEN:?required}
+    volumes:
+      - ${ISOLATED_PRIVATE_KEY_FILE:?required}:/app/keys/convex-auth.key:ro
+      - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/app/keys/convex-auth.pub:ro
+      - ${REAL_AUTHORITY_AUTH_GRPC_CREDENTIALS_FILE:?required}:/run/secrets/auth-grpc-service-credentials.json:ro
+      - ${REAL_AUTHORITY_AUTH_INTERNAL_CREDENTIALS_FILE:?required}:/run/secrets/auth-internal-service-credentials.json:ro
+      - ${REAL_AUTHORITY_USER_GRPC_CLIENT_CREDENTIAL_FILE:?required}:/run/secrets/auth-user-grpc-client.json:ro
+      - ${REAL_AUTHORITY_USER_GRPC_TLS_CA_FILE:?required}:/run/secrets/user-grpc-tls-ca.pem:ro
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3011/api/convex-auth/jwks')
+          .then(async response => {
+            if (!response.ok) throw new Error('JWKS unavailable');
+            const body = await response.json();
+            if (!body || !Array.isArray(body.keys) || body.keys.length === 0 ||
+                body.keys.some(key => key.kty !== 'RSA' || key.alg !== 'RS256' ||
+                  typeof key.kid !== 'string' || !key.kid)) {
+              throw new Error('JWKS malformed');
+            }
+          })
+          .catch(() => process.exit(1));
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 10s
+    networks:
+      dpv2-net: {}
+      inter-plane-bus:
+        aliases: ["auth-core"]
+    depends_on:
+      authority-db-init:
+        condition: service_completed_successfully
+      dragonfly:
+        condition: service_healthy
+      audit-stream-init:
+        condition: service_completed_successfully
+
+  user-core:
+    build:
+      context: ../Control Plane/user-core
+      dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?required}
+        BUILD_DATE: ${BUILD_DATE:?required}
+    image: ${REAL_AUTHORITY_USER_IMAGE:?required}
+    restart: "no"
+    init: true
+    expose: ["3012", "50012"]
+    environment:
+      ENVIRONMENT: test
+      HTTP_PORT: "3012"
+      GRPC_PORT: "50012"
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?required}@postgres:5432/user_service?sslmode=disable
+      AUTH_DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?required}@postgres:5432/auth_service?sslmode=disable
+      DB_USER: ${POSTGRES_USER:-dataplane}
+      DRAGONFLY_ENABLED: "false"
+      NATS_URL: nats://data-nats:4222
+      NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?required}
+      NATS_ALLOW_TOKEN_FALLBACK: "1"
+      VELION_NATS_URL: ""
+      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+      JWT_SECRET: ${REAL_AUTHORITY_USER_JWT_SECRET:?required}
+      INTERNAL_SERVICE_SECRET: ${REAL_AUTHORITY_INTERNAL_SECRET:?required}
+      INTERNAL_API_KEY: ${REAL_AUTHORITY_INTERNAL_API_KEY:?required}
+      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${REAL_AUTHORITY_MEMBERSHIP_TOKEN:?required}
+      USER_CORE_SERVICE_CREDENTIALS: ${REAL_AUTHORITY_USER_CREDENTIALS_JSON:?required}
+      USER_CORE_GRPC_SERVICE_CREDENTIALS_FILE: /run/secrets/user-grpc-service-credentials.json
+      USER_CORE_GRPC_TLS_CERT_FILE: /run/secrets/user-grpc-tls-server.pem
+      USER_CORE_GRPC_TLS_KEY_FILE: /run/secrets/user-grpc-tls-server-key.pem
+      USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE: /run/secrets/user-auth-internal-client.json
+      AUTH_SERVICE_URL: http://auth-core:3011
+      BETTER_AUTH_URL: http://auth-core:3011
+      AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
+      AUTH_CORE_ISSUER: http://auth-core:3011/api/convex-auth
+      DATA_PLANE_AUTH_AUDIENCE: data-plane
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+    volumes:
+      - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/app/keys/convex-auth.pub:ro
+      - ${REAL_AUTHORITY_USER_GRPC_SERVICE_CREDENTIALS_FILE:?required}:/run/secrets/user-grpc-service-credentials.json:ro
+      - ${REAL_AUTHORITY_USER_GRPC_TLS_CERT_FILE:?required}:/run/secrets/user-grpc-tls-server.pem:ro
+      - ${REAL_AUTHORITY_USER_GRPC_TLS_KEY_FILE:?required}:/run/secrets/user-grpc-tls-server-key.pem:ro
+      - ${REAL_AUTHORITY_USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE:?required}:/run/secrets/user-auth-internal-client.json:ro
+    networks:
+      dpv2-net: {}
+      inter-plane-bus:
+        aliases: ["user-core"]
+    depends_on:
+      authority-db-init:
+        condition: service_completed_successfully
+      auth-core:
+        condition: service_healthy
+
+  authority-verifier:
+    image: ${REAL_AUTHORITY_AUTH_IMAGE:?required}
+    profiles: ["real-authority-verify"]
+    restart: "no"
+    entrypoint: ["node", "/app/real-authority-fixture.mjs"]
+    command: ["verify"]
+    environment:
+      AUTH_BASE_URL: http://auth-core:3011
+      USER_BASE_URL: http://user-core:3012
+      AUTH_CORE_ISSUER: http://auth-core:3011/api/convex-auth
+      NATS_URL: nats://data-nats:4222
+      NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?required}
+      RUN_ID: ${REAL_AUTHORITY_RUN_ID:?required}
+      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${REAL_AUTHORITY_MEMBERSHIP_TOKEN:?required}
+      USER_CORE_RETRIEVAL_TOKEN: ${REAL_AUTHORITY_RETRIEVAL_TOKEN:?required}
+      CONTROL_POLICY_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:?required}
+      PERSISTENCE_SERVICE_ID: ${REAL_AUTHORITY_PERSISTENCE_SERVICE_ID:?required}
+      PERSISTENCE_SERVICE_API_KEY: ${REAL_AUTHORITY_PERSISTENCE_SERVICE_API_KEY:?required}
+      FIXTURE_OUTPUT_FILE: /fixtures/runtime/authority.json
+    volumes:
+      - ./tests/e2e/isolated/real-authority-fixture.mjs:/app/real-authority-fixture.mjs:ro
+      - ${ISOLATED_PUBLIC_KEY_FILE:?required}:/fixtures/public.pem:ro
+      - ${REAL_AUTHORITY_FIXTURE_OUTPUT_DIR:?required}:/fixtures/runtime
+    networks:
+      - dpv2-net
+      - inter-plane-bus
+    depends_on:
+      auth-core:
+        condition: service_healthy
+      user-core:
+        condition: service_started

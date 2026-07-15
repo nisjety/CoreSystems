@@ -2,12 +2,13 @@ package users
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // GDPR erasure + DSAR for users.
@@ -24,113 +25,10 @@ import (
 //   - velion.audit.v1.control.dsar_export    (durable audit)
 //   - velion.gdpr.erasure.requested          (cross-plane fan-out)
 const (
-	ErasureAuditSubject      = "velion.audit.v1.control.erasure"
-	DSARExportAuditSubject   = "velion.audit.v1.control.dsar_export"
+	ErasureAuditSubject      = "velion.audit.v2.control.user-core.erasure"
+	DSARExportAuditSubject   = "velion.audit.v2.control.user-core.dsar_export"
 	GDPRErasureFanoutSubject = "velion.gdpr.erasure.requested"
 )
-
-// SetAuthPool wires the secondary pgx pool used to invoke the auth-DB GDPR
-// stored procedures. Pass nil to leave it unconfigured (hard erasure / anonymize
-// will then return an error explaining AUTH_DATABASE_URL is required).
-func (s *Service) SetAuthPool(pool *pgxpool.Pool) {
-	s.authPool = pool
-}
-
-// ErasureAvailable reports whether the auth-DB pool is wired, i.e. whether
-// hard-erase / anonymize can actually run. When false (AUTH_DATABASE_URL unset),
-// callers should refuse the erasure routes with an explicit 503 rather than
-// attempting the operation and surfacing an opaque 500.
-func (s *Service) ErasureAvailable() bool {
-	return s.authPool != nil
-}
-
-// ErasureReceipt aggregates the auth-DB proc receipt and the local cleanup.
-type ErasureReceipt struct {
-	Success      bool            `json:"success"`
-	UserID       string          `json:"user_id"`
-	Mode         string          `json:"mode"` // "hard_delete" | "anonymize"
-	AuthDB       json.RawMessage `json:"auth_db_receipt,omitempty"`
-	LocalDeleted bool            `json:"local_user_deleted"`
-	ErasedAt     time.Time       `json:"erased_at"`
-}
-
-// HardEraseUser performs an irreversible GDPR erasure of a user:
-//  1. invokes gdpr_hard_delete_user($1) on the auth_service DB (cascades
-//     session/account/two_factor/passkey/apikey/member/... and the "user" row);
-//  2. hard-deletes the user's local rows in user_service (memberships + users).
-//
-// Both calls are parameterized. Returns the combined receipt.
-func (s *Service) HardEraseUser(ctx context.Context, userID string) (*ErasureReceipt, error) {
-	if strings.TrimSpace(userID) == "" {
-		return nil, fmt.Errorf("user ID is required")
-	}
-	if s.authPool == nil {
-		return nil, fmt.Errorf("auth database not configured (AUTH_DATABASE_URL); cannot run gdpr_hard_delete_user")
-	}
-
-	var authReceipt []byte
-	if err := s.authPool.QueryRow(ctx, `SELECT gdpr_hard_delete_user($1)`, userID).Scan(&authReceipt); err != nil {
-		return nil, fmt.Errorf("gdpr_hard_delete_user: %w", err)
-	}
-
-	// Local cleanup in user_service. Memberships first (FK-free but explicit),
-	// then the canonical users row.
-	if err := s.repo.DeleteUserOrgMemberships(ctx, userID); err != nil {
-		return nil, err
-	}
-	localDeleted := true
-	if err := s.repo.Delete(ctx, userID); err != nil {
-		// A missing local row is acceptable (auth-side erasure still happened).
-		if !strings.Contains(strings.ToLower(err.Error()), "not found") {
-			return nil, err
-		}
-		localDeleted = false
-	}
-
-	if s.cache != nil {
-		_ = s.cache.Del(ctx, userIDKeyPrefix+userID)
-	}
-
-	return &ErasureReceipt{
-		Success:      true,
-		UserID:       userID,
-		Mode:         "hard_delete",
-		AuthDB:       json.RawMessage(authReceipt),
-		LocalDeleted: localDeleted,
-		ErasedAt:     time.Now().UTC(),
-	}, nil
-}
-
-// AnonymizeUser performs the softer GDPR variant: it invokes
-// gdpr_anonymize_user($1) on the auth_service DB (scrubs PII + bans the
-// account, drops sessions/accounts/2fa/passkeys/apikeys) and leaves the local
-// user_service row in place (the user id survives for referential integrity).
-func (s *Service) AnonymizeUser(ctx context.Context, userID string) (*ErasureReceipt, error) {
-	if strings.TrimSpace(userID) == "" {
-		return nil, fmt.Errorf("user ID is required")
-	}
-	if s.authPool == nil {
-		return nil, fmt.Errorf("auth database not configured (AUTH_DATABASE_URL); cannot run gdpr_anonymize_user")
-	}
-
-	var authReceipt []byte
-	if err := s.authPool.QueryRow(ctx, `SELECT gdpr_anonymize_user($1)`, userID).Scan(&authReceipt); err != nil {
-		return nil, fmt.Errorf("gdpr_anonymize_user: %w", err)
-	}
-
-	if s.cache != nil {
-		_ = s.cache.Del(ctx, userIDKeyPrefix+userID)
-	}
-
-	return &ErasureReceipt{
-		Success:      true,
-		UserID:       userID,
-		Mode:         "anonymize",
-		AuthDB:       json.RawMessage(authReceipt),
-		LocalDeleted: false,
-		ErasedAt:     time.Now().UTC(),
-	}, nil
-}
 
 // DSARExport assembles a GDPR Art. 15 data-subject export from the Control
 // Plane data reachable from user-core: the user profile + org memberships.
@@ -154,7 +52,7 @@ type DSARExport struct {
 // test; do not weaken it without updating that test.
 var DSARControlPlaneDisclosure = []string{
 	"Control Plane export: profile + org memberships + API key metadata.",
-	"Audit events for this subject are retained by audit-core (velion.audit.v1.control.*).",
+	"Audit events for this subject are retained by audit-core (velion.audit.v2.control.user-core.*).",
 	"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
 }
 
@@ -235,70 +133,34 @@ func (s *Service) BuildDSARExport(ctx context.Context, userID string) (*DSARExpo
 	return export, nil
 }
 
-// PublishErasureAudit emits a durable audit record on the local control-plane
-// bus (controlplane-nats, where audit-core listens) plus the cross-plane erasure
-// fan-out on the shared velion-nats bus. The two transports are independent: a
-// disabled local audit publisher does not suppress the fan-out, and vice versa.
-// Both are best-effort and silently no-op when their connection is unavailable.
-func (s *Service) PublishErasureAudit(orgID, subjectType, subjectID, actorID, actorRole, outcome string, receipt any) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-
-	var details map[string]any
-	if receipt != nil {
-		if b, err := json.Marshal(receipt); err == nil {
-			_ = json.Unmarshal(b, &details)
-		}
-	}
-
-	// Durable audit event → LOCAL control-plane bus via CORE publish, matching
-	// audit-core's core QueueSubscribe on velion.audit.v1.>.
-	if ap := s.auditPublisher; ap != nil {
-		_ = ap.Publish(ErasureAuditSubject, map[string]any{
-			"occurred_at": now,
-			"org_id":      orgID,
-			"user_id":     actorID,
-			"actor_role":  actorRole,
-			"plane":       "control",
-			"event":       "erasure",
-			"subject":     subjectType + ":" + subjectID,
-			"resource_id": subjectID,
-			"outcome":     outcome,
-			"details":     details,
-		})
-	}
-
-	// Cross-plane erasure fan-out → SHARED velion-nats bus (Model/Data plane
-	// purge their side). Fires only on erasure success.
-	if outcome == "ok" {
-		if sp := s.sharedPublisher; sp != nil {
-			sp.PublishPlain(GDPRErasureFanoutSubject, map[string]any{
-				"subject_type": subjectType,
-				"subject_id":   subjectID,
-				"org_id":       orgID,
-				"requested_by": actorID,
-				"ts":           now,
-			})
-		}
-	}
-}
-
 // PublishDSARAudit emits a durable audit record for a DSAR export on the local
 // control-plane bus (controlplane-nats). DSAR is a read, so it does NOT emit the
 // erasure fan-out. Best-effort; no-ops when the local audit publisher is unset.
-func (s *Service) PublishDSARAudit(orgID, subjectID, actorID, actorRole, outcome string) {
-	ap := s.auditPublisher
-	if ap == nil {
-		return
-	}
-	_ = ap.Publish(DSARExportAuditSubject, map[string]any{
-		"occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
+func (s *Service) PublishDSARAudit(ctx context.Context, orgID, subjectID, actorID, actorRole, outcome string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	eventID := fmt.Sprintf("dsar:user-core:%x", sha256.Sum256([]byte(subjectID+"\x00"+actorID+"\x00"+outcome+"\x00"+now)))
+	payload := map[string]any{
+		"event_id":    eventID,
+		"occurred_at": now,
 		"org_id":      orgID,
 		"user_id":     actorID,
 		"actor_role":  actorRole,
 		"plane":       "control",
+		"producer":    "user-core",
 		"event":       "dsar_export",
 		"subject":     "user:" + subjectID,
 		"resource_id": subjectID,
 		"outcome":     outcome,
-	})
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode DSAR audit event: %w", err)
+	}
+	err = s.auditOutbox.EnqueueAndDispatch(ctx, AuditOutboxRow{EventID: eventID, Subject: DSARExportAuditSubject, Payload: encoded})
+	var deferred *auditDispatchDeferredError
+	if errors.As(err, &deferred) {
+		log.Printf("user-core audit event %s retained for retry: %v", eventID, deferred)
+		return nil
+	}
+	return err
 }

@@ -436,16 +436,11 @@ pub(super) async fn dispatch_toggle_policy(
 pub(super) async fn dispatch_operating_map_generate(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
     action_id: &str,
 ) -> Response {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
-    };
     let body = json!({
         "requested_by": user.user_id.clone(),
         "generated_from": input.get("generatedFrom").cloned().unwrap_or_else(|| json!({
@@ -454,13 +449,14 @@ pub(super) async fn dispatch_operating_map_generate(
         })),
     });
     let url = format!("{}/v1/wiki/operating-map/refresh", state.wiki_store_url);
-    let (status, Json(resp)) = proxy_json(
+    let (status, Json(resp)) = crate::domains::knowledge::shared::proxy_data_plane_json(
         state,
+        user,
+        headers,
         Method::POST,
         &url,
         Some(body),
         Some(org_id.as_str()),
-        Some(&actor),
         None,
     )
     .await;
@@ -492,6 +488,7 @@ pub(super) async fn dispatch_operating_map_generate(
 pub(super) async fn dispatch_operating_map_review(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let proposal_id = input
@@ -516,24 +513,19 @@ pub(super) async fn dispatch_operating_map_review(
     }
 
     let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
-    };
     let url = format!(
         "{}/v1/wiki/operating-map/proposals/{}/review",
         state.wiki_store_url,
         urlencoding::encode(proposal_id)
     );
-    let (status, Json(resp)) = proxy_json(
+    let (status, Json(resp)) = crate::domains::knowledge::shared::proxy_data_plane_json(
         state,
+        user,
+        headers,
         Method::POST,
         &url,
         Some(json!({ "decision": decision, "reviewed_by": user.user_id.clone() })),
         Some(org_id.as_str()),
-        Some(&actor),
         None,
     )
     .await;
@@ -559,6 +551,7 @@ pub(super) async fn dispatch_operating_map_review(
 pub(super) async fn dispatch_operating_map_blueprint(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let version_id = input
@@ -593,12 +586,6 @@ pub(super) async fn dispatch_operating_map_blueprint(
     }
 
     let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = ActionActor {
-        user_id: user.user_id.clone(),
-        user_email: user.user_email.clone(),
-        user_name: user.user_name.clone(),
-        user_role: user.auth_role.clone().unwrap_or_default(),
-    };
     let body = json!({
         "version_id": version_id,
         "blueprint_id": blueprint_id,
@@ -612,13 +599,14 @@ pub(super) async fn dispatch_operating_map_blueprint(
         "{}/v1/wiki/operating-map/agent-blueprints",
         state.wiki_store_url
     );
-    let (status, Json(resp)) = proxy_json(
+    let (status, Json(resp)) = crate::domains::knowledge::shared::proxy_data_plane_json(
         state,
+        user,
+        headers,
         Method::POST,
         &url,
         Some(body),
         Some(org_id.as_str()),
-        Some(&actor),
         None,
     )
     .await;

@@ -12,6 +12,7 @@ import { DirectNatsService } from '../nats/direct-nats.service';
 import { setAuthIntegrationService } from '../auth/user-service-integration.plugin';
 import { setOrganizationEventPublisher } from '../auth/organization-hooks';
 import { setOrganizationEventPublisher as setPluginEventPublisher } from '../auth/organization-events.plugin';
+import { validateOrganizationReconciliationCredentials } from '../auth/control-service-credentials';
 import { setAuditNatsPublisher } from '../auth/audit-plugin';
 
 @Injectable()
@@ -25,6 +26,7 @@ export class AuthServiceInitializer implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
+    validateOrganizationReconciliationCredentials();
     try {
       this.logger.log('Initializing auth service integration...');
 
@@ -37,7 +39,7 @@ export class AuthServiceInitializer implements OnModuleInit {
       this.logger.log('Organization event publisher initialized');
 
       // Wire the LOCAL control-plane bus (DirectNatsService → controlplane-nats)
-      // into the audit plugin for velion.audit.v1.control.* emission. audit-core's
+      // into the audit plugin for Auth Core's velion.audit.v2.control.* emission.
       // primary subscription listens there; the shared velion-nats bus is reserved
       // for cross-plane domain/ACL events.
       setAuditNatsPublisher(this.directNats);

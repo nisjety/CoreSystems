@@ -1,15 +1,19 @@
 package nats
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
 )
 
 type Config struct {
-	URL   string
-	Token string
-	Name  string
+	URL         string
+	User        string
+	Password    string
+	InboxPrefix string
+	Name        string
 }
 
 type Client struct {
@@ -18,12 +22,18 @@ type Client struct {
 }
 
 func NewClient(cfg Config) (*Client, error) {
+	user := strings.TrimSpace(cfg.User)
+	password := strings.TrimSpace(cfg.Password)
+	if user == "" || len(password) < 32 {
+		return nil, fmt.Errorf("scoped NATS user and password of at least 32 characters are required")
+	}
 	options := []nats.Option{
 		nats.Name(cfg.Name),
 		nats.Timeout(5 * time.Second),
+		nats.UserInfo(user, password),
 	}
-	if cfg.Token != "" {
-		options = append(options, nats.Token(cfg.Token))
+	if cfg.InboxPrefix != "" {
+		options = append(options, nats.CustomInboxPrefix(cfg.InboxPrefix))
 	}
 	conn, err := nats.Connect(cfg.URL, options...)
 	if err != nil {

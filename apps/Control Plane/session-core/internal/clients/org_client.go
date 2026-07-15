@@ -24,19 +24,26 @@ type orgMembersResponse struct {
 
 // OrgClient calls org-core to validate membership.
 type OrgClient struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL      string
+	serviceToken string
+	httpClient   *http.Client
 }
 
 // NewOrgClient returns nil if baseURL is empty (disabled).
-func NewOrgClient(baseURL string) *OrgClient {
+func NewOrgClient(baseURL string, serviceTokens ...string) *OrgClient {
 	if baseURL == "" {
 		return nil
 	}
+	serviceToken := ""
+	if len(serviceTokens) > 0 {
+		serviceToken = serviceTokens[0]
+	}
 	return &OrgClient{
-		baseURL: baseURL,
+		baseURL:      baseURL,
+		serviceToken: serviceToken,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout:       5 * time.Second,
+			CheckRedirect: rejectScopedServiceRedirect,
 		},
 	}
 }
@@ -50,6 +57,7 @@ func (c *OrgClient) ValidateMembership(ctx context.Context, orgID, userID string
 	if err != nil {
 		return "", fmt.Errorf("building org membership request: %w", err)
 	}
+	setSessionServicePrincipal(req, c.serviceToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -93,6 +101,7 @@ func (c *OrgClient) GetOrganization(ctx context.Context, orgID string) (*Organiz
 	if err != nil {
 		return nil, fmt.Errorf("org-client: build organization request: %w", err)
 	}
+	setSessionServicePrincipal(req, c.serviceToken)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("org-client: call org-core: %w", err)
@@ -130,6 +139,7 @@ func (c *OrgClient) GetEntitlements(ctx context.Context, orgID string) ([]Entitl
 	if err != nil {
 		return nil, fmt.Errorf("org-client: build entitlements request: %w", err)
 	}
+	setSessionServicePrincipal(req, c.serviceToken)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("org-client: call org-core entitlements: %w", err)

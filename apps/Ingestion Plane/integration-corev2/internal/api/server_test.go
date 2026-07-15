@@ -129,6 +129,33 @@ func TestRequestIDPropagatesToResponseEnvelope(t *testing.T) {
 	}
 }
 
+func TestAuditMutationIDNeverTrustsCallerRequestIDForDeduplication(t *testing.T) {
+	requestContext := context.WithValue(t.Context(), requestIDContextKey{}, "req-audit-id")
+	first := auditMutationID(requestContext, "capabilities", "conn-1")
+	second := auditMutationID(requestContext, "capabilities", "conn-1")
+	if first == second {
+		t.Fatalf("caller request ID suppressed a distinct audit intent: %q", first)
+	}
+	if !strings.HasPrefix(first, "audit:integration:capabilities:") {
+		t.Fatalf("audit ID = %q, want bounded operation prefix", first)
+	}
+
+	backgroundFirst := auditMutationID(t.Context(), "capabilities", "conn-1")
+	backgroundSecond := auditMutationID(t.Context(), "capabilities", "conn-1")
+	if backgroundFirst == backgroundSecond {
+		t.Fatalf("background audit IDs collided: %q", backgroundFirst)
+	}
+}
+
+func TestPrepareAuditEventPreservesExplicitRequestID(t *testing.T) {
+	event := prepareAuditEvent(context.WithValue(t.Context(), requestIDContextKey{}, "req-context"), store.AuditEvent{
+		ID: "audit-explicit", OrganizationID: "org-1", EventType: "test", RequestID: "req-explicit",
+	})
+	if event.RequestID != "req-explicit" {
+		t.Fatalf("RequestID = %q, want explicit value", event.RequestID)
+	}
+}
+
 func TestMetricsRequireInternalAuthAndExposeRequestCounts(t *testing.T) {
 	app := testServer(t)
 	req := httptest.NewRequest("GET", "/api/v1/providers", nil)
@@ -161,6 +188,69 @@ func TestMetricsRequireInternalAuthAndExposeRequestCounts(t *testing.T) {
 	text := string(body)
 	if !strings.Contains(text, "integration_http_requests_total") || !strings.Contains(text, `path="/api/v1/providers"`) {
 		t.Fatalf("metrics body missing expected request counter: %s", text)
+	}
+}
+
+func TestAuditOutboxTerminalStateDegradesHealthExposesMetricsAndCanBeRequeued(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	queue := &fakeIntegrationAuditStore{stats: store.AuditOutboxStats{
+		Pending: 3, Terminal: 2, OldestPendingAge: 90 * time.Second, OldestTerminalAge: 5 * time.Minute,
+	}}
+	outbox := NewAuditOutbox(queue, &fakeIntegrationAuditRecorder{}, nil)
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, AuditOutbox: outbox})
+
+	healthRequest := httptest.NewRequest("GET", "/health/detailed", nil)
+	healthResponse, err := app.Test(healthRequest)
+	if err != nil {
+		t.Fatalf("health request error: %v", err)
+	}
+	if healthResponse.StatusCode != fiber.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want 503", healthResponse.StatusCode)
+	}
+	var healthBody struct {
+		Status      string `json:"status"`
+		AuditOutbox struct {
+			Terminal int `json:"terminal"`
+		} `json:"auditOutbox"`
+	}
+	if err := json.NewDecoder(healthResponse.Body).Decode(&healthBody); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if healthBody.Status != "degraded" || healthBody.AuditOutbox.Terminal != 2 {
+		t.Fatalf("health = %#v, want terminal degradation", healthBody)
+	}
+
+	metricsRequest := httptest.NewRequest("GET", "/metrics", nil)
+	metricsRequest.Header.Set("X-Internal-API-Key", "dev-key")
+	metricsResponse, err := app.Test(metricsRequest)
+	if err != nil {
+		t.Fatalf("metrics request error: %v", err)
+	}
+	metricsBody, err := io.ReadAll(metricsResponse.Body)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	metricsText := string(metricsBody)
+	for _, expected := range []string{
+		"integration_audit_outbox_pending 3",
+		"integration_audit_outbox_terminal 2",
+		"integration_audit_outbox_oldest_pending_seconds 90",
+		"integration_audit_outbox_oldest_terminal_seconds 300",
+	} {
+		if !strings.Contains(metricsText, expected) {
+			t.Fatalf("metrics missing %q: %s", expected, metricsText)
+		}
+	}
+
+	requeueRequest := httptest.NewRequest("POST", "/internal/audit-outbox/requeue", strings.NewReader(`{"eventIds":["audit-1","audit-2"]}`))
+	requeueRequest.Header.Set("Content-Type", "application/json")
+	requeueRequest.Header.Set("X-Internal-API-Key", "dev-key")
+	requeueResponse, err := app.Test(requeueRequest)
+	if err != nil {
+		t.Fatalf("requeue request error: %v", err)
+	}
+	if requeueResponse.StatusCode != fiber.StatusOK || len(queue.requeued) != 2 {
+		t.Fatalf("requeue status/ids = %d/%#v, want 200/two", requeueResponse.StatusCode, queue.requeued)
 	}
 }
 
@@ -726,6 +816,35 @@ func TestWriteActionIdempotencyReceiptPreventsDuplicateProviderSend(t *testing.T
 	}
 }
 
+func TestActionAuditEventIDSeparatesAuthorizedReceiptsForIdenticalPayload(t *testing.T) {
+	first := store.ActionReceipt{
+		OrganizationID: "org-1", IdempotencyKey: "reply:first-authorized-action",
+		RequestSHA256: "same-payload", ConnectionID: "connection-1", ProviderKey: "microsoft",
+		Operation: "mail.send", AttestationIssuer: "model-plane", AuthorizationKind: "human_approved_ai_action",
+		AuthorizationID: "authorization-1", ApprovalID: "approval-1", ActionID: "action-1",
+		ActorID: "user-1", PayloadSHA256: "same-payload",
+	}
+	second := first
+	second.IdempotencyKey = "reply:second-authorized-action"
+	second.AuthorizationID = "authorization-2"
+	second.ApprovalID = "approval-2"
+	second.ActionID = "action-2"
+
+	firstRequested := actionAuditEventID("requested", first)
+	if firstRequested == actionAuditEventID("requested", second) {
+		t.Fatal("distinct durable authorization receipts collapsed to one audit event id")
+	}
+	if firstRequested == actionAuditEventID("executed", first) {
+		t.Fatal("requested and executed stages collapsed to one audit event id")
+	}
+	rotatedSigner := first
+	rotatedSigner.AttestationKeyID = "rotated-key"
+	rotatedSigner.AttestationJTI = "fresh-jti"
+	if firstRequested != actionAuditEventID("requested", rotatedSigner) {
+		t.Fatal("signer rotation changed the durable action audit identity")
+	}
+}
+
 func TestWriteActionProviderFailureBecomesUnknownAndBlocksBlindRetry(t *testing.T) {
 	providerCalls := 0
 	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -879,8 +998,22 @@ type completeFailureRepository struct {
 	store.Repository
 }
 
+type completeFailureTransaction struct {
+	store.AuditTransaction
+}
+
+func (completeFailureTransaction) CompleteActionReceipt(context.Context, string, string, string) (store.ActionReceipt, error) {
+	return store.ActionReceipt{}, errors.New("receipt finalize unavailable")
+}
+
 func (completeFailureRepository) CompleteActionReceipt(context.Context, string, string, string) (store.ActionReceipt, error) {
 	return store.ActionReceipt{}, errors.New("receipt finalize unavailable")
+}
+
+func (r completeFailureRepository) WithAuditTransaction(ctx context.Context, fn func(store.AuditTransaction) error) error {
+	return r.Repository.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		return fn(completeFailureTransaction{AuditTransaction: tx})
+	})
 }
 
 func TestWriteActionReceiptFinalizeFailureBlocksBlindRetry(t *testing.T) {
@@ -964,6 +1097,113 @@ func TestWriteActionReceiptFinalizeFailureBlocksBlindRetry(t *testing.T) {
 	}
 	if providerCalls != 1 {
 		t.Fatalf("provider calls = %d, want exactly 1 after receipt finalize failure and retry", providerCalls)
+	}
+	sawUnknownAudit := false
+	for attempt := 0; attempt < 3; attempt++ {
+		event, found, err := repo.ClaimAuditEvent(t.Context())
+		if err != nil {
+			t.Fatalf("ClaimAuditEvent: %v", err)
+		}
+		if !found {
+			break
+		}
+		if event.EventType == "connection.action.unknown" {
+			sawUnknownAudit = true
+		}
+	}
+	if !sawUnknownAudit {
+		t.Fatal("stale executing receipt was not durably reconciled to an unknown audit stage")
+	}
+}
+
+func TestWriteActionAuditIntentFailureStopsBeforeProviderAndRemainsRetryable(t *testing.T) {
+	providerCalls := 0
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"provider-message-unexpected"}`))
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+	cfg.ProviderWriteAttestationKeysJSON = apiTrustedKeysJSON(t, publicKey)
+	cfg.AllowLegacyTenantKey = false
+	cfg.MicrosoftGraphBaseURL = providerServer.URL
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	encryptedToken, err := vault.Encrypt("access-token", []byte("conn-ms-audit-preflight"))
+	if err != nil {
+		t.Fatalf("Encrypt error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-ms-audit-preflight", ProviderKey: "microsoft", ConnectorType: "microsoft-graph",
+		OrganizationID: "org-1", UserID: "user-1", Status: "active",
+		Capabilities: []string{"mail.send"}, EncryptedAccessToken: encryptedToken,
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   auditInsertFailureRepository{Repository: repo},
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "conversation-core", OrganizationID: "org-1", PrincipalType: "service", Scopes: []string{"integration:write"},
+		}},
+		Actions: actions.NewService(cfg, providerServer.Client()),
+	})
+	idempotencyKey := "conversation:org-1:audit-preflight"
+	body := map[string]any{"message": map[string]any{"subject": "hello"}}
+	binding := attestation.Binding{
+		PresenterService: "conversation-core", OrganizationID: "org-1", ConnectionID: "conn-ms-audit-preflight",
+		ProviderKey: "microsoft", Operation: "mail.send", Body: body, IdempotencyKey: idempotencyKey,
+	}
+	claims := apiHumanIntentClaims(t, binding)
+	claims.AuthorizationID = "human-reply-audit-preflight"
+	claims.ActionID = claims.AuthorizationID
+	claims.JWTID = "attestation-audit-preflight"
+	payloadBytes, _ := json.Marshal(map[string]any{
+		"operation": "mail.send", "writeAttestation": signAPIWriteAttestation(t, privateKey, claims),
+		"idempotencyKey": idempotencyKey, "body": body,
+	})
+	for attempt := 1; attempt <= 2; attempt++ {
+		req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-audit-preflight/actions", strings.NewReader(string(payloadBytes)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer conversation-service-token")
+		response, requestErr := app.Test(req)
+		if requestErr != nil {
+			t.Fatalf("attempt %d app.Test error: %v", attempt, requestErr)
+		}
+		if response.StatusCode != fiber.StatusServiceUnavailable {
+			defer response.Body.Close()
+			t.Fatalf("attempt %d status = %d, want 503", attempt, response.StatusCode)
+		}
+		if code := readAPIErrorCode(t, response); code != "action_pre_provider_retryable" {
+			t.Fatalf("attempt %d error code = %q", attempt, code)
+		}
+	}
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want zero when durable intent is unavailable", providerCalls)
+	}
+}
+
+func TestMarkActionOutcomeUnknownRequiresExecutingReceipt(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	err := markActionOutcomeUnknown(t.Context(), ServerConfig{Repo: repo}, store.Connection{
+		ID: "conn-missing-receipt", OrganizationID: "org-1", UserID: "user-1", ProviderKey: "microsoft",
+	}, store.ActionReceipt{
+		OrganizationID: "org-1", IdempotencyKey: "missing-idempotency-key",
+		ConnectionID: "conn-missing-receipt", Operation: "mail.send",
+	})
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("markActionOutcomeUnknown error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -1162,6 +1402,76 @@ func TestSyncJobCreateAndEvents(t *testing.T) {
 	}
 	if retried.Data.SyncJob.Metadata["retryOf"] != decoded.Data.SyncJob.ID {
 		t.Fatalf("retryOf = %#v, want %s", retried.Data.SyncJob.Metadata["retryOf"], decoded.Data.SyncJob.ID)
+	}
+}
+
+func TestSyncCancellationRollsBackWhenAuditIntentCannotPersist(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	_, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-sync-cancel-rollback", ProviderKey: "notion", ConnectorType: "notion",
+		OrganizationID: "org-1", UserID: "user-1", Status: "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	job, err := repo.CreateSyncJob(t.Context(), store.SyncJob{
+		ID: "sync-cancel-rollback", OrganizationID: "org-1", ConnectionID: "conn-sync-cancel-rollback",
+		UserID: "user-1", ProviderKey: "notion", Status: "handoff_data_plane", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("CreateSyncJob error: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   auditInsertFailureRepository{Repository: repo},
+		OAuth:  service,
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/sync-jobs/"+job.ID+"/cancel", strings.NewReader(`{"reason":"rollback-test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test cancel error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("cancel status = %d, want 500", resp.StatusCode)
+	}
+	unchanged, err := repo.GetSyncJob(t.Context(), job.ID)
+	if err != nil {
+		t.Fatalf("GetSyncJob error: %v", err)
+	}
+	if unchanged.Status != "handoff_data_plane" || unchanged.CompletedAt != nil {
+		t.Fatalf("sync cancellation committed without audit: status=%q completed=%v", unchanged.Status, unchanged.CompletedAt)
+	}
+}
+
+func TestCancelSyncJobHandlesDefaultReasonAndTerminalReplay(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	job, err := repo.CreateSyncJob(t.Context(), store.SyncJob{
+		ID: "sync-cancel-default", OrganizationID: "org-1", ConnectionID: "conn-1",
+		UserID: "user-1", ProviderKey: "notion", Status: "handoff_data_plane", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("CreateSyncJob error: %v", err)
+	}
+	cancelled, err := cancelSyncJob(t.Context(), ServerConfig{Repo: repo}, job, "")
+	if err != nil {
+		t.Fatalf("cancelSyncJob error: %v", err)
+	}
+	if cancelled.Metadata["cancelReason"] != "user_requested" {
+		t.Fatalf("cancel reason = %#v, want user_requested", cancelled.Metadata["cancelReason"])
+	}
+	replayed, err := cancelSyncJob(t.Context(), ServerConfig{Repo: repo}, cancelled, "ignored")
+	if err != nil {
+		t.Fatalf("terminal replay error: %v", err)
+	}
+	if replayed.ID != cancelled.ID || replayed.Status != "cancelled" {
+		t.Fatalf("terminal replay changed job: %#v", replayed)
+	}
+	if _, err := cancelSyncJob(t.Context(), ServerConfig{Repo: repo}, store.SyncJob{ID: "missing", Status: "running"}, "test"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing job error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -1914,6 +2224,38 @@ func TestInternalTokenBrokerPublishesRedactedLeaseEvent(t *testing.T) {
 	}
 }
 
+func TestRecordTokenLeaseFailsClosedOnMissingConnectionOrAuditIntent(t *testing.T) {
+	token := oauth.AccessTokenResult{
+		ConnectionID: "conn-lease-rollback", AccessToken: "must-not-be-persisted", ExpiresAt: time.Now().Add(time.Hour),
+	}
+	missingRepo := store.NewMemoryRepository()
+	if err := recordTokenLease(t.Context(), ServerConfig{Repo: missingRepo}, token, "social-publisher"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing connection error = %v, want ErrNotFound", err)
+	}
+
+	repo := store.NewMemoryRepository()
+	_, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID: token.ConnectionID, ProviderKey: "x", ConnectorType: "x", OrganizationID: "org-1", UserID: "user-1", Status: "active",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	publisher := &fakeEventsPublisher{}
+	err = recordTokenLease(t.Context(), ServerConfig{
+		Repo:   auditInsertFailureRepository{Repository: repo},
+		Events: publisher,
+	}, token, "social-publisher")
+	if err == nil {
+		t.Fatal("audit persistence error = nil")
+	}
+	if len(publisher.events) != 0 {
+		t.Fatalf("lease event published without committed audit intent: %#v", publisher.events)
+	}
+	if _, found, err := repo.ClaimAuditEvent(t.Context()); err != nil || found {
+		t.Fatalf("audit outbox state after rollback: found=%v err=%v", found, err)
+	}
+}
+
 func TestSCIMProvisioningRequiresBearerToken(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.SCIMBearerToken = "scim-secret"
@@ -2050,6 +2392,58 @@ func TestSCIMTokenCRUDAndInboundAuth(t *testing.T) {
 	}
 	if resp.StatusCode != 401 {
 		t.Fatalf("revoked scim status = %d, want 401", resp.StatusCode)
+	}
+}
+
+type auditInsertFailureTransaction struct {
+	store.AuditTransaction
+}
+
+func (auditInsertFailureTransaction) InsertAuditEvent(context.Context, store.AuditEvent) error {
+	return errors.New("audit insert unavailable")
+}
+
+type auditInsertFailureRepository struct {
+	store.Repository
+}
+
+func (r auditInsertFailureRepository) InsertAuditEvent(context.Context, store.AuditEvent) error {
+	return errors.New("audit insert unavailable")
+}
+
+func (r auditInsertFailureRepository) WithAuditTransaction(ctx context.Context, fn func(store.AuditTransaction) error) error {
+	return r.Repository.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
+		return fn(auditInsertFailureTransaction{AuditTransaction: tx})
+	})
+}
+
+func TestSCIMTokenCreateRollsBackWhenAuditIntentCannotPersist(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.SCIMBearerToken = ""
+	cfg.SCIMBearerTokens = map[string]string{}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   auditInsertFailureRepository{Repository: repo},
+		OAuth:  service,
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"must rollback"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	tokens, err := repo.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil {
+		t.Fatalf("ListSCIMTokens: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("SCIM token committed without audit intent: %#v", tokens)
 	}
 }
 
@@ -2386,6 +2780,56 @@ func TestGDPRExportAndDeleteRedactsAndClearsTokens(t *testing.T) {
 	}
 	if len(consents) != 1 || consents[0].Granted || consents[0].RevokedAt == nil {
 		t.Fatalf("consents = %#v, want revoked consent", consents)
+	}
+}
+
+func TestGDPRDeleteRollsBackAllLocalMutationsWhenAuditIntentFails(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	_, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-gdpr-rollback", ProviderKey: "github", ConnectorType: "github",
+		OrganizationID: "org-1", UserID: "user-1", Status: "active",
+		EncryptedAccessToken: "encrypted-token-fixture",
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	_, err = repo.UpsertConnectionConsent(t.Context(), store.ConnectionConsent{
+		ID: "consent-gdpr-rollback", OrganizationID: "org-1", ConnectionID: "conn-gdpr-rollback",
+		UserID: "user-1", ProviderKey: "github", Source: "repositories", Purpose: "search", Granted: true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnectionConsent error: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   auditInsertFailureRepository{Repository: repo},
+		OAuth:  service,
+	})
+
+	req := httptest.NewRequest("POST", "/internal/gdpr/delete", strings.NewReader(`{"organizationId":"org-1","userId":"user-1","reason":"rollback-test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test delete error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("delete status = %d, want 500", resp.StatusCode)
+	}
+	connection, err := repo.GetConnection(t.Context(), "conn-gdpr-rollback")
+	if err != nil {
+		t.Fatalf("GetConnection error: %v", err)
+	}
+	if connection.Status != "active" || connection.DeletedAt != nil || connection.EncryptedAccessToken == "" {
+		t.Fatalf("connection committed without audit: status=%q deleted=%v token_empty=%v", connection.Status, connection.DeletedAt, connection.EncryptedAccessToken == "")
+	}
+	consents, err := repo.ListConnectionConsents(t.Context(), connection.ID)
+	if err != nil {
+		t.Fatalf("ListConnectionConsents error: %v", err)
+	}
+	if len(consents) != 1 || !consents[0].Granted || consents[0].RevokedAt != nil {
+		t.Fatalf("consents committed without audit: %#v", consents)
 	}
 }
 

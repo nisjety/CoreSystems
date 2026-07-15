@@ -364,11 +364,9 @@ async fn export_csv(
             }
             (status, headers, bytes).into_response()
         }
-        Err(err) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(
-                json!({ "error": { "code": "upstream_unavailable", "message": err.to_string() } }),
-            ),
+            Json(crate::envelope::upstream_unavailable()),
         )
             .into_response(),
     }

@@ -17,7 +17,8 @@ type Config struct {
 	InternalAPIKey            string
 	IntegrationCoreURL        string
 	NATSURL                   string
-	NATSToken                 string
+	NATSUser                  string
+	NATSPassword              string
 	PublishWorkerEnabled      bool
 	PublishWorkerPollInterval time.Duration
 	PublishWorkerBatchSize    int
@@ -54,7 +55,8 @@ func Load() (*Config, error) {
 		InternalAPIKey:             strings.TrimSpace(getEnv("INTERNAL_API_KEY", "")),
 		IntegrationCoreURL:         strings.TrimRight(strings.TrimSpace(getEnv("INTEGRATION_CORE_URL", "http://integration-api:3026")), "/"),
 		NATSURL:                    strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
-		NATSToken:                  strings.TrimSpace(getEnv("VELION_NATS_TOKEN", getEnv("NATS_TOKEN", ""))),
+		NATSUser:                   strings.TrimSpace(getEnv("NATS_USER", "")),
+		NATSPassword:               strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
 		PublishWorkerEnabled:       getEnvBool("SOCIAL_PUBLISH_WORKER_ENABLED", true),
 		PublishWorkerPollInterval:  getEnvDuration("SOCIAL_PUBLISH_WORKER_POLL_INTERVAL", 5*time.Second),
 		PublishWorkerBatchSize:     getEnvInt("SOCIAL_PUBLISH_WORKER_BATCH_SIZE", 10),

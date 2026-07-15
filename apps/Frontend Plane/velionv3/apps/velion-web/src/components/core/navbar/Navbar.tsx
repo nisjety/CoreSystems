@@ -7,8 +7,8 @@ type NavbarProps = {
 };
 
 const navItems = [
-	{ href: "#produkt", label: "Produkt" },
-	{ href: "#plattform", label: "Plattform" },
+	{ href: "/produkt/arbeidsflyten", label: "Produkt" },
+	{ href: "/plattform/felles-kontekst", label: "Plattform" },
 	{ href: "/trust", label: "Tillit" },
 	{ href: "#kontakt", label: "Kontakt" },
 ];

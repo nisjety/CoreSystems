@@ -1,11 +1,35 @@
 # auth-core Research Dive
 
 Original generated: 2026-06-07
-Updated (live-verified): 2026-07-11
+Updated (source + isolated verification): 2026-07-15
 
 Scope: `apps/Control Plane/auth-core` (NestJS/TypeScript, container `auth-service`, port 3011 / gRPC 50011)
 
-## 2026-07-11 production-readiness addendum (current)
+## 2026-07-15 final secure-MVP addendum (current)
+
+The original fresh-image run exited before `/api/convex-auth/jwks` became ready; bounded redacted logs isolated legacy internal-key startup configuration without printing credentials. Auth now consumes file-backed gRPC, internal HTTP/NATS, and Auth→User credential registries. Exact credential ID, principal, audience, token, scope/method, ambiguity, retirement, and bounded rotation overlap are fail-closed. The real Nest gRPC transport matrix passes 9/9 cases.
+
+Convex signing startup now requires a readable matching RSA private/public pair of at least 2048 bits. Mismatched, EC, weak, and unreadable keys fail before service readiness. Production health requires exactly one RSA/RS256 signing JWK. The rebuilt production-mode image reached that readiness before the 4/4 container lifecycle passed. Production User mounts the same public-key secret and requires an explicit issuer.
+
+Migrations 017-027 cover invitation repair, reviewed owner preflight, revisioned membership/audit intent, identity/GDPR outboxes, publish fencing, removal preflight, and atomic membership mutation intent. The final lifecycle proof permits safe bounded retries with stable IDs while requiring durable logical cardinality. `pnpm build`, 39 active suites/372 tests, 6/6 lint-contract tests, and the 135-file lint ratchet pass. Eighty-four changed files are unsuppressed; 212 violations remain explicitly baselined in seven untouched legacy files. New scoped-auth/key helpers measure 88.23% statements, 83.2% branches, and 91.3% lines; the Auth→User TLS transport helper is 100% covered. The Docker proto path is `/app/proto`, not `/app/dist/src/proto`; the real Auth/User TLS integration passes and rejects plaintext. Production file-backed secrets use a root-only handoff into app-owned `0600` files before `appuser`. Real production secret injection/rotation and deployed-image verification remain operator-owned; no live tenant mutation was performed.
+
+## 2026-07-15 durable invitation/scoped-caller detail (superseded by final addendum above)
+
+Migrations 017-027 close the Better Auth 1.6.23 status/member transaction gap durably, add reviewed historical-owner preflight, revision-ordered membership audit intent, transactional registration/provider-link delivery, and the `invitation.created_at` field required by Better Auth's real adapter path. The repair worker never infers from all historical `accepted` rows; cancel/delete/removal tombstones and existing roles win. Owner repair reports and stops unless one existing canonical member has an explicit reviewed mapping. The immutable bootstrap migration is unchanged; later migrations are additive.
+
+Auth's Org projection, Billing deletion, User membership, and Application membership-reconciliation callers require pairwise-distinct audience/scope-bound tokens and reject reuse with legacy credentials. The seven-phase disposable-Postgres runner passes 59 Auth invitation/owner/audit cases plus deletion lifecycle tests. The expanded four-phase fresh-image stack proves real invitation creation, Auth -> Org convergence, duplicate invite/role/remove replay with exact audit cardinality, deletion checkpoint/resume, and Billing tombstone protection without touching existing tenants. Current test/static counts are recorded in the final addendum above. The long-running dev Auth image was not replaced during this continuation.
+
+## 2026-07-14 Velion v3 boundary addendum (historical deployment evidence)
+
+Auth Core was rebuilt from the current worktree and is healthy. Its public Better Auth/frontend origin is now configured through `VELION_PUBLIC_ORIGIN` (local live value `http://localhost:5173`) rather than an Auth-container URL. Invitation email HTML escapes dynamic fields and links to Velion's real `/accept-invitation/:invitationId` page. The gateway's invite/accept/remove/role-change and organization list/switch routes use Auth as canonical authority. Acceptance now uses an Auth-owned idempotent wrapper: real Drizzle transactions cover member creation plus active-org selection; the wrapper dispatches through Better Auth's trusted-origin/rate-limited router and normalizes enumeration-prone errors. Every Better Auth IP-precedence header is replaced with a verified-actor-derived 120-bit HMAC address, the Dragonfly increment/expiry is atomic, cache failures propagate, and a direct canonical acceptance request is rejected unless it carries the wrapper's invitation-bound 30-second HMAC marker. A committed retry returns the existing acceptance only when invitation ID, normalized invitee email, authenticated user ID, membership, and organization all match. Better Auth 1.6.23 still changes the invitation to `accepted` before the member/active-org transaction and compensates afterward on failure, leaving a residual medium risk of partial state if that compensation fails or an ambiguous commit occurs. Criterion E therefore still requires a broader transaction or durable reconciliation plus isolated real-Postgres fault injection.
+
+The same-origin gateway now exposes bounded OAuth/OIDC and SAML callback routes. They pin Auth Core as upstream, do not follow upstream redirects, forward no browser-supplied identity/internal-auth headers, bound provider/body/response size, restrict SAML to form posts, and preserve only the callback response headers required by the browser. Production Auth/frontend URLs must be canonical HTTPS origins with no credentials/path/query/fragment; non-production HTTP is loopback-only. Gateway and release-nginx access logs are path-only and normalize invitation IDs, without changing query forwarding. Live fake-state OAuth produced a 302 to `http://localhost:5173/api/auth/error?error=state_mismatch`; an invalid provider returned 400, and fake callback/reset/invitation markers were absent from gateway/SPA logs.
+
+A full Auth regression run exposed a fail-open ZDR posture in delegated token claims. Existing tests failed first; Model and plane token payloads now always set issuer-selected `zdr: true`, ignoring caller attempts to relax it. All 20 Jest suites/170 tests and `pnpm run build` pass; focused ESLint passes for the acceptance/rate-limit, atomic Dragonfly, Redis failure, and deployment-contract changes. The selected changed Auth security modules measure 95.16% lines, 94.07% statements, 93.75% functions, and 90% branches; the invitation controller measures 92.3% lines, 92.77% statements, 90% functions, and 90.47% branches; the atomic limiter is 100% covered. Public-origin/invitation-email logic measures 94.11% line coverage. This fail-closed contract can deliberately block a downstream provider that is not ZDR-attested; that is the secure-MVP behavior, not a UI fallback.
+
+At the 2026-07-14 verification, Org/Billing/Audit still accepted a shared inbound key and lifecycle fault E2E was pending. The 2026-07-15 addendum above supersedes those source/isolation gaps; no live invitation, role, or deletion mutation was exercised in either pass.
+
+## 2026-07-11 production-readiness addendum (historical)
 
 This addendum supersedes older statements below that the outbox WIP was undeployed. Auth Core was rebuilt from the current worktree and is healthy. Its checksum migration runner is live with four ledger rows: `init_better_auth.sql`, `gdpr_hard_delete.sql`, `014_normalized_identity_email.sql`, and `015_organization_projection_outbox.sql`.
 
@@ -17,7 +41,7 @@ The 2026-07-11 continuation also closed two worker concurrency hazards. Org/Bill
 
 Verification: Auth build passes; 12 Jest suites/78 tests pass. Measured coverage across the changed reconciliation/revision/service-principal set is 89.58%; `reconciliation-http.ts` and `outbox-revision.ts` are 100%, and `plane-service-principal.ts` is 85.71%. Full ESLint remains red at 591 errors/43 warnings. Auth is implemented/live but does not pass the MVP static gate yet.
 
-The live service-principal registry is audience/scope-bound. Plane-token and policy endpoints fail closed. Remaining boundary work: Org/Billing/Audit still accept a shared inbound key, and Model service-principal compatibility needs an explicit no-user-subject contract test.
+The 2026-07-11 service-principal registry was audience/scope-bound and plane-token/policy endpoints failed closed. At that time Org/Billing/Audit still accepted a shared inbound key; the 2026-07-15 addendum records its scoped replacement.
 
 ## 2026-07-10 Update — Executive Summary
 

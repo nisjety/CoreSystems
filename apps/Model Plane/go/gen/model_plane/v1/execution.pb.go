@@ -46,7 +46,16 @@ type RunAgentRequest struct {
 	// into every inference round and onto each tool step's GDPR audit detail so
 	// no run content is retained durably. Sourced from the chat request's `zdr`
 	// flag (model-gateway), OR'd with any org-level ZDR default.
-	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	Zdr bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Client-supplied tool definitions for this turn (chat-parity: the same
+	// ToolSpec[] the inline chat loop accepts). Merged with execution-core's
+	// built-in read/action tools and the org's registered MCP tools, then
+	// offered to the model AND admitted into the purpose-lock allowlist. Every
+	// client tool still executes through the SAME governed execute_step path
+	// (permission gate + HITL), so forwarding them cannot bypass approval; a
+	// client tool that resolves to no executor returns a graceful error the
+	// ReAct loop feeds back. Empty → only the server-side set is offered.
+	Tools         []*ToolDefinition `protobuf:"bytes,10,rep,name=tools,proto3" json:"tools,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -142,6 +151,13 @@ func (x *RunAgentRequest) GetZdr() bool {
 		return x.Zdr
 	}
 	return false
+}
+
+func (x *RunAgentRequest) GetTools() []*ToolDefinition {
+	if x != nil {
+		return x.Tools
+	}
+	return nil
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
@@ -635,7 +651,7 @@ var File_model_plane_v1_execution_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/execution.proto\x12\x0emodel_plane.v1\x1a\x19model_plane/v1/runs.proto\"\xe4\x01\n" +
+	"\x1emodel_plane/v1/execution.proto\x12\x0emodel_plane.v1\x1a\x19model_plane/v1/runs.proto\x1a\x1emodel_plane/v1/inference.proto\"\x9a\x02\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -646,7 +662,9 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x04mode\x18\a \x01(\tR\x04mode\x12\x1d\n" +
 	"\n" +
 	"max_rounds\x18\b \x01(\rR\tmaxRounds\x12\x10\n" +
-	"\x03zdr\x18\t \x01(\bR\x03zdr\"v\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\x124\n" +
+	"\x05tools\x18\n" +
+	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\"v\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
@@ -711,25 +729,27 @@ var file_model_plane_v1_execution_proto_goTypes = []any{
 	(*ResumeRunResponse)(nil),   // 5: model_plane.v1.ResumeRunResponse
 	(*PauseRunRequest)(nil),     // 6: model_plane.v1.PauseRunRequest
 	(*PauseRunResponse)(nil),    // 7: model_plane.v1.PauseRunResponse
-	(*CancelRunRequest)(nil),    // 8: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),   // 9: model_plane.v1.CancelRunResponse
+	(*ToolDefinition)(nil),      // 8: model_plane.v1.ToolDefinition
+	(*CancelRunRequest)(nil),    // 9: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),   // 10: model_plane.v1.CancelRunResponse
 }
 var file_model_plane_v1_execution_proto_depIdxs = []int32{
-	2, // 0: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
-	4, // 1: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
-	8, // 2: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	6, // 3: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
-	0, // 4: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
-	3, // 5: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
-	5, // 6: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
-	9, // 7: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	7, // 8: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
-	1, // 9: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
-	5, // [5:10] is the sub-list for method output_type
-	0, // [0:5] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	8,  // 0: model_plane.v1.RunAgentRequest.tools:type_name -> model_plane.v1.ToolDefinition
+	2,  // 1: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
+	4,  // 2: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
+	9,  // 3: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	6,  // 4: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
+	0,  // 5: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
+	3,  // 6: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
+	5,  // 7: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
+	10, // 8: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	7,  // 9: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
+	1,  // 10: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
+	6,  // [6:11] is the sub-list for method output_type
+	1,  // [1:6] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_execution_proto_init() }
@@ -738,6 +758,7 @@ func file_model_plane_v1_execution_proto_init() {
 		return
 	}
 	file_model_plane_v1_runs_proto_init()
+	file_model_plane_v1_inference_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

@@ -23,6 +23,8 @@ const (
 	SessionCore_AppendMessage_FullMethodName      = "/model_plane.v1.SessionCore/AppendMessage"
 	SessionCore_StartRun_FullMethodName           = "/model_plane.v1.SessionCore/StartRun"
 	SessionCore_CompleteStep_FullMethodName       = "/model_plane.v1.SessionCore/CompleteStep"
+	SessionCore_ReserveToolAction_FullMethodName  = "/model_plane.v1.SessionCore/ReserveToolAction"
+	SessionCore_FinalizeToolAction_FullMethodName = "/model_plane.v1.SessionCore/FinalizeToolAction"
 	SessionCore_SaveCheckpoint_FullMethodName     = "/model_plane.v1.SessionCore/SaveCheckpoint"
 	SessionCore_ReplayThread_FullMethodName       = "/model_plane.v1.SessionCore/ReplayThread"
 	SessionCore_GetContextAssembly_FullMethodName = "/model_plane.v1.SessionCore/GetContextAssembly"
@@ -50,6 +52,12 @@ type SessionCoreClient interface {
 	StartRun(ctx context.Context, in *StartRunRequest, opts ...grpc.CallOption) (*StartRunResponse, error)
 	// Record completion of a single step within a run.
 	CompleteStep(ctx context.Context, in *CompleteStepRequest, opts ...grpc.CallOption) (*CompleteStepResponse, error)
+	// Durably reserve an inline tool-action audit intent before the tool runs.
+	// This does not advance or terminate the run/plan.
+	ReserveToolAction(ctx context.Context, in *ReserveToolActionRequest, opts ...grpc.CallOption) (*ReserveToolActionResponse, error)
+	// Finalize a previously reserved inline tool action after execution.
+	// This persists the final audit event without changing run/plan lifecycle.
+	FinalizeToolAction(ctx context.Context, in *FinalizeToolActionRequest, opts ...grpc.CallOption) (*FinalizeToolActionResponse, error)
 	// Persist a checkpoint snapshot for a run.
 	SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*SaveCheckpointResponse, error)
 	// Replay the thread event log as a stream of Events.
@@ -130,6 +138,26 @@ func (c *sessionCoreClient) CompleteStep(ctx context.Context, in *CompleteStepRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CompleteStepResponse)
 	err := c.cc.Invoke(ctx, SessionCore_CompleteStep_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ReserveToolAction(ctx context.Context, in *ReserveToolActionRequest, opts ...grpc.CallOption) (*ReserveToolActionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReserveToolActionResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ReserveToolAction_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) FinalizeToolAction(ctx context.Context, in *FinalizeToolActionRequest, opts ...grpc.CallOption) (*FinalizeToolActionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FinalizeToolActionResponse)
+	err := c.cc.Invoke(ctx, SessionCore_FinalizeToolAction_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +279,12 @@ type SessionCoreServer interface {
 	StartRun(context.Context, *StartRunRequest) (*StartRunResponse, error)
 	// Record completion of a single step within a run.
 	CompleteStep(context.Context, *CompleteStepRequest) (*CompleteStepResponse, error)
+	// Durably reserve an inline tool-action audit intent before the tool runs.
+	// This does not advance or terminate the run/plan.
+	ReserveToolAction(context.Context, *ReserveToolActionRequest) (*ReserveToolActionResponse, error)
+	// Finalize a previously reserved inline tool action after execution.
+	// This persists the final audit event without changing run/plan lifecycle.
+	FinalizeToolAction(context.Context, *FinalizeToolActionRequest) (*FinalizeToolActionResponse, error)
 	// Persist a checkpoint snapshot for a run.
 	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error)
 	// Replay the thread event log as a stream of Events.
@@ -308,6 +342,12 @@ func (UnimplementedSessionCoreServer) StartRun(context.Context, *StartRunRequest
 }
 func (UnimplementedSessionCoreServer) CompleteStep(context.Context, *CompleteStepRequest) (*CompleteStepResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompleteStep not implemented")
+}
+func (UnimplementedSessionCoreServer) ReserveToolAction(context.Context, *ReserveToolActionRequest) (*ReserveToolActionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReserveToolAction not implemented")
+}
+func (UnimplementedSessionCoreServer) FinalizeToolAction(context.Context, *FinalizeToolActionRequest) (*FinalizeToolActionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FinalizeToolAction not implemented")
 }
 func (UnimplementedSessionCoreServer) SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SaveCheckpoint not implemented")
@@ -425,6 +465,42 @@ func _SessionCore_CompleteStep_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SessionCoreServer).CompleteStep(ctx, req.(*CompleteStepRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ReserveToolAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReserveToolActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ReserveToolAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ReserveToolAction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ReserveToolAction(ctx, req.(*ReserveToolActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_FinalizeToolAction_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinalizeToolActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).FinalizeToolAction(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_FinalizeToolAction_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).FinalizeToolAction(ctx, req.(*FinalizeToolActionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -606,6 +682,14 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CompleteStep",
 			Handler:    _SessionCore_CompleteStep_Handler,
+		},
+		{
+			MethodName: "ReserveToolAction",
+			Handler:    _SessionCore_ReserveToolAction_Handler,
+		},
+		{
+			MethodName: "FinalizeToolAction",
+			Handler:    _SessionCore_FinalizeToolAction_Handler,
 		},
 		{
 			MethodName: "SaveCheckpoint",

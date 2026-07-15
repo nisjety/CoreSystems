@@ -79,7 +79,7 @@ async fn resolve_org_name(state: &AppState, user: &AuthenticatedUser, org_id: &s
             urlencoding::encode(org_id)
         ),
         None,
-        None,
+        Some(org_id),
         Some(&actor_for(user)),
         None,
     )
@@ -131,9 +131,9 @@ pub(super) async fn get_me(
             }
             (status, Json(body))
         }
-        Err(request_error) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", request_error.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         ),
     }
 }

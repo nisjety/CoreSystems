@@ -9,6 +9,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::audience_tokens::{new_audience_token_cache, AudienceTokenCache};
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) client: reqwest::Client,
@@ -23,13 +26,17 @@ pub(crate) struct AppState {
     /// "strict" AND viewer identity is live — surfaced via GET /api/v1/ownership/status.
     pub(crate) enforcement_mode: String,
     pub(crate) auth_core_url: String,
+    pub(crate) velion_public_origin: String,
     pub(crate) session_core_url: String,
     pub(crate) session_core_service_token: String,
     pub(crate) user_core_service_token: String,
     pub(crate) billing_core_url: String,
+    pub(crate) billing_core_service_token: String,
     pub(crate) org_core_url: String,
+    pub(crate) org_core_service_token: String,
     pub(crate) integration_core_url: String,
     pub(crate) audit_core_url: String,
+    pub(crate) audit_core_service_token: String,
     pub(crate) insight_core_url: String,
     pub(crate) leads_core_url: String,
     pub(crate) shipping_core_url: String,
@@ -84,18 +91,24 @@ pub(crate) struct AppState {
 pub(crate) async fn build_state() -> Result<AppState> {
     let cache_url = env::var("GATEWAY_CACHE_REDIS_URL").ok();
     let cache = crate::cache::ResultCache::connect(cache_url.as_deref()).await;
+    let internal_api_key = internal_api_key()?;
+    let session_core_service_token = required_service_token("SESSION_CORE_SERVICE_TOKEN")?;
+    let user_core_service_token = required_service_token("USER_CORE_SERVICE_TOKEN")?;
+    let billing_core_service_token = required_service_token("BILLING_CORE_SERVICE_TOKEN")?;
+    let org_core_service_token = required_service_token("ORG_CORE_SERVICE_TOKEN")?;
+    let audit_core_service_token = required_service_token("AUDIT_CORE_SERVICE_TOKEN")?;
+    validate_service_token_distinctness(
+        &[
+            ("SESSION_CORE_SERVICE_TOKEN", &session_core_service_token),
+            ("USER_CORE_SERVICE_TOKEN", &user_core_service_token),
+            ("BILLING_CORE_SERVICE_TOKEN", &billing_core_service_token),
+            ("ORG_CORE_SERVICE_TOKEN", &org_core_service_token),
+            ("AUDIT_CORE_SERVICE_TOKEN", &audit_core_service_token),
+        ],
+        &[("INTERNAL_API_KEY", &internal_api_key)],
+    )?;
     Ok(AppState {
-        client: reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(8))
-            // Generous overall ceiling so browser-render scrapes (quarry /v1/scrape)
-            // don't get cut off; most internal calls return in well under a second.
-            .timeout(Duration::from_secs(25))
-            // Drop idle keep-alive connections well before the upstream (or the
-            // Docker bridge) reaps them, so we never send on a dead socket — the
-            // root cause of intermittent "error sending request" 502s.
-            .pool_idle_timeout(Duration::from_secs(20))
-            .tcp_keepalive(Duration::from_secs(20))
-            .build()?,
+        client: standard_http_client()?,
         // Streaming client: same connection hygiene but NO overall `.timeout()`, so
         // long-lived SSE streams are not severed at 25s. Connect/idle/dead-socket
         // protection remains; stream lifetime is bounded by the client disconnecting.
@@ -103,8 +116,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .connect_timeout(Duration::from_secs(8))
             .pool_idle_timeout(Duration::from_secs(20))
             .tcp_keepalive(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?,
-        internal_api_key: internal_api_key()?,
+        internal_api_key,
         // Same env var retrieval-engine reads; normalize + whitelist so an
         // unknown/unset value can never accidentally read as "strict".
         enforcement_mode: env::var("CONTROL_PLANE_ENFORCEMENT")
@@ -113,15 +127,24 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .filter(|v| matches!(v.as_str(), "off" | "permissive" | "strict"))
             .unwrap_or_else(|| "off".to_string()),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
+        velion_public_origin: canonical_public_origin(
+            &env::var("VELION_PUBLIC_ORIGIN")
+                .unwrap_or_else(|_| "http://localhost:5173".to_owned()),
+            !dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default()),
+        )?,
         session_core_url: env_url("SESSION_CORE_URL", "http://session-core:3017"),
-        session_core_service_token: required_service_token("SESSION_CORE_SERVICE_TOKEN")?,
-        user_core_service_token: required_service_token("USER_CORE_SERVICE_TOKEN")?,
+        session_core_service_token,
+        user_core_service_token,
         billing_core_url: env_url("BILLING_CORE_URL", "http://billing-core:3014"),
+        billing_core_service_token,
         org_core_url: env_url("ORG_CORE_URL", "http://org-core:8080"),
+        org_core_service_token,
         integration_core_url: env_url("INTEGRATION_CORE_URL", "http://integration-api:3026"),
         // audit-core (Control Plane) serves the audit read API the Trust Center
-        // aggregates over. Internal-key auth (X-Internal-Api-Key) like the other cores.
+        // aggregates over. Its credential is audience-bound and cannot be reused
+        // for Org or Billing authority.
         audit_core_url: env_url("AUDIT_CORE_URL", "http://audit-core:8187"),
+        audit_core_service_token,
         // insight-core (Application Plane, registry-only) serves the connector
         // registry. Internal-key auth + x-org-id header, like the other cores.
         insight_core_url: env_url("INSIGHT_CORE_URL", "http://insight-core:3163"),
@@ -209,6 +232,21 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .trim()
             .to_ascii_lowercase(),
     })
+}
+
+fn standard_http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        // Generous overall ceiling so browser-render scrapes (quarry /v1/scrape)
+        // don't get cut off; most internal calls return in well under a second.
+        .timeout(Duration::from_secs(25))
+        // Never carry service credentials or signed delegation headers across
+        // an upstream redirect, even when a compromised service returns 3xx.
+        .redirect(reqwest::redirect::Policy::none())
+        // Drop idle keep-alive connections before the upstream/bridge reaps them.
+        .pool_idle_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Duration::from_secs(20))
+        .build()?)
 }
 
 pub(crate) fn build_cors_layer() -> CorsLayer {
@@ -301,7 +339,27 @@ fn required_service_token(name: &str) -> Result<String> {
 fn service_token_is_secure(value: &str) -> bool {
     let value = value.trim();
     let lower = value.to_ascii_lowercase();
-    value.len() >= 32 && !lower.starts_with("change-me") && !lower.starts_with("replace-with")
+    value.len() >= 32
+        && !lower.starts_with("test")
+        && !lower.starts_with("placeholder")
+        && !lower.starts_with("change-me")
+        && !lower.starts_with("replace-with")
+}
+
+fn validate_service_token_distinctness(
+    scoped: &[(&str, &str)],
+    forbidden: &[(&str, &str)],
+) -> Result<()> {
+    for (index, (name, value)) in scoped.iter().enumerate() {
+        if let Some((reused_name, _)) = forbidden
+            .iter()
+            .chain(scoped[..index].iter())
+            .find(|(_, candidate)| candidate.trim() == value.trim())
+        {
+            anyhow::bail!("{name} must not reuse {reused_name}");
+        }
+    }
+    Ok(())
 }
 
 /// Dev auth escape hatches must never activate in a production deploy, even if
@@ -340,12 +398,88 @@ fn env_url(key: &str, fallback: &str) -> String {
         .to_owned()
 }
 
+fn canonical_public_origin(value: &str, production_like: bool) -> Result<String> {
+    let parsed = url::Url::parse(value.trim())?;
+    let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let allowed_scheme =
+        parsed.scheme() == "https" || (!production_like && parsed.scheme() == "http" && loopback);
+    if !allowed_scheme
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        anyhow::bail!("VELION_PUBLIC_ORIGIN must be a canonical HTTPS origin");
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{dev_flags_allowed, service_token_is_secure};
+    use super::{
+        canonical_public_origin, dev_flags_allowed, service_token_is_secure, standard_http_client,
+        validate_service_token_distinctness,
+    };
+
+    #[tokio::test]
+    async fn standard_upstream_client_never_follows_redirects() {
+        use axum::{response::Redirect, routing::get, Router};
+
+        let app = Router::new()
+            .route(
+                "/redirect",
+                get(|| async { Redirect::temporary("/target") }),
+            )
+            .route("/target", get(|| async { "scoped token must not arrive" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let response = standard_http_client()
+            .expect("client")
+            .get(format!("http://{address}/redirect"))
+            .header("x-service-token", "scoped-token")
+            .send()
+            .await
+            .expect("redirect response");
+        server.abort();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    }
+
+    #[test]
+    fn public_origin_requires_https_in_production_and_loopback_http_in_development() {
+        assert_eq!(
+            canonical_public_origin("https://velion.example/", true).unwrap(),
+            "https://velion.example"
+        );
+        assert_eq!(
+            canonical_public_origin("http://localhost:5173", false).unwrap(),
+            "http://localhost:5173"
+        );
+        for value in [
+            "http://velion.example",
+            "https://user:pass@velion.example",
+            "https://velion.example/path",
+            "https://velion.example?tenant=acme",
+            "https://velion.example/#fragment",
+        ] {
+            assert!(canonical_public_origin(value, true).is_err(), "{value}");
+        }
+        assert!(canonical_public_origin("http://localhost:5173", true).is_err());
+        assert!(canonical_public_origin("http://velion.example", false).is_err());
+    }
 
     #[test]
     fn service_tokens_reject_public_placeholder_families() {
+        assert!(!service_token_is_secure(
+            "test-generated-dedicated-random-32-byte-minimum-key"
+        ));
+        assert!(!service_token_is_secure(
+            "placeholder-dedicated-random-32-byte-minimum-key"
+        ));
         assert!(!service_token_is_secure(
             "replace-with-dedicated-random-32-byte-minimum-key"
         ));
@@ -355,6 +489,31 @@ mod tests {
         assert!(service_token_is_secure(
             "generated-secret-value-with-at-least-32-bytes"
         ));
+    }
+
+    #[test]
+    fn service_tokens_must_be_distinct_from_each_other_and_legacy_keys() {
+        assert!(validate_service_token_distinctness(
+            &[
+                ("ORG_CORE_SERVICE_TOKEN", "org-token"),
+                ("BILLING_CORE_SERVICE_TOKEN", "billing-token"),
+            ],
+            &[("INTERNAL_API_KEY", "legacy-key")],
+        )
+        .is_ok());
+        assert!(validate_service_token_distinctness(
+            &[
+                ("ORG_CORE_SERVICE_TOKEN", "same-token"),
+                ("BILLING_CORE_SERVICE_TOKEN", "same-token"),
+            ],
+            &[],
+        )
+        .is_err());
+        assert!(validate_service_token_distinctness(
+            &[("ORG_CORE_SERVICE_TOKEN", "legacy-key")],
+            &[("INTERNAL_API_KEY", "legacy-key")],
+        )
+        .is_err());
     }
 
     #[test]

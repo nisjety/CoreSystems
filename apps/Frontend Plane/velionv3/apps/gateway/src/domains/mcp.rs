@@ -36,7 +36,7 @@ use crate::{
         required_capability_token,
     },
     envelope::error,
-    middleware::{require_session, AuthenticatedUser},
+    middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
 };
 
@@ -65,29 +65,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// model-gateway (which independently derives authorization from verified token
 /// scopes).
 async fn is_org_admin(state: &AppState, user: &AuthenticatedUser) -> bool {
-    if has_any_role(user.auth_role.as_deref(), &["admin", "superadmin"]) {
-        return true;
-    }
-
-    let org_role = crate::upstream::resolve_session_context(state, user)
-        .await
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    has_any_role(Some(org_role.as_str()), &["owner", "admin"])
-}
-
-fn has_any_role(value: Option<&str>, allowed: &[&str]) -> bool {
-    value
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .any(|role| {
-            allowed
-                .iter()
-                .any(|allowed_role| role.eq_ignore_ascii_case(allowed_role))
-        })
+    let _ = state;
+    has_authorized_org_role(user, &["owner", "admin"])
 }
 
 async fn list_servers(

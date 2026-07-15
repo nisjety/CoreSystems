@@ -10,7 +10,6 @@ import {
   Logger,
   OnModuleInit,
   OnModuleDestroy,
-  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -18,22 +17,13 @@ import {
   NatsConnection,
   StringCodec,
   JetStreamClient,
-  RetentionPolicy,
-  StorageType,
   type ConnectionOptions,
 } from 'nats';
 import { SharedNatsService } from '../nats/shared-nats.service';
+import { selectNatsCredentials } from '../nats/nats-credentials';
 
-function isNonFatalStreamSetupError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes('stream name already in use') ||
-    normalized.includes('subjects overlap with an existing stream') ||
-    normalized.includes('err_code=10058') ||
-    normalized.includes('err_code=10065')
-  );
-}
+const AUDIT_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const AUDIT_EVENT_NAME = /^[a-z0-9_]+$/;
 
 // Event schemas with tracing support
 export interface BaseEvent {
@@ -60,8 +50,8 @@ export interface UserRegisteredEvent extends BaseEvent {
     locale?: string;
     timezone?: string;
   };
-  metadata?: Record<string, any>;
-  /** Active org at sign-up time — gates velion.audit.v1.control.sign_up emission */
+  metadata?: Record<string, unknown>;
+  /** Active org at sign-up time. */
   activeOrganizationId?: string;
 }
 
@@ -74,7 +64,7 @@ export interface UserLoginEvent extends BaseEvent {
   ipAddress?: string;
   userAgent?: string;
   provider?: string;
-  /** Active org at sign-in time — gates velion.audit.v1.control.sign_in emission */
+  /** Active org at sign-in time. */
   activeOrganizationId?: string;
 }
 
@@ -84,7 +74,7 @@ export interface UserLogoutEvent extends BaseEvent {
   email: string;
   sessionId: string;
   reason?: 'manual' | 'timeout' | 'force';
-  /** Active org at sign-out time — gates velion.audit.v1.control.sign_out emission */
+  /** Active org at sign-out time. */
   activeOrganizationId?: string;
 }
 
@@ -95,21 +85,21 @@ export interface UserCreatedEvent extends BaseEvent {
   name?: string;
   role?: string;
   emailVerified: boolean;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface UserUpdatedEvent extends BaseEvent {
   type: 'user.updated';
   userId: string;
   email: string;
-  changes: Record<string, any>;
+  changes: Record<string, unknown>;
 }
 
 export interface UserProfileUpdatedEvent extends BaseEvent {
   type: 'auth.user.profile_updated';
   userId: string;
   email: string;
-  changes: Record<string, any>;
+  changes: Record<string, unknown>;
 }
 
 export interface SessionCreatedEvent extends BaseEvent {
@@ -138,7 +128,7 @@ export interface OrganizationCreatedEvent extends BaseEvent {
   slug: string;
   creatorId: string;
   creatorEmail: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface OrganizationMemberAddedEvent extends BaseEvent {
@@ -173,8 +163,14 @@ export interface OrganizationPlanChangedEvent extends BaseEvent {
 export interface OrganizationUpdatedEvent extends BaseEvent {
   type: 'organization.updated';
   organizationId: string;
-  changes: Record<string, any>;
+  changes: Record<string, unknown>;
   updatedBy?: string;
+}
+
+export interface OrganizationDeletedEvent extends BaseEvent {
+  type: 'organization.deleted';
+  organizationId: string;
+  reason: string;
 }
 
 export interface UserProviderLinkedEvent extends BaseEvent {
@@ -210,9 +206,14 @@ export type AuthEvent =
   | SessionEndedEvent
   | OrganizationCreatedEvent
   | OrganizationUpdatedEvent
+  | OrganizationDeletedEvent
   | OrganizationPlanChangedEvent
   | OrganizationMemberAddedEvent
   | OrganizationMemberRemovedEvent;
+
+const ORGANIZATION_PROJECTION_SUBJECT = 'aqencia.controlplane.org.changed';
+const ORGANIZATION_MEMBERSHIP_PROJECTION_SUBJECT =
+  'aqencia.controlplane.org.member_changed';
 
 @Injectable()
 export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
@@ -225,7 +226,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private configService: ConfigService,
-    @Optional() private sharedNats: SharedNatsService,
+    private sharedNats: SharedNatsService,
   ) {
     this.isEnabled = this.configService.get<string>('NODE_ENV') !== 'test';
     // Allow disabling dual-publish via env var for testing target state
@@ -241,7 +242,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.connectToNATS();
-      await this.setupJetStream();
+      this.setupJetStream();
       this.logger.log('NATS event publisher initialized successfully');
     } catch (error) {
       this.logger.error('Failed to initialize NATS event publisher', error);
@@ -260,109 +261,42 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   private async connectToNATS() {
     const natsUrl =
       this.configService.get<string>('NATS_URL') || 'nats://localhost:4222';
-    const natsToken =
-      this.configService.get<string>('NATS_TOKEN') ||
-      this.configService.get<string>('NATS_AUTH_TOKEN');
-    const natsUser = this.configService.get<string>('NATS_USER');
-    const natsPass = this.configService.get<string>('NATS_PASS');
+    const credentials = selectNatsCredentials({
+      NATS_TOKEN: this.configService.get<string>('NATS_TOKEN'),
+      NATS_AUTH_TOKEN: this.configService.get<string>('NATS_AUTH_TOKEN'),
+      NATS_USER: this.configService.get<string>('NATS_USER'),
+      NATS_PASSWORD: this.configService.get<string>('NATS_PASSWORD'),
+      NATS_PASS: this.configService.get<string>('NATS_PASS'),
+      NATS_ALLOW_TOKEN_FALLBACK: this.configService.get<string>(
+        'NATS_ALLOW_TOKEN_FALLBACK',
+      ),
+    });
 
     const connectionOptions: ConnectionOptions = {
       servers: [natsUrl],
       name: 'auth-service-publisher',
       maxReconnectAttempts: 10,
       reconnectTimeWait: 2000,
+      inboxPrefix: '_INBOX.AUTH_CONTROL',
     };
 
-    // Token auth takes precedence (for production with aquatiq root container)
-    if (natsToken) {
-      connectionOptions.token = natsToken;
-      this.logger.log('Using NATS token authentication');
-    } else if (natsUser && natsPass) {
-      connectionOptions.user = natsUser;
-      connectionOptions.pass = natsPass;
-      this.logger.log('Using NATS user/password authentication');
-    } else {
-      this.logger.log('Using NATS without authentication (development)');
-    }
+    Object.assign(connectionOptions, credentials);
 
     this.natsConnection = await connect(connectionOptions);
     this.logger.log(`Connected to NATS: ${natsUrl}`);
   }
 
-  private async setupJetStream() {
+  private setupJetStream() {
     if (!this.natsConnection) {
       throw new Error('NATS connection not established');
     }
 
     this.jetStream = this.natsConnection.jetstream();
-    const jsm = await this.natsConnection.jetstreamManager();
-
-    // Ensure auth events stream exists (OLD - compatibility)
-    try {
-      await jsm.streams.add({
-        name: 'AUTH_EVENTS',
-        subjects: ['auth.>'],
-        retention: RetentionPolicy.Limits,
-        max_msgs: 10000,
-        max_age: 7 * 24 * 60 * 60 * 1000 * 1000000, // 7 days in nanoseconds
-        storage: StorageType.File,
-      });
-      this.logger.log('AUTH_EVENTS stream configured (compatibility)');
-    } catch (error) {
-      if (!isNonFatalStreamSetupError(error)) {
-        this.logger.warn(
-          `AUTH_EVENTS stream setup issue: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      this.logger.debug(
-        'AUTH_EVENTS stream configuration skipped (might exist)',
-      );
-    }
-
-    // Ensure new simplified event streams exist (TARGET)
-    if (this.enableDualPublish) {
-      try {
-        await jsm.streams.add({
-          name: 'USER_EVENTS',
-          subjects: ['user.>', 'session.>'],
-          retention: RetentionPolicy.Limits,
-          max_msgs: 10000,
-          max_age: 7 * 24 * 60 * 60 * 1000 * 1000000,
-          storage: StorageType.File,
-        });
-        this.logger.log('USER_EVENTS stream configured (target)');
-      } catch (error) {
-        if (!isNonFatalStreamSetupError(error)) {
-          this.logger.warn(
-            `USER_EVENTS stream setup issue: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        this.logger.debug(
-          'USER_EVENTS stream configuration skipped (might exist)',
-        );
-      }
-
-      try {
-        await jsm.streams.add({
-          name: 'ORGANIZATION_EVENTS',
-          subjects: ['organization.>'],
-          retention: RetentionPolicy.Limits,
-          max_msgs: 10000,
-          max_age: 7 * 24 * 60 * 60 * 1000 * 1000000,
-          storage: StorageType.File,
-        });
-        this.logger.log('ORGANIZATION_EVENTS stream configured (target)');
-      } catch (error) {
-        if (!isNonFatalStreamSetupError(error)) {
-          this.logger.warn(
-            `ORGANIZATION_EVENTS stream setup issue: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        this.logger.debug(
-          'ORGANIZATION_EVENTS stream configuration skipped (might exist)',
-        );
-      }
-    }
+    // Deployment-only audit-nats-provisioner owns stream topology. Runtime
+    // auth-core receives publish/PubAck capability only, never stream admin.
+    this.logger.log(
+      'JetStream publisher ready (streams provisioned externally)',
+    );
   }
 
   /**
@@ -460,7 +394,9 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   async publishUserRegistered(
     data: Omit<UserRegisteredEvent, 'type' | 'timestamp'>,
     traceId?: string,
+    idempotencyKey?: string,
   ): Promise<void> {
+    const sharedNats = this.requireSharedNats();
     await this.publishEvent({
       ...data,
       type: 'auth.user.registered',
@@ -481,27 +417,21 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     );
 
     // Cross-plane: publish to shared NATS for Ingestion/Data/Reasoning planes
-    void this.sharedNats?.publish('aqencia.controlplane.user.registered', {
-      user_id: data.userId,
-      email: data.email,
-      name: data.name,
-      provider: data.provider,
-      email_verified: data.emailVerified,
-      tenant_id: data.tenantId,
-      microsoft_tenant_id: data.microsoftTenantId,
-      scopes_granted: data.scopesGranted,
-      trace_id: traceId,
-    });
-
-    // Velion audit — no-ops when org_id is absent (brand-new users pre-onboarding)
-    this.publishVelionAudit({
-      org_id: data.activeOrganizationId,
-      user_id: data.userId,
-      event: 'sign_up',
-      subject: data.email,
-      outcome: 'ok',
-      details: { provider: data.provider },
-    });
+    await sharedNats.publish(
+      'aqencia.controlplane.user.registered',
+      {
+        user_id: data.userId,
+        email: data.email,
+        name: data.name,
+        provider: data.provider,
+        email_verified: data.emailVerified,
+        tenant_id: data.tenantId,
+        microsoft_tenant_id: data.microsoftTenantId,
+        scopes_granted: data.scopesGranted,
+        trace_id: traceId,
+      },
+      idempotencyKey ? { msgID: idempotencyKey } : undefined,
+    );
   }
 
   /**
@@ -518,24 +448,12 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     } as UserLoginEvent);
 
     // Cross-plane: notify other planes of sign-in (useful for session-aware services)
-    void this.sharedNats?.publish('aqencia.controlplane.user.signed_in', {
+    await this.sharedNats?.publish('aqencia.controlplane.user.signed_in', {
       user_id: data.userId,
       email: data.email,
       session_id: data.sessionId,
       provider: data.provider,
       trace_id: traceId,
-    });
-
-    // Velion audit — no-ops when org_id is absent (returning users without an active org)
-    this.publishVelionAudit({
-      org_id: data.activeOrganizationId,
-      user_id: data.userId,
-      event: 'sign_in',
-      subject: data.email,
-      outcome: 'ok',
-      details: { provider: data.provider, session_id: data.sessionId },
-      ip_address: data.ipAddress,
-      user_agent: data.userAgent,
     });
   }
 
@@ -551,16 +469,6 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       type: 'auth.user.logout',
       traceId,
     } as UserLogoutEvent);
-
-    // Velion audit — no-ops when org_id is absent
-    this.publishVelionAudit({
-      org_id: data.activeOrganizationId,
-      user_id: data.userId,
-      event: 'sign_out',
-      subject: data.email,
-      outcome: 'ok',
-      details: { session_id: data.sessionId, reason: data.reason },
-    });
   }
 
   /**
@@ -570,7 +478,9 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   async publishUserProviderLinked(
     data: Omit<UserProviderLinkedEvent, 'type' | 'timestamp'>,
     traceId?: string,
+    idempotencyKey?: string,
   ): Promise<void> {
+    const sharedNats = this.requireSharedNats();
     await this.publishEvent({
       ...data,
       type: 'auth.user.provider_linked',
@@ -578,17 +488,28 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     } as UserProviderLinkedEvent);
 
     // Cross-plane: critical event — Ingestion subscribes to provision M365 sync
-    void this.sharedNats?.publish('aqencia.controlplane.user.provider_linked', {
-      user_id: data.userId,
-      email: data.email,
-      provider: data.provider,
-      provider_account_id: data.providerAccountId,
-      tenant_id: data.tenantId,
-      microsoft_tenant_id: data.microsoftTenantId,
-      scopes_granted: data.scopesGranted,
-      token_ref: data.tokenRef,
-      trace_id: traceId,
-    });
+    await sharedNats.publish(
+      'aqencia.controlplane.user.provider_linked',
+      {
+        user_id: data.userId,
+        email: data.email,
+        provider: data.provider,
+        provider_account_id: data.providerAccountId,
+        tenant_id: data.tenantId,
+        microsoft_tenant_id: data.microsoftTenantId,
+        scopes_granted: data.scopesGranted,
+        token_ref: data.tokenRef,
+        trace_id: traceId,
+      },
+      idempotencyKey ? { msgID: idempotencyKey } : undefined,
+    );
+  }
+
+  private requireSharedNats(): SharedNatsService {
+    if (!this.sharedNats) {
+      throw new Error('shared NATS publisher unavailable');
+    }
+    return this.sharedNats;
   }
 
   /**
@@ -649,6 +570,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   async publishOrganizationCreated(
     data: Omit<OrganizationCreatedEvent, 'type' | 'timestamp'>,
     traceId?: string,
+    idempotencyKey?: string,
   ): Promise<void> {
     await this.publishEvent({
       ...data,
@@ -657,15 +579,94 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     } as OrganizationCreatedEvent);
 
     // Cross-plane: ALL planes need to provision resources for a new org
-    void this.sharedNats?.publish('aqencia.controlplane.org.created', {
-      org_id: data.organizationId,
-      org_name: data.name,
-      slug: data.slug,
-      creator_id: data.creatorId,
-      creator_email: data.creatorEmail,
-      metadata: data.metadata,
-      trace_id: traceId,
-    });
+    await this.sharedNats?.publish(
+      'aqencia.controlplane.org.created',
+      {
+        org_id: data.organizationId,
+        org_name: data.name,
+        slug: data.slug,
+        creator_id: data.creatorId,
+        creator_email: data.creatorEmail,
+        metadata: data.metadata,
+        trace_id: traceId,
+      },
+      { msgID: idempotencyKey },
+    );
+  }
+
+  async publishOrganizationProjection(
+    data: {
+      organizationId: string;
+      name: string;
+      slug: string;
+      ownerUserId: string;
+      metadata: Record<string, unknown>;
+      revision: number;
+    },
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.requireSharedNats().publish(
+      ORGANIZATION_PROJECTION_SUBJECT,
+      {
+        schema_version: 1,
+        event_id: idempotencyKey,
+        action: 'upsert',
+        org_id: data.organizationId,
+        name: data.name,
+        slug: data.slug,
+        owner_user_id: data.ownerUserId,
+        metadata: data.metadata,
+        revision: data.revision,
+      },
+      { msgID: idempotencyKey },
+    );
+  }
+
+  async publishOrganizationMembershipProjection(
+    data: {
+      organizationId: string;
+      userId: string;
+      role: string;
+      action: 'upsert' | 'remove';
+      revision: number;
+      organizationRevision: number;
+      userEmail?: string;
+    },
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.requireSharedNats().publish(
+      ORGANIZATION_MEMBERSHIP_PROJECTION_SUBJECT,
+      {
+        schema_version: 1,
+        event_id: idempotencyKey,
+        action: data.action,
+        org_id: data.organizationId,
+        user_id: data.userId,
+        ...(data.action === 'upsert'
+          ? { role: data.role, user_email: data.userEmail }
+          : {}),
+        revision: data.revision,
+        organization_revision: data.organizationRevision,
+      },
+      { msgID: idempotencyKey },
+    );
+  }
+
+  async publishOrganizationDeletionProjection(
+    data: { organizationId: string; revision: number },
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.requireSharedNats().publish(
+      ORGANIZATION_PROJECTION_SUBJECT,
+      {
+        schema_version: 1,
+        event_id: idempotencyKey,
+        action: 'remove',
+        org_id: data.organizationId,
+        revision: data.revision,
+      },
+      { msgID: idempotencyKey },
+    );
   }
 
   /**
@@ -681,7 +682,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       traceId,
     } as OrganizationMemberAddedEvent);
 
-    void this.sharedNats?.publish('aqencia.controlplane.org.member_added', {
+    await this.sharedNats?.publish('aqencia.controlplane.org.member_added', {
       org_id: data.organizationId,
       org_name: data.organizationName,
       user_id: data.userId,
@@ -692,7 +693,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     });
 
     // Notify the invited user via notification-core (plain NATS, not JetStream)
-    this.sharedNats?.publishPlain('notifications.team.invite.sent', {
+    await this.sharedNats?.publishPlain('notifications.team.invite.sent', {
       subscriberId: data.userId,
       inviteeEmail: data.userEmail,
       orgId: data.organizationId,
@@ -704,23 +705,6 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       role: data.role,
       actorId: data.invitedBy ?? '',
       actorName: data.invitedBy ?? '',
-    });
-
-    // Durable audit trail — actor is the inviter, subject is the added member.
-    this.publishVelionAudit({
-      org_id: data.organizationId,
-      user_id: data.invitedBy,
-      event: 'member_added',
-      subject: data.userEmail || data.userId,
-      resource_id: data.userId,
-      outcome: 'ok',
-      details: {
-        target_user_id: data.userId,
-        target_email: data.userEmail,
-        role: data.role,
-        invited_by: data.invitedBy,
-        org_name: data.organizationName,
-      },
     });
   }
 
@@ -737,29 +721,13 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       traceId,
     } as OrganizationMemberRemovedEvent);
 
-    void this.sharedNats?.publish('aqencia.controlplane.org.member_removed', {
+    await this.sharedNats?.publish('aqencia.controlplane.org.member_removed', {
       org_id: data.organizationId,
       org_name: data.organizationName,
       user_id: data.userId,
       user_email: data.userEmail,
       removed_by: data.removedBy,
       trace_id: traceId,
-    });
-
-    // Durable audit trail — actor is whoever removed the member.
-    this.publishVelionAudit({
-      org_id: data.organizationId,
-      user_id: data.removedBy,
-      event: 'member_removed',
-      subject: data.userEmail || data.userId,
-      resource_id: data.userId,
-      outcome: 'ok',
-      details: {
-        target_user_id: data.userId,
-        target_email: data.userEmail,
-        removed_by: data.removedBy,
-        org_name: data.organizationName,
-      },
     });
   }
 
@@ -789,27 +757,6 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       type: 'organization.plan.changed',
       traceId,
     } as OrganizationPlanChangedEvent);
-
-    // Durable audit trail for billing/plan state changes. NOTE: as of this
-    // change there is no caller for publishOrganizationPlanChanged in
-    // auth-core — billing lives in billing-core (proxied by the gateway), so
-    // the upstream plan-change handler must call this method (or emit the
-    // audit event directly) for plan_changed to reach audit-core.
-    this.publishVelionAudit({
-      org_id: data.organizationId,
-      user_id: data.changedBy,
-      event: 'plan_changed',
-      subject: data.organizationName || data.organizationId,
-      resource_id: data.organizationId,
-      outcome: 'ok',
-      details: {
-        previous_plan: data.previousPlan,
-        new_plan: data.newPlan,
-        changed_by: data.changedBy,
-        change_reason: data.changeReason,
-        org_name: data.organizationName,
-      },
-    });
   }
 
   private getSubjectForEvent(eventType: string): string {
@@ -818,24 +765,15 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Publish an audit event to velion.audit.v1.control.<event> via SharedNatsService.
+   * Publish an audit event to velion.audit.v2.control.auth-core.<event> on Control's
+   * plane-local broker. Audit Core pins this broker to the control authority.
    *
-   * org_id is REQUIRED by audit-core. This method silently no-ops when org_id is
-   * absent so callers don't need to guard.
-   *
-   * Events that reach audit-core when org_id is present:
-   *   - twofa_enable / twofa_disable / twofa_verify  (session.activeOrganizationId via audit-plugin)
-   *   - session_revoke  (same)
-   *   - sign_in  (data.activeOrganizationId passed by caller — returning users with active org)
-   *   - sign_out (data.activeOrganizationId — same)
-   *   - sign_up  (data.activeOrganizationId — rare; brand-new users will have undefined and no-op)
-   *
-   * Events that silently no-op (org_id undefined):
-   *   - sign_in / sign_out / sign_up for users with no active org (pre-onboarding or single-org
-   *     users whose org context isn't carried by the caller). Still published on auth.> / user.>
-   *     JetStream subjects regardless.
+   * org_id is REQUIRED by audit-core. Durable identity and producer occurrence
+   * time are mandatory even when org context is absent; callers must never
+   * replace them with request-time randomness.
    */
-  publishVelionAudit(payload: {
+  async publishVelionAudit(payload: {
+    occurred_at: Date | string;
     org_id: string | undefined;
     user_id?: string;
     actor_role?: string;
@@ -844,28 +782,54 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     resource_id?: string;
     outcome: 'ok' | 'denied' | 'error';
     details?: Record<string, unknown>;
+    event_id: string;
     request_id?: string;
     ip_address?: string;
     user_agent?: string;
-  }): void {
-    if (!payload.org_id || !this.sharedNats) return;
-    const natsSubject = `velion.audit.v1.control.${payload.event}`;
-    this.sharedNats.publishPlain(natsSubject, {
-      occurred_at: new Date().toISOString(),
-      org_id: payload.org_id,
-      user_id: payload.user_id,
-      actor_role: payload.actor_role,
-      plane: 'control',
-      event: payload.event,
-      subject: payload.subject,
-      resource_id: payload.resource_id,
-      outcome: payload.outcome,
-      details: payload.details,
-      request_id: payload.request_id,
-      ip_address: payload.ip_address,
-      user_agent: payload.user_agent,
+  }): Promise<void> {
+    if (
+      !AUDIT_EVENT_ID.test(payload.event_id) ||
+      !AUDIT_EVENT_NAME.test(payload.event)
+    ) {
+      throw new Error('Invalid durable audit identity');
+    }
+    const occurredAt = new Date(payload.occurred_at);
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new Error('Invalid durable audit identity');
+    }
+    if (!payload.org_id) return;
+    if (!this.isEnabled || !this.jetStream) {
+      throw new Error('Durable audit transport unavailable');
+    }
+    const natsSubject = `velion.audit.v2.control.auth-core.${payload.event}`;
+    const encoded = this.stringCodec.encode(
+      JSON.stringify({
+        occurred_at: occurredAt.toISOString(),
+        event_id: payload.event_id,
+        org_id: payload.org_id,
+        user_id: payload.user_id,
+        actor_role: payload.actor_role,
+        plane: 'control',
+        producer: 'auth-core',
+        event: payload.event,
+        subject: payload.subject,
+        resource_id: payload.resource_id,
+        outcome: payload.outcome,
+        details: payload.details,
+        request_id: payload.request_id,
+        ip_address: payload.ip_address,
+        user_agent: payload.user_agent,
+      }),
+    );
+    const ack = await this.jetStream.publish(natsSubject, encoded, {
+      msgID: payload.event_id,
     });
-    this.logger.debug(`velion.audit → ${natsSubject}`);
+    if (!ack?.stream || !Number.isSafeInteger(ack.seq) || ack.seq <= 0) {
+      throw new Error('Invalid durable audit PubAck');
+    }
+    this.logger.debug(
+      `velion.audit → ${natsSubject} (${ack.stream}:${ack.seq})`,
+    );
   }
 
   /**

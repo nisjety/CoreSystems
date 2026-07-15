@@ -14,6 +14,8 @@ import (
 const (
 	agentRunSubscriberDurable      = "insight-core-agent-run-subscriber"
 	agentApprovalSubscriberDurable = "insight-core-agent-approval-subscriber"
+	agentRunStream                 = "MODEL_PLANE_RUN_EVENTS"
+	agentApprovalStream            = "MP_ORCHESTRATION_EVENTS"
 
 	// Model Plane v1 subjects. Run lifecycle events flow on the per-run
 	// `mp.v1.run.{id}.event` subject (wildcard below); orchestration approval
@@ -74,10 +76,10 @@ func NewAgentSubscriber(js nats.JetStreamContext, recorder MetricRecorder) *Agen
 }
 
 func (s *AgentSubscriber) Start(_ context.Context) error {
-	if err := s.runConsumer.Bind(runEventsWildcard, agentRunSubscriberDurable, s.handle); err != nil {
+	if err := s.runConsumer.BindProvisioned(runEventsWildcard, agentRunStream, agentRunSubscriberDurable, s.handle); err != nil {
 		return err
 	}
-	return s.approvalConsumer.Bind(orchestrationApprovalSj, agentApprovalSubscriberDurable, s.handle)
+	return s.approvalConsumer.BindProvisioned(orchestrationApprovalSj, agentApprovalStream, agentApprovalSubscriberDurable, s.handle)
 }
 
 func (s *AgentSubscriber) Stop() {

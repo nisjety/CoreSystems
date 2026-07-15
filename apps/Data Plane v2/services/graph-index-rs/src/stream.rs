@@ -165,10 +165,12 @@ fn decode_cleanup_event(
     {
         anyhow::bail!("invalid tenant-bound graph cleanup payload");
     }
-    Ok(DecodedEvent {
+    let event = DecodedEvent {
         claims: event.claims,
         payload,
-    })
+    };
+    event_org_id(&event)?;
+    Ok(event)
 }
 
 pub async fn setup_stream(js: &JsContext) -> anyhow::Result<()> {
@@ -234,11 +236,18 @@ pub async fn run_consumer(
                         continue;
                     }
                 };
+            let org_id = match event_org_id(&verified) {
+                Ok(org_id) => org_id.to_owned(),
+                Err(e) => {
+                    tracing::warn!(err = %e, "rejected graph event tenant mismatch");
+                    let _ = msg.ack().await;
+                    continue;
+                }
+            };
             let payload = verified.payload;
             let claims = verified.claims;
 
             let doc_id = payload["document_id"].as_str().unwrap_or("");
-            let org_id = payload["org_id"].as_str().unwrap_or("");
 
             if doc_id.is_empty() || org_id.is_empty() {
                 let _ = msg.ack().await;
@@ -265,7 +274,7 @@ pub async fn run_consumer(
             // disclose private/shared content to the extractor even when the
             // resulting graph rows were discarded.
             let chunks = store
-                .load_org_visible_chunks(org_id, doc_id)
+                .load_org_visible_chunks(&org_id, doc_id)
                 .await
                 .unwrap_or_default();
 
@@ -274,11 +283,11 @@ pub async fn run_consumer(
             let mut total_claims = 0usize;
 
             for (kid, text) in &chunks {
-                match extractor.extract(text, org_id).await {
-                    Ok(result) => match store.persist_extraction(org_id, kid, &result).await {
+                match extractor.extract(text, &org_id, claims.zdr).await {
+                    Ok(result) => match store.persist_extraction(&org_id, kid, &result).await {
                         Ok((eids, rids, cids)) => {
                             if let Err(e) = store
-                                .persist_text_unit_mappings(org_id, kid, &eids, &rids, &cids)
+                                .persist_text_unit_mappings(&org_id, kid, &eids, &rids, &cids)
                                 .await
                             {
                                 tracing::error!(err = %e, knowledge_id = kid, "persist text_unit mappings failed");
@@ -340,6 +349,30 @@ struct DecodedEvent {
     payload: serde_json::Value,
 }
 
+/// Return the tenant identity from the verified event claims after checking
+/// that the payload cannot override it. Signed envelopes currently enforce
+/// this invariant too, but keeping the check at the graph consumer boundary
+/// protects the downstream path when legacy/test decoding is enabled and
+/// makes the claim-to-tenant pin explicit.
+fn event_org_id(event: &DecodedEvent) -> anyhow::Result<&str> {
+    let claims_org = event.claims.org_id.as_str();
+    anyhow::ensure!(
+        !claims_org.is_empty() && claims_org == claims_org.trim(),
+        "graph event claims missing canonical org_id"
+    );
+
+    let payload_org = event.payload["org_id"].as_str().unwrap_or("");
+    anyhow::ensure!(
+        !payload_org.is_empty() && payload_org == payload_org.trim(),
+        "graph event payload missing canonical org_id"
+    );
+    anyhow::ensure!(
+        payload_org == claims_org,
+        "graph event payload org_id does not match verified claims"
+    );
+    Ok(claims_org)
+}
+
 fn decode_event(
     verifier: Option<&EventVerifier>,
     subject: &str,
@@ -386,18 +419,66 @@ fn decode_verified_event(
     } else {
         verifier.verify(subject, bytes)?
     };
-    Ok(DecodedEvent {
+    let event = DecodedEvent {
         claims: event.claims,
         payload: serde_json::from_slice(&event.payload)?,
-    })
+    };
+    event_org_id(&event)?;
+    Ok(event)
 }
 
 #[cfg(test)]
 mod signed_event_tests {
-    use super::{decode_cleanup_event, decode_verified_event, SUBJECT, SUBJECT_KNOWLEDGE_DELETED};
+    use super::{
+        decode_cleanup_event, decode_verified_event, event_org_id, SUBJECT,
+        SUBJECT_KNOWLEDGE_DELETED,
+    };
     use event_envelope_rs::{EventSigner, EventVerifier};
     use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    #[test]
+    fn graph_rejects_verified_claim_payload_tenant_mismatch() {
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("key");
+        let public = RsaPublicKey::from(&private);
+        let signer = EventSigner::from_rsa_pem(
+            private
+                .to_pkcs1_pem(Default::default())
+                .expect("pem")
+                .as_bytes(),
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            "dataplane-events",
+            "events:embedding:publish",
+        )
+        .expect("signer");
+        let verifier = EventVerifier::from_rsa_pem(
+            public
+                .to_pkcs1_pem(Default::default())
+                .expect("pem")
+                .as_bytes(),
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            "dataplane-events",
+            "events:embedding:publish",
+            10,
+        )
+        .expect("verifier");
+        let envelope = signer
+            .sign(
+                SUBJECT,
+                "org-a",
+                None,
+                false,
+                br#"{"document_id":"doc-a","org_id":"org-a"}"#,
+            )
+            .expect("signed event");
+        let mut event =
+            decode_verified_event(&verifier, SUBJECT, &envelope, false).expect("verified event");
+        event.payload["org_id"] = serde_json::Value::String("org-b".into());
+
+        assert!(event_org_id(&event).is_err());
+    }
 
     #[test]
     fn graph_rejects_unsigned_embedding_events_and_preserves_tenant_zdr() {

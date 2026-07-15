@@ -69,9 +69,9 @@ pub(super) async fn import_upload(
             let resp_body = upstream.json::<Value>().await.unwrap_or_else(|_| json!({}));
             (status, Json(resp_body)).into_response()
         }
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )
             .into_response(),
     }

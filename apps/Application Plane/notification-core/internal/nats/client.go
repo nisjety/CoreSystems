@@ -7,9 +7,11 @@ import (
 )
 
 type Config struct {
-	URL   string
-	Token string
-	Name  string
+	URL         string
+	User        string
+	Password    string
+	InboxPrefix string
+	Name        string
 }
 
 type Client struct {
@@ -22,8 +24,13 @@ func NewClient(cfg Config) (*Client, error) {
 		nats.Name(cfg.Name),
 		nats.Timeout(5 * time.Second),
 	}
-	if cfg.Token != "" {
-		options = append(options, nats.Token(cfg.Token))
+	credential, err := selectRuntimeCredential(cfg.User, cfg.Password)
+	if err != nil {
+		return nil, err
+	}
+	options = append(options, nats.UserInfo(credential.User, credential.Password))
+	if cfg.InboxPrefix != "" {
+		options = append(options, nats.CustomInboxPrefix(cfg.InboxPrefix))
 	}
 	conn, err := nats.Connect(cfg.URL, options...)
 	if err != nil {

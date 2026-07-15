@@ -14,7 +14,9 @@ type Config struct {
 	HTTPPort                   int
 	GRPCPort                   int
 	SharedNatsURL              string
-	SharedNatsToken            string
+	SharedNatsUser             string
+	SharedNatsPassword         string
+	GDPRConsumerRequired       bool
 	UserCoreServiceToken       string
 	EventSigningPrivateKeyPath string
 	// UserCoreURL is the user-core base URL used to resolve a viewer's explicit
@@ -29,8 +31,10 @@ func Load() (*Config, error) {
 		NatsToken:                  strings.TrimSpace(os.Getenv("DATAPLANE_NATS_TOKEN")),
 		HTTPPort:                   envIntOr("HTTP_PORT", 8010),
 		GRPCPort:                   envIntOr("GRPC_PORT", 50060),
-		SharedNatsURL:              envOr("NATS_SHARED_URL", ""),
-		SharedNatsToken:            envOr("VELION_NATS_TOKEN", ""),
+		SharedNatsURL:              strings.TrimSpace(os.Getenv("NATS_SHARED_URL")),
+		SharedNatsUser:             strings.TrimSpace(os.Getenv("NATS_SHARED_USER")),
+		SharedNatsPassword:         strings.TrimSpace(os.Getenv("NATS_SHARED_PASSWORD")),
+		GDPRConsumerRequired:       os.Getenv("GDPR_DURABLE_CONSUMER_REQUIRED") == "1",
 		UserCoreServiceToken:       envOr("USER_CORE_SERVICE_TOKEN", ""),
 		EventSigningPrivateKeyPath: envOr("EVENT_SIGNING_PRIVATE_KEY_PATH", ""),
 		UserCoreURL:                envOr("USER_CORE_URL", "http://user-core:8080"),
@@ -40,6 +44,16 @@ func Load() (*Config, error) {
 	}
 	if cfg.EventSigningPrivateKeyPath == "" {
 		return nil, fmt.Errorf("EVENT_SIGNING_PRIVATE_KEY_PATH required")
+	}
+	sharedConfigured := cfg.SharedNatsURL != "" || cfg.SharedNatsUser != "" || cfg.SharedNatsPassword != ""
+	if sharedConfigured && (cfg.SharedNatsURL == "" || cfg.SharedNatsUser == "" || cfg.SharedNatsPassword == "") {
+		return nil, fmt.Errorf("NATS_SHARED_URL, NATS_SHARED_USER, and NATS_SHARED_PASSWORD must be configured together")
+	}
+	if cfg.SharedNatsPassword != "" && len(cfg.SharedNatsPassword) < 32 {
+		return nil, fmt.Errorf("NATS_SHARED_PASSWORD must contain at least 32 characters")
+	}
+	if cfg.GDPRConsumerRequired && !sharedConfigured {
+		return nil, fmt.Errorf("scoped shared NATS credentials are required for the durable GDPR consumer")
 	}
 	return cfg, nil
 }

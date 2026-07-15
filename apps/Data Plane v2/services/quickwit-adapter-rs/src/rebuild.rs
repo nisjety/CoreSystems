@@ -200,6 +200,7 @@ pub async fn rebuild_all(
 
 pub async fn index_knowledge_unit_by_id(
     ctx: &RebuildContext,
+    org_id: &str,
     knowledge_id: &str,
 ) -> anyhow::Result<bool> {
     let row = sqlx::query_as::<_, KnowledgeRow>(
@@ -220,12 +221,14 @@ pub async fn index_knowledge_unit_by_id(
         FROM knowledge_units ku
         JOIN documents d ON d.document_id = ku.document_id
         WHERE ku.knowledge_id = $1
+          AND ku.org_id = $2
           AND ku.embedding_status = 'done'
           AND d.deleted_at IS NULL
           AND LOWER(BTRIM(d.zdr_classification)) IN ('internal', 'public', 'sensitive')
         "#,
     )
     .bind(knowledge_id)
+    .bind(org_id)
     .fetch_optional(&ctx.pool)
     .await?;
 
@@ -240,6 +243,7 @@ pub async fn index_knowledge_unit_by_id(
 
 pub async fn index_document_knowledge_units(
     ctx: &RebuildContext,
+    org_id: &str,
     document_id: &str,
 ) -> anyhow::Result<usize> {
     let rows = sqlx::query_as::<_, KnowledgeRow>(
@@ -260,6 +264,7 @@ pub async fn index_document_knowledge_units(
         FROM knowledge_units ku
         JOIN documents d ON d.document_id = ku.document_id
         WHERE ku.document_id = $1
+          AND ku.org_id = $2
           AND ku.embedding_status = 'done'
           AND d.deleted_at IS NULL
           AND LOWER(BTRIM(d.zdr_classification)) IN ('internal', 'public', 'sensitive')
@@ -267,6 +272,7 @@ pub async fn index_document_knowledge_units(
         "#,
     )
     .bind(document_id)
+    .bind(org_id)
     .fetch_all(&ctx.pool)
     .await?;
 
@@ -278,6 +284,7 @@ pub async fn index_document_knowledge_units(
 
 pub async fn index_source_object_by_id(
     ctx: &RebuildContext,
+    org_id: &str,
     source_object_id: &str,
 ) -> anyhow::Result<bool> {
     let row = sqlx::query_as::<_, SourceObjectRow>(
@@ -288,10 +295,12 @@ pub async fn index_source_object_by_id(
             content_hash, acl_tags, metadata, modified_at, updated_at
         FROM source_objects
         WHERE source_object_id = $1
+          AND org_id = $2
           AND deleted_at IS NULL
         "#,
     )
     .bind(source_object_id)
+    .bind(org_id)
     .fetch_optional(&ctx.pool)
     .await?;
 
@@ -305,10 +314,13 @@ pub async fn index_source_object_by_id(
     Ok(false)
 }
 
-pub async fn index_wiki_event(ctx: &RebuildContext, event: &Value) -> anyhow::Result<()> {
-    let org_id = string_field(event, &["org_id"]).unwrap_or_default();
-    if org_id.is_empty() {
-        anyhow::bail!("wiki event missing org_id");
+pub async fn index_wiki_event(
+    ctx: &RebuildContext,
+    verified_org_id: &str,
+    event: &Value,
+) -> anyhow::Result<()> {
+    if string_field(event, &["org_id"]).as_deref() != Some(verified_org_id) {
+        anyhow::bail!("wiki event tenant does not match verified producer claims");
     }
     let page_id = string_field(event, &["page_id"]);
     let version_id = string_field(event, &["version_id"]);
@@ -318,7 +330,7 @@ pub async fn index_wiki_event(ctx: &RebuildContext, event: &Value) -> anyhow::Re
         timestamp,
         rebuild_batch_id: None,
         entity_type: "wiki_version".into(),
-        org_id,
+        org_id: verified_org_id.to_owned(),
         document_id: page_id.clone(),
         knowledge_id: version_id,
         source_object_id: None,
@@ -709,15 +721,21 @@ mod zdr_rebuild_tests {
         };
 
         for suffix in ["restricted", "unknown", "deleted"] {
-            assert!(
-                !index_knowledge_unit_by_id(&ctx, &format!("fixture-kid-{suffix}"))
-                    .await
-                    .expect("filtered by-id lookup")
-            );
+            assert!(!index_knowledge_unit_by_id(
+                &ctx,
+                &format!("fixture-org-{suffix}"),
+                &format!("fixture-kid-{suffix}"),
+            )
+            .await
+            .expect("filtered by-id lookup"));
             assert_eq!(
-                index_document_knowledge_units(&ctx, &format!("fixture-doc-{suffix}"))
-                    .await
-                    .expect("filtered document lookup"),
+                index_document_knowledge_units(
+                    &ctx,
+                    &format!("fixture-org-{suffix}"),
+                    &format!("fixture-doc-{suffix}"),
+                )
+                .await
+                .expect("filtered document lookup"),
                 0
             );
         }

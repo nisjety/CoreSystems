@@ -188,7 +188,7 @@ pub(crate) async fn create_organization(
         Method::POST,
         &format!("{}/orgs", state.org_core_url),
         Some(mirror_body),
-        None,
+        Some(&org_id),
         Some(&actor),
         None,
     )

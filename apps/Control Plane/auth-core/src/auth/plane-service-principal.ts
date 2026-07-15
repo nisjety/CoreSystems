@@ -5,7 +5,9 @@ type ServicePrincipalConfig = {
   audiences: readonly string[];
   orgIds: readonly string[];
   allowAnyOrg?: boolean;
+  allowPersistentData?: boolean;
   scopes: readonly string[];
+  scopesByAudience?: Readonly<Record<string, readonly string[]>>;
 };
 
 type ServicePrincipalRegistry = Record<string, ServicePrincipalConfig>;
@@ -17,6 +19,7 @@ export type PlaneServicePrincipalRequest = {
   orgId: string;
   requestedScopes: readonly string[];
   reason: string;
+  zdr?: boolean;
 };
 
 export type AuthorizedPlaneServicePrincipal = {
@@ -25,6 +28,7 @@ export type AuthorizedPlaneServicePrincipal = {
   orgId: string;
   scopes: readonly string[];
   reason: string;
+  zdr: boolean;
 };
 
 export class ServicePrincipalConfigurationError extends Error {}
@@ -35,6 +39,45 @@ function nonEmptyStrings(value: unknown): value is readonly string[] {
     Array.isArray(value) &&
     value.length > 0 &&
     value.every((item) => typeof item === 'string' && item.trim().length > 0)
+  );
+}
+
+function validAudienceScopeMap(
+  config: Partial<ServicePrincipalConfig>,
+): boolean {
+  if (config.scopesByAudience === undefined) {
+    // Legacy single/union-scope registries remain valid until migrated.
+    return true;
+  }
+  if (
+    !config.scopesByAudience ||
+    typeof config.scopesByAudience !== 'object' ||
+    Array.isArray(config.scopesByAudience) ||
+    !nonEmptyStrings(config.audiences) ||
+    !nonEmptyStrings(config.scopes)
+  ) {
+    return false;
+  }
+
+  const entries = Object.entries(config.scopesByAudience);
+  const audiences = new Set(config.audiences);
+  if (
+    entries.length !== audiences.size ||
+    entries.some(
+      ([audience, scopes]) =>
+        !audiences.has(audience) ||
+        !nonEmptyStrings(scopes) ||
+        scopes.some((scope) => !config.scopes!.includes(scope)),
+    ) ||
+    [...audiences].some((audience) => !(audience in config.scopesByAudience!))
+  ) {
+    return false;
+  }
+
+  const mappedScopes = new Set(entries.flatMap(([, scopes]) => scopes));
+  return (
+    mappedScopes.size === new Set(config.scopes).size &&
+    config.scopes.every((scope) => mappedScopes.has(scope))
   );
 }
 
@@ -79,8 +122,13 @@ function parseRegistry(raw: string): ServicePrincipalRegistry {
       (config.allowAnyOrg !== true && !nonEmptyStrings(config.orgIds)) ||
       (config.allowAnyOrg !== undefined &&
         typeof config.allowAnyOrg !== 'boolean') ||
+      (config.allowPersistentData !== undefined &&
+        typeof config.allowPersistentData !== 'boolean') ||
+      (config.allowPersistentData === true &&
+        !config.audiences?.includes('data-plane')) ||
       !Array.isArray(config.orgIds) ||
-      !nonEmptyStrings(config.scopes)
+      !nonEmptyStrings(config.scopes) ||
+      !validAudienceScopeMap(config)
     ) {
       throw new ServicePrincipalConfigurationError(
         'PLANE_SERVICE_PRINCIPALS_JSON contains an invalid principal policy',
@@ -114,7 +162,11 @@ export function authorizePlaneServicePrincipal(
   const orgId = request.orgId.trim();
   const reason = request.reason.trim();
   const requestedScopes = normalizedUnique(request.requestedScopes);
+  const requestedZdr = request.zdr ?? true;
   const principal = registry[serviceId];
+  const allowedScopes = principal?.scopesByAudience
+    ? principal.scopesByAudience[request.audience]
+    : principal?.scopes;
 
   if (
     !principal ||
@@ -124,7 +176,10 @@ export function authorizePlaneServicePrincipal(
     !orgId ||
     (principal.allowAnyOrg !== true && !principal.orgIds.includes(orgId)) ||
     requestedScopes.length === 0 ||
-    requestedScopes.some((scope) => !principal.scopes.includes(scope)) ||
+    !allowedScopes ||
+    requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||
+    typeof requestedZdr !== 'boolean' ||
+    (requestedZdr === false && principal.allowPersistentData !== true) ||
     reason.length < 3 ||
     reason.length > 500
   ) {
@@ -139,5 +194,6 @@ export function authorizePlaneServicePrincipal(
     orgId,
     scopes: requestedScopes,
     reason,
+    zdr: requestedZdr,
   };
 }

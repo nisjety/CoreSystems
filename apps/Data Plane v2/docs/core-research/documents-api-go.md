@@ -4,6 +4,76 @@ Generated: 2026-07-10 (supersedes 2026-06-07 pass; re-verified live against the 
 
 Scope: `apps/Data Plane v2/services/documents-api-go`
 
+## 2026-07-15 final isolated acceptance delta
+
+The final source was rebuilt after the signed-claim and source-object repairs.
+Documents passed HTTP 401/401/200/403 and every DocumentService gRPC shape in
+the 31-method/124-assertion matrix. Deprecated same-tenant gRPC mutations reached
+exact permanent containment; cross-tenant calls reached the tenant-pinning guard. Under a
+signed restrictive posture, stabilized final state across PostgreSQL, Qdrant,
+Dragonfly, Quickwit, MinIO, and NATS was unchanged. NATS/Dragonfly are monotonic
+no-write checks; the other stores remain final-state checks and need mutation
+telemetry to exclude a transient write/delete cycle.
+
+This supersedes the same-day statement below that Docker was unavailable and the
+final image was not rebuilt. It remains isolated evidence: the shared deployment
+and production scoped-GDPR-broker rollout are unchanged.
+
+## 2026-07-15 durable GDPR consumer addendum (current source)
+
+The earlier release-disabled, token-capable, ephemeral GDPR subscription is
+removed. Documents API now requires a scoped `documents-api-gdpr` user/password
+in release Compose and binds only the pre-provisioned
+`documents-api-gdpr-erasure-v1` durable on `AQENCIA_CONTROLPLANE`. The strict
+event boundary requires bounded event/user/org IDs and accepts hard-delete and
+anonymize user children. Successful ownership transfer is explicitly ACKed;
+transient database/output failures are NAKed; poison and exhausted deliveries
+are copied to the Documents GDPR DLQ and the source is ACKed only after a valid
+DLQ PubAck.
+
+`/internal/gdpr/health` reports pending, ACK-pending, redelivery, terminal,
+success, last-error, and activity-lag state. Embedded JetStream tests exercise
+the real fixed-durable bind and ACK path; unit tests cover transient NAK and all
+invalid-DLQ-PubAck shapes. The GDPR package measures 84.2%, and full serialized
+tests/vet plus changed-package race tests pass. Data and Control Compose renders
+validate with injected values. This source was not deployed: coordinated
+`DOCUMENTS_GDPR_NATS_PASSWORD` injection and ordered provisioner -> consumer ->
+User producer rollout remain required.
+
+The final disposable proof now runs the **real Documents binary** against a
+separate Control-style JetStream broker with a pre-provisioned scoped durable.
+It binds and reports healthy; its principal can inspect only its own durable and
+cannot publish Control input or administer the stream. A valid synthetic erasure
+is ACKed only after ownership transfer. During a disposable PostgreSQL outage the
+ACK floor is held, health degrades, and the event redelivers; recovery completes
+the transfer, advances the ACK floor, and restores healthy state. All owned
+resources were removed. This is isolated runtime proof, not production rollout.
+
+## 2026-07-15 isolated runtime and final source delta
+
+The checkpoint image `7d668137516c` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`. In the disposable stack its HTTP
+four-shape matrix returned 401/401/200/403. An authenticated non-ZDR write first
+succeeded at 201. After the relational snapshot was stable, restrictive single
+and bulk requests matched their exact ZDR denial contracts and the document/
+chunk/trace/graph/source/outbox snapshot stayed unchanged for ten seconds. This
+proves the body-selected boundary and relational guard in isolation, but the
+successful control then exposed that this image ignored the bearer's signed
+`zdr:true` posture.
+
+The latest source requires a signed boolean `zdr` claim, preserves it in verified
+claims, and applies `verified_claim.zdr OR request_policy.zdr` to single and bulk
+document persistence. Final review found and closed the same bypass on
+`POST /v1/source-objects`: a restrictive signed token is now denied before the
+source row or outbox event can be written. Both regressions were observed RED
+before implementation. `go test -race ./...`, `go vet ./...`, and `go build
+./...` pass; `authctx` measures 95.5% and both changed ZDR decision helpers are
+100% (the broad handler package is 14.9%). Docker Desktop became unavailable
+before this final source could be rebuilt, so image/runtime effectiveness for
+the signed-claim and source-object guards is pending. Qdrant/Dragonfly/Quickwit/
+MinIO/broker/downstream zero-write assertions and the unchanged shared deployment
+also remain pending.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented:** JWT signature, issuer, audience, expiry, and JWKS verification
@@ -11,19 +81,21 @@ Scope: `apps/Data Plane v2/services/documents-api-go`
   material. Tenant/owner identity is claim-pinned. The shared inbound internal-key
   bypass is removed, service principals require explicit document scopes, and
   viewer-less service reads no longer silently broaden private visibility.
-- **Implemented ZDR/privacy:** single and bulk ingest share restrictive durable-
-  write rejection. Cross-user idempotency-key reuse returns a generic conflict
-  rather than another user's document result.
+- **Implemented ZDR/privacy:** single and bulk ingest share monotonic signed-or-
+  body restrictive durable-write rejection; source-object upsert rejects
+  restrictive or missing verified posture before source/outbox persistence.
+  Cross-user idempotency-key reuse returns a generic conflict rather than another
+  user's document result.
 - **Tested:** `go test -race ./...` and `go vet ./...` passed; `govulncheck`
   reported no reachable vulnerability. The changed `pkg/authctx` package measured
-  95.4% statement coverage in the final profile, including JWKS rotation/outage,
+  95.5% statement coverage in the final profile, including JWKS rotation/outage,
   startup posture, verified-user-proof retention, and serialization safety.
-- **Built/deployed/reachable/effective:** an earlier checkpoint image built with
-  verified revision/build labels. The later user-proof/outbox source has not
-  been rebuilt because Docker's content store is failing reads; it has not been
-  deployed or exercised by the isolated bearer/ZDR matrix. Earlier observe-mode/
-  internal-key findings below are historical deployment evidence, not proof
-  about current source behavior.
+- **Checkpoint built/reachable/effective in isolation:** the user-proof/outbox
+  image built with revision/build labels and passed the disposable bearer/body-
+  ZDR boundary described above. It predates the latest signed-claim/source-object
+  guards and was not deployed to the shared stack. Earlier
+  observe-mode/internal-key findings below are historical deployment evidence,
+  not proof about current source behavior.
 - **Containment/blocker:** the unsigned GDPR NATS consumer is disabled by default
   behind two insecure-development gates. GDPR async handling remains ineffective
   until signed, scoped events and NATS authorization exist.
@@ -195,4 +267,6 @@ JetStream outbox publication are implemented and tested. Explicit-grant lookup
 now forwards the original already-verified user bearer in memory; User Core must
 independently verify that proof. Outbox retries use a stable `Nats-Msg-Id`.
 `go test -race ./...`, vet, build, and `govulncheck ./...` pass; `pkg/authctx`
-measures 95.4%. Current image/runtime effectiveness remains Docker-blocked.
+measures 95.5%. The 2026-07-15 checkpoint and final source-only ZDR result above
+supersede the former Docker-blocked image statement; the latest image/runtime,
+broker/outbox, and shared deployment proof remain pending.

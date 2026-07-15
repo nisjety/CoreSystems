@@ -2,10 +2,9 @@ package billing
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -35,7 +34,7 @@ type Service struct {
 	cache           *rediscache.Client   // optional, nil if Redis disabled
 	httpClient      *http.Client
 	orgServiceURL   string
-	internalAPIKey  string
+	orgServiceToken string
 }
 
 func NewService(repo *Repository, paymentAdapter PaymentAdapter, invoiceAdapter InvoiceAdapter, cache ...*rediscache.Client) *Service {
@@ -43,17 +42,18 @@ func NewService(repo *Repository, paymentAdapter PaymentAdapter, invoiceAdapter 
 		repo:           repo,
 		paymentAdapter: paymentAdapter,
 		invoiceAdapter: invoiceAdapter,
-		httpClient:     &http.Client{Timeout: 5 * time.Second},
-		orgServiceURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("ORG_SERVICE_URL")), "/"),
-		internalAPIKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		orgServiceURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("ORG_SERVICE_URL")), "/"),
+		orgServiceToken: strings.TrimSpace(os.Getenv("ORG_CORE_SERVICE_TOKEN")),
 	}
 
 	if svc.orgServiceURL == "" {
 		svc.orgServiceURL = "http://org-core:8080"
-	}
-
-	if svc.internalAPIKey == "" {
-		svc.internalAPIKey = strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET"))
 	}
 
 	if len(cache) > 0 {
@@ -108,8 +108,9 @@ func (s *Service) fetchOrgCoreSeed(
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if s.internalAPIKey != "" {
-			req.Header.Set("X-Internal-Api-Key", s.internalAPIKey)
+		if s.orgServiceToken != "" {
+			req.Header.Set("X-Service-Id", "billing-core")
+			req.Header.Set("X-Service-Token", s.orgServiceToken)
 		}
 		return req, nil
 	}
@@ -246,7 +247,7 @@ func (s *Service) persistAccount(ctx context.Context, account Account) error {
 		account.Metadata = map[string]interface{}{}
 	}
 
-	if err := s.repo.UpsertAccount(ctx, account); err != nil {
+	if err := s.repo.SaveAccountStateCAS(ctx, account); err != nil {
 		return err
 	}
 
@@ -407,11 +408,120 @@ func (s *Service) ApplyPlanChange(ctx context.Context, orgID, orgName, newPlan s
 			})
 		}
 		if s.sharedPublisher != nil {
-			s.sharedPublisher.PublishPlanChanged(ctx, hydratedAccount.OrgID, previousPlan, hydratedAccount.Plan)
+			_ = s.sharedPublisher.PublishPlanChanged(ctx, hydratedAccount.OrgID, previousPlan, hydratedAccount.Plan)
 		}
 	}
 
 	return nil
+}
+
+// ApplyOrganizationPlanChange is the canonical Org event path. The repository
+// compares and writes the revision in the same transaction as the account
+// mutation, so concurrent, duplicate, and reordered deliveries cannot regress
+// Billing state. Checkout/provider flows continue to use ApplyPlanChange.
+func (s *Service) ApplyOrganizationPlanChange(
+	ctx context.Context,
+	orgID, orgName, newPlan string,
+	revision int64,
+) (bool, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return false, fmt.Errorf("org_id is required")
+	}
+	if revision < 1 {
+		return false, fmt.Errorf("plan revision must be positive")
+	}
+	canonicalPlan := strings.ToLower(strings.TrimSpace(newPlan))
+	switch canonicalPlan {
+	case "free", "trial", "hobby", "standard", "pro", "enterprise":
+	default:
+		return false, fmt.Errorf("invalid canonical organization plan")
+	}
+
+	account, err := s.GetAccount(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if account.PlanRevision > revision {
+		return false, nil
+	}
+	if account.PlanRevision == revision {
+		if normalizePlan(account.Plan) != canonicalPlan {
+			return false, fmt.Errorf("plan revision %d conflicts with existing plan", revision)
+		}
+		if account.SubscriptionState == SubscriptionStateCanceled {
+			return false, ErrOrganizationDeleted
+		}
+		if s.sharedPublisher == nil {
+			return false, fmt.Errorf("billing shared plan event publisher is unavailable")
+		}
+		if err := s.sharedPublisher.PublishPlanChanged(
+			ctx, orgID, canonicalPlan, canonicalPlan, revision,
+		); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	next := cloneAccount(account)
+	next.Plan = canonicalPlan
+	next.PlanRevision = revision
+	next.SubscriptionState = SubscriptionStateActive
+	next.TrialEndsAt = nil
+	if trimmedName := strings.TrimSpace(orgName); trimmedName != "" {
+		next.Metadata["org_name"] = trimmedName
+	}
+	for key, enabled := range defaultEntitlementsForPlan(canonicalPlan) {
+		next.Entitlements[key] = enabled
+	}
+	for key, limit := range defaultQuotaLimitsForPlan(canonicalPlan) {
+		next.QuotaLimits[key] = limit
+	}
+
+	applied, err := s.repo.ApplyOrganizationPlanRevision(ctx, next, revision)
+	if err != nil || !applied {
+		return applied, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "billing:account:"+orgID)
+	}
+	if s.publisher != nil {
+		if err := s.publisher.Publish(ctx, "billing.plan.changed", map[string]any{
+			"org_id":        orgID,
+			"previous_plan": account.Plan,
+			"new_plan":      canonicalPlan,
+			"revision":      revision,
+			"timestamp":     time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			log.Printf("billing-core failed to publish derived billing.plan.changed for org %s revision %d: %v", orgID, revision, err)
+		}
+	}
+	if s.sharedPublisher == nil {
+		return true, fmt.Errorf("billing shared plan event publisher is unavailable")
+	}
+	if err := s.sharedPublisher.PublishPlanChanged(
+		ctx, orgID, normalizePlan(account.Plan), canonicalPlan, revision,
+	); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func cloneAccount(account Account) Account {
+	next := account
+	next.Products = cloneMap(account.Products)
+	next.FeatureFlags = cloneMap(account.FeatureFlags)
+	next.Entitlements = cloneMap(account.Entitlements)
+	next.QuotaLimits = cloneMap(account.QuotaLimits)
+	next.ProviderCustomerID = cloneMap(account.ProviderCustomerID)
+	next.Metadata = cloneMap(account.Metadata)
+	return next
+}
+
+func cloneMap[K comparable, V any](source map[K]V) map[K]V {
+	cloned := make(map[K]V, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (s *Service) DeactivateOrganization(ctx context.Context, orgID, reason string) error {
@@ -473,7 +583,7 @@ func (s *Service) ExpireTrials(ctx context.Context) (int, error) {
 			})
 		}
 		if s.sharedPublisher != nil {
-			s.sharedPublisher.PublishPlanChanged(ctx, hydrated.OrgID, TrialPlan, hydrated.Plan)
+			_ = s.sharedPublisher.PublishPlanChanged(ctx, hydrated.OrgID, TrialPlan, hydrated.Plan)
 		}
 		expired++
 	}
@@ -508,7 +618,7 @@ func (s *Service) GetAccount(ctx context.Context, orgID string) (Account, error)
 		if upsertErr := s.persistAccount(ctx, defaultAccount); upsertErr != nil {
 			return Account{}, upsertErr
 		}
-		return defaultAccount, nil
+		return s.repo.GetAccount(ctx, orgID)
 	}
 
 	if err != nil {
@@ -651,14 +761,8 @@ func (s *Service) ConfirmCheckoutByPaymentID(ctx context.Context, paymentID stri
 }
 
 func (s *Service) RecordUsage(ctx context.Context, usage UsageEvent) error {
-	if usage.OrgID == "" || usage.Metric == "" {
-		return fmt.Errorf("org_id and metric are required")
-	}
-	if usage.OccurredAt.IsZero() {
-		usage.OccurredAt = time.Now().UTC()
-	}
-	if usage.EventID == "" {
-		usage.EventID = s.newUsageEventID(usage)
+	if err := ValidateUsageEvent(usage); err != nil {
+		return err
 	}
 	if usage.Source == "" {
 		usage.Source = "unknown"
@@ -667,25 +771,12 @@ func (s *Service) RecordUsage(ctx context.Context, usage UsageEvent) error {
 		usage.Metadata = map[string]interface{}{}
 	}
 
-	isNew, err := s.repo.ReserveUsageEvent(ctx, usage)
+	isNew, err := s.repo.RecordUsage(ctx, usage)
 	if err != nil {
 		return err
 	}
-	if !isNew {
-		return nil
-	}
 
-	if err := s.repo.SaveUsage(ctx, usage); err != nil {
-		return err
-	}
-
-	if err := s.invoiceAdapter.ReportUsage(ctx, usage); err != nil {
-		if enqueueErr := s.enqueueUsageRetry(ctx, usage); enqueueErr != nil {
-			return fmt.Errorf("report usage failed and enqueue retry failed: %w", enqueueErr)
-		}
-	}
-
-	if s.publisher != nil {
+	if isNew && s.publisher != nil {
 		_ = s.publisher.Publish(ctx, "billing.usage.recorded", map[string]any{
 			"event_id":    usage.EventID,
 			"org_id":      usage.OrgID,
@@ -697,12 +788,6 @@ func (s *Service) RecordUsage(ctx context.Context, usage UsageEvent) error {
 	}
 
 	return nil
-}
-
-func (s *Service) newUsageEventID(usage UsageEvent) string {
-	raw := fmt.Sprintf("%s|%s|%f|%s|%d", usage.OrgID, usage.Metric, usage.Quantity, usage.Source, usage.OccurredAt.UnixNano())
-	sum := sha256.Sum256([]byte(raw))
-	return "evt_" + hex.EncodeToString(sum[:])
 }
 
 func (s *Service) CanUseFeature(ctx context.Context, orgID, feature string) (bool, Account, error) {
@@ -834,8 +919,8 @@ func (s *Service) CreateInvoice(ctx context.Context, invoice Invoice, autoCharge
 	return nil
 }
 
-func (s *Service) enqueueUsageRetry(ctx context.Context, usage UsageEvent) error {
-	payload := map[string]interface{}{
+func usageRetryPayload(usage UsageEvent) map[string]interface{} {
+	return map[string]interface{}{
 		"event_id":    usage.EventID,
 		"org_id":      usage.OrgID,
 		"metric":      usage.Metric,
@@ -844,8 +929,6 @@ func (s *Service) enqueueUsageRetry(ctx context.Context, usage UsageEvent) error
 		"occurred_at": usage.OccurredAt.UTC().Format(time.RFC3339),
 		"metadata":    usage.Metadata,
 	}
-	dedupeKey := string(RetryJobKindLagoUsage) + ":" + usage.EventID
-	return s.repo.EnqueueRetryJob(ctx, RetryJobKindLagoUsage, dedupeKey, payload, time.Now().UTC())
 }
 
 func (s *Service) enqueueInvoiceChargeRetry(ctx context.Context, invoice Invoice) error {

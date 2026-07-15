@@ -10,24 +10,27 @@ import (
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/validate"
+	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 )
 
 type SourceObjectHandler struct {
 	repo    *repo.SourceObjectRepo
-	outbox  *repo.DocumentRepo
 	subject events.SourceObjectSubjects
 }
 
-func NewSourceObjectHandler(sourceObjects *repo.SourceObjectRepo, outbox *repo.DocumentRepo) *SourceObjectHandler {
+func NewSourceObjectHandler(sourceObjects *repo.SourceObjectRepo) *SourceObjectHandler {
 	return &SourceObjectHandler{
 		repo:    sourceObjects,
-		outbox:  outbox,
 		subject: events.DefaultSourceObjectSubjects(),
 	}
 }
 
 func (h *SourceObjectHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
+	if reason := sourceObjectPersistenceZDRReason(verifiedClaims(r)); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
+		return
+	}
 	var input model.UpsertSourceObjectInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -45,32 +48,32 @@ func (h *SourceObjectHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.repo.Upsert(r.Context(), input)
+	result, err := h.repo.UpsertWithOutbox(
+		r.Context(),
+		input,
+		h.subject.Changed,
+		eventUserID(r),
+	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to upsert source object")
 		return
 	}
-
-	h.enqueue(r, result.SourceObject.OrgID, h.subject.Changed, map[string]any{
-		"source_object_id": result.SourceObject.SourceObjectID,
-		"org_id":           result.SourceObject.OrgID,
-		"connector":        result.SourceObject.Connector,
-		"external_id":      result.SourceObject.ExternalID,
-		"inserted":         result.Inserted,
-		"content_hash":     result.SourceObject.ContentHash,
-		// content_changed lets vector/embedding consumers skip work on a
-		// metadata-only re-sync; full-text consumers still re-index on every
-		// changed event to pick up renamed paths, ACL changes, etc.
-		"content_changed": result.Inserted || result.ContentChanged,
-		"user_id":         eventUserID(r),
-		"zdr":             false,
-	})
 
 	status := http.StatusOK
 	if result.Inserted {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, result.SourceObject)
+}
+
+func sourceObjectPersistenceZDRReason(claims *authctx.Claims) string {
+	if claims == nil || !claims.Verified || !claims.ZDRPresent {
+		return "verified retention posture is required for durable source-object persistence"
+	}
+	if claims.ZDR {
+		return "verified token zdr=true forbids durable source-object persistence"
+	}
+	return ""
 }
 
 func (h *SourceObjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -94,20 +97,16 @@ func (h *SourceObjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, err := h.repo.SoftDelete(r.Context(), input)
+	_, err := h.repo.SoftDeleteWithOutbox(
+		r.Context(),
+		input,
+		h.subject.Deleted,
+		eventUserID(r),
+	)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "source object not found")
 		return
 	}
-
-	h.enqueue(r, obj.OrgID, h.subject.Deleted, map[string]any{
-		"source_object_id": obj.SourceObjectID,
-		"org_id":           obj.OrgID,
-		"connector":        obj.Connector,
-		"external_id":      obj.ExternalID,
-		"user_id":          eventUserID(r),
-		"zdr":              false,
-	})
 
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
@@ -145,17 +144,6 @@ func (h *SourceObjectHandler) Duplicates(w http.ResponseWriter, r *http.Request)
 			"groups":     groups,
 		},
 	})
-}
-
-func (h *SourceObjectHandler) enqueue(r *http.Request, orgID, subject string, payload any) {
-	if h.outbox == nil {
-		return
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	_ = h.outbox.EnqueueOutbox(r.Context(), orgID, subject, body)
 }
 
 func normalizeSourceObjectInput(input *model.UpsertSourceObjectInput) {

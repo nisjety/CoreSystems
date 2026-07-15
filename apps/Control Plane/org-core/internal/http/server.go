@@ -31,7 +31,12 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(correlationMiddleware())
-	router.Use(internalAuthMiddleware())
+	serviceCredentials, credentialErr := parseServiceCredentials(os.Getenv(serviceCredentialEnv))
+	if credentialErr != nil {
+		log.Printf("org-core service authentication unavailable: %v", credentialErr)
+		serviceCredentials = nil
+	}
+	router.Use(serviceAuthMiddleware(serviceCredentials, time.Now))
 
 	s := &Server{
 		router:           router,
@@ -70,7 +75,7 @@ func (s *Server) setupRoutes() {
 	// guard is the tenant-isolation SECOND LAYER (membership_guard.go): before
 	// any org-scoped MUTATION runs, re-verify against org-core's own membership
 	// table that the request's x-user-id is an active member of :id. This makes
-	// org-core stop blindly trusting the path even behind the internal-API-key
+	// org-core stop blindly trusting the path even behind the scoped service-principal
 	// gate. Reads stay gateway-trusted (not wrapped) to avoid a membership
 	// round-trip on every GET.
 	guard := requireActiveMembership(s.orgService)
@@ -122,8 +127,8 @@ func (s *Server) setupRoutes() {
 	// These are machine-to-machine (provisioning / onboarding orchestration)
 	// and have NO acting end-user (no x-user-id), so the membership guard does
 	// not apply — there is no user whose membership could be checked. They stay
-	// protected solely by the internal-API-key gate; access is restricted to
-	// trusted control-plane callers and must not be exposed to user traffic.
+	// protected by route-scoped machine principals; access is restricted to
+	// explicitly registered control-plane callers and must not be exposed to user traffic.
 	internal := s.router.Group("/internal")
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
@@ -131,35 +136,4 @@ func (s *Server) setupRoutes() {
 	internal.POST("/orgs/:orgId/reconcile", s.reconcileOrganizationProjection)
 	internal.POST("/orgs/:orgId/members/reconcile", s.reconcileOrganizationMember)
 	internal.POST("/orgs/:orgId/reconcile-delete", s.reconcileOrganizationDeletion)
-}
-
-func internalAuthMiddleware() gin.HandlerFunc {
-	configuredKeys := []string{
-		strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		strings.TrimSpace(os.Getenv("INTERNAL_SERVICE_SECRET")),
-	}
-
-	return func(c *gin.Context) {
-		if c.Request.URL.Path == "/health" || c.Request.Method == http.MethodOptions {
-			c.Next()
-			return
-		}
-
-		reqKey := strings.TrimSpace(c.GetHeader("X-Internal-Api-Key"))
-		for _, key := range configuredKeys {
-			if key != "" && reqKey == key {
-				c.Next()
-				return
-			}
-		}
-
-		for _, key := range configuredKeys {
-			if key != "" {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-				return
-			}
-		}
-
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "service auth not configured"})
-	}
 }

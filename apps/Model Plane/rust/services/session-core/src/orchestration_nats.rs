@@ -13,11 +13,7 @@
 
 use std::time::Duration;
 
-use async_nats::jetstream::{
-    self,
-    consumer::{pull::Config as PullConfig, AckPolicy, DeliverPolicy},
-    stream::{Config as StreamConfig, RetentionPolicy},
-};
+use async_nats::jetstream::{self, consumer::PullConsumer};
 use futures::StreamExt;
 use mp_contracts::model_plane::v1 as proto;
 use mp_events::subjects::ORCHESTRATION_WILDCARD;
@@ -41,25 +37,16 @@ pub async fn run(
     let client = crate::nats_connection::connect(&nats_url).await?;
     let js = jetstream::new(client);
 
-    js.get_or_create_stream(StreamConfig {
-        name: STREAM_NAME.to_owned(),
-        subjects: vec![ORCHESTRATION_WILDCARD.to_owned()],
-        retention: RetentionPolicy::Limits,
-        max_age: Duration::from_secs(60 * 60 * 24),
-        ..Default::default()
-    })
-    .await?;
-
     let stream = js.get_stream(STREAM_NAME).await?;
-    let consumer = stream
-        .create_consumer(PullConfig {
-            durable_name: None,
-            filter_subject: ORCHESTRATION_WILDCARD.to_owned(),
-            ack_policy: AckPolicy::None,
-            deliver_policy: DeliverPolicy::New,
-            ..Default::default()
-        })
-        .await?;
+    let consumer: PullConsumer = stream
+        .get_consumer("session-core-orchestration")
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if consumer.cached_info().config.filter_subject != ORCHESTRATION_WILDCARD {
+        return Err(anyhow::anyhow!(
+            "pre-provisioned orchestration consumer filter mismatch"
+        ));
+    }
 
     let mut messages = consumer.messages().await?;
     info!("orchestration NATS bridge ready");

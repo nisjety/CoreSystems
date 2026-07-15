@@ -68,3 +68,25 @@ func TestLoadHonorsConnectorOverrides(t *testing.T) {
 		t.Fatalf("GoogleSearchConsoleAPIBaseURL = %s", cfg.GoogleSearchConsoleAPIBaseURL)
 	}
 }
+
+func TestLoadRejectsModelPlaneTokenFallbackAndRequiresScopedCredentialPair(t *testing.T) {
+	t.Setenv("INTERNAL_API_KEY", "test-key")
+	t.Setenv("MODEL_PLANE_NATS_URL", "nats://model-nats:4222")
+	t.Setenv("MODEL_PLANE_NATS_USER", "")
+	t.Setenv("MODEL_PLANE_NATS_PASSWORD", "")
+	t.Setenv("MODEL_PLANE_NATS_TOKEN", "legacy-token-must-not-work")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Model Plane URL without scoped user/password was accepted")
+	}
+
+	t.Setenv("MODEL_PLANE_NATS_USER", "application-insight-model")
+	t.Setenv("MODEL_PLANE_NATS_PASSWORD", "0123456789abcdef0123456789abcdef")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelPlaneNATSUser != "application-insight-model" || cfg.ModelPlaneNATSPassword == "" {
+		t.Fatalf("unexpected scoped Model credential config: %+v", cfg)
+	}
+}

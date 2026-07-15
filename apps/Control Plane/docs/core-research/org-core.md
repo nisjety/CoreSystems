@@ -1,11 +1,29 @@
 # org-core Research Dive
 
 Generated: 2026-06-07
-Updated: 2026-07-11 (production-readiness continuation, live checks, Postgres verification)
+Updated: 2026-07-15 (scoped authority and isolated lifecycle verification)
 
 Scope: `apps/Control Plane/org-core`
 
-## 2026-07-11 production-readiness addendum (current)
+## 2026-07-15 final secure-MVP addendum (current)
+
+The final current-image 4/4 lifecycle is green. Auth invitation acceptance and projection converge to one logical Org state under asynchronous insertion and bounded retry; member add/role/remove replays preserve revision order and audit cardinality; Billing-down deletion checkpoints Org independently and resumes; delayed resurrection is rejected by tombstones. The runner applies Auth migrations through 027, uses only disposable databases/containers, and leaves no matching resources after cleanup.
+
+Historical ownerless organizations remain fail-closed: migration 018 reports absent, ambiguous, stale, and changed-role evidence and applies only a reviewed mapping to an existing canonical member. No owner is inferred. `go test ./...` and `go vet ./...` pass. `UpdatePlanWithOutbox` is 81.8% covered and `FlushPlanChangeOutbox` 82.1%; older projection functions below 80% remain explicitly disclosed. Production scoped-credential rollout is the only external gate, and no live organization or membership was mutated.
+
+## 2026-07-15 scoped/lifecycle detail (superseded by final addendum above)
+
+Org HTTP now accepts only required audience/scope-bound principals: Velion self-service scopes and Auth projection/delete scopes are separate, request/body/subject/nonce binding is verified, and legacy or pairwise-reused credentials fail startup. Plan changes use a positive monotonic revision, atomically update history plus migration-014 outbox, and retry acknowledged publication; projection/deletion tombstones remain authoritative under reordering.
+
+Disposable Postgres and a fresh-image Auth/Org/Billing stack prove projection ordering, duplicate/retry convergence, membership role/removal ordering, plan-outbox retry, Billing-down deletion checkpointing, restart/resume, and delayed-resurrection rejection. Auth migration 018 proves the historical ownerless-organization workflow reports and stops on absent/ambiguous/stale evidence and applies only one explicitly reviewed existing canonical member, with append-only evidence and no invented owner. `go test ./...`, `go vet ./...`, and the earlier race pass remain green. Changed function coverage is 81.8% for `UpdatePlanWithOutbox` and 82.1% for `FlushPlanChangeOutbox`; older projection functions remain below 80%. Coordinated credential deployment remains open; no live organization was mutated.
+
+## 2026-07-14 Velion/Auth authority addendum (historical deployment evidence)
+
+Velion no longer fabricates a personal workspace or treats Org Core as a membership writer. The gateway lists/switches organizations through Auth Core and pins membership list/invite/remove/role-change to the verified active Better Auth membership; sensitive mutations require admin/owner authority. Invitation acceptance is Auth-owned and idempotent for committed retries, with invitation/user/email/membership/organization binding before an existing acceptance is returned. Org Core remains the revisioned projection/domain authority, and its competing legacy mutation routes remain unmounted.
+
+Current read-only live counts are Auth organizations/memberships `1/1` and Org organizations/memberships `1/1`; organization and membership projection-version counts are also one each. The prior `5/3` historical ownerless dataset is not present in this runtime, so no repair was attempted. Exactly-once behavior under duplicates/reordering and the ownerless-org stop/report preflight remain isolated-fixture MVP gates. The container is healthy; no organization or membership row was mutated during this check.
+
+## 2026-07-11 production-readiness addendum (historical)
 
 The earlier “unsafe to deploy” finding is fixed and the current container is healthy. Migrations 010 owner invariant, 011 verified domains, 012 Auth projection guards, and 013 strict fail-closed RLS are applied. Live `pg_policies` inventory finds zero `app.current_org_id` references and 14 `app.current_org` references. Functional migration/RLS tests, isolated rollback rehearsals, `go test ./...`, and `go vet ./...` pass.
 

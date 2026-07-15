@@ -1,10 +1,48 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   aggregateToolActions,
   aggregateWorkspaceActivity,
+  listAuditEvents,
   zeroDataRetention,
   type AuditEvent,
 } from '@/shared/api/audit-client'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('listAuditEvents', () => {
+  it('normalizes the live Audit Core snake_case row at the API boundary', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: [{
+        id: 17,
+        event: 'member.removed',
+        occurred_at: '2026-07-14T18:00:00Z',
+        user_id: 'user_admin',
+        actor_role: 'admin',
+        resource_id: 'user_member',
+        outcome: 'ok',
+        request_id: 'req_audit_17',
+      }],
+      meta: { count: 1 },
+      error: null,
+    }), {
+      headers: { 'Content-Type': 'application/json' },
+      status: 200,
+    })))
+
+    await expect(listAuditEvents({ limit: 25 })).resolves.toEqual([{
+      id: '17',
+      event: 'member.removed',
+      occurredAt: '2026-07-14T18:00:00Z',
+      userId: 'user_admin',
+      actorRole: 'admin',
+      resource: 'user_member',
+      outcome: 'ok',
+      requestId: 'req_audit_17',
+    }])
+  })
+})
 
 describe('zeroDataRetention', () => {
   it('reads the flag top-level or from details, defaulting to false', () => {

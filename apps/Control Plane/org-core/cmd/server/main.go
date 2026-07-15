@@ -20,7 +20,6 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/grpc"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/http"
-	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/internalkey"
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/metrics"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/nats"
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
@@ -29,18 +28,10 @@ import (
 )
 
 func main() {
-	// G40 (velion-gap.md §8.29): refuse to start in production with a
-	// placeholder / missing / drifted internal API key. Mirrors velion's
-	// boot-time gate (§8.27).
-	if r := internalkey.AssertFromEnv("INTERNAL_API_KEY", "INTERNAL_SERVICE_SECRET"); !r.OK {
-		msg := "[org-core startup] internal API key validation failed (" + string(r.Problem.Kind) + " on " + r.Problem.EnvVar + "): " + r.Problem.Detail
-		if internalkey.IsProduction() {
-			log.Fatalf("FATAL %s", msg)
-		}
-		log.Printf("WARN  %s — continuing because not production", msg)
-	} else {
-		log.Printf("[org-core startup] internal API key OK (%s)", r.Resolved)
+	if err := httpserver.ValidateRequiredServiceCredentialRegistry(os.Getenv("ORG_CORE_SERVICE_CREDENTIALS")); err != nil {
+		log.Fatalf("[org-core startup] service credential registry validation failed: %v", err)
 	}
+	log.Printf("[org-core startup] scoped service credential registry OK")
 
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6061
 	if os.Getenv("PPROF_ENABLED") == "true" {
@@ -110,26 +101,28 @@ func main() {
 
 	if natsClient != nil {
 		defer natsClient.Close()
-		if err := natsClient.EnsureStream(ctx, "CONTROL_PLANE_EVENTS", []string{"user.>", "organization.>", "session.>", "billing.>", "usage.>"}); err != nil {
-			log.Printf("warning: ensure nats stream failed: %v", err)
-		}
 		publisher = nats.NewPublisher(natsClient)
 	}
 
 	orgService := orgcore.NewService(repo, publisher, redisClient)
+	if publisher != nil {
+		go runPlanChangeOutbox(ctx, orgService, 5*time.Second)
+	}
 
-	// Wire the local control-plane bus (controlplane-nats) as the audit
-	// publisher. velion.audit.v1.control.* events go here — NOT the shared
-	// velion-nats bus — because audit-core's primary QueueSubscribe listens on
-	// controlplane-nats. Core publish (no JetStream) matches audit-core's
-	// core subscription.
+	// Wire the local control-plane JetStream publisher. Audit intents are first
+	// committed to PostgreSQL, then published to the pre-provisioned Control
+	// observability stream with a stable Nats-Msg-Id and validated PubAck.
 	if natsClient != nil {
 		orgService.SetAuditPublisher(natsClient)
+		go runGDPRAuditOutbox(ctx, orgService, 5*time.Second)
 	}
 
 	// Wire shared cross-plane publisher (velion-nats)
-	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, cfg.NATSSharedToken, cfg.ServiceName); spErr != nil {
-		log.Printf("warning: shared NATS unavailable: %v", spErr)
+	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, nats.SharedCredentials{
+		User: cfg.NATSSharedUser, Password: cfg.NATSSharedPass,
+		Token: cfg.NATSSharedToken, AllowTokenFallback: cfg.NATSSharedAllowTokenFallback,
+	}, cfg.ServiceName); spErr != nil {
+		log.Fatalf("shared NATS unavailable: %v", spErr)
 	} else if sp != nil {
 		defer sp.Close()
 		orgService.SetSharedPublisher(sp)
@@ -192,6 +185,56 @@ func main() {
 	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http shutdown error: %v", err)
+	}
+}
+
+func runPlanChangeOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		published, err := service.FlushPlanChangeOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core plan change outbox retry failed: %v", err)
+			return
+		}
+		if published > 0 {
+			log.Printf("org-core published %d pending plan change event(s)", published)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+func runGDPRAuditOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushGDPRAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core GDPR audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core GDPR audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
 	}
 }
 

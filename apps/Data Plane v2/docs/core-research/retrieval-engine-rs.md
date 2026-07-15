@@ -5,6 +5,56 @@ Updated: 2026-07-10 (live re-verification pass; supersedes the 2026-06-07 snapsh
 
 Scope: `apps/Data Plane v2/services/retrieval-engine-rs`
 
+## 2026-07-15 final isolated acceptance delta
+
+The real Auth/User/Control fixture proves an authorized user can use Knowledge,
+GraphRAG, and navbar retrieval while a second tenant remains absent from
+serialized browser/API payloads. The final HTTP matrix passed 401/401/200/403,
+and all Retrieval, Document, and Knowledge gRPC families passed exact outcomes
+in the 31-method/124-shape matrix.
+
+Control policy token issuance has a seven-second budget because Auth Core waits
+for a durable audit PubAck with a five-second downstream budget. Retrieval retries
+only connect/timeout/503 once after 150ms; it never retries 401/403, malformed
+contracts, or explicit denial. Exhaustion makes exactly two attempts, no decision
+call, is uncached, and maps to gRPC `Unavailable`; verified non-membership remains
+`PermissionDenied`. Policy and interceptor line coverage measure 93.76% and
+88.14%. The final all-target suite passed **212 tests with 10 explicit
+infrastructure ignores**. The shared deployment is unchanged.
+
+## 2026-07-15 Velion and inference-auth delta
+
+- HTTP now requires a cryptographically verified bearer and rejects the
+  fleet-shared API-key identity path. The verifier requires RS256 plus configured
+  issuer/audience and registered `exp`, `nbf`, `aud`, `iss`, `sub`; missing,
+  expired, wrong-algorithm, wrong-issuer/audience, and non-canonical identity
+  shapes return 401.
+- Query embeddings no longer call Inference Core with a shared key. Retrieval
+  mints one short-lived, audited, org-bound `aud=inference-core` service bearer
+  per batch for exact `inference:invoke`, forwards only `Authorization: Bearer`,
+  and retains caller ZDR. Auth Core's new `scopesByAudience` policy prevents the
+  retrieval service's `control-policy` decision scope from being reused for
+  inference (and vice versa).
+- Velion's gateway mints its Data bearer from the verified session for search,
+  chunks, trace/source expansion, and navbar search; failure is a sanitized 503
+  with no internal-key fallback. The gateway maps SPA `limit`/`kinds` to
+  retrieval `top_k`/filters and maps `candidates`/`sources` back to the UI
+  contract. Navbar search now calls the implemented `/v1/knowledge/search`.
+
+Verification dated 2026-07-15: `cargo test --all-targets` passed **175 unit/bin
+tests plus 18 non-ignored integration tests** (**193 non-ignored total**); 10
+infrastructure-dependent cases remain explicitly ignored. Minimal retrieval
+requests now default an omitted `filters` member to empty filters, with a focused
+regression test. `cargo fmt --all -- --check` and
+`cargo clippy --all-targets -- -D warnings` passed.
+The five focused HTTP JWT regressions and 19 focused embedding/service-auth
+tests passed. Auth Core's focused registry suite passed **12/12**, build passed,
+and changed-module coverage measured **90.19% statements, 93.84% branches, 100%
+functions, 89.79% lines**. The current-source isolated retrieval image
+`5a9bd5f96a14` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd`; its HTTP four-shape matrix returned
+401/401/200/403. Shared running images still predate this source.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented:** strict RS256/JWKS auth covers HTTP and gRPC; tenant/user are
@@ -24,9 +74,11 @@ Scope: `apps/Data Plane v2/services/retrieval-engine-rs`
   containment tests pass after the bearer
   migration; auxiliary-handler, isolated-Postgres visibility, search, and trace
   security suites also pass. Strict all-target clippy passes.
-- **Built/deployed/reachable/effective:** the revised image built locally with
-  verified revision/build labels. Deployment, the safe Docker matrix, and a
-  real-bearer Control integration run have not completed.
+- **Built/reachable/effective in isolation:** the revised image built locally
+  with verified revision/build labels. The disposable stack accepted a
+  cryptographically signed authorized-tenant bearer and rejected a spoofed
+  tenant. This used an isolated authority fixture; the real Auth Core/User Core
+  user journey and shared deployment have not completed.
 - **Key isolation:** Compose mounts only Control's public verification file;
   retrieval no longer receives the directory containing the signing-key file.
 - **Blockers:** Model Gateway, Execution Core, and Inference Core gRPC are
@@ -285,5 +337,7 @@ embedding/cache/rerank egress guards, canonical auxiliary visibility, and
 tenant+actor trace scope. Explicit-grant reads require the original verified
 user bearer and are intentionally uncached, removing the stale-revocation/shared-
 bus dependency. Provider errors retain status only. The library suite passes
-75/75; current all-target/workspace verification is recorded centrally. Docker
-still blocks the authorized-user runtime matrix.
+75/75; current all-target/workspace verification is recorded centrally. The
+isolated cryptographic authority fixture now proves the 200 authorized and 403
+cross-tenant HTTP path; a real Auth Core/User Core authorized-user journey is
+still required.

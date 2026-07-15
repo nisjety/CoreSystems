@@ -27,7 +27,6 @@ export function HeroSection() {
 					loop
 					muted
 					playsInline
-					poster="/velion-vibe/velion-signal-drone-short-poster.jpg"
 					preload="metadata"
 				>
 					<source

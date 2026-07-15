@@ -23,7 +23,7 @@ type SharedEventPublisher interface {
 	PublishAccountUpdated(ctx context.Context, orgID, plan string, seats int)
 	PublishInvoiceCreated(ctx context.Context, orgID, invoiceID string, amountCents int64, currency string)
 	PublishQuotaExceeded(ctx context.Context, orgID, metric string, limit, current int64)
-	PublishPlanChanged(ctx context.Context, orgID, previousPlan, newPlan string)
+	PublishPlanChanged(ctx context.Context, orgID, previousPlan, newPlan string, revision ...int64) error
 	// PublishPlain sends a plain NATS core message for notification-core consumption.
 	PublishPlain(subject string, payload map[string]any)
 }

@@ -71,6 +71,14 @@ pub(super) async fn quarry_token(
     get_audience_token(state, &user.user_id, cookie, "quarry").await
 }
 
+pub(super) async fn data_plane_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    cookie: &str,
+) -> Option<String> {
+    get_audience_token(state, &user.user_id, cookie, "data-plane").await
+}
+
 /// Call quarry-edge with bearer auth and return the raw `(status, body)`.
 /// `path` is appended to `quarry_edge_url` and may already carry a query string.
 pub(super) async fn quarry_call(
@@ -123,6 +131,37 @@ pub(super) async fn fetch_internal_json(
     }
     if let Some(body) = body {
         req = req.json(&body);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => resp.json::<Value>().await.ok(),
+        _ => None,
+    }
+}
+
+/// Read a Data Plane projection as the interactive user. The audience token is
+/// the only credential: never combine it with the shared internal key, which
+/// could otherwise change private-document visibility semantics.
+pub(super) async fn fetch_data_plane_json(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    org_id: &str,
+    actor: &ActionActor,
+    timeout: Duration,
+    bearer: &str,
+) -> Option<Value> {
+    let mut req = state
+        .client
+        .request(method, url)
+        .timeout(timeout)
+        .bearer_auth(bearer)
+        .header("x-user-id", actor.user_id.as_str())
+        .header("x-org-id", org_id.trim());
+    if !actor.user_email.is_empty() {
+        req = req.header("x-user-email", actor.user_email.as_str());
+    }
+    if !actor.user_name.is_empty() {
+        req = req.header("x-user-name", actor.user_name.as_str());
     }
     match req.send().await {
         Ok(resp) if resp.status().is_success() => resp.json::<Value>().await.ok(),

@@ -25,7 +25,10 @@ import (
 	"github.com/triodelab/integration-corev2/internal/config"
 )
 
-const defaultTimeout = 5 * time.Second
+const (
+	defaultTimeout      = 5 * time.Second
+	ingestionAuditPlane = "ingestion"
+)
 
 var errUnknownSigningKey = errors.New("unknown signing key")
 
@@ -43,23 +46,26 @@ type AuthClient struct {
 }
 
 type OrgClient struct {
-	baseURL        string
-	internalAPIKey string
-	httpClient     *http.Client
+	baseURL      string
+	serviceToken string
+	serviceID    string
+	httpClient   *http.Client
 }
 
 type BillingClient struct {
-	baseURL        string
-	internalAPIKey string
-	source         string
-	httpClient     *http.Client
+	baseURL      string
+	serviceToken string
+	serviceID    string
+	source       string
+	httpClient   *http.Client
 }
 
 type AuditClient struct {
-	baseURL        string
-	internalAPIKey string
-	source         string
-	httpClient     *http.Client
+	baseURL      string
+	serviceToken string
+	serviceID    string
+	source       string
+	httpClient   *http.Client
 }
 
 type UsageEvent struct {
@@ -69,11 +75,13 @@ type UsageEvent struct {
 }
 
 type AuditEvent struct {
+	EventID    string         `json:"event_id"`
 	OccurredAt time.Time      `json:"occurred_at"`
 	OrgID      string         `json:"org_id"`
 	UserID     string         `json:"user_id,omitempty"`
 	ActorRole  string         `json:"actor_role,omitempty"`
 	Plane      string         `json:"plane"`
+	Producer   string         `json:"producer"`
 	Event      string         `json:"event"`
 	Subject    string         `json:"subject,omitempty"`
 	ResourceID string         `json:"resource_id,omitempty"`
@@ -106,27 +114,30 @@ func NewAuthClient(cfg config.Config, httpClient *http.Client) *AuthClient {
 
 func NewOrgClient(cfg config.Config, httpClient *http.Client) *OrgClient {
 	return &OrgClient{
-		baseURL:        strings.TrimRight(cfg.OrgCoreURL, "/"),
-		internalAPIKey: cfg.ControlPlaneInternalAPIKey(),
-		httpClient:     withDefaultClient(httpClient),
+		baseURL:      strings.TrimRight(cfg.OrgCoreURL, "/"),
+		serviceToken: strings.TrimSpace(cfg.OrgCoreServiceToken),
+		serviceID:    cfg.ServiceName,
+		httpClient:   withDefaultClient(httpClient),
 	}
 }
 
 func NewBillingClient(cfg config.Config, httpClient *http.Client) *BillingClient {
 	return &BillingClient{
-		baseURL:        strings.TrimRight(cfg.BillingCoreURL, "/"),
-		internalAPIKey: cfg.ControlPlaneInternalAPIKey(),
-		source:         cfg.ServiceName,
-		httpClient:     withDefaultClient(httpClient),
+		baseURL:      strings.TrimRight(cfg.BillingCoreURL, "/"),
+		serviceToken: strings.TrimSpace(cfg.BillingCoreServiceToken),
+		serviceID:    cfg.ServiceName,
+		source:       cfg.ServiceName,
+		httpClient:   withDefaultClient(httpClient),
 	}
 }
 
 func NewAuditClient(cfg config.Config, httpClient *http.Client) *AuditClient {
 	return &AuditClient{
-		baseURL:        strings.TrimRight(cfg.AuditCoreURL, "/"),
-		internalAPIKey: cfg.ControlPlaneInternalAPIKey(),
-		source:         cfg.ServiceName,
-		httpClient:     withDefaultClient(httpClient),
+		baseURL:      strings.TrimRight(cfg.AuditCoreURL, "/"),
+		serviceToken: strings.TrimSpace(cfg.AuditCoreServiceToken),
+		serviceID:    cfg.ServiceName,
+		source:       ingestionAuditPlane,
+		httpClient:   withDefaultClient(httpClient),
 	}
 }
 
@@ -301,7 +312,7 @@ func stringSliceClaim(claims jwt.MapClaims, key string) []string {
 	return out
 }
 
-func (c *OrgClient) GetOrgPlan(ctx context.Context, orgID, userID string) (auth.OrgPlan, error) {
+func (c *OrgClient) GetOrgPlan(ctx context.Context, orgID, _ string) (auth.OrgPlan, error) {
 	if c.baseURL == "" {
 		return auth.OrgPlan{}, auth.NewError(http.StatusServiceUnavailable, "org_core_unconfigured", "ORG_CORE_URL is not configured")
 	}
@@ -310,10 +321,7 @@ func (c *OrgClient) GetOrgPlan(ctx context.Context, orgID, userID string) (auth.
 	if err != nil {
 		return auth.OrgPlan{}, err
 	}
-	req.Header.Set("X-Internal-Api-Key", c.internalAPIKey)
-	if userID != "" {
-		req.Header.Set("X-User-ID", userID)
-	}
+	setServicePrincipal(req, c.serviceID, c.serviceToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -363,7 +371,7 @@ func (c *BillingClient) RecordUsage(ctx context.Context, orgID string, event Usa
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Api-Key", c.internalAPIKey)
+	setServicePrincipal(req, c.serviceID, c.serviceToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -377,17 +385,17 @@ func (c *BillingClient) RecordUsage(ctx context.Context, orgID string, event Usa
 }
 
 func (c *AuditClient) RecordAudit(ctx context.Context, event AuditEvent) error {
-	if c == nil || c.baseURL == "" || strings.TrimSpace(event.OrgID) == "" || strings.TrimSpace(event.Event) == "" {
-		return nil
+	if c == nil || c.baseURL == "" {
+		return fmt.Errorf("audit-core is not configured")
 	}
-	if strings.TrimSpace(event.Plane) == "" {
-		event.Plane = c.source
+	if strings.TrimSpace(event.EventID) == "" || event.OccurredAt.IsZero() ||
+		strings.TrimSpace(event.OrgID) == "" || strings.TrimSpace(event.Event) == "" {
+		return fmt.Errorf("audit event_id, occurred_at, org_id, and event are required")
 	}
+	event.Plane = c.source
+	event.Producer = c.serviceID
 	if strings.TrimSpace(event.Outcome) == "" {
 		event.Outcome = "ok"
-	}
-	if event.OccurredAt.IsZero() {
-		event.OccurredAt = time.Now().UTC()
 	}
 	body, err := json.Marshal(event)
 	if err != nil {
@@ -398,7 +406,7 @@ func (c *AuditClient) RecordAudit(ctx context.Context, event AuditEvent) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Api-Key", c.internalAPIKey)
+	setServicePrincipal(req, c.serviceID, c.serviceToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -412,10 +420,19 @@ func (c *AuditClient) RecordAudit(ctx context.Context, event AuditEvent) error {
 }
 
 func withDefaultClient(httpClient *http.Client) *http.Client {
-	if httpClient != nil {
-		return httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultTimeout}
 	}
-	return &http.Client{Timeout: defaultTimeout}
+	client := *httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
+}
+
+func setServicePrincipal(req *http.Request, serviceID, token string) {
+	req.Header.Set("X-Service-Id", strings.TrimSpace(serviceID))
+	req.Header.Set("X-Service-Token", strings.TrimSpace(token))
 }
 
 func unwrapData(input map[string]any) map[string]any {

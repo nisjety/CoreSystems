@@ -1,0 +1,34 @@
+# Explicit migration-only overlay. Never include this file in the secure
+# production render after all downstream consumers use scoped principals.
+services:
+  control-shared-legacy-bridge:
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    build:
+      context: ./audit-core
+      dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
+    container_name: control-shared-legacy-bridge
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/control-event-bridge"]
+    environment:
+      CONTROL_SHARED_NATS_URL: nats://control-shared-nats:4222
+      CONTROL_SHARED_BRIDGE_USER: control-shared-legacy-bridge
+      CONTROL_SHARED_BRIDGE_PASSWORD: ${CONTROL_SHARED_BRIDGE_PASSWORD:?CONTROL_SHARED_BRIDGE_PASSWORD is required}
+      VELION_LEGACY_NATS_URL: ${VELION_NATS_URL:?VELION_NATS_URL is required during bridge migration}
+      VELION_LEGACY_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN is required during bridge migration}
+    networks:
+      - controlplane-net
+      - inter-plane-bus
+    depends_on:
+      control-shared-nats:
+        condition: service_healthy
+      audit-nats-provisioner:
+        condition: service_completed_successfully

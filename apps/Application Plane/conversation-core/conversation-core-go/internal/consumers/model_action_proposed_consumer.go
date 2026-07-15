@@ -44,7 +44,7 @@ func NewModelActionProposedConsumer(js nats.JetStreamContext, service ActionProp
 // Start binds the durable consumer on the model action proposed subject. The
 // model stream must exist first (see eventing.EnsureModelStream).
 func (c *ModelActionProposedConsumer) Start(_ context.Context) error {
-	return c.consumer.Bind(conversation.SubjectModelActionProposed, modelActionProposedDurable, c.handle)
+	return c.consumer.BindProvisioned(conversation.SubjectModelActionProposed, applicationModelStream, modelActionProposedDurable, c.handle)
 }
 
 // Stop drains the subscription.

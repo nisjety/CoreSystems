@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use crate::{
     config::AppState,
+    contracts::ActionActor,
     middleware::{require_session, AuthenticatedUser},
     upstream::{authorized_org_id, proxy_json},
 };
@@ -60,7 +61,13 @@ async fn list_audit(
         .into_response();
     }
 
-    let mut params: Vec<(&str, String)> = vec![("org_id", org_id)];
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let mut params: Vec<(&str, String)> = vec![("org_id", org_id.clone())];
     if let Some(event) = query.event.filter(|v| !v.trim().is_empty()) {
         params.push(("event", event));
     }
@@ -84,7 +91,15 @@ async fn list_audit(
         .join("&");
     let url = format!("{}/v1/audit?{}", state.audit_core_url, query_string);
 
-    // proxy_json injects the shared internal-api-key header audit-core requires.
-    let (status, body) = proxy_json(&state, Method::GET, &url, None, None, None, None).await;
+    let (status, body) = proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
     (status, body).into_response()
 }

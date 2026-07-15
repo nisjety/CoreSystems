@@ -15,9 +15,8 @@ func TestSubscriberUsesDurableJetStreamWithExplicitFailureDisposition(t *testing
 
 	for _, required := range []string{
 		"JetStream()",
-		"AddStream",
 		"QueueSubscribe",
-		"nats.Durable",
+		"nats.Bind",
 		"nats.ManualAck",
 		"nats.AckExplicit",
 		"nats.MaxDeliver",
@@ -28,6 +27,8 @@ func TestSubscriberUsesDurableJetStreamWithExplicitFailureDisposition(t *testing
 		"if !s.deadLetter",
 		"InsertAuditFromStream",
 		"InsertUsageFromStream",
+		"planeSubject",
+		"audit-core-%s-v3-%s",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("durable subscriber contract missing %q", required)
@@ -35,5 +36,10 @@ func TestSubscriberUsesDurableJetStreamWithExplicitFailureDisposition(t *testing
 	}
 	if strings.Contains(source, "s.nc.QueueSubscribe") {
 		t.Error("core NATS queue subscription remains enabled")
+	}
+	for _, forbidden := range []string{"AddStream", "UpdateStream", "nats.Durable"} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("audit runtime retains JetStream administration capability %q", forbidden)
+		}
 	}
 }

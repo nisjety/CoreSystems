@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -91,38 +92,46 @@ func (s *Server) recordUsage(c *gin.Context) {
 	orgID := c.Param("orgId")
 
 	var req struct {
-		EventID    string                 `json:"event_id,omitempty"`
+		EventID    string                 `json:"event_id" binding:"required"`
 		Metric     string                 `json:"metric" binding:"required"`
 		Quantity   float64                `json:"quantity" binding:"required"`
 		Source     string                 `json:"source,omitempty"`
-		OccurredAt string                 `json:"occurred_at,omitempty"`
+		OccurredAt string                 `json:"occurred_at" binding:"required"`
 		Metadata   map[string]interface{} `json:"metadata,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "metric and quantity are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "event_id, metric, quantity, and occurred_at are required"})
 		return
 	}
 
-	occurredAt := time.Now().UTC()
-	if req.OccurredAt != "" {
-		parsed, err := time.Parse(time.RFC3339, req.OccurredAt)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "occurred_at must be RFC3339 format"})
-			return
-		}
-		occurredAt = parsed
+	if err := billing.ValidateUsageEventID(req.EventID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "event_id must be a stable 1-128 byte identifier"})
+		return
 	}
-
-	if err := s.billingCore.RecordUsage(c.Request.Context(), billing.UsageEvent{
+	parsed, err := time.Parse(time.RFC3339, req.OccurredAt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "occurred_at must be RFC3339 format"})
+		return
+	}
+	usage := billing.UsageEvent{
 		EventID:    req.EventID,
 		OrgID:      orgID,
 		Metric:     req.Metric,
 		Quantity:   req.Quantity,
 		Source:     req.Source,
-		OccurredAt: occurredAt,
+		OccurredAt: parsed,
 		Metadata:   req.Metadata,
-	}); err != nil {
+	}
+	if err := billing.ValidateUsageEvent(usage); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid usage event"})
+		return
+	}
+
+	if err := s.billingCore.RecordUsage(c.Request.Context(), usage); errors.Is(err, billing.ErrUsageEventConflict) {
+		c.JSON(http.StatusConflict, gin.H{"error": "event_id is already bound to a different usage event"})
+		return
+	} else if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record usage"})
 		return
 	}

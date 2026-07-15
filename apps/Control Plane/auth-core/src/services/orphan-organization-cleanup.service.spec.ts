@@ -1,3 +1,7 @@
+jest.mock('better-auth/api', () => ({
+  createAuthMiddleware: <T>(handler: T): T => handler,
+}));
+
 import { ownerlessOrganizationMode } from './orphan-organization-cleanup.service';
 
 describe('ownerless organization safety policy', () => {

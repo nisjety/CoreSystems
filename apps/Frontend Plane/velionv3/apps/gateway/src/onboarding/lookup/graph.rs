@@ -2,10 +2,10 @@ use std::collections::HashSet;
 
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Extension, Json,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{
     config::AppState,
@@ -18,6 +18,7 @@ use crate::{
 pub(crate) async fn graph_preview(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Query(query): Query<GraphPreviewQuery>,
 ) -> (StatusCode, Json<Value>) {
     let org_id = authorized_org_id(&state, &user).await;
@@ -37,19 +38,20 @@ pub(crate) async fn graph_preview(
         urlencoding::encode(&org_id)
     );
 
-    let response = state
-        .client
-        .get(url)
-        .header("x-internal-api-key", &state.internal_api_key)
-        .header("x-org-id", &org_id)
-        .send()
-        .await;
-
-    let Ok(response) = response else {
-        return empty_graph_response();
-    };
-
-    let body = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    let (status, Json(body)) = crate::domains::knowledge::shared::proxy_data_plane_json(
+        &state,
+        &user,
+        &headers,
+        reqwest::Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(body));
+    }
     let data = unwrap_data(&body);
     let nodes_in = data
         .get("nodes")
@@ -118,21 +120,6 @@ pub(crate) async fn graph_preview(
             },
             nodes,
             edges,
-        })),
-    )
-}
-
-fn empty_graph_response() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::OK,
-        Json(ok(GraphPreviewResponse {
-            nodes: vec![],
-            edges: vec![],
-            counts: GraphCounts {
-                nodes: 0,
-                edges: 0,
-                groups: 0,
-            },
         })),
     )
 }

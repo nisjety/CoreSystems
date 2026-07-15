@@ -20,8 +20,8 @@ use std::{
 
 use axum::{
     extract::{Extension, State},
-    http::HeaderMap,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use futures_util::future::join_all;
@@ -35,6 +35,7 @@ use crate::{
         diagnostics,
         shared::{self, fetch_json},
     },
+    envelope::error,
     middleware::AuthenticatedUser,
 };
 
@@ -43,29 +44,44 @@ const GRAPH_NODE_LIMIT: usize = 40;
 const GRAPH_EDGE_LIMIT: usize = 80;
 const GRAPH_SOURCE_REF_LIMIT: usize = 80;
 const CHUNK_PREVIEW_LIMIT: usize = 3;
+const DOCUMENT_PAGE_SIZE: usize = 100;
+const DOCUMENT_MAX_PAGES: usize = 20;
 const RING_RADII: [f64; 3] = [110.0, 155.0, 195.0];
 
 pub(super) async fn load_workspace(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Response {
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let actor = shared::actor_for(&user);
     let cookie = shared::cookie_header(&headers);
     let org_opt = (!org_id.trim().is_empty()).then(|| org_id.clone());
-    // Data Plane audience token — attached as Bearer on documents-api /
-    // retrieval-engine / graph-index legs so documents-api can enforce tenant
-    // identity from the signed claim. None when auth-core is unreachable; the
-    // legs still work via internal-key + header while enforce is off.
+    // Data Plane audience token — attached as Bearer on every interactive
+    // documents/retrieval/graph leg. Never fall back to the shared internal key:
+    // strict deployments reject it and permissive deployments could broaden a
+    // user's private-document visibility into a service-principal read.
     let dp_token = shared::data_plane_token(&state, &user, &cookie).await;
+    if org_opt.is_some() && dp_token.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "A scoped Data Plane authorization token could not be minted.",
+            )),
+        )
+            .into_response();
+    }
     let dp = dp_token.as_deref();
 
     // Stage 1 — documents + integration summary load regardless of org scope.
-    let (documents, integration) = tokio::join!(
+    let (document_load, integration) = tokio::join!(
         load_documents(&state, org_opt.as_deref(), &actor, dp),
         load_integration_summary(&state, org_opt.as_deref(), &actor),
     );
+    let documents = document_load.documents;
+    let document_count = document_load.total.unwrap_or(documents.len());
+    let documents_truncated = document_load.truncated;
     let indexed_count = count_indexed(&documents);
     let generated_at = chrono::Utc::now().to_rfc3339();
 
@@ -74,7 +90,7 @@ pub(super) async fn load_workspace(
             &state,
             &actor,
             diagnostics::DiagInput {
-                document_count: documents.len() as i64,
+                document_count: document_count as i64,
                 graph_available: false,
                 graph_node_count: 0,
                 graph_edge_count: 0,
@@ -87,10 +103,16 @@ pub(super) async fn load_workspace(
             "generatedAt": generated_at,
             "orgId": Value::Null,
             "collections": build_collections(&documents, &[]),
-            "dataPlane": { "available": false, "documentCount": documents.len(), "indexedCount": indexed_count },
+            "dataPlane": {
+                "available": false,
+                "documentCount": document_count,
+                "loadedDocumentCount": documents.len(),
+                "indexedCount": indexed_count,
+                "documentsTruncated": documents_truncated,
+            },
             "graph": empty_graph(),
             "metrics": integration.metrics_json(),
-            "metricCards": build_metric_cards(documents.len() as i64, indexed_count, 0, &GraphMetrics { available: false, node_count: 0, edge_count: 0 }, 0, 0, &integration),
+            "metricCards": build_metric_cards(document_count as i64, indexed_count, 0, &GraphMetrics { available: false, node_count: 0, edge_count: 0 }, 0, 0, &integration),
             "folders": build_folder_cards(&[], &documents),
             "integrations": build_integration_cards(&integration.connections, &documents, 0),
             "files": build_files(&documents),
@@ -99,7 +121,7 @@ pub(super) async fn load_workspace(
             "diagnostics": diagnostics,
             "finspo": empty_finspo(),
         });
-        return Json(payload);
+        return Json(payload).into_response();
     }
 
     let org = org_opt.clone().unwrap();
@@ -131,7 +153,7 @@ pub(super) async fn load_workspace(
             &state,
             &actor,
             diagnostics::DiagInput {
-                document_count: documents.len() as i64,
+                document_count: document_count as i64,
                 graph_available: graph.available,
                 graph_node_count: graph.node_count,
                 graph_edge_count: graph.edge_count,
@@ -154,11 +176,17 @@ pub(super) async fn load_workspace(
         "generatedAt": generated_at,
         "orgId": org,
         "collections": build_collections(&documents, &web_sources),
-        "dataPlane": { "available": !documents.is_empty(), "documentCount": documents.len(), "indexedCount": indexed_count },
+        "dataPlane": {
+            "available": !documents.is_empty(),
+            "documentCount": document_count,
+            "loadedDocumentCount": documents.len(),
+            "indexedCount": indexed_count,
+            "documentsTruncated": documents_truncated,
+        },
         "graph": graph.value,
         "metrics": integration.metrics_json(),
         "metricCards": build_metric_cards(
-            documents.len() as i64,
+            document_count as i64,
             indexed_count,
             finspo.duplicate_groups as i64,
             &graph_metrics,
@@ -183,7 +211,7 @@ pub(super) async fn load_workspace(
         }),
     });
 
-    Json(payload)
+    Json(payload).into_response()
 }
 
 // ── Loaders ───────────────────────────────────────────────────────────────
@@ -207,28 +235,103 @@ struct DocSummary {
     owner_id: String,
 }
 
+struct DocumentLoad {
+    documents: Vec<DocSummary>,
+    total: Option<usize>,
+    truncated: bool,
+}
+
 async fn load_documents(
     state: &AppState,
     org: Option<&str>,
     actor: &ActionActor,
     dp_token: Option<&str>,
-) -> Vec<DocSummary> {
-    let url = format!(
-        "{}/v1/documents?limit=100&offset=0",
-        state.documents_api_url
-    );
-    let payload = shared::fetch_json_bearer(
-        state,
-        Method::GET,
-        &url,
-        None,
-        org,
-        actor,
-        Duration::from_millis(2_500),
-        dp_token,
-    )
-    .await;
-    array_from(payload.as_ref(), "documents")
+) -> DocumentLoad {
+    if !document_load_authorized(org, dp_token) {
+        return DocumentLoad {
+            documents: Vec::new(),
+            total: Some(0),
+            truncated: false,
+        };
+    }
+
+    let mut documents = Vec::new();
+    let mut seen = HashSet::new();
+    let mut total = None;
+    let mut page = 0;
+    let mut safety_cap_reached = false;
+
+    loop {
+        let offset = page * DOCUMENT_PAGE_SIZE;
+        let url = format!(
+            "{}/v1/documents?limit={DOCUMENT_PAGE_SIZE}&offset={offset}",
+            state.documents_api_url
+        );
+        let payload = shared::fetch_json_bearer(
+            state,
+            Method::GET,
+            &url,
+            None,
+            org,
+            actor,
+            Duration::from_millis(2_500),
+            dp_token,
+        )
+        .await;
+
+        if total.is_none() {
+            total = payload.as_ref().and_then(document_total);
+        }
+        let page_documents = parse_document_summaries(payload.as_ref());
+        let page_len = page_documents.len();
+        let before = documents.len();
+        for document in page_documents {
+            if seen.insert(document.id.clone()) {
+                documents.push(document);
+            }
+        }
+
+        // Empty/duplicate pages cannot make progress. Stop rather than issuing
+        // twenty identical requests if an upstream ignores offset pagination.
+        if page_len == 0 || documents.len() == before {
+            break;
+        }
+
+        page += 1;
+        if let Some(total) = total {
+            if documents.len() >= total {
+                break;
+            }
+        } else if page_len < DOCUMENT_PAGE_SIZE {
+            break;
+        }
+        if page >= DOCUMENT_MAX_PAGES {
+            safety_cap_reached = true;
+            break;
+        }
+    }
+
+    let truncated = safety_cap_reached
+        || total
+            .map(|total| {
+                document_load_truncated(total, DOCUMENT_PAGE_SIZE, DOCUMENT_MAX_PAGES)
+                    || documents.len() < total
+            })
+            .unwrap_or(false);
+    DocumentLoad {
+        documents,
+        total,
+        truncated,
+    }
+}
+
+fn document_load_authorized(org: Option<&str>, bearer: Option<&str>) -> bool {
+    org.is_some_and(|value| !value.trim().is_empty())
+        && bearer.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn parse_document_summaries(payload: Option<&Value>) -> Vec<DocSummary> {
+    array_from(payload, "documents")
         .iter()
         .filter_map(|doc| {
             let id = str_any(doc, &["document_id", "id"]);
@@ -482,12 +585,7 @@ async fn load_document_chunk_previews(
     dp_token: Option<&str>,
 ) -> HashMap<String, ChunkPreview> {
     let futures = documents.iter().map(|doc| async move {
-        let body = json!({
-            "org_id": org,
-            "document_ids": [doc.id],
-            "limit": CHUNK_PREVIEW_LIMIT,
-            "offset": 0,
-        });
+        let body = document_chunk_request(org, &doc.id, CHUNK_PREVIEW_LIMIT);
         let url = format!("{}/v1/retrieve/chunks", state.retrieval_engine_url);
         let payload = shared::fetch_json_bearer(
             state,
@@ -1674,4 +1772,94 @@ fn str_array(value: &Value, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn document_chunk_request(org: &str, document_id: &str, limit: usize) -> Value {
+    json!({
+        "org_id": org,
+        "document_id": document_id,
+        "limit": limit,
+        "offset": 0,
+    })
+}
+
+fn document_total(payload: &Value) -> Option<usize> {
+    let scope = payload
+        .get("data")
+        .filter(|data| data.is_object())
+        .unwrap_or(payload);
+    scope
+        .get("total")
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+        .map(|value| value as usize)
+}
+
+fn document_page_offsets(total: usize, page_size: usize, max_pages: usize) -> Vec<usize> {
+    if total == 0 || page_size == 0 || max_pages == 0 {
+        return Vec::new();
+    }
+    let page_count = total
+        .saturating_add(page_size - 1)
+        .checked_div(page_size)
+        .unwrap_or(0)
+        .min(max_pages);
+    (0..page_count).map(|page| page * page_size).collect()
+}
+
+fn document_load_truncated(total: usize, page_size: usize, max_pages: usize) -> bool {
+    document_page_offsets(total, page_size, max_pages)
+        .last()
+        .map(|offset| offset.saturating_add(page_size) < total)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_chunk_request_uses_retrieval_contract_singular_document_id() {
+        assert_eq!(
+            document_chunk_request("org-a", "doc-1", 3),
+            json!({
+                "org_id": "org-a",
+                "document_id": "doc-1",
+                "limit": 3,
+                "offset": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn document_loading_never_falls_back_without_tenant_bound_bearer() {
+        assert!(!document_load_authorized(None, None));
+        assert!(!document_load_authorized(Some("org-a"), None));
+        assert!(!document_load_authorized(None, Some("signed-token")));
+        assert!(!document_load_authorized(Some(" "), Some("signed-token")));
+        assert!(!document_load_authorized(Some("org-a"), Some(" ")));
+        assert!(document_load_authorized(
+            Some("org-a"),
+            Some("signed-token")
+        ));
+    }
+
+    #[test]
+    fn document_page_offsets_follow_total_with_safety_cap() {
+        assert_eq!(document_page_offsets(205, 100, 20), vec![0, 100, 200]);
+        assert_eq!(document_page_offsets(2_500, 100, 20).last(), Some(&1_900));
+        assert_eq!(document_page_offsets(0, 100, 20), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn document_page_parser_reads_nested_total_and_marks_cap_truncation() {
+        let payload = json!({
+            "data": {
+                "documents": [{"document_id": "doc-1"}],
+                "total": 2_500,
+            }
+        });
+        assert_eq!(document_total(&payload), Some(2_500));
+        assert!(document_load_truncated(2_500, 100, 20));
+        assert!(!document_load_truncated(205, 100, 20));
+    }
 }

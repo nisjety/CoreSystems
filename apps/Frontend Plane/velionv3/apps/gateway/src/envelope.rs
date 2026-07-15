@@ -44,3 +44,30 @@ pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
     })
     .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error." } }))
 }
+
+/// Public response for transport failures. `reqwest::Error` display strings can
+/// contain configured upstream URLs, query identifiers, and internal topology;
+/// callers receive only this bounded category.
+pub(crate) fn upstream_unavailable() -> Value {
+    error(
+        "upstream_unavailable",
+        "The upstream service is unavailable.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_unavailable;
+
+    #[test]
+    fn upstream_transport_failures_use_a_bounded_public_message() {
+        let body = upstream_unavailable();
+        assert_eq!(body["error"]["code"], "upstream_unavailable");
+        assert_eq!(
+            body["error"]["message"],
+            "The upstream service is unavailable."
+        );
+        assert!(!body.to_string().contains("http://"));
+        assert!(!body.to_string().contains("https://"));
+    }
+}

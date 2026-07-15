@@ -12,33 +12,53 @@ const nats = require("nats");
 
 // Configuration
 const NATS_URL = process.env.NATS_URL || "nats://localhost:4222";
-const NATS_TOKEN = process.env.NATS_TOKEN;
+const NATS_USER = process.env.NATS_USER || "";
+const NATS_PASSWORD = process.env.NATS_PASSWORD || "";
 const CONVEX_URL = process.env.CONVEX_BACKEND_URL || "http://localhost:3000";
-const CONVEX_API_KEY = process.env.CONVEX_API_KEY;
+const CONVEX_CONTROL_PROJECTION_KEY =
+  process.env.CONVEX_CONTROL_PROJECTION_KEY;
 
-if (!CONVEX_API_KEY) {
-  throw new Error("CONVEX_API_KEY must be configured");
-}
-if (!NATS_TOKEN) {
-  throw new Error("NATS_TOKEN must be configured");
+if (!CONVEX_CONTROL_PROJECTION_KEY) {
+  throw new Error("CONVEX_CONTROL_PROJECTION_KEY must be configured");
 }
 
 const CONTROL_PLANE_SUBJECTS = Object.freeze({
-  organizationCreated: "aqencia.controlplane.org.created",
-  organizationUpdated: "aqencia.controlplane.org.updated",
-  organizationDeleted: "aqencia.controlplane.org.deleted",
-  memberAdded: "aqencia.controlplane.org.member_added",
-  memberRemoved: "aqencia.controlplane.org.member_removed",
+  organizationChanged: "aqencia.controlplane.org.changed",
+  memberChanged: "aqencia.controlplane.org.member_changed",
 });
 const CONTROL_PLANE_DLQ_SUBJECT = "velion.application.dlq.convex.controlplane";
-const CONTROL_PLANE_DLQ_STREAM = "CONVEX_CONTROLPLANE_DLQ";
+const CONTROL_PLANE_STREAM = "AQENCIA_CONTROLPLANE";
 const DEAD_LETTER_AFTER = 5;
+
+function controlPlaneConnectionOptions({ url, user, password }) {
+  const normalizedUser = String(user ?? "").trim();
+  const normalizedPassword = String(password ?? "").trim();
+  if (!normalizedUser || normalizedPassword.length < 32) {
+    throw new Error(
+      "Control Plane NATS requires a scoped user/password credential",
+    );
+  }
+  return {
+    servers: [url],
+    user: normalizedUser,
+    pass: normalizedPassword,
+    name: "convex-subscriber-control",
+    inboxPrefix: "_INBOX.APPLICATION_CONVEX_CONTROL",
+    maxReconnectAttempts: 10,
+    reconnectDelayMs: 2000,
+  };
+}
 
 function redactControlPlanePayload(payload) {
   const allowed = [
+    "schema_version",
+    "event_id",
+    "action",
     "org_id",
     "user_id",
     "role",
+    "revision",
+    "organization_revision",
     "_source",
     "_published_at",
   ];
@@ -89,54 +109,95 @@ function requiredString(payload, field) {
   return value.trim();
 }
 
-function sourceUpdatedAt(payload) {
-  const value = Date.parse(requiredString(payload, "_published_at"));
-  if (!Number.isFinite(value)) {
-    throw new Error("Control Plane event _published_at is invalid");
+function positiveSafeInteger(payload, field) {
+  const value = payload?.[field];
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Control Plane event field ${field} must be a positive safe integer`);
   }
   return value;
 }
 
-function normalizeControlPlaneEvent(eventType, payload) {
-  const common = {
-    source: requiredString(payload, "_source"),
-    sourceUpdatedAt: sourceUpdatedAt(payload),
+function canonicalEnvelope(payload) {
+  if (payload?.schema_version !== 1) {
+    throw new Error("Control Plane event schema_version must be 1");
+  }
+  if (requiredString(payload, "_source") !== "auth-core") {
+    throw new Error("Control Plane event source must be auth-core");
+  }
+  const action = requiredString(payload, "action");
+  if (action !== "upsert" && action !== "remove") {
+    throw new Error("Control Plane event action is invalid");
+  }
+  return {
+    action,
+    eventId: requiredString(payload, "event_id"),
+    revision: positiveSafeInteger(payload, "revision"),
   };
+}
+
+function normalizedEmail(payload) {
+  const email = requiredString(payload, "user_email").toLowerCase();
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+$/.test(email)) {
+    throw new Error("Control Plane event field user_email is invalid");
+  }
+  return email;
+}
+
+function normalizedRole(payload) {
+  const role = requiredString(payload, "role").toLowerCase();
+  if (!["owner", "admin", "member", "viewer"].includes(role)) {
+    throw new Error("Control Plane event role is invalid");
+  }
+  return role;
+}
+
+function normalizeControlPlaneEvent(eventType, payload) {
+  const common = canonicalEnvelope(payload);
   switch (eventType) {
-    case "organizationCreated":
+    case "organizationChanged": {
+      const orgId = requiredString(payload, "org_id");
+      const expectedEventId = `organization:${orgId}:${common.revision}:${common.action === "remove" ? "deleted" : "upsert"}`;
+      if (common.eventId !== expectedEventId) {
+        throw new Error("Control Plane organization event_id does not match its identity");
+      }
+      if (common.action === "remove") {
+        return { ...common, orgId };
+      }
       return {
-        orgId: requiredString(payload, "org_id"),
-        name: requiredString(payload, "org_name"),
+        ...common,
+        orgId,
+        name: requiredString(payload, "name"),
         slug: requiredString(payload, "slug"),
-        createdAt: common.sourceUpdatedAt,
-      };
-    case "organizationUpdated": {
-      const changes = payload?.changes ?? {};
-      return {
-        orgId: requiredString(payload, "org_id"),
-        name: typeof changes.name === "string" ? changes.name : undefined,
-        slug: typeof changes.slug === "string" ? changes.slug : undefined,
-        settings: changes.settings,
-        updatedAt: common.sourceUpdatedAt,
       };
     }
-    case "organizationDeleted":
-      return { orgId: requiredString(payload, "org_id") };
-    case "memberAdded":
+    case "memberChanged": {
+      const orgId = requiredString(payload, "org_id");
+      const userId = requiredString(payload, "user_id");
+      const organizationRevision = positiveSafeInteger(
+        payload,
+        "organization_revision",
+      );
+      const expectedEventId = `organization:${orgId}:member:${userId}:${common.revision}:${common.action}`;
+      if (common.eventId !== expectedEventId) {
+        throw new Error("Control Plane membership event_id does not match its identity");
+      }
+      if (common.action === "remove") {
+        return {
+          ...common,
+          orgId,
+          userId,
+          organizationRevision,
+        };
+      }
       return {
-        orgId: requiredString(payload, "org_id"),
-        userId: requiredString(payload, "user_id"),
-        email: requiredString(payload, "user_email"),
-        role: requiredString(payload, "role"),
-        addedAt: common.sourceUpdatedAt,
+        ...common,
+        orgId,
+        userId,
+        email: normalizedEmail(payload),
+        role: normalizedRole(payload),
+        organizationRevision,
       };
-    case "memberRemoved":
-      return {
-        orgId: requiredString(payload, "org_id"),
-        userId: requiredString(payload, "user_id"),
-        source: common.source,
-        sourceUpdatedAt: common.sourceUpdatedAt,
-      };
+    }
     default:
       throw new Error(`Unsupported Control Plane event type: ${eventType}`);
   }
@@ -144,13 +205,31 @@ function normalizeControlPlaneEvent(eventType, payload) {
 
 // W4-2 (ui-ux-velion-gap.md §13): Model Plane's orchestrator-core publishes
 // `mp.v1.run.{id}.event` to `model-plane-nats` (port 4222 inside its compose
-// network). Velion-nats and model-plane-nats are isolated clusters with
+// network). Control-shared-nats and model-plane-nats are isolated clusters with
 // `routes = []`, so the subscriber needs a SECOND connection here for those
 // subjects. When the env var isn't set we silently skip the second
 // connection (single-NATS deployments stay unchanged).
 const MODEL_PLANE_NATS_URL = process.env.MODEL_PLANE_NATS_URL || "";
-const MODEL_PLANE_NATS_TOKEN =
-  process.env.MODEL_PLANE_NATS_TOKEN || process.env.NATS_TOKEN || "";
+const MODEL_PLANE_NATS_USER = process.env.MODEL_PLANE_NATS_USER || "";
+const MODEL_PLANE_NATS_PASSWORD = process.env.MODEL_PLANE_NATS_PASSWORD || "";
+
+function modelPlaneConnectionOptions({ url, user, password }) {
+  const normalizedUser = String(user ?? "").trim();
+  const normalizedPassword = String(password ?? "").trim();
+  if (!normalizedUser || normalizedPassword.length < 32) {
+    throw new Error(
+      "Model Plane NATS requires a scoped user/password credential",
+    );
+  }
+  return {
+    servers: [url],
+    user: normalizedUser,
+    pass: normalizedPassword,
+    name: "convex-subscriber-mp",
+    maxReconnectAttempts: 10,
+    reconnectDelayMs: 2000,
+  };
+}
 
 class ConvexNatsSubscriber {
   constructor() {
@@ -168,17 +247,14 @@ class ConvexNatsSubscriber {
 
     try {
       // Connect to NATS
-      this.nc = await nats.connect({
-        servers: [NATS_URL],
-        token: NATS_TOKEN,
-        name: "convex-subscriber",
-        maxReconnectAttempts: 10,
-        reconnectDelayMs: 2000,
-      });
+      this.nc = await nats.connect(controlPlaneConnectionOptions({
+        url: NATS_URL,
+        user: NATS_USER,
+        password: NATS_PASSWORD,
+      }));
 
       // Get JetStream context
       this.js = this.nc.jetstream();
-      await this.ensureDeadLetterStream();
 
       console.log("[Convex NATS] Connected successfully");
 
@@ -189,13 +265,13 @@ class ConvexNatsSubscriber {
           MODEL_PLANE_NATS_URL,
         );
         try {
-          this.ncModelPlane = await nats.connect({
-            servers: [MODEL_PLANE_NATS_URL],
-            token: MODEL_PLANE_NATS_TOKEN || undefined,
-            name: "convex-subscriber-mp",
-            maxReconnectAttempts: 10,
-            reconnectDelayMs: 2000,
-          });
+          this.ncModelPlane = await nats.connect(
+            modelPlaneConnectionOptions({
+              url: MODEL_PLANE_NATS_URL,
+              user: MODEL_PLANE_NATS_USER,
+              password: MODEL_PLANE_NATS_PASSWORD,
+            }),
+          );
           console.log("[Convex NATS] Model Plane NATS connected");
         } catch (mpErr) {
           // Failure to attach to the second cluster shouldn't block the
@@ -228,64 +304,27 @@ class ConvexNatsSubscriber {
     console.log("[Convex NATS] Setting up event subscriptions...");
 
     try {
-      // Control Plane organization events (via velion-nats cross-plane bus)
+      // Auth-canonical organization events on the scoped Control shared bus.
       await this.subscribeToDurableTopic(
-        CONTROL_PLANE_SUBJECTS.organizationCreated,
-        "convex-org-created-v1",
-        this.handleOrganizationCreated.bind(this)
+        CONTROL_PLANE_SUBJECTS.organizationChanged,
+        "convex-org-changed-v2",
+        this.handleOrganizationChanged.bind(this)
       );
       await this.subscribeToDurableTopic(
-        CONTROL_PLANE_SUBJECTS.organizationUpdated,
-        "convex-org-updated-v1",
-        this.handleOrganizationUpdated.bind(this)
-      );
-      await this.subscribeToDurableTopic(
-        CONTROL_PLANE_SUBJECTS.organizationDeleted,
-        "convex-org-deleted-v1",
-        this.handleOrganizationDeleted.bind(this)
-      );
-      await this.subscribeToDurableTopic(
-        CONTROL_PLANE_SUBJECTS.memberAdded,
-        "convex-org-member-added-v1",
-        this.handleMemberAdded.bind(this)
-      );
-      await this.subscribeToDurableTopic(
-        CONTROL_PLANE_SUBJECTS.memberRemoved,
-        "convex-org-member-removed-v1",
-        this.handleMemberRemoved.bind(this)
+        CONTROL_PLANE_SUBJECTS.memberChanged,
+        "convex-org-member-changed-v2",
+        this.handleMemberChanged.bind(this)
       );
 
-      // Ingestion Plane events
-      await this.subscribeToTopic(
-        "velion.ingestion.import.completed",
-        this.handleImportCompleted.bind(this)
+      // The former token-only shared broker multiplexed Ingestion and
+      // Application subjects into this process. Secure MVP leaves those
+      // non-authority mirrors disabled until their owning planes expose scoped
+      // principals; Control projection must not regain an admin-capable token.
+      console.warn(
+        "[Convex NATS] scoped Ingestion mirror is disabled pending an Ingestion-owned principal",
       );
-
-      await this.subscribeToTopic(
-        "velion.application.conversation.>",
-        this.handleConversationEvent.bind(this)
-      );
-
-      // Quarry crawl job events
-      await this.subscribeToTopic(
-        "velion.ingestion.crawl.started",
-        this.handleCrawlStarted.bind(this)
-      );
-      await this.subscribeToTopic(
-        "velion.ingestion.crawl.progress",
-        this.handleCrawlProgress.bind(this)
-      );
-      await this.subscribeToTopic(
-        "velion.ingestion.crawl.completed",
-        this.handleCrawlCompleted.bind(this)
-      );
-      await this.subscribeToTopic(
-        "velion.ingestion.crawl.failed",
-        this.handleCrawlFailed.bind(this)
-      );
-      await this.subscribeToTopic(
-        "velion.ingestion.crawl.indexed",
-        this.handleCrawlIndexed.bind(this)
+      console.warn(
+        "[Convex NATS] scoped Application conversation mirror is disabled pending a dedicated projection principal",
       );
 
       // U3-3 (ui-ux-velion-gap.md §10): Model Plane agent run lifecycle.
@@ -295,15 +334,19 @@ class ConvexNatsSubscriber {
       //
       // W4-2: in production these events arrive on `model-plane-nats`,
       // NOT `velion-nats` (the two clusters are isolated). Use the
-      // optional second connection when available; fall back to the
-      // primary connection (dev / single-NATS deployments) otherwise.
-      const mpNats = this.ncModelPlane ?? this.nc;
-      await this.subscribeToTopicOn(
-        mpNats,
-        "mp.v1.run.*.event",
-        this.handleAgentRunEvent.bind(this),
-        this.ncModelPlane ? "model-plane-nats" : "velion-nats (fallback)",
-      );
+      // optional second connection when a scoped Model principal is present.
+      if (this.ncModelPlane) {
+        await this.subscribeToTopicOn(
+          this.ncModelPlane,
+          "mp.v1.run.*.event",
+          this.handleAgentRunEvent.bind(this),
+          "model-plane-nats",
+        );
+      } else {
+        console.warn(
+          "[Convex NATS] scoped Model mirror is disabled; no fallback to the Control principal",
+        );
+      }
 
       console.log("[Convex NATS] All subscriptions established");
     } catch (error) {
@@ -313,34 +356,10 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Subscribe to a NATS topic on the default (velion-nats) connection.
+   * Subscribe to a NATS topic on the default Control shared connection.
    */
   async subscribeToTopic(topic, handler) {
     return this.subscribeToTopicOn(this.nc, topic, handler, "velion-nats");
-  }
-
-  async ensureDeadLetterStream() {
-    const manager = await this.nc.jetstreamManager();
-    try {
-      await manager.streams.info(CONTROL_PLANE_DLQ_STREAM);
-      return;
-    } catch (error) {
-      const code = error?.code ?? error?.api_error?.code;
-      const errorCode = error?.api_error?.err_code;
-      if (String(code) !== "404" && errorCode !== 10059) {
-        throw error;
-      }
-    }
-
-    await manager.streams.add({
-      name: CONTROL_PLANE_DLQ_STREAM,
-      subjects: [CONTROL_PLANE_DLQ_SUBJECT],
-      retention: nats.RetentionPolicy.Limits,
-      storage: nats.StorageType.File,
-      discard: nats.DiscardPolicy.Old,
-      max_msgs: 10_000,
-      max_age: nats.nanos(14 * 24 * 60 * 60 * 1000),
-    });
   }
 
   async publishDeadLetter(payload) {
@@ -353,14 +372,9 @@ class ConvexNatsSubscriber {
 
   async subscribeToDurableTopic(topic, durableName, handler) {
     const options = nats.consumerOpts();
-    options.durable(durableName);
+    options.bind(CONTROL_PLANE_STREAM, durableName);
+    options.queue(durableName);
     options.manualAck();
-    options.ackExplicit();
-    options.ackWait(30_000);
-    // The application moves poison events into its own DLQ after five tries.
-    // Keep the broker ceiling higher so a transient DLQ outage cannot lose one.
-    options.maxDeliver(100);
-    options.deliverTo(nats.createInbox());
 
     const subscription = await this.js.subscribe(topic, options);
     console.log(`[Convex NATS] Durable subscription: ${topic} (${durableName})`);
@@ -417,46 +431,19 @@ class ConvexNatsSubscriber {
   /**
    * Handle velion.controlplane.org.created event
    */
-  async handleOrganizationCreated(payload) {
-    const event = normalizeControlPlaneEvent("organizationCreated", payload);
-    console.log("[Convex NATS] Processing org.created:", event.orgId);
-    await this.callConvexMutation("nats:onOrganizationCreated", event);
-  }
-
-  /**
-   * Handle velion.controlplane.org.updated event
-   */
-  async handleOrganizationUpdated(payload) {
-    const event = normalizeControlPlaneEvent("organizationUpdated", payload);
-    console.log("[Convex NATS] Processing org.updated:", event.orgId);
-    await this.callConvexMutation("nats:onOrganizationUpdated", event);
-  }
-
-  /**
-   * Handle velion.controlplane.org.deleted event
-   */
-  async handleOrganizationDeleted(payload) {
-    const event = normalizeControlPlaneEvent("organizationDeleted", payload);
-    console.log("[Convex NATS] Processing org.deleted:", event.orgId);
-    await this.callConvexMutation("nats:onOrganizationDeleted", event);
+  async handleOrganizationChanged(payload) {
+    const event = normalizeControlPlaneEvent("organizationChanged", payload);
+    console.log("[Convex NATS] Processing org.changed:", event.orgId);
+    await this.callConvexMutation("nats:onOrganizationProjectionChanged", event);
   }
 
   /**
    * Handle velion.controlplane.org.member.added event
    */
-  async handleMemberAdded(payload) {
-    const event = normalizeControlPlaneEvent("memberAdded", payload);
-    console.log("[Convex NATS] Processing org.member.added:", event.userId);
-    await this.callConvexMutation("nats:onOrganizationMemberAdded", event);
-  }
-
-  /**
-   * Handle velion.controlplane.org.member.removed event
-   */
-  async handleMemberRemoved(payload) {
-    const event = normalizeControlPlaneEvent("memberRemoved", payload);
-    console.log("[Convex NATS] Processing org.member.removed:", event.userId);
-    await this.callConvexMutation("nats:onOrganizationMemberRemoved", event);
+  async handleMemberChanged(payload) {
+    const event = normalizeControlPlaneEvent("memberChanged", payload);
+    console.log("[Convex NATS] Processing org.member_changed:", event.userId);
+    await this.callConvexMutation("nats:onOrganizationMembershipProjectionChanged", event);
   }
 
   /**
@@ -654,7 +641,7 @@ class ConvexNatsSubscriber {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${CONVEX_API_KEY}`,
+        Authorization: `Bearer ${CONVEX_CONTROL_PROJECTION_KEY}`,
       },
       body: JSON.stringify(args),
     });
@@ -672,6 +659,10 @@ class ConvexNatsSubscriber {
    * Close NATS connection
    */
   async close() {
+    if (this.ncModelPlane) {
+      await this.ncModelPlane.close();
+      this.ncModelPlane = null;
+    }
     if (this.nc) {
       await this.nc.close();
       console.log("[Convex NATS] Disconnected");
@@ -715,6 +706,8 @@ if (require.main === module) {
 module.exports = {
   CONTROL_PLANE_SUBJECTS,
   ConvexNatsSubscriber,
+  controlPlaneConnectionOptions,
+  modelPlaneConnectionOptions,
   normalizeControlPlaneEvent,
   processJetStreamMessage,
 };

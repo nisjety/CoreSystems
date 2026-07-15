@@ -19,6 +19,11 @@ import { CoreNavbarPanel, type CoreNavbarPanelKind } from '@/features/core/compo
 import { getNavbarLabels, type VelionRoute, type WorkspaceIdentity } from '@/features/core/lib/shell-data'
 import { signOut } from '@/shared/api/auth-client'
 import {
+  listOrganizations,
+  switchActiveOrganization,
+  type OrganizationSummary,
+} from '@/shared/api/organization-client'
+import {
   saveNavbarTheme,
   searchNavbar,
   type NavbarPayload,
@@ -26,7 +31,7 @@ import {
   type ThemePayload,
 } from '@/shared/api/navbar-client'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
-import { clearSession, getSession } from '@/shared/session/session-store'
+import { clearSession, getSession, loadSession } from '@/shared/session/session-store'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 
@@ -282,6 +287,7 @@ export function CoreNavbar(props: {
             canManageWorkspace={shouldShowWorkspaceAdminNavigation(session)}
             workspace={props.workspace}
             onClose={() => setOpenPanel(null)}
+            onSwitched={props.onNavbarRefresh}
           />
         </Show>
       </header>
@@ -537,49 +543,85 @@ function BreadcrumbSeparator() {
   return <Slash class="size-3.5" strokeWidth={2} />
 }
 
-function WorkspaceSwitcher(props: { canManageWorkspace: boolean; onClose: () => void; workspace: WorkspaceIdentity }) {
+function WorkspaceSwitcher(props: {
+  canManageWorkspace: boolean
+  onClose: () => void
+  onSwitched?: () => void
+  workspace: WorkspaceIdentity
+}) {
   const i18n = useI18n()
-  const [active, setActive] = createSignal<'org' | 'personal'>('org')
+  const session = getSession()
+  const [organizations, setOrganizations] = createSignal<OrganizationSummary[]>([])
+  const [loading, setLoading] = createSignal(true)
+  const [error, setError] = createSignal<string | null>(null)
+  const [switchingId, setSwitchingId] = createSignal<string | null>(null)
+
+  onMount(() => {
+    listOrganizations()
+      .then(setOrganizations)
+      .catch(() => setError(i18n.tr('Kunne ikke laste arbeidsområder.', 'Could not load workspaces.')))
+      .finally(() => setLoading(false))
+  })
+
+  const switchOrganization = async (organizationId: string) => {
+    if (switchingId()) return
+    if (organizationId === session.activeOrg?.id) {
+      props.onClose()
+      return
+    }
+    setSwitchingId(organizationId)
+    setError(null)
+    try {
+      await switchActiveOrganization(organizationId)
+      await loadSession()
+      props.onSwitched?.()
+      props.onClose()
+    } catch {
+      setError(i18n.tr(
+        'Kunne ikke bytte arbeidsområde. Tilgangen kan ha blitt endret.',
+        'Could not switch workspace. Your access may have changed.',
+      ))
+    } finally {
+      setSwitchingId(null)
+    }
+  }
 
   return (
     <div class="core-workspace-switcher">
-      <button
-        type="button"
-        aria-pressed={active() === 'org'}
-        onClick={() => {
-          setActive('org')
-          props.onClose()
-        }}
-        class="core-workspace-switcher__row core-workspace-switcher__row--active"
-      >
-        <span class="core-workspace-mark">{props.workspace.initial}</span>
-        <span>
-          <strong>{props.workspace.name}</strong>
-          <small>{i18n.tr('Organisasjonsarbeidsområde', 'Organization workspace')} · {props.workspace.plan}</small>
-        </span>
-        <Show when={active() === 'org'}>
-          <Check class="size-3.5" aria-hidden="true" />
-        </Show>
-      </button>
+      <Show when={!loading()} fallback={<p role="status">{i18n.tr('Laster arbeidsområder …', 'Loading workspaces…')}</p>}>
+        <For each={organizations()}>
+          {(organization) => {
+            const active = () => organization.id === session.activeOrg?.id
+            return (
+              <button
+                type="button"
+                aria-pressed={active()}
+                disabled={Boolean(switchingId())}
+                onClick={() => void switchOrganization(organization.id)}
+                classList={{
+                  'core-workspace-switcher__row': true,
+                  'core-workspace-switcher__row--active': active(),
+                }}
+              >
+                <span class="core-workspace-mark">{organization.name.charAt(0).toUpperCase()}</span>
+                <span>
+                  <strong>{organization.name}</strong>
+                  <small>
+                    {i18n.tr('Organisasjonsarbeidsområde', 'Organization workspace')}
+                  </small>
+                </span>
+                <Show when={active()}>
+                  <Check class="size-3.5" aria-hidden="true" />
+                </Show>
+              </button>
+            )
+          }}
+        </For>
+      </Show>
 
-      <button
-        type="button"
-        aria-pressed={active() === 'personal'}
-        onClick={() => {
-          setActive('personal')
-          props.onClose()
-        }}
-        class="core-workspace-switcher__row"
-      >
-        <span class="core-user-workspace-mark">{props.workspace.initial}</span>
-        <span>
-          <strong>{props.workspace.userName ?? i18n.tr('Personlig arbeidsområde', 'Personal workspace')}</strong>
-          <small>{props.workspace.userEmail ?? i18n.tr('Innlogget', 'Signed in')}</small>
-        </span>
-        <Show when={active() === 'personal'}>
-          <Check class="size-3.5" aria-hidden="true" />
-        </Show>
-      </button>
+      <Show when={error()}>
+        <p role="alert">{error()}</p>
+      </Show>
 
       <Show when={props.canManageWorkspace}>
         <A href="/settings/workspace" onClick={props.onClose} class="core-workspace-switcher__manage">

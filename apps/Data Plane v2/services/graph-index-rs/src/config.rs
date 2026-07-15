@@ -17,7 +17,11 @@ pub struct Config {
     // Extraction backend selector: "model_plane" (default — route LLM extraction
     // through inference-core's Infer RPC, honoring the no-independent-LLM-outside-
     // Model-Plane rule) or "azure_openai" (legacy direct-Azure fallback).
-    #[serde(default = "default_extraction_provider")]
+    #[serde(
+        default = "default_extraction_provider",
+        rename = "graph_extraction_provider",
+        alias = "extraction_provider"
+    )]
     pub extraction_provider: String,
 
     // Model Plane inference-core gRPC endpoint + routing hints for extraction.
@@ -29,8 +33,17 @@ pub struct Config {
     pub model_plane_extraction_provider: String,
     #[serde(default = "default_extraction_timeout_ms")]
     pub model_plane_extraction_timeout_ms: u64,
+    // Auth Core service-principal contract used for the inference-core gRPC
+    // hop. The API key is deliberately empty by default so production startup
+    // fails closed unless a deployment secret is supplied.
+    #[serde(default = "default_model_plane_inference_token_url")]
+    pub model_plane_inference_token_url: String,
+    #[serde(default = "default_model_plane_inference_token_issuer")]
+    pub model_plane_inference_token_issuer: String,
+    #[serde(default = "default_model_plane_inference_service_id")]
+    pub model_plane_inference_service_id: String,
     #[serde(default)]
-    pub internal_api_key: Option<String>,
+    pub model_plane_inference_service_api_key: String,
 
     #[serde(default = "default_azure_endpoint")]
     pub azure_openai_endpoint: String,
@@ -99,6 +112,18 @@ fn default_extraction_timeout_ms() -> u64 {
     60_000
 }
 
+fn default_model_plane_inference_token_url() -> String {
+    "http://auth-core:3011/api/inference-core/internal-token".into()
+}
+
+fn default_model_plane_inference_token_issuer() -> String {
+    "http://localhost:3011/api/convex-auth".into()
+}
+
+fn default_model_plane_inference_service_id() -> String {
+    "graph-index".into()
+}
+
 fn default_azure_endpoint() -> String {
     String::new()
 }
@@ -117,4 +142,25 @@ fn default_community_min_size() -> usize {
 
 fn default_event_auth_audience() -> String {
     "dataplane-events".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn graph_provider_uses_the_deployment_environment_contract() {
+        let config: Config = envy::from_iter([(
+            "GRAPH_EXTRACTION_PROVIDER".to_owned(),
+            "azure_openai".to_owned(),
+        )])
+        .expect("config");
+
+        assert_eq!(config.extraction_provider, "azure_openai");
+
+        let legacy: Config =
+            envy::from_iter([("EXTRACTION_PROVIDER".to_owned(), "azure_openai".to_owned())])
+                .expect("legacy config");
+        assert_eq!(legacy.extraction_provider, "azure_openai");
+    }
 }

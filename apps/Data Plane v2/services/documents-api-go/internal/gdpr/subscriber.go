@@ -14,13 +14,13 @@
 package gdpr
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 	"time"
-
-	"github.com/nats-io/nats.go"
-	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -47,9 +47,41 @@ type Publisher interface {
 }
 
 type erasureEvent struct {
+	EventID     string `json:"event_id"`
+	OperationID string `json:"operation_id"`
 	SubjectType string `json:"subject_type"`
 	SubjectID   string `json:"subject_id"`
 	OrgID       string `json:"org_id"`
+	RequestedBy string `json:"requested_by"`
+	Mode        string `json:"mode"`
+	Timestamp   string `json:"ts"`
+}
+
+type poisonEventError struct{ reason string }
+
+func (e *poisonEventError) Error() string { return e.reason }
+
+func decodeErasureEvent(payload []byte) (erasureEvent, error) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var event erasureEvent
+	if err := decoder.Decode(&event); err != nil {
+		return erasureEvent{}, &poisonEventError{reason: "decode erasure event: " + err.Error()}
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return erasureEvent{}, &poisonEventError{reason: "erasure event must contain one JSON object"}
+	}
+	event.EventID = strings.TrimSpace(event.EventID)
+	event.SubjectType = strings.TrimSpace(event.SubjectType)
+	event.SubjectID = strings.TrimSpace(event.SubjectID)
+	event.OrgID = strings.TrimSpace(event.OrgID)
+	if event.EventID == "" || len(event.EventID) > 128 || event.SubjectID == "" || len(event.SubjectID) > 255 || event.OrgID == "" || len(event.OrgID) > 255 {
+		return erasureEvent{}, &poisonEventError{reason: "erasure event requires bounded event, subject, and organization IDs"}
+	}
+	if event.SubjectType != "user" && event.SubjectType != "user_anonymize" {
+		return erasureEvent{}, &poisonEventError{reason: "erasure subject type is outside documents-api authority"}
+	}
+	return event, nil
 }
 
 // HandleErasure transfers the erased user's owned documents to the org system
@@ -57,12 +89,9 @@ type erasureEvent struct {
 // after the first transfer matches zero rows). Returns the number transferred.
 // Non-user subjects and events missing scope are a no-op (returns 0, nil).
 func HandleErasure(ctx context.Context, repo OwnershipTransferrer, pub Publisher, payload []byte) (int64, error) {
-	var evt erasureEvent
-	if err := json.Unmarshal(payload, &evt); err != nil {
-		return 0, fmt.Errorf("decode erasure event: %w", err)
-	}
-	if evt.SubjectType != "user" || evt.SubjectID == "" || evt.OrgID == "" {
-		return 0, nil
+	evt, err := decodeErasureEvent(payload)
+	if err != nil {
+		return 0, err
 	}
 
 	n, err := repo.TransferOwnership(ctx, evt.OrgID, evt.SubjectID, systemAccount)
@@ -78,32 +107,12 @@ func HandleErasure(ctx context.Context, repo OwnershipTransferrer, pub Publisher
 			"documents_transferred": n,
 			"ts":                    time.Now().UTC().Format(time.RFC3339Nano),
 		})
-		if mErr == nil {
-			_ = pub.Publish(OwnershipTransferredSubject, body)
+		if mErr != nil {
+			return 0, fmt.Errorf("encode ownership transfer event: %w", mErr)
+		}
+		if err := pub.Publish(OwnershipTransferredSubject, body); err != nil {
+			return 0, fmt.Errorf("publish ownership transfer event: %w", err)
 		}
 	}
 	return n, nil
-}
-
-// StartSubscriber subscribes to the GDPR erasure fan-out on the (shared) NATS
-// connection and transfers ownership for each erased user. Best-effort: handler
-// failures are logged, never fatal.
-func StartSubscriber(nc *nats.Conn, repo OwnershipTransferrer) error {
-	_, err := nc.Subscribe(ErasureRequestedSubject, func(msg *nats.Msg) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		n, hErr := HandleErasure(ctx, repo, nc, msg.Data)
-		if hErr != nil {
-			log.Error().Err(hErr).Msg("gdpr erasure: ownership transfer failed")
-			return
-		}
-		if n > 0 {
-			log.Info().Int64("documents_transferred", n).Msg("gdpr erasure: transferred owned documents to system account")
-		}
-	})
-	if err != nil {
-		return fmt.Errorf("subscribe %s: %w", ErasureRequestedSubject, err)
-	}
-	log.Info().Str("subject", ErasureRequestedSubject).Msg("gdpr erasure ownership-transfer subscriber started")
-	return nil
 }

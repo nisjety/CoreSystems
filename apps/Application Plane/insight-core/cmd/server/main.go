@@ -56,7 +56,10 @@ func main() {
 	// AND social-core application events and record them as metrics — two of the real
 	// producers behind the metrics view. No-op when NATS_URL is empty.
 	if cfg.NATSURL != "" {
-		natsClient, err := appnats.NewClient(appnats.Config{URL: cfg.NATSURL, Token: cfg.NATSToken, Name: cfg.ServiceName})
+		natsClient, err := appnats.NewClient(appnats.Config{
+			URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
+			InboxPrefix: "_INBOX.APPLICATION_INSIGHT", Name: cfg.ServiceName,
+		})
 		if err != nil {
 			log.Printf("insight-core: NATS disabled: %v", err)
 		} else {
@@ -77,21 +80,15 @@ func main() {
 	// surface=agents metrics — the third real producer. No-op when
 	// MODEL_PLANE_NATS_URL is empty.
 	if cfg.ModelPlaneNATSURL != "" {
-		mpNATS, err := appnats.NewClient(appnats.Config{URL: cfg.ModelPlaneNATSURL, Token: cfg.ModelPlaneNATSToken, Name: cfg.ServiceName + "-agents"})
+		mpNATS, err := appnats.NewClient(appnats.Config{
+			URL: cfg.ModelPlaneNATSURL, User: cfg.ModelPlaneNATSUser,
+			Password: cfg.ModelPlaneNATSPassword, InboxPrefix: "_INBOX.APPLICATION_INSIGHT_MODEL",
+			Name: cfg.ServiceName + "-agents",
+		})
 		if err != nil {
 			log.Printf("insight-core: model-plane NATS disabled: %v", err)
 		} else {
 			defer mpNATS.Close()
-			// The Model Plane publishes run lifecycle via core NATS with no stream;
-			// provision a bounded one so the durable consumer can bind (idempotent,
-			// see nats.Client.EnsureStream). Approval events already have a stream
-			// (MP_ORCHESTRATION_EVENTS covers mp.v1.orchestration.>), so we cover
-			// ONLY the run subject to avoid a subject overlap.
-			if err := mpNATS.EnsureStream("MODEL_PLANE_RUN_EVENTS", []string{
-				"mp.v1.run.*.event",
-			}); err != nil {
-				log.Printf("insight-core: model-plane run-events stream: %v", err)
-			}
 			agentSub := consumers.NewAgentSubscriber(mpNATS.JS, service)
 			if err := agentSub.Start(context.Background()); err != nil {
 				log.Printf("insight-core: agent subscriber: %v", err)

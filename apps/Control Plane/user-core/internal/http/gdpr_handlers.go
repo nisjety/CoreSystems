@@ -1,12 +1,65 @@
 package http
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 )
+
+const maxGDPROperatorBodyBytes = 16 * 1024
+
+type gdprRequeueRequest struct {
+	Kind     string   `json:"kind"`
+	EventIDs []string `json:"event_ids"`
+}
+
+func decodeStrictGDPRJSON(c *gin.Context, destination any) error {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxGDPROperatorBodyBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *Server) requeueGDPRDeliveries(c *gin.Context) {
+	if _, authenticated := getUserIDFromContext(c); !authenticated {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	if !isAdminRequest(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin role required"})
+		return
+	}
+	var request gdprRequeueRequest
+	if err := decodeStrictGDPRJSON(c, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	request.Kind = strings.TrimSpace(request.Kind)
+	if (request.Kind != "audit" && request.Kind != "fanout") || len(request.EventIDs) == 0 || len(request.EventIDs) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be audit or fanout and event_ids must contain 1-100 values"})
+		return
+	}
+	requeued, err := s.userService.RequeueGDPRDeliveries(c.Request.Context(), request.Kind, request.EventIDs)
+	if err != nil {
+		log.Error().Err(err).Msg("GDPR delivery requeue failed")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "delivery requeue rejected"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"requeued": requeued, "kind": request.Kind}})
+}
 
 // GDPR erasure + DSAR surface for users.
 //
@@ -52,10 +105,14 @@ func actorRole(isAdmin, isSelf bool) string {
 	}
 }
 
-// auditOrgID resolves the org id to attach to the audit event. audit-core
-// requires org_id; the gateway forwards the session's active org via X-Org-Id.
-func auditOrgID(c *gin.Context) string {
-	return strings.TrimSpace(c.GetHeader("X-Org-Id"))
+// verifiedAuditOrgHint returns an org only when service-auth middleware has
+// cryptographically verified a delegated user+org binding. Raw X-Org-Id and
+// unverified context values are deliberately ignored.
+func verifiedAuditOrgHint(c *gin.Context) string {
+	if c.GetString("auth_method") != "service_principal" || !c.GetBool("delegation_verified") {
+		return ""
+	}
+	return strings.TrimSpace(c.GetString("org_id"))
 }
 
 // erasureUnavailable refuses an erasure/anonymize request with an explicit 503
@@ -107,30 +164,19 @@ func (s *Server) hardEraseUser(c *gin.Context) {
 		return
 	}
 
-	orgID := auditOrgID(c)
-	role := actorRole(isAdmin, callerID == targetID)
-
-	receipt, err := s.userService.HardEraseUser(c.Request.Context(), targetID)
+	orgID, err := s.userService.ResolveErasureAuditOrg(c.Request.Context(), targetID, verifiedAuditOrgHint(c))
 	if err != nil {
-		log.Error().Err(err).Str("subject_id", targetID).Msg("gdpr hard erase failed")
-		s.userService.PublishErasureAudit(orgID, "user", targetID, callerID, role, "error", nil)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to erase user"})
+		log.Error().Err(err).Str("subject_id", targetID).Msg("failed to derive erasure audit scope")
+		c.JSON(http.StatusConflict, gin.H{"error": "audit_scope_unavailable"})
 		return
 	}
+	role := actorRole(isAdmin, callerID == targetID)
 
-	s.userService.PublishErasureAudit(orgID, "user", targetID, callerID, role, "ok", receipt)
-
-	// Per-User Ownership (GDPR): revoke every inbound resource grant the erased
-	// user held so their shared-with access disappears with them. Best-effort —
-	// erasure already succeeded; a revoke failure is logged, not fatal. (Transfer
-	// of the user's OWNED documents to an org admin is the Data Plane half of the
-	// erasure flow.)
-	if s.aclRepo != nil {
-		if n, rerr := s.aclRepo.RevokeAllGrantsForUser(c.Request.Context(), targetID); rerr != nil {
-			log.Error().Err(rerr).Str("subject_id", targetID).Msg("gdpr: failed to revoke erased user's resource grants")
-		} else if n > 0 {
-			log.Info().Int64("grants_revoked", n).Str("subject_id", targetID).Msg("gdpr: revoked erased user's inbound resource grants")
-		}
+	receipt, err := s.userService.HardEraseUser(c.Request.Context(), targetID, callerID, role, orgID)
+	if err != nil {
+		log.Error().Err(err).Str("subject_id", targetID).Msg("gdpr hard erase retained for retry")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "erasure_pending", "operation": receipt})
+		return
 	}
 
 	c.JSON(http.StatusOK, receipt)
@@ -156,18 +202,20 @@ func (s *Server) anonymizeUser(c *gin.Context) {
 		return
 	}
 
-	orgID := auditOrgID(c)
-	role := actorRole(isAdmin, callerID == targetID)
-
-	receipt, err := s.userService.AnonymizeUser(c.Request.Context(), targetID)
+	orgID, err := s.userService.ResolveErasureAuditOrg(c.Request.Context(), targetID, verifiedAuditOrgHint(c))
 	if err != nil {
-		log.Error().Err(err).Str("subject_id", targetID).Msg("gdpr anonymize failed")
-		s.userService.PublishErasureAudit(orgID, "user_anonymize", targetID, callerID, role, "error", nil)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to anonymize user"})
+		log.Error().Err(err).Str("subject_id", targetID).Msg("failed to derive anonymize audit scope")
+		c.JSON(http.StatusConflict, gin.H{"error": "audit_scope_unavailable"})
 		return
 	}
+	role := actorRole(isAdmin, callerID == targetID)
 
-	s.userService.PublishErasureAudit(orgID, "user_anonymize", targetID, callerID, role, "ok", receipt)
+	receipt, err := s.userService.AnonymizeUser(c.Request.Context(), targetID, callerID, role, orgID)
+	if err != nil {
+		log.Error().Err(err).Str("subject_id", targetID).Msg("gdpr anonymize retained for retry")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "erasure_pending", "operation": receipt})
+		return
+	}
 	c.JSON(http.StatusOK, receipt)
 }
 
@@ -186,17 +234,28 @@ func (s *Server) dsarExport(c *gin.Context) {
 		return
 	}
 
-	orgID := auditOrgID(c)
+	orgID, err := s.userService.ResolveErasureAuditOrg(c.Request.Context(), targetID, verifiedAuditOrgHint(c))
+	if err != nil {
+		log.Error().Err(err).Str("subject_id", targetID).Msg("failed to derive DSAR audit scope")
+		c.JSON(http.StatusConflict, gin.H{"error": "audit_scope_unavailable"})
+		return
+	}
 	role := actorRole(isAdmin, callerID == targetID)
 
 	export, err := s.userService.BuildDSARExport(c.Request.Context(), targetID)
 	if err != nil {
 		log.Error().Err(err).Str("subject_id", targetID).Msg("dsar export failed")
-		s.userService.PublishDSARAudit(orgID, targetID, callerID, role, "error")
+		if auditErr := s.userService.PublishDSARAudit(c.Request.Context(), orgID, targetID, callerID, role, "error"); auditErr != nil {
+			log.Error().Err(auditErr).Msg("failed to persist DSAR failure audit")
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "failed to build data export"})
 		return
 	}
 
-	s.userService.PublishDSARAudit(orgID, targetID, callerID, role, "ok")
+	if auditErr := s.userService.PublishDSARAudit(c.Request.Context(), orgID, targetID, callerID, role, "ok"); auditErr != nil {
+		log.Error().Err(auditErr).Msg("DSAR audit intent was not persisted")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "audit_persistence_failed"})
+		return
+	}
 	c.JSON(http.StatusOK, export)
 }

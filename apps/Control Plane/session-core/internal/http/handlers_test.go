@@ -119,7 +119,7 @@ func TestCreateSession_AuthWithMalformedJSON_Returns400(t *testing.T) {
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.Equal(t, "invalid request body", body["error"])
-	assert.NotEmpty(t, body["details"])
+	assert.NotContains(t, body, "details")
 }
 
 func TestCreateSession_AuthWithEmptyBody_Returns400(t *testing.T) {

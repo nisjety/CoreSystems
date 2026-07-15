@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strconv"
@@ -14,7 +15,6 @@ type Config struct {
 	Database    DatabaseConfig
 	Redis       RedisConfig
 	NATS        NATSConfig
-	Auth        AuthConfig
 	Convex      ConvexConfig
 	Logging     LoggingConfig
 	OrgCore     OrgCoreConfig
@@ -30,7 +30,8 @@ type UserCoreConfig struct {
 
 // BillingCoreConfig — upstream billing-core for the Control Session aggregator (G10).
 type BillingCoreConfig struct {
-	URL string
+	URL          string
+	ServiceToken string
 }
 
 type ServerConfig struct {
@@ -58,20 +59,20 @@ type RedisConfig struct {
 }
 
 type NATSConfig struct {
-	LocalURL    string
-	Token       string
-	SharedURL   string
-	SharedToken string
+	LocalURL                 string
+	LocalUser                string
+	LocalPassword            string
+	Token                    string
+	AllowTokenFallback       bool
+	SharedURL                string
+	SharedUser               string
+	SharedPassword           string
+	SharedToken              string
+	SharedAllowTokenFallback bool
 	// ModelPlaneV2RolloutPct controls what percentage (0-100) of new
 	// sessions are routed to Model Plane v2 when the client does not
 	// explicitly request a version. 0 = all traffic to v1 (default).
 	ModelPlaneV2RolloutPct int
-}
-
-type AuthConfig struct {
-	InternalAPIKey string
-	ServiceSecret  string
-	NATSSubject    string
 }
 
 // ConvexConfig holds connection details for writing reactive state into
@@ -92,7 +93,8 @@ type LoggingConfig struct {
 }
 
 type OrgCoreConfig struct {
-	URL string
+	URL          string
+	ServiceToken string
 }
 
 func Load() *Config {
@@ -124,16 +126,17 @@ func Load() *Config {
 			DB:       getEnvAsInt("DRAGONFLY_DB", getEnvAsInt("CACHE_DB", getEnvAsInt("REDIS_DB", 1))),
 		},
 		NATS: NATSConfig{
-			LocalURL:               getEnv("NATS_LOCAL_URL", "nats://controlplane-nats:4222"),
-			Token:                  getEnv("NATS_TOKEN", ""),
-			SharedURL:              getEnv("NATS_SHARED_URL", ""),
-			SharedToken:            getEnv("NATS_SHARED_TOKEN", ""),
-			ModelPlaneV2RolloutPct: getEnvAsInt("MODEL_PLANE_V2_ROLLOUT_PCT", 0),
-		},
-		Auth: AuthConfig{
-			InternalAPIKey: getEnv("INTERNAL_API_KEY", ""),
-			ServiceSecret:  getEnv("INTERNAL_SERVICE_SECRET", ""),
-			NATSSubject:    getEnv("AUTH_NATS_SUBJECT", "session.validate"),
+			LocalURL:                 getEnv("NATS_LOCAL_URL", "nats://controlplane-nats:4222"),
+			LocalUser:                getEnv("NATS_USER", ""),
+			LocalPassword:            getEnv("NATS_PASSWORD", ""),
+			Token:                    getEnv("NATS_TOKEN", ""),
+			AllowTokenFallback:       getEnvAsBool("NATS_ALLOW_TOKEN_FALLBACK", false),
+			SharedURL:                getEnv("NATS_SHARED_URL", ""),
+			SharedUser:               getEnv("NATS_SHARED_USER", ""),
+			SharedPassword:           getEnv("NATS_SHARED_PASSWORD", ""),
+			SharedToken:              getEnv("NATS_SHARED_TOKEN", ""),
+			SharedAllowTokenFallback: getEnvAsBool("NATS_SHARED_ALLOW_TOKEN_FALLBACK", false),
+			ModelPlaneV2RolloutPct:   getEnvAsInt("MODEL_PLANE_V2_ROLLOUT_PCT", 0),
 		},
 		Convex: ConvexConfig{
 			URL:        getEnv("CONVEX_URL", ""),
@@ -144,14 +147,16 @@ func Load() *Config {
 			Format: getEnv("LOGGING_FORMAT", "json"),
 		},
 		OrgCore: OrgCoreConfig{
-			URL: getEnv("ORG_CORE_URL", "http://org-core:8080"),
+			URL:          getEnv("ORG_CORE_URL", "http://org-core:8080"),
+			ServiceToken: getEnv("ORG_CORE_SERVICE_TOKEN", ""),
 		},
 		UserCore: UserCoreConfig{
 			URL:          getEnv("USER_CORE_URL", "http://user-core:3012"),
 			ServiceToken: getEnv("USER_CORE_SERVICE_TOKEN", ""),
 		},
 		BillingCore: BillingCoreConfig{
-			URL: getEnv("BILLING_CORE_URL", "http://billing-core:3014"),
+			URL:          getEnv("BILLING_CORE_URL", "http://billing-core:3014"),
+			ServiceToken: getEnv("BILLING_CORE_SERVICE_TOKEN", ""),
 		},
 	}
 
@@ -166,6 +171,36 @@ func (c *DatabaseConfig) URL_DSN() string {
 		"postgres://%s:%s@%s:%s/%s?sslmode=%s",
 		c.User, c.Password, c.Host, c.Port, c.Name, c.SSLMode,
 	)
+}
+
+func (c *Config) ValidateScopedServiceTokens() error {
+	tokens := map[string]string{
+		"ORG_CORE_SERVICE_TOKEN":     c.OrgCore.ServiceToken,
+		"BILLING_CORE_SERVICE_TOKEN": c.BillingCore.ServiceToken,
+		"USER_CORE_SERVICE_TOKEN":    c.UserCore.ServiceToken,
+	}
+	seen := make(map[[sha256.Size]byte]string, len(tokens))
+	for name, token := range tokens {
+		if !validDedicatedServiceToken(token) {
+			return fmt.Errorf("%s must be a non-placeholder secret of at least 32 bytes", name)
+		}
+		digest := sha256.Sum256([]byte(strings.TrimSpace(token)))
+		if reusedFrom, exists := seen[digest]; exists {
+			return fmt.Errorf("%s must not reuse %s", name, reusedFrom)
+		}
+		seen[digest] = name
+	}
+	return nil
+}
+
+func validDedicatedServiceToken(token string) bool {
+	token = strings.TrimSpace(token)
+	lower := strings.ToLower(token)
+	return len(token) >= 32 &&
+		!strings.HasPrefix(lower, "test") &&
+		!strings.HasPrefix(lower, "placeholder") &&
+		!strings.HasPrefix(lower, "change-me") &&
+		!strings.HasPrefix(lower, "replace-with")
 }
 
 func getEnv(key, defaultVal string) string {

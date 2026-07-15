@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/memory.proto.
  */
 export const file_model_plane_v1_memory: GenFile = /*@__PURE__*/
-  fileDesc("Chttb2RlbF9wbGFuZS92MS9tZW1vcnkucHJvdG8SDm1vZGVsX3BsYW5lLnYxIp8BChNTZWFyY2hNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgVxdWVyeRgCIAEoCRIUCgx0b3BpY19maWx0ZXIYAyADKAkSDQoFbGltaXQYBCABKA0SDgoGb3JnX2lkGAUgASgJEjEKDXVwZGF0ZWRfYWZ0ZXIYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIkQKFFNlYXJjaE1lbW9yeVJlc3BvbnNlEiwKB2VudHJpZXMYASADKAsyGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlFbnRyeSKSAQoLTWVtb3J5RW50cnkSEQoJbWVtb3J5X2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRINCgV0b3BpYxgDIAEoCRIPCgdjb250ZW50GAQgASgJEg0KBXNjb3JlGAUgASgCEi4KCnVwZGF0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIlcKEkluZGV4TWVtb3J5UmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSDQoFdG9waWMYAiABKAkSDwoHY29udGVudBgDIAEoCRIOCgZvcmdfaWQYBCABKAkiKAoTSW5kZXhNZW1vcnlSZXNwb25zZRIRCgltZW1vcnlfaWQYASABKAkiFQoTTWVtb3J5SGVhbHRoUmVxdWVzdCImChRNZW1vcnlIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkylwIKDU1lbW9yeVNlcnZpY2USWQoMU2VhcmNoTWVtb3J5EiMubW9kZWxfcGxhbmUudjEuU2VhcmNoTWVtb3J5UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNlYXJjaE1lbW9yeVJlc3BvbnNlElYKC0luZGV4TWVtb3J5EiIubW9kZWxfcGxhbmUudjEuSW5kZXhNZW1vcnlSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuSW5kZXhNZW1vcnlSZXNwb25zZRJTCgZIZWFsdGgSIy5tb2RlbF9wbGFuZS52MS5NZW1vcnlIZWFsdGhSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuTWVtb3J5SGVhbHRoUmVzcG9uc2VCswEKEmNvbS5tb2RlbF9wbGFuZS52MUILTWVtb3J5UHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Chttb2RlbF9wbGFuZS92MS9tZW1vcnkucHJvdG8SDm1vZGVsX3BsYW5lLnYxIp8BChNTZWFyY2hNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgVxdWVyeRgCIAEoCRIUCgx0b3BpY19maWx0ZXIYAyADKAkSDQoFbGltaXQYBCABKA0SDgoGb3JnX2lkGAUgASgJEjEKDXVwZGF0ZWRfYWZ0ZXIYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wInIKFFNlYXJjaE1lbW9yeVJlc3BvbnNlEiwKB2VudHJpZXMYASADKAsyGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlFbnRyeRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkikgEKC01lbW9yeUVudHJ5EhEKCW1lbW9yeV9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDQoFdG9waWMYAyABKAkSDwoHY29udGVudBgEIAEoCRINCgVzY29yZRgFIAEoAhIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJXChJJbmRleE1lbW9yeVJlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEg0KBXRvcGljGAIgASgJEg8KB2NvbnRlbnQYAyABKAkSDgoGb3JnX2lkGAQgASgJIlYKE0luZGV4TWVtb3J5UmVzcG9uc2USEQoJbWVtb3J5X2lkGAEgASgJEhAKCGRlZ3JhZGVkGAIgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgDIAEoCSIVChNNZW1vcnlIZWFsdGhSZXF1ZXN0IkwKFE1lbW9yeUhlYWx0aFJlc3BvbnNlEg4KBnN0YXR1cxgBIAEoCRINCgVyZWFkeRgCIAEoCBIVCg1tZW1vcnlfc3RhdHVzGAMgASgJMpcCCg1NZW1vcnlTZXJ2aWNlElkKDFNlYXJjaE1lbW9yeRIjLm1vZGVsX3BsYW5lLnYxLlNlYXJjaE1lbW9yeVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5TZWFyY2hNZW1vcnlSZXNwb25zZRJWCgtJbmRleE1lbW9yeRIiLm1vZGVsX3BsYW5lLnYxLkluZGV4TWVtb3J5UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkluZGV4TWVtb3J5UmVzcG9uc2USUwoGSGVhbHRoEiMubW9kZWxfcGxhbmUudjEuTWVtb3J5SGVhbHRoUmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUhlYWx0aFJlc3BvbnNlQrMBChJjb20ubW9kZWxfcGxhbmUudjFCC01lbW9yeVByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.SearchMemoryRequest
@@ -78,6 +78,20 @@ export type SearchMemoryResponse = Message<"model_plane.v1.SearchMemoryResponse"
    * @generated from field: repeated model_plane.v1.MemoryEntry entries = 1;
    */
   entries: MemoryEntry[];
+
+  /**
+   * True when local results are returned without verified semantic recall.
+   *
+   * @generated from field: bool degraded = 2;
+   */
+  degraded: boolean;
+
+  /**
+   * Stable machine-readable reason, empty when semantic recall is ready.
+   *
+   * @generated from field: string degradation_reason = 3;
+   */
+  degradationReason: string;
 };
 
 /**
@@ -191,6 +205,20 @@ export type IndexMemoryResponse = Message<"model_plane.v1.IndexMemoryResponse"> 
    * @generated from field: string memory_id = 1;
    */
   memoryId: string;
+
+  /**
+   * True when local persistence succeeded but Letta synchronization did not.
+   *
+   * @generated from field: bool degraded = 2;
+   */
+  degraded: boolean;
+
+  /**
+   * Stable machine-readable reason, empty when Letta synchronization is ready.
+   *
+   * @generated from field: string degradation_reason = 3;
+   */
+  degradationReason: string;
 };
 
 /**
@@ -218,11 +246,25 @@ export const MemoryHealthRequestSchema: GenMessage<MemoryHealthRequest> = /*@__P
  */
 export type MemoryHealthResponse = Message<"model_plane.v1.MemoryHealthResponse"> & {
   /**
-   * "ok" when service is healthy.
+   * Legacy summary/status code. New callers should use ready + memory_status.
    *
    * @generated from field: string status = 1;
    */
   status: string;
+
+  /**
+   * Whether the configured semantic memory path has been verified ready.
+   *
+   * @generated from field: bool ready = 2;
+   */
+  ready: boolean;
+
+  /**
+   * Stable machine-readable semantic memory readiness state.
+   *
+   * @generated from field: string memory_status = 3;
+   */
+  memoryStatus: string;
 };
 
 /**

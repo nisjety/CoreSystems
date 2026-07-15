@@ -213,11 +213,9 @@ async fn upload_training_file(
             let body = response.json::<Value>().await.unwrap_or(Value::Null);
             (status, Json(if body.is_null() { json!({}) } else { body }))
         }
-        Err(error) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "error": { "code": "upstream_unavailable", "message": error.to_string() }
-            })),
+            Json(crate::envelope::upstream_unavailable()),
         ),
     }
 }

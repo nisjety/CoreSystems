@@ -2,7 +2,12 @@ import { Controller, Logger } from '@nestjs/common';
 import { GrpcMethod } from '@nestjs/microservices';
 import { Metadata } from '@grpc/grpc-js';
 import { auth } from '../auth/auth';
-import * as crypto from 'crypto';
+import {
+  authorizeAuthGrpcService,
+  type AuthGrpcScope,
+  type AuthGrpcServiceCredential,
+  loadAuthGrpcServiceCredentials,
+} from './auth-grpc-service-auth';
 import type {
   SignUpRequest,
   SignUpResponse,
@@ -12,26 +17,65 @@ import type {
   SignOutResponse,
   GetCurrentUserRequest,
   GetCurrentUserResponse,
-  HealthCheckRequest,
   HealthCheckResponse,
 } from './auth/v1/auth';
 import type { AuthUser } from './auth/v1/auth';
 
-/** Service auth key — Data Plane services must send this in gRPC metadata */
-const INTERNAL_API_KEY =
-  process.env.INTERNAL_API_KEY || process.env.INTERNAL_SERVICE_SECRET;
-if (!INTERNAL_API_KEY) {
-  throw new Error(
-    'INTERNAL_API_KEY or INTERNAL_SERVICE_SECRET env var is required. ' +
-      'Refusing to start without service-to-service authentication.',
-  );
+const emptyRecord: Readonly<Record<string, unknown>> = Object.freeze({});
+
+function asRecord(value: unknown): Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : emptyRecord;
+}
+
+function optionalString(
+  record: Readonly<Record<string, unknown>>,
+  field: string,
+): string | undefined {
+  const value = record[field];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function optionalBoolean(
+  record: Readonly<Record<string, unknown>>,
+  field: string,
+): boolean | undefined {
+  const value = record[field];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function optionalTimestamp(value: unknown):
+  | Readonly<{
+      seconds: number;
+      nanos: number;
+    }>
+  | undefined {
+  if (
+    typeof value !== 'string' &&
+    typeof value !== 'number' &&
+    !(value instanceof Date)
+  ) {
+    return undefined;
+  }
+  const milliseconds = new Date(value).getTime();
+  return Number.isFinite(milliseconds)
+    ? Object.freeze({ seconds: Math.floor(milliseconds / 1000), nanos: 0 })
+    : undefined;
 }
 
 @Controller()
 export class AuthGrpcController {
   private readonly logger = new Logger(AuthGrpcController.name);
+  private readonly serviceCredentials: readonly AuthGrpcServiceCredential[];
 
-  constructor() {}
+  constructor() {
+    this.serviceCredentials = loadAuthGrpcServiceCredentials();
+  }
+
+  private authorize(metadata: Metadata, requiredScope: AuthGrpcScope): void {
+    authorizeAuthGrpcService(metadata, this.serviceCredentials, requiredScope);
+  }
 
   // ── Cross-plane: Token Validation (called by Data Plane) ─────────────
 
@@ -50,21 +94,7 @@ export class AuthGrpcController {
     permissions: string[];
     expiresAt?: { seconds: number; nanos: number };
   }> {
-    // Verify service-to-service auth key from gRPC metadata
-    const serviceKey = metadata?.get('x-service-auth')?.[0];
-    if (!serviceKey || serviceKey !== INTERNAL_API_KEY) {
-      this.logger.warn('ValidateToken called without valid x-service-auth');
-      return {
-        valid: false,
-        userId: '',
-        orgId: '',
-        email: '',
-        name: '',
-        role: '',
-        sessionId: '',
-        permissions: [],
-      };
-    }
+    this.authorize(metadata, 'auth:token:validate');
 
     if (!data.token) {
       return {
@@ -99,7 +129,10 @@ export class AuthGrpcController {
       }
 
       // Extract active org from session if available
-      const activeOrgId = (session.session as any)?.activeOrganizationId || '';
+      const sessionRecord = asRecord(session.session);
+      const userRecord = asRecord(session.user);
+      const activeOrgId =
+        optionalString(sessionRecord, 'activeOrganizationId') ?? '';
 
       return {
         valid: true,
@@ -107,7 +140,7 @@ export class AuthGrpcController {
         orgId: activeOrgId,
         email: session.user.email || '',
         name: session.user.name || '',
-        role: (session.user as any).role || 'user',
+        role: optionalString(userRecord, 'role') || 'user',
         sessionId: session.session?.id || '',
         permissions: [], // Populated by org-core CheckOrgAccess
         expiresAt: session.session?.expiresAt
@@ -119,8 +152,8 @@ export class AuthGrpcController {
             }
           : undefined,
       };
-    } catch (error) {
-      this.logger.error('ValidateToken error:', error);
+    } catch {
+      this.logger.error('Token validation failed');
       return {
         valid: false,
         userId: '',
@@ -135,7 +168,11 @@ export class AuthGrpcController {
   }
 
   @GrpcMethod('AuthService', 'SignUp')
-  async signUp(data: SignUpRequest): Promise<SignUpResponse> {
+  async signUp(
+    data: SignUpRequest,
+    metadata: Metadata,
+  ): Promise<SignUpResponse> {
+    this.authorize(metadata, 'auth:signup');
     try {
       // Call Better Auth sign up
       const response = await auth.api.signUpEmail({
@@ -163,7 +200,11 @@ export class AuthGrpcController {
   }
 
   @GrpcMethod('AuthService', 'SignIn')
-  async signIn(data: SignInRequest): Promise<SignInResponse> {
+  async signIn(
+    data: SignInRequest,
+    metadata: Metadata,
+  ): Promise<SignInResponse> {
+    this.authorize(metadata, 'auth:signin');
     try {
       const response = await auth.api.signInEmail({
         body: {
@@ -189,7 +230,11 @@ export class AuthGrpcController {
   }
 
   @GrpcMethod('AuthService', 'SignOut')
-  async signOut(data: SignOutRequest): Promise<SignOutResponse> {
+  async signOut(
+    data: SignOutRequest,
+    metadata: Metadata,
+  ): Promise<SignOutResponse> {
+    this.authorize(metadata, 'auth:signout');
     try {
       await auth.api.signOut({
         headers: {
@@ -207,30 +252,19 @@ export class AuthGrpcController {
   @GrpcMethod('AuthService', 'GetCurrentUser')
   async getCurrentUser(
     data: GetCurrentUserRequest,
+    metadata: Metadata,
   ): Promise<GetCurrentUserResponse> {
+    this.authorize(metadata, 'auth:user:read');
     try {
-      // For gRPC calls, validate JWT directly instead of using Better Auth's session API
-      const payload = this.validateJWT(data.token);
-
-      if (!payload || !payload.userId) {
+      const session = await auth.api.getSession({
+        headers: new Headers({ authorization: `Bearer ${data.token}` }),
+      });
+      if (!session?.user) {
         throw new Error('Invalid token or user not found');
       }
 
-      // Return user from JWT claims
       return {
-        user: {
-          id: payload.userId,
-          email: payload.email || '',
-          name: payload.name || '',
-          image: '',
-          emailVerified: false,
-          twoFactorEnabled: false,
-          phoneNumber: '',
-          phoneNumberVerified: false,
-          role: payload.isAdmin ? 'admin' : 'user',
-          createdAt: undefined,
-          updatedAt: undefined,
-        },
+        user: this.mapToAuthUser(session.user),
       };
     } catch (error) {
       console.error('GetCurrentUser gRPC error:', error);
@@ -238,55 +272,8 @@ export class AuthGrpcController {
     }
   }
 
-  // Helper method to validate JWT tokens
-  private validateJWT(token: string): any {
-    try {
-      const secret =
-        process.env.JWT_SECRET ||
-        'sCmpCA9xm6bR40cRQKmw18MeQQtu0cS3hwBoIdszpeRJVJXsqf6ff8NEX5bndxpt';
-      const [headerB64, payloadB64, signatureB64] = token.split('.');
-
-      if (!headerB64 || !payloadB64 || !signatureB64) {
-        throw new Error('Invalid token format');
-      }
-
-      // Verify signature using base64url encoding
-      const message = `${headerB64}.${payloadB64}`;
-
-      const hmac = crypto.createHmac('sha256', secret);
-      hmac.update(message);
-      const signature = hmac.digest();
-
-      // Convert signature to base64url (manual conversion since Node.js < 16 might not support it)
-      const expectedSignature = signature
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=/g, '');
-
-      if (expectedSignature !== signatureB64) {
-        throw new Error('Invalid signature');
-      }
-
-      // Decode payload
-      const payload = JSON.parse(
-        Buffer.from(payloadB64, 'base64url').toString('utf-8'),
-      );
-
-      // Check expiration
-      if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-        throw new Error('Token expired');
-      }
-
-      return payload;
-    } catch (error) {
-      console.error('JWT validation error:', error);
-      throw error;
-    }
-  }
-
   @GrpcMethod('AuthService', 'HealthCheck')
-  async healthCheck(data: HealthCheckRequest): Promise<HealthCheckResponse> {
+  healthCheck(): HealthCheckResponse {
     return {
       status: 1, // SERVING
       message: 'Auth service is healthy',
@@ -299,29 +286,27 @@ export class AuthGrpcController {
   }
 
   // Helper methods to map Better Auth types to proto types
-  private mapToAuthUser(user: any): AuthUser {
+  private mapToAuthUser(user: unknown): AuthUser {
+    const source = asRecord(user);
+    const id = optionalString(source, 'id');
+    const email = optionalString(source, 'email');
+    if (!id || !email) {
+      throw new Error('Auth provider returned an invalid user');
+    }
+
     return {
-      id: user.id,
-      email: user.email,
-      name: user.name || '',
-      image: user.image || '',
-      emailVerified: user.emailVerified || false,
-      twoFactorEnabled: user.twoFactorEnabled || false,
-      phoneNumber: user.phoneNumber || '',
-      phoneNumberVerified: user.phoneNumberVerified || false,
-      role: user.role || '',
-      createdAt: user.createdAt
-        ? {
-            seconds: Math.floor(new Date(user.createdAt).getTime() / 1000),
-            nanos: 0,
-          }
-        : undefined,
-      updatedAt: user.updatedAt
-        ? {
-            seconds: Math.floor(new Date(user.updatedAt).getTime() / 1000),
-            nanos: 0,
-          }
-        : undefined,
+      id,
+      email,
+      name: optionalString(source, 'name') || '',
+      image: optionalString(source, 'image') || '',
+      emailVerified: optionalBoolean(source, 'emailVerified') || false,
+      twoFactorEnabled: optionalBoolean(source, 'twoFactorEnabled') || false,
+      phoneNumber: optionalString(source, 'phoneNumber') || '',
+      phoneNumberVerified:
+        optionalBoolean(source, 'phoneNumberVerified') || false,
+      role: optionalString(source, 'role') || '',
+      createdAt: optionalTimestamp(source.createdAt),
+      updatedAt: optionalTimestamp(source.updatedAt),
     };
   }
 }

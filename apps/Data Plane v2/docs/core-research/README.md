@@ -1,21 +1,28 @@
 # Data Plane v2 Core Research
 
 Generated: 2026-06-07
-Updated: 2026-07-11 (secure-MVP remediation and final source verification; supersedes the earlier passes)
+Updated: 2026-07-15 (final isolated Auth/User/Control, browser, HTTP/gRPC, broker, and multi-store ZDR checkpoint)
 
 This directory contains the current service-level research notes for Data Plane v2.
 
-## Secure-MVP current state — 2026-07-11
+## Secure-MVP current state — 2026-07-15
 
-**Not production-ready.** Security fixes are implemented and test-proven in the
-dirty source worktree. An earlier checkpoint built the migrator plus nine Data
-service images with verified revision/build labels, but later source changes have
-not been rebuilt because Docker's content store now returns blob input/output
-errors. Current source has not been deployed, reached, or shown effective through
-the isolated Docker/live matrix. In these
-notes, `implemented` means present in source, `tested` means the named local test
-command passed, and neither word implies `built`, `deployed`, `reachable`, or
-`effective` in a running environment.
+**Secure-MVP candidate in source; not production-ready.** The final disposable
+source build passed the real Auth/User/Control Velion journey, Playwright **2/2**,
+HTTP **28/28**, gRPC **31 methods / 124 assertions**, supported signed broker
+delivery/redelivery, and the six-store restrictive-ZDR final-state comparison.
+The final Documents signed-claim/single/bulk/source-object guards were rebuilt
+and exercised. The shared deployment was not replaced and still predates this
+source.
+
+The six-store check proves stable final state in PostgreSQL, Qdrant, Dragonfly,
+Quickwit, MinIO, and NATS. NATS/Dragonfly additionally use monotonic no-write
+counters; PostgreSQL/Qdrant/Quickwit/MinIO still need per-operation mutation
+telemetry to exclude a transient insert-then-delete. Production scoped-broker
+provisioning, credential rotation, database-backed coverage, controlled rollout,
+and safe post-deploy verification remain open.
+In these notes, `implemented`, `tested`, `built`, `deployed`, `reachable`, and
+`effective` remain separate claims.
 
 Sanitized program evidence recorded on 2026-07-10:
 
@@ -26,10 +33,11 @@ Sanitized program evidence recorded on 2026-07-10:
 - documents, wiki, quality, and orchestrator completed their recorded Go test
   suites with `-race`; `go vet ./...` passed. Documents and wiki also recorded
   no reachable `govulncheck` finding.
-- the safe HTTP matrix harness has a 28/28 synthetic contract result covering
-  seven route families and four credential shapes. It has **not** run against a
-  rebuilt Compose stack, so it is tooling evidence, not endpoint evidence.
-- measured auth-package coverage is documents 95.4%, quality 82.8%,
+- the safe HTTP matrix harness contract passes and the rebuilt disposable stack
+  passed all 28 endpoint checks covering seven route families and four
+  credential shapes. This is isolated endpoint evidence, not shared deployment
+  evidence.
+- measured auth-package coverage is documents 95.5%, quality 82.8%,
   orchestrator 91.1%, and wiki 85.2%.
 - Data and Model RustSec audit scripts pass; Quarry's production-graph audit has
   no known vulnerability (two unmaintained-crate warnings remain). No full Rust
@@ -48,36 +56,28 @@ Sanitized program evidence recorded on 2026-07-10:
   downgrade it while an authoritative organization policy is absent.
 - Model service-token issuance now emits a tenant-bound Control audit event
   containing its bounded reason/scopes and returns 503 if the audit publisher
-  is unavailable. Audit-core persistence remains runtime-unproven. Auth Core
-  passes 76 tests and builds, but its repository-wide lint baseline and
-  controller-only branch coverage remain open gates.
+  is unavailable. Audit-core persistence remains runtime-unproven. Auth Core's
+  recorded full suite passes 99/99 with build and no-fix lint; focused changed
+  security modules exceed 80% coverage.
 - Model Gateway explicitly distinguishes scoped services from users: canonical
   service ID/reason plus exact `models:invoke` is accepted only on POST chat and
   embeddings; all user/delegated/Data/session/retrieval routes deny services.
 
 Current release blockers:
 
-- unsigned legacy consumers are fail-closed/disabled by default in embedding,
-  index, graph, Quickwit adapter, documents GDPR, and orchestrator cost paths.
-  This contains untrusted asynchronous mutation but leaves the corresponding
-  pipeline functions ineffective until signed, caller-scoped events and NATS
-  authorization are implemented.
-- Quickwit rebuild mutations return 501; only an authenticated, tenant-scoped
-  dry-run preview exists. Durable job state, audit, rate limiting, approval,
-  resumability, and concurrency protection are not complete.
-- retrieval and Control now share a versioned decision contract in source, but
-  a real authorized bearer has not been accepted end to end by rebuilt services.
-- legacy static Control credentials intentionally cannot perform delegated-user
-  or grant/visibility calls. Signed caller+user+tenant+resource delegation is
-  required before explicit sharing is functional again.
-- Model Gateway, Execution Core, and Inference Core legacy gRPC listeners are
-  contained off by default behind a surface-specific gate plus the insecure-dev
-  gate. Verified replacement authentication and tenant/ownership pinning are
-  not yet proven end to end, so Data-to-Model service identity remains a release
-  boundary.
-- the revised Data images built locally with matching non-placeholder provenance
-  labels, but no restart/deployment, private-network reachability check, or
-  isolated live auth/ZDR/admin matrix has completed.
+- production NATS subject ACLs/scoped credentials, including the Documents GDPR
+  durable, require coordinated provisioning and post-deploy proof; the real
+  disposable consumer's scoped bind/ACL/ACK/redelivery/recovery matrix is green;
+- strict mutation telemetry is missing for four of the six ZDR stores;
+- Quickwit destructive execution remains 501 pending trustworthy task completion
+  and crash/retry proof; no destructive action was tested;
+- database-backed coverage is below 80% for Quickwit jobs, quality evals,
+  orchestrator jobs, and the full wiki events package;
+- shared images still predate source; surfaced local credentials require rotation
+  before a controlled rollout and safe synthetic-tenant verification;
+- unverified Execution/Model listeners and unsupported unsigned consumers must
+  remain disabled, and grant mutation remains unavailable until resource-owner
+  authorization exists.
 
 The older live-audit sections in individual files are preserved as historical
 root-cause evidence. Where they conflict with this section, they are superseded;
@@ -95,8 +95,8 @@ boundary failures across multiple services. The customer-specific evidence is
 redacted here; the finding remains release evidence, while the old runtime state
 is superseded by the un-deployed source fixes described above.
 
-Runtime-service notes in scope (current source overlays added; rebuilt live state
-not yet verified):
+Runtime-service notes in scope (current source overlays and final isolated
+evidence added; no shared deployment claim):
 
 - `documents-api-go.md`
 - `index-engine-rs.md`

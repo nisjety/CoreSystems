@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 var versionPattern = regexp.MustCompile(`^(\d{14})_(.+)\.sql$`)
 
+type connectDatabase func(context.Context, string) (*pgx.Conn, error)
+
 type migration struct {
 	version string
 	name    string
@@ -79,7 +81,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	conn, err := pgx.Connect(ctx, dbURL)
+	conn, err := connectWithRetry(
+		ctx,
+		dbURL,
+		30*time.Second,
+		250*time.Millisecond,
+		pgx.Connect,
+	)
 	if err != nil {
 		fail("connect: %v", err)
 	}
@@ -116,6 +124,41 @@ func main() {
 	default:
 		usage()
 		os.Exit(2)
+	}
+}
+
+func connectWithRetry(
+	parent context.Context,
+	dbURL string,
+	retryWindow time.Duration,
+	initialDelay time.Duration,
+	connect connectDatabase,
+) (*pgx.Conn, error) {
+	ctx, cancel := context.WithTimeout(parent, retryWindow)
+	defer cancel()
+
+	delay := initialDelay
+	var lastErr error
+	for {
+		conn, err := connect(ctx, dbURL)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("database did not become ready within %s: %w", retryWindow, lastErr)
+		case <-timer.C:
+		}
+		if delay < 2*time.Second {
+			delay *= 2
+			if delay > 2*time.Second {
+				delay = 2 * time.Second
+			}
+		}
 	}
 }
 

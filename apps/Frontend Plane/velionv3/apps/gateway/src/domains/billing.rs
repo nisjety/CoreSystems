@@ -11,7 +11,7 @@ use crate::{
     config::AppState,
     contracts::ActionActor,
     envelope::error,
-    middleware::{require_session, AuthenticatedUser},
+    middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
     upstream::proxy_json,
 };
 
@@ -147,7 +147,7 @@ async fn billing_quota(
 async fn billing_checkout(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    Json(body): Json<Value>,
+    Json(caller_body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let org_id = match require_billing_admin(&state, &user).await {
         Ok(org_id) => org_id,
@@ -157,6 +157,19 @@ async fn billing_checkout(
         "{}/api/v1/billing/orgs/{}/checkout-session",
         state.billing_core_url, org_id
     );
+    let body = match canonical_checkout_body(
+        &caller_body,
+        &state.velion_public_origin,
+        "/settings/billing",
+    ) {
+        Ok(body) => body,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("invalid_checkout_request", message)),
+            )
+        }
+    };
     proxy_json(
         &state,
         Method::POST,
@@ -167,6 +180,46 @@ async fn billing_checkout(
         None,
     )
     .await
+}
+
+pub(crate) fn canonical_checkout_body(
+    caller_body: &Value,
+    public_origin: &str,
+    landing_path: &str,
+) -> Result<Value, &'static str> {
+    let plan = caller_body
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|plan| {
+            !plan.is_empty()
+                && plan.len() <= 64
+                && plan
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        .ok_or("A valid billing plan is required.")?;
+
+    let mut success = url::Url::parse(public_origin).map_err(|_| "Checkout is unavailable.")?;
+    success.set_path(landing_path);
+    success.set_query(None);
+    success
+        .query_pairs_mut()
+        .append_pair("checkout", "success")
+        .append_pair("plan", plan);
+
+    let mut cancel = success.clone();
+    cancel
+        .query_pairs_mut()
+        .clear()
+        .append_pair("checkout", "cancel")
+        .append_pair("plan", plan);
+
+    Ok(json!({
+        "plan": plan,
+        "success_url": success.as_str(),
+        "cancel_url": cancel.as_str(),
+    }))
 }
 
 async fn billing_checkout_confirm(
@@ -203,17 +256,7 @@ async fn require_billing_admin(
         return Err(no_active_org_response());
     }
 
-    if has_any_role(user.auth_role.as_deref(), &["admin", "superadmin"]) {
-        return Ok(org_id);
-    }
-
-    let org_role = crate::upstream::resolve_session_context(state, user)
-        .await
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    if has_any_role(Some(org_role.as_str()), &["owner", "admin"]) {
+    if has_authorized_org_role(user, &["owner", "admin"]) {
         Ok(org_id)
     } else {
         Err((
@@ -234,18 +277,6 @@ fn no_active_org_response() -> (StatusCode, Json<Value>) {
             "An active organization is required for billing.",
         )),
     )
-}
-
-fn has_any_role(value: Option<&str>, allowed: &[&str]) -> bool {
-    value
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .any(|role| {
-            allowed
-                .iter()
-                .any(|allowed_role| role.eq_ignore_ascii_case(allowed_role))
-        })
 }
 
 fn billing_account_fallback_enabled(state: &AppState) -> bool {
@@ -277,4 +308,52 @@ fn default_billing_account(org_id: &str, reason: &str) -> Value {
             "fallback": reason
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn checkout_return_urls_are_derived_from_the_server_origin() {
+        let caller = json!({
+            "plan": "standard",
+            "success_url": "https://attacker.example/success",
+            "cancel_url": "https://attacker.example/cancel"
+        });
+        let body = super::canonical_checkout_body(
+            &caller,
+            "https://app.velion.example",
+            "/settings/billing",
+        )
+        .expect("valid checkout request");
+
+        assert_eq!(body["plan"], "standard");
+        assert_eq!(
+            body["success_url"],
+            "https://app.velion.example/settings/billing?checkout=success&plan=standard"
+        );
+        assert_eq!(
+            body["cancel_url"],
+            "https://app.velion.example/settings/billing?checkout=cancel&plan=standard"
+        );
+        assert!(!body.to_string().contains("attacker.example"));
+    }
+
+    #[test]
+    fn checkout_plan_is_a_bounded_opaque_identifier() {
+        for plan in [
+            "",
+            "../admin",
+            "standard?next=https://attacker.example",
+            &"a".repeat(65),
+        ] {
+            assert!(super::canonical_checkout_body(
+                &json!({ "plan": plan }),
+                "https://app.velion.example",
+                "/onboarding",
+            )
+            .is_err());
+        }
+    }
 }

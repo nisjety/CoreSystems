@@ -1,18 +1,16 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::Uri,
+    http::{HeaderMap, Uri},
     response::IntoResponse,
 };
 use reqwest::Method;
 
-use crate::{
-    config::AppState, domains::knowledge::shared, middleware::AuthenticatedUser,
-    upstream::proxy_json,
-};
+use crate::{config::AppState, domains::knowledge::shared, middleware::AuthenticatedUser};
 
 pub(super) async fn list_wiki_pages(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
     let org_id = {
@@ -20,13 +18,14 @@ pub(super) async fn list_wiki_pages(
         (!o.is_empty()).then_some(o)
     };
     let url = format!("{}/v1/wiki/pages{}", state.wiki_store_url, shared::qs(&uri));
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -35,6 +34,7 @@ pub(super) async fn list_wiki_pages(
 pub(super) async fn wiki_page_by_path(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     uri: Uri,
 ) -> impl IntoResponse {
     let org_id = {
@@ -46,13 +46,14 @@ pub(super) async fn wiki_page_by_path(
         state.wiki_store_url,
         shared::qs(&uri)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -61,6 +62,7 @@ pub(super) async fn wiki_page_by_path(
 pub(super) async fn get_wiki_page(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let org_id = {
@@ -72,13 +74,14 @@ pub(super) async fn get_wiki_page(
         state.wiki_store_url,
         urlencoding::encode(&id)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -87,6 +90,7 @@ pub(super) async fn get_wiki_page(
 pub(super) async fn wiki_page_versions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     uri: Uri,
 ) -> impl IntoResponse {
@@ -100,13 +104,14 @@ pub(super) async fn wiki_page_versions(
         urlencoding::encode(&id),
         shared::qs(&uri)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -115,6 +120,7 @@ pub(super) async fn wiki_page_versions(
 pub(super) async fn wiki_page_diff(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     uri: Uri,
 ) -> impl IntoResponse {
@@ -128,13 +134,14 @@ pub(super) async fn wiki_page_diff(
         urlencoding::encode(&id),
         shared::qs(&uri)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await
@@ -143,6 +150,7 @@ pub(super) async fn wiki_page_diff(
 pub(super) async fn wiki_page_backlinks(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     uri: Uri,
 ) -> impl IntoResponse {
@@ -156,13 +164,14 @@ pub(super) async fn wiki_page_backlinks(
         urlencoding::encode(&id),
         shared::qs(&uri)
     );
-    proxy_json(
+    shared::proxy_data_plane_json(
         &state,
+        &user,
+        &headers,
         Method::GET,
         &url,
         None,
         org_id.as_deref(),
-        Some(&shared::actor_for(&user)),
         None,
     )
     .await

@@ -85,6 +85,27 @@ pub(crate) struct AuthorizedMembership {
     pub(crate) role: String,
 }
 
+/// Check an organization role only against the live membership decision added
+/// by `require_session`. Cached session context and the platform-level Auth role
+/// are presentation data and must never grant tenant administration authority.
+pub(crate) fn has_authorized_org_role(user: &AuthenticatedUser, allowed_roles: &[&str]) -> bool {
+    let Some(active_org_id) = user
+        .active_org_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Some(membership) = user.authorized_membership.as_ref() else {
+        return false;
+    };
+    membership.organization_id.trim() == active_org_id
+        && allowed_roles
+            .iter()
+            .any(|role| membership.role.trim().eq_ignore_ascii_case(role))
+}
+
 #[derive(Deserialize)]
 struct SessionValidationResponse {
     user: Option<UserFields>,
@@ -144,7 +165,9 @@ pub(crate) async fn require_session(
         .unwrap_or("")
         .to_owned();
 
-    if let Some(user) = validate_session_cookie(&state, &cookie_header).await {
+    let allow_cached_session = allows_cached_session_validation(request.uri().path());
+    if let Some(user) = validate_session_cookie(&state, &cookie_header, allow_cached_session).await
+    {
         return authorize_request(state, request, next, user).await;
     }
 
@@ -228,6 +251,7 @@ fn requires_active_membership(path: &str) -> bool {
         || path == "/api/v1/me"
         || path == "/api/v1/me/session-context"
         || path == "/api/v1/admin/users"
+        || path == "/api/v1/orgs"
         || path == "/api/v1/orgs/switch-active"
         || path.starts_with("/api/v1/auth/2fa/")
         || is_pre_org_onboarding_route(path)
@@ -267,6 +291,15 @@ fn optionally_resolves_active_membership(path: &str) -> bool {
         path,
         "/api/v1/session/current" | "/api/v1/me/session-context"
     )
+}
+
+/// Cache only the organization-list bootstrap request, whose response and
+/// authorization do not depend on the session's active tenant. Tenant-bearing,
+/// role-bearing, and session-mutation routes always validate the current
+/// server-side session live, preventing a concurrent org switch from reusing or
+/// re-storing stale scope.
+fn allows_cached_session_validation(path: &str) -> bool {
+    path == "/api/v1/orgs"
 }
 
 /// Emit per-tenant observability for a validated request (Phase 6 B13): an
@@ -360,6 +393,7 @@ fn stamp_trusted_identity(request: &mut Request, user: &AuthenticatedUser) {
 pub(crate) async fn validate_session_cookie(
     state: &AppState,
     cookie_header: &str,
+    allow_cached: bool,
 ) -> Option<AuthenticatedUser> {
     if cookie_header.is_empty() {
         return None;
@@ -384,11 +418,13 @@ pub(crate) async fn validate_session_cookie(
     //     validates live, exactly as before.
     let ttl = session_validation_ttl_secs();
     let cache_key = crate::cache::cache_key("session-validation", &[cookie_header]);
-    if let Some(cached) = state.cache.lookup_within(&cache_key, ttl).await {
-        if let Ok(user) = serde_json::from_value::<AuthenticatedUser>(cached) {
-            return Some(user);
+    if allow_cached {
+        if let Some(cached) = state.cache.lookup_within(&cache_key, ttl).await {
+            if let Ok(user) = serde_json::from_value::<AuthenticatedUser>(cached) {
+                return Some(user);
+            }
+            // A malformed/legacy cache entry: fall through to a live validation.
         }
-        // A malformed/legacy cache entry: fall through to a live validation.
     }
 
     let resp = state
@@ -424,11 +460,26 @@ pub(crate) async fn validate_session_cookie(
 
     // Cache only this positive validation, for the short TTL. Failures are
     // ignored inside `store_for_secs` (degrade-safe).
-    if let Ok(value) = serde_json::to_value(&authenticated) {
-        state.cache.store_for_secs(&cache_key, &value, ttl).await;
+    if allow_cached {
+        if let Ok(value) = serde_json::to_value(&authenticated) {
+            state.cache.store_for_secs(&cache_key, &value, ttl).await;
+        }
     }
 
     Some(authenticated)
+}
+
+/// Remove the short-lived positive session validation after a successful
+/// server-side session mutation (for example, changing the active org). Better
+/// Auth can persist that mutation without changing the session cookie, so
+/// leaving the cookie-keyed entry in place would retain the previous org until
+/// the validation TTL expires.
+pub(crate) async fn invalidate_session_validation_cache(state: &AppState, cookie_header: &str) {
+    if cookie_header.trim().is_empty() {
+        return;
+    }
+    let cache_key = crate::cache::cache_key("session-validation", &[cookie_header]);
+    state.cache.delete(&cache_key).await;
 }
 
 #[cfg(test)]
@@ -471,6 +522,47 @@ mod tests {
     }
 
     #[test]
+    fn organization_role_checks_use_only_live_authorized_membership() {
+        let mut user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("owner".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        assert!(!has_authorized_org_role(&user, &["owner", "admin"]));
+        user.authorized_membership = Some(AuthorizedMembership {
+            organization_id: "org-1".to_owned(),
+            role: "member".to_owned(),
+        });
+        assert!(!has_authorized_org_role(&user, &["owner", "admin"]));
+        user.authorized_membership = Some(AuthorizedMembership {
+            organization_id: "org-1".to_owned(),
+            role: "admin".to_owned(),
+        });
+        assert!(has_authorized_org_role(&user, &["owner", "admin"]));
+    }
+
+    #[test]
+    fn tenant_and_session_mutation_routes_never_use_cached_session_scope() {
+        for path in [
+            "/api/v1/knowledge/sources",
+            "/api/v1/billing/checkout",
+            "/api/v1/mcp/servers",
+            "/api/v1/me/session-context",
+            "/api/v1/session/current",
+            "/api/v1/orgs/switch-active",
+        ] {
+            assert!(!allows_cached_session_validation(path), "{path}");
+        }
+        assert!(allows_cached_session_validation("/api/v1/orgs"));
+    }
+
+    #[test]
     fn only_explicit_pre_org_flows_are_session_only() {
         for path in [
             "/api/v1/session/current",
@@ -488,6 +580,7 @@ mod tests {
             "/api/v1/onboarding/translate-recommendation",
             "/api/v1/onboarding/actions/create-organization",
             "/api/v1/orgs/switch-active",
+            "/api/v1/orgs",
             "/api/v1/orgs/invitations/inv_123/accept",
         ] {
             assert!(!requires_active_membership(path), "{path}");

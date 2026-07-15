@@ -43,6 +43,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request } from 'express';
 
 import { DirectNatsService } from '../nats/direct-nats.service';
+import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import { ConvexTokenService } from './convex-token.service';
 import {
@@ -229,13 +230,19 @@ export class ModelPlaneTokenController {
     const event = 'model_service_token_issued';
     let audited = false;
     try {
+      const auditIdentity = issuedTokenAuditIdentity(
+        response.token,
+        'model-token',
+      );
       await this.directNats.publishAuditDurable(
-        `velion.audit.v1.control.${event}`,
+        `velion.audit.v2.control.auth-core.${event}`,
         {
-          occurred_at: new Date().toISOString(),
+          occurred_at: auditIdentity.occurredAt,
+          event_id: auditIdentity.eventId,
           org_id: principal.orgId,
           actor_role: 'service',
           plane: 'control',
+          producer: 'auth-core',
           event,
           subject: principal.subject,
           resource_id: 'model-gateway',

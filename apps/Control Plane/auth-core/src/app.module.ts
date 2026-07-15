@@ -1,4 +1,4 @@
-import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { HttpModule } from '@nestjs/axios';
 import { AuthModule } from '@thallesp/nestjs-better-auth';
@@ -19,8 +19,9 @@ import { ConvexTokenService } from './auth/convex-token.service';
 import { DocsModule } from './docs/docs.module';
 import { InternalServicesModule } from './internal/internal-services.module';
 import { NatsModule } from './nats/nats.module';
-import { OrganizationEventMiddleware } from './middleware/organization-event.middleware';
 import { OrphanOrganizationCleanupService } from './services/orphan-organization-cleanup.service';
+import { InvitationAcceptanceController } from './auth/invitation-acceptance.controller';
+import { InvitationAcceptanceRepairService } from './services/invitation-acceptance-repair.service';
 
 @Module({
   imports: [
@@ -44,24 +45,15 @@ import { OrphanOrganizationCleanupService } from './services/orphan-organization
     PlaneTokenController,
     DataPlaneAuthorizationController,
     MembershipAuthorityController,
+    InvitationAcceptanceController,
     AuthGrpcController,
   ],
   providers: [
     SessionCleanupService,
     MicrosoftGraphService,
     ConvexTokenService,
-    OrganizationEventMiddleware,
     OrphanOrganizationCleanupService,
+    InvitationAcceptanceRepairService,
   ],
 })
-export class AppModule implements NestModule {
-  configure(consumer: MiddlewareConsumer) {
-    consumer
-      .apply(OrganizationEventMiddleware)
-      .forRoutes(
-        '/api/auth/organization/create',
-        '/api/auth/organization/invite-member',
-        '/api/auth/organization/remove-member',
-      );
-  }
-}
+export class AppModule {}

@@ -5,6 +5,21 @@ Re-verified: 2026-07-10 (live Docker + source re-read; supersedes the 2026-06-07
 
 Scope: `apps/Data Plane v2/services/embedding-engine-rs`
 
+## 2026-07-15 final isolated acceptance delta
+
+The final rebuilt service reached healthy state, participated in the supported
+signed broker delivery/redelivery matrix, and was included in the six-store ZDR
+final-state comparison. No restrictive request produced a persisted embedding in
+that comparison. Production broker ACLs, strict per-store mutation telemetry,
+and shared deployment remain pending.
+
+## 2026-07-15 isolated runtime delta
+
+The current-source image `401d28370432` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd` and reached healthy state in the
+disposable stack. No signed broker event, embedding egress, Qdrant write, or
+cross-plane inference flow was invoked, so this is startup evidence only.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented/contained:** unsigned knowledge-unit, wiki, and page-image event
@@ -12,8 +27,9 @@ Scope: `apps/Data Plane v2/services/embedding-engine-rs`
   gates. This fails closed against forged asynchronous tenant/content identity.
 - **Tested:** 19/19 tests pass after consumer containment, including the two-gate
   regression; strict combined embedding/index all-target clippy passes.
-- **Built/deployed/reachable/effective:** the revised image built locally with
-  verified revision/build labels, but it has not been deployed or exercised.
+- **Built/reachable in isolation:** the revised image built locally with
+  verified revision/build labels and reached healthy state in the disposable
+  stack, but its signed event/data flow was not exercised or shared-deployed.
   With consumers disabled the embedding pipeline is intentionally ineffective until
   signed, producer-scoped envelopes and NATS permissions are implemented.
 - **Cross-plane blocker:** Inference Core gRPC is securely disabled by default

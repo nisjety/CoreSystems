@@ -30,6 +30,9 @@ impl AuthMethod {
 #[allow(dead_code)] // JWT fields decoded from auth-service; not all are read today
 pub struct Claims {
     pub sub: String, // user_id (RFC 7519 conventional)
+    /// Signed Zero Data Retention posture. Required at deserialization so an
+    /// absent, null, or non-boolean claim fails authentication closed.
+    pub zdr: bool,
     #[serde(default)]
     pub org_id: Option<String>,
     #[serde(default)]
@@ -85,6 +88,8 @@ pub struct AuthContext {
     pub org_id: String,
     pub auth_method: AuthMethod,
     pub scopes: Vec<String>,
+    /// Cryptographically verified request-retention posture from the JWT.
+    pub zdr: bool,
     pub acl: EffectiveAcl,
     /// Echoed back to the caller in `X-Request-Id` and persisted in
     /// `access_audit_log.request_id` for cross-service correlation.
@@ -97,6 +102,26 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
+    /// Merge caller-requested posture with the cryptographically verified
+    /// authority posture monotonically. `reject` remains stricter than
+    /// `ephemeral`; a signed `zdr=true` can never become durable/disabled.
+    #[must_use]
+    pub const fn effective_zdr_mode(
+        &self,
+        requested: Option<crate::pipeline::types::ZdrMode>,
+    ) -> Option<crate::pipeline::types::ZdrMode> {
+        use crate::pipeline::types::ZdrMode;
+
+        if self.zdr {
+            match requested {
+                Some(ZdrMode::Reject) => Some(ZdrMode::Reject),
+                _ => Some(ZdrMode::Ephemeral),
+            }
+        } else {
+            requested
+        }
+    }
+
     /// Build a context that grants org-scoped access only (no per-user ACL).
     /// Used when `CONTROL_PLANE_ENFORCEMENT=off` or for `API_KEY`-only calls
     /// where there is no user identity to enforce against.
@@ -107,6 +132,7 @@ impl AuthContext {
             org_id: org_id.into(),
             auth_method: method,
             scopes: vec![],
+            zdr: true,
             acl: EffectiveAcl::allow_all(),
             request_id,
             verified_bearer: None,
@@ -188,6 +214,7 @@ impl AuthContext {
             req.user_id = self.user_id.clone();
         }
         req.verified_bearer = self.verified_bearer.clone();
+        req.zdr_mode = self.effective_zdr_mode(req.zdr_mode);
 
         // Org-admin super-visibility derives ONLY from a verified scope. This is
         // reached only on the JWT HTTP path; the api-key/agent path carries no
@@ -227,6 +254,7 @@ pub fn pin_org_from_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::types::{RetrievalRequest, ZdrMode};
 
     fn ctx_with_acl(workspaces: Vec<&str>) -> AuthContext {
         AuthContext {
@@ -234,12 +262,57 @@ mod tests {
             org_id: "org-a".into(),
             auth_method: AuthMethod::Jwt,
             scopes: vec![],
+            zdr: false,
             acl: EffectiveAcl {
                 workspaces: workspaces.into_iter().map(String::from).collect(),
                 ..Default::default()
             },
             request_id: "req".into(),
             verified_bearer: None,
+        }
+    }
+
+    fn retrieval_request(zdr_mode: Option<ZdrMode>) -> RetrievalRequest {
+        let mut value = serde_json::json!({
+            "org_id": "body-org",
+            "query": "synthetic boundary test"
+        });
+        if let Some(mode) = zdr_mode {
+            value["zdr_mode"] = serde_json::to_value(mode).expect("serialize mode");
+        }
+        serde_json::from_value(value).expect("valid retrieval request")
+    }
+
+    #[test]
+    fn signed_zdr_forces_http_request_to_ephemeral_without_downgrading_reject() {
+        let ctx = AuthContext {
+            zdr: true,
+            ..ctx_with_acl(vec![])
+        };
+
+        for requested in [None, Some(ZdrMode::Disabled), Some(ZdrMode::Ephemeral)] {
+            let mut request = retrieval_request(requested);
+            ctx.apply_to_request(&mut request);
+            assert_eq!(request.zdr_mode, Some(ZdrMode::Ephemeral));
+        }
+
+        let mut reject = retrieval_request(Some(ZdrMode::Reject));
+        ctx.apply_to_request(&mut reject);
+        assert_eq!(reject.zdr_mode, Some(ZdrMode::Reject));
+    }
+
+    #[test]
+    fn signed_non_zdr_preserves_any_stricter_caller_posture() {
+        let ctx = ctx_with_acl(vec![]);
+        for requested in [
+            None,
+            Some(ZdrMode::Disabled),
+            Some(ZdrMode::Reject),
+            Some(ZdrMode::Ephemeral),
+        ] {
+            let mut request = retrieval_request(requested);
+            ctx.apply_to_request(&mut request);
+            assert_eq!(request.zdr_mode, requested);
         }
     }
 

@@ -513,6 +513,15 @@ export function SensesSection() {
 												chapter.highlight,
 											)}
 										</p>
+
+										{chapter.id === "connect" ? (
+											<a
+												className="pointer-events-auto mt-1 font-protokoll text-[0.88rem] font-light text-velion-j-text/58 underline-offset-4 transition-colors hover:text-velion-j-text hover:underline"
+												href="/plattform/felles-kontekst"
+											>
+												Se hvordan felles kontekst fungerer
+											</a>
+										) : null}
 									</div>
 								</div>
 

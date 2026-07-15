@@ -7,6 +7,7 @@ use tonic::transport::{Channel, Endpoint};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::inference_auth::InferenceTokenClient;
 use crate::model::ExtractionResult;
 
 // Model Plane inference client (compiled by build.rs from the shared
@@ -38,7 +39,7 @@ struct ModelPlaneExtractor {
     model: String,
     provider: String,
     timeout: Duration,
-    internal_api_key: Option<String>,
+    token_client: InferenceTokenClient,
 }
 
 struct AzureExtractor {
@@ -68,7 +69,12 @@ impl GraphExtractor {
                     model: cfg.model_plane_extraction_model.clone(),
                     provider: cfg.model_plane_extraction_provider.clone(),
                     timeout,
-                    internal_api_key: cfg.internal_api_key.clone().filter(|k| !k.is_empty()),
+                    token_client: InferenceTokenClient::new(
+                        &cfg.model_plane_inference_token_url,
+                        &cfg.model_plane_inference_token_issuer,
+                        &cfg.model_plane_inference_service_id,
+                        &cfg.model_plane_inference_service_api_key,
+                    )?,
                 }))
             }
             "azure_openai" => {
@@ -101,11 +107,21 @@ impl GraphExtractor {
         }
     }
 
-    pub async fn extract(&self, text: &str, org_id: &str) -> anyhow::Result<ExtractionResult> {
+    pub async fn extract(
+        &self,
+        text: &str,
+        org_id: &str,
+        zdr: bool,
+    ) -> anyhow::Result<ExtractionResult> {
         let prompt = build_prompt(self.max_entities, text);
         let content = match &self.backend {
-            Backend::ModelPlane(inner) => inner.infer(org_id, &prompt).await?,
-            Backend::AzureOpenAi(inner) => inner.chat(&prompt).await?,
+            Backend::ModelPlane(inner) => inner.infer(org_id, &prompt, zdr).await?,
+            Backend::AzureOpenAi(inner) => {
+                if zdr {
+                    anyhow::bail!("ZDR graph extraction must not egress to the direct-Azure path");
+                }
+                inner.chat(&prompt).await?
+            }
         };
         let result = parse_extraction(&content)?;
         tracing::info!(
@@ -123,7 +139,12 @@ impl GraphExtractor {
 impl ModelPlaneExtractor {
     /// Build the Infer request. Split out so a unit test can assert the prompt +
     /// routing hints are carried onto the wire without a live inference-core.
-    fn build_request(&self, org_id: &str, prompt: &str) -> model_plane::v1::InferRequest {
+    fn build_request(
+        &self,
+        org_id: &str,
+        prompt: &str,
+        zdr: bool,
+    ) -> model_plane::v1::InferRequest {
         model_plane::v1::InferRequest {
             request_id: Uuid::new_v4().to_string(),
             org_id: org_id.to_string(),
@@ -144,22 +165,41 @@ impl ModelPlaneExtractor {
             temperature: 0.1,
             max_tokens: 4096,
             structured_output_schema: String::new(),
-            // Graph extraction does not currently thread per-document ZDR
-            // classification; inference-core still enforces the EU residency gate
-            // on every call regardless of this flag.
-            zdr: false,
+            zdr,
             tools: vec![],
             tool_choice: String::new(),
         }
     }
 
-    async fn infer(&self, org_id: &str, prompt: &str) -> anyhow::Result<String> {
-        let mut request = tonic::Request::new(self.build_request(org_id, prompt));
-        if let Some(key) = self.internal_api_key.as_deref() {
-            request
-                .metadata_mut()
-                .insert("x-api-key", MetadataValue::try_from(key)?);
-        }
+    fn build_authenticated_request(
+        &self,
+        bearer: &str,
+        org_id: &str,
+        prompt: &str,
+        zdr: bool,
+    ) -> anyhow::Result<tonic::Request<model_plane::v1::InferRequest>> {
+        anyhow::ensure!(
+            !bearer.trim().is_empty()
+                && bearer == bearer.trim()
+                && !bearer.chars().any(char::is_whitespace),
+            "verified bearer is required"
+        );
+        anyhow::ensure!(
+            !org_id.trim().is_empty() && org_id == org_id.trim(),
+            "org_id is required"
+        );
+
+        let mut request = tonic::Request::new(self.build_request(org_id, prompt, zdr));
+        request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {bearer}"))?,
+        );
+        Ok(request)
+    }
+
+    async fn infer(&self, org_id: &str, prompt: &str, zdr: bool) -> anyhow::Result<String> {
+        let bearer = self.token_client.mint(org_id).await?;
+        let request = self.build_authenticated_request(bearer.as_str(), org_id, prompt, zdr)?;
         let mut client = self.client.clone();
         let resp = tokio::time::timeout(self.timeout, client.infer(request))
             .await
@@ -275,7 +315,11 @@ mod tests {
             model_plane_extraction_model: "gpt-4o".to_string(),
             model_plane_extraction_provider: "azure_openai".to_string(),
             model_plane_extraction_timeout_ms: 60_000,
-            internal_api_key: None,
+            model_plane_inference_token_url:
+                "http://auth-core:3011/api/inference-core/internal-token".to_string(),
+            model_plane_inference_token_issuer: "http://auth-core:3011/api/convex-auth".to_string(),
+            model_plane_inference_service_id: "graph-index".to_string(),
+            model_plane_inference_service_api_key: "isolated-test-service-credential".to_string(),
             azure_openai_endpoint: String::new(),
             azure_openai_api_key: String::new(),
             azure_openai_extraction_deployment: "gpt-4o".to_string(),
@@ -294,6 +338,17 @@ mod tests {
         assert_eq!(extractor.provider_name(), "model_plane");
     }
 
+    #[tokio::test]
+    async fn model_plane_requires_service_principal_credential() {
+        let mut config = test_config("model_plane");
+        config.model_plane_inference_service_api_key.clear();
+        let error = match GraphExtractor::new(&config) {
+            Ok(_) => panic!("model-plane startup must fail closed without a credential"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("SERVICE_API_KEY"));
+    }
+
     #[test]
     fn azure_backend_requires_endpoint() {
         let err = match GraphExtractor::new(&test_config("azure_openai")) {
@@ -304,6 +359,19 @@ mod tests {
             err.to_string().contains("AZURE_OPENAI_ENDPOINT"),
             "unexpected: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn azure_backend_rejects_zdr_before_network_egress() {
+        let mut config = test_config("azure_openai");
+        config.azure_openai_endpoint = "http://127.0.0.1:1/unreachable".to_string();
+        config.azure_openai_api_key = "isolated-test-key".to_string();
+        let extractor = GraphExtractor::new(&config).expect("Azure extractor");
+        let error = extractor
+            .extract("restricted text", "org-9", true)
+            .await
+            .expect_err("ZDR must fail before a retaining provider call");
+        assert!(error.to_string().contains("must not egress"));
     }
 
     #[test]
@@ -320,7 +388,7 @@ mod tests {
             panic!("expected model-plane backend");
         };
         let prompt = build_prompt(20, "some chunk text");
-        let req = inner.build_request("org-9", &prompt);
+        let req = inner.build_request("org-9", &prompt, false);
         assert_eq!(req.org_id, "org-9");
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.provider_hint, "azure_openai");
@@ -329,6 +397,60 @@ mod tests {
         assert_eq!(req.messages[1].role, "user");
         assert!(req.messages[1].content.contains("some chunk text"));
         assert!(req.messages[1].content.contains("Only return valid JSON"));
+    }
+
+    #[tokio::test]
+    async fn model_plane_authenticated_request_uses_bearer_exact_org_and_zdr_without_shared_key() {
+        let extractor = GraphExtractor::new(&test_config("model_plane")).unwrap();
+        let Backend::ModelPlane(inner) = &extractor.backend else {
+            panic!("expected model-plane backend");
+        };
+        let prompt = build_prompt(20, "isolated test text");
+        let request = inner
+            .build_authenticated_request("header.payload.signature", "org-9", &prompt, true)
+            .expect("authenticated request");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer header.payload.signature")
+        );
+        assert!(request.metadata().get("x-api-key").is_none());
+        assert_eq!(request.get_ref().org_id, "org-9");
+        assert!(
+            request.get_ref().zdr,
+            "restrictive ZDR posture must survive wrapping"
+        );
+
+        let non_zdr = inner
+            .build_authenticated_request("header.payload.signature", "org-9", &prompt, false)
+            .expect("authenticated request");
+        assert!(
+            !non_zdr.get_ref().zdr,
+            "caller ZDR posture must not be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_plane_authenticated_request_fails_closed_without_bearer_or_tenant() {
+        let extractor = GraphExtractor::new(&test_config("model_plane")).unwrap();
+        let Backend::ModelPlane(inner) = &extractor.backend else {
+            panic!("expected model-plane backend");
+        };
+        let prompt = build_prompt(20, "isolated test text");
+
+        for bearer in ["", "  ", "header payload"] {
+            let error = inner
+                .build_authenticated_request(bearer, "org-9", &prompt, false)
+                .expect_err("malformed bearer must fail closed");
+            assert!(error.to_string().contains("bearer"));
+        }
+        let error = inner
+            .build_authenticated_request("header.payload.signature", "", &prompt, false)
+            .expect_err("missing tenant must fail closed");
+        assert!(error.to_string().contains("org_id"));
     }
 
     #[test]

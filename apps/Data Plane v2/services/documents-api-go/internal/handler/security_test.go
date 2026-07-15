@@ -64,6 +64,39 @@ func TestRejectPersistentZDRContent(t *testing.T) {
 	}
 }
 
+func TestPersistentZDRReasonIsMonotonic(t *testing.T) {
+	restrictive := &authctx.Claims{
+		UserID: "verified-user", PrincipalType: "user", OrgID: "org-a",
+		ZDR: true, ZDRPresent: true, Verified: true,
+	}
+	durable := &authctx.Claims{
+		UserID: "verified-user", PrincipalType: "user", OrgID: "org-a",
+		ZDR: false, ZDRPresent: true, Verified: true,
+	}
+	missingPosture := &authctx.Claims{Verified: true}
+	ordinary := &model.CreateDocumentInput{Content: "durable"}
+	bodyRestricted := &model.CreateDocumentInput{
+		Content:      "must remain ephemeral",
+		IngestPolicy: &model.IngestPolicy{ZDRMode: "on"},
+	}
+
+	if got := persistentZDRReason(restrictive, ordinary); got != "verified token zdr=true forbids durable document persistence" {
+		t.Fatalf("signed restrictive posture reason = %q", got)
+	}
+	if got := persistentZDRReason(durable, bodyRestricted); got != "ingest_policy.zdr_mode=on or ephemeral_only=true forbids durable document persistence" {
+		t.Fatalf("body restrictive posture reason = %q", got)
+	}
+	if got := persistentZDRReason(durable, ordinary); got != "" {
+		t.Fatalf("non-restrictive request was rejected: %q", got)
+	}
+	if got := persistentZDRReason(nil, ordinary); got != "verified retention posture is required for durable document persistence" {
+		t.Fatalf("missing verified posture did not fail closed: %q", got)
+	}
+	if got := persistentZDRReason(missingPosture, ordinary); got != "verified retention posture is required for durable document persistence" {
+		t.Fatalf("missing signed boolean posture did not fail closed: %q", got)
+	}
+}
+
 func TestPinDocumentOwnerRejectsCallerSelectedIdentity(t *testing.T) {
 	input := model.CreateDocumentInput{OwnerID: "another-user"}
 	if !pinDocumentOwner(&input, "verified-user") {

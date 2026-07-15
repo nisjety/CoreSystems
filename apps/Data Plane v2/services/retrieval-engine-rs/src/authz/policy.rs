@@ -93,6 +93,10 @@ impl HttpPolicyClient {
     const REQUIRED_SCOPE: &'static str = "data:authorization:decide";
     const TOKEN_REASON: &'static str = "authorize retrieval request";
     const MAX_TOKEN_TTL_SECONDS: i64 = 300;
+    const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
+    const DECISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+    const TOKEN_REQUEST_ATTEMPTS: usize = 2;
+    const TOKEN_RETRY_DELAY: Duration = Duration::from_millis(150);
 
     pub fn new(
         token_url: impl Into<String>,
@@ -117,7 +121,10 @@ impl HttpPolicyClient {
         cache_ttl: Duration,
     ) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
+            // A policy token waits for Auth Core's durable audit PubAck. Keep
+            // this budget above the broker client's five-second deadline;
+            // decision calls use their own shorter per-request timeout.
+            .timeout(Self::TOKEN_REQUEST_TIMEOUT)
             // Never forward the service credential or short-lived bearer to a
             // redirected host. Control routes are configured as exact URLs.
             .redirect(reqwest::redirect::Policy::none())
@@ -151,25 +158,7 @@ impl HttpPolicyClient {
             return Err(());
         }
 
-        let response = self
-            .http
-            .post(&self.token_url)
-            .header("x-service-id", &self.service_id)
-            .header("x-service-api-key", &self.service_api_key)
-            .json(&serde_json::json!({
-                "orgId": org_id,
-                "scopes": [Self::REQUIRED_SCOPE],
-                "reason": Self::TOKEN_REASON,
-            }))
-            .send()
-            .await
-            .map_err(|error| {
-                tracing::warn!(error = %error, "Control policy token endpoint unavailable");
-            })?;
-        if !response.status().is_success() {
-            tracing::warn!(status = %response.status(), "Control policy token issuance failed");
-            return Err(());
-        }
+        let response = self.request_token(org_id).await?;
 
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -264,6 +253,55 @@ impl HttpPolicyClient {
         Ok(bundle.token)
     }
 
+    async fn request_token(&self, org_id: &str) -> Result<reqwest::Response, ()> {
+        for attempt in 1..=Self::TOKEN_REQUEST_ATTEMPTS {
+            let result = self
+                .http
+                .post(&self.token_url)
+                .header("x-service-id", &self.service_id)
+                .header("x-service-api-key", &self.service_api_key)
+                .json(&serde_json::json!({
+                    "orgId": org_id,
+                    "scopes": [Self::REQUIRED_SCOPE],
+                    "reason": Self::TOKEN_REASON,
+                }))
+                .send()
+                .await;
+
+            match result {
+                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response)
+                    if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                        && attempt < Self::TOKEN_REQUEST_ATTEMPTS =>
+                {
+                    tracing::warn!(
+                        attempt,
+                        "Control policy audit dependency unavailable; retrying token issuance"
+                    );
+                }
+                Ok(response) => {
+                    tracing::warn!(status = %response.status(), attempt, "Control policy token issuance failed");
+                    return Err(());
+                }
+                Err(error)
+                    if (error.is_timeout() || error.is_connect())
+                        && attempt < Self::TOKEN_REQUEST_ATTEMPTS =>
+                {
+                    tracing::warn!(
+                        attempt,
+                        "Control policy token transport unavailable; retrying token issuance"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, attempt, "Control policy token endpoint unavailable");
+                    return Err(());
+                }
+            }
+            tokio::time::sleep(Self::TOKEN_RETRY_DELAY).await;
+        }
+        Err(())
+    }
+
     async fn fetch_decision(&self, user_id: &str, org_id: &str) -> Result<PolicyDecision, ()> {
         if self.decision_url.trim().is_empty()
             || user_id.trim().is_empty()
@@ -284,6 +322,7 @@ impl HttpPolicyClient {
                 "orgId": org_id,
                 "action": "data.read",
             }))
+            .timeout(Self::DECISION_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| {
@@ -406,6 +445,8 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum TokenProblem {
         None,
+        UnavailableOnce,
+        AlwaysUnavailable,
         MalformedResponse,
         WrongAudience,
         MissingScope,
@@ -473,7 +514,7 @@ mod tests {
         headers: HeaderMap,
         Json(body): Json<serde_json::Value>,
     ) -> (StatusCode, Json<serde_json::Value>) {
-        state.token_requests.fetch_add(1, Ordering::SeqCst);
+        let attempt = state.token_requests.fetch_add(1, Ordering::SeqCst);
         state
             .recorded_tokens
             .lock()
@@ -482,6 +523,15 @@ mod tests {
                 headers,
                 body: body.clone(),
             });
+
+        if matches!(state.token_problem, TokenProblem::AlwaysUnavailable)
+            || (matches!(state.token_problem, TokenProblem::UnavailableOnce) && attempt == 0)
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "audit transport unavailable"})),
+            );
+        }
 
         if matches!(state.token_problem, TokenProblem::MalformedResponse) {
             return (StatusCode::OK, Json(json!({"audience": "control-policy"})));
@@ -723,6 +773,38 @@ mod tests {
             malformed_decision.decision_requests.load(Ordering::SeqCst),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn transient_audit_unavailability_is_retried_before_failing_closed() {
+        let (token_url, decision_url, state) =
+            start_policy_server(TokenProblem::UnavailableOnce, 1).await;
+
+        let decision = client(token_url, decision_url)
+            .resolve("user-1", "org-a")
+            .await;
+
+        assert!(decision.is_member);
+        assert_eq!(state.token_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(state.decision_requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_retry_exhaustion_is_bounded_and_fails_closed() {
+        let (token_url, decision_url, state) =
+            start_policy_server(TokenProblem::AlwaysUnavailable, 1).await;
+
+        let decision = tokio::time::timeout(
+            Duration::from_secs(1),
+            client(token_url, decision_url).resolve("user-1", "org-a"),
+        )
+        .await
+        .expect("two immediate 503 attempts stay within the retry ceiling");
+
+        assert!(!decision.is_member);
+        assert_eq!(decision.cause, "denied:control_plane_unavailable");
+        assert_eq!(state.token_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(state.decision_requests.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

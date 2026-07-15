@@ -20,14 +20,14 @@ As of 2026-07-13 this procedure has **not** been executed against the live proje
 
 1. Record the Convex backend/function/subscriber revisions and immutable image IDs.
 2. Back up the Convex volume and prove the backup can be opened in an isolated restore test.
-3. Confirm the Control membership endpoint returns only the selected tenant and defines active status/role semantics.
-4. Load `CONTROL_PLANE_INTERNAL_KEY` and `CONVEX_RECONCILIATION_KEY` from the approved secret store without printing them.
+3. Confirm Auth Core's canonical membership endpoint returns only the selected tenant and defines active status/role semantics.
+4. Load `APPLICATION_RECONCILER_AUTH_TOKEN` and `CONVEX_RECONCILIATION_KEY` from the approved secret store without printing them. The Auth credential must be dedicated to the `application-reconciler` read-only principal and must not reuse a generic internal key.
 5. Set the two internal URLs from the operator network:
 
 ```bash
-export CONTROL_PLANE_ORG_CORE_URL='http://org-core:8080'
+export CONTROL_PLANE_AUTH_CORE_URL='http://auth-core:3011'
 export CONVEX_HTTP_ACTIONS_URL='http://convex-backend:3211'
-test -n "$CONTROL_PLANE_INTERNAL_KEY"
+test -n "$APPLICATION_RECONCILER_AUTH_TOKEN"
 test -n "$CONVEX_RECONCILIATION_KEY"
 ```
 

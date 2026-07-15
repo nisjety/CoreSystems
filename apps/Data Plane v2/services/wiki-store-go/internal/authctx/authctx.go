@@ -36,6 +36,7 @@ type Claims struct {
 	PrincipalType string   `json:"principal_type,omitempty"`
 	Email         string   `json:"email,omitempty"`
 	Scopes        []string `json:"scopes,omitempty"`
+	ZDR           *bool    `json:"zdr"`
 	Verified      bool     `json:"-"`
 	jwt.RegisteredClaims
 }
@@ -51,6 +52,13 @@ func (c *Claims) PrincipalID() string {
 }
 
 func (c *Claims) IsService() bool { return c != nil && c.ServiceID != "" }
+
+// RestrictiveZDR reports the signed retention posture. Verify rejects tokens
+// where the claim is absent or is not a JSON boolean, so callers never infer a
+// durable posture from a missing claim.
+func (c *Claims) RestrictiveZDR() bool {
+	return c != nil && c.ZDR != nil && *c.ZDR
+}
 
 func (c *Claims) hasScope(required string) bool {
 	for _, scope := range c.Scopes {
@@ -166,6 +174,9 @@ func (v *Verifier) Verify(token string) (*Claims, error) {
 	if claims.IssuedAt == nil || claims.NotBefore == nil || claims.ExpiresAt == nil {
 		return nil, errors.New("authctx: token requires iat, nbf, and exp")
 	}
+	if claims.ZDR == nil {
+		return nil, errors.New("authctx: token requires boolean zdr")
+	}
 	claims.OrgID = strings.TrimSpace(claims.OrgID)
 	claims.UserID = strings.TrimSpace(claims.UserID)
 	claims.ServiceID = strings.TrimSpace(claims.ServiceID)
@@ -210,6 +221,24 @@ func RequireScope(required string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequireDurableWritesAllowed rejects every wiki mutation when the verified
+// Control Plane token carries the restrictive ZDR posture. The guard belongs
+// at the HTTP boundary so repository and outbox code cannot be reached.
+func RequireDurableWritesAllowed(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := FromContext(r.Context())
+		if !ok || claims.ZDR == nil {
+			writeAuthError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+		if claims.RestrictiveZDR() {
+			writeAuthError(w, http.StatusForbidden, "zdr_persistence_forbidden", "verified token zdr=true forbids durable wiki persistence")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (v *Verifier) keyForToken(token *jwt.Token) (any, error) {
@@ -275,8 +304,12 @@ func UnaryServerInterceptor(verifier TokenVerifier) grpc.UnaryServerInterceptor 
 		if requested := strings.TrimSpace(tenantRequest.GetOrgId()); requested != "" && requested != claims.OrgID {
 			return nil, status.Error(codes.PermissionDenied, "request tenant does not match verified identity")
 		}
-		if !claims.hasScope(grpcRequiredScope(info.FullMethod)) {
+		requiredScope := grpcRequiredScope(info.FullMethod)
+		if !claims.hasScope(requiredScope) {
 			return nil, status.Error(codes.PermissionDenied, "principal lacks required scope")
+		}
+		if requiredScope != "wiki.read" && (claims.ZDR == nil || claims.RestrictiveZDR()) {
+			return nil, status.Error(codes.PermissionDenied, "verified token zdr=true forbids durable wiki persistence")
 		}
 		return handler(context.WithValue(ctx, contextKey{}, claims), req)
 	}
@@ -302,7 +335,7 @@ func verifyBearer(verifier TokenVerifier, values []string) (*Claims, error) {
 		return nil, errors.New("authentication required")
 	}
 	claims, err := verifier.Verify(token)
-	if err != nil || claims == nil || !claims.Verified {
+	if err != nil || claims == nil || !claims.Verified || claims.ZDR == nil {
 		return nil, errors.New("invalid credentials")
 	}
 	return claims, nil

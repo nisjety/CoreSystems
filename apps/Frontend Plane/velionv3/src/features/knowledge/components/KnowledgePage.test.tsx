@@ -379,13 +379,29 @@ describe('KnowledgePage', () => {
     expect(screen.getByRole('heading', { name: /^integrations$/i, level: 2 })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /^files$/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /tracked web sources/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /data plane status/i })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /data plane status/i })).toBeNull()
     expect(screen.getByRole('heading', { name: /support knowledge/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /microsoft 365/i })).toBeTruthy()
     expect(screen.getByText(/docs\.velion\.ai/i)).toBeTruthy()
-    expect(screen.getAllByText(/quickwit-with-postgres-fallback/i).length).toBeGreaterThan(0)
-    expect(screen.getByText(/context mode/i)).toBeTruthy()
     expect(screen.getAllByText(/shipping faq/i)[0]).toBeTruthy()
+  })
+
+  it('exposes the Docs toolbar and switches the overview layout accessibly', async () => {
+    renderKnowledgePage()
+
+    await screen.findByRole('heading', { name: /^folders$/i })
+
+    expect(screen.getByRole('textbox', { name: /search knowledge base/i })).toBeTruthy()
+    const gridView = screen.getByRole('button', { name: /grid view/i })
+    const listView = screen.getByRole('button', { name: /list view/i })
+    expect(gridView.getAttribute('aria-pressed')).toBe('true')
+    expect(listView.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(listView)
+
+    expect(listView.getAttribute('aria-pressed')).toBe('true')
+    expect(gridView.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByRole('button', { name: /filter knowledge/i })).toBeTruthy()
   })
 
   it('switches from overview to graph and chunks using live data', async () => {
@@ -401,6 +417,19 @@ describe('KnowledgePage', () => {
 
     expect(screen.getByRole('heading', { name: /^sources$/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /returns policy/i })).toBeTruthy()
+  })
+
+  it('opens a navbar knowledge result on its exact chunk-backed source', async () => {
+    window.history.pushState(null, '', '/knowledge?source=doc-returns')
+    render(() => (
+      <Router root={(props) => <>{props.children}</>}>
+        <Route path="/*all" component={KnowledgePage} />
+      </Router>
+    ))
+
+    const source = await screen.findByRole('button', { name: /returns policy/i })
+    expect(source.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('heading', { name: /returns policy/i, level: 2 })).toBeTruthy()
   })
 
   it('renders the Operating Map tab and generates a reviewable proposal', async () => {
@@ -536,7 +565,7 @@ describe('KnowledgePage', () => {
     expect(screen.queryAllByText(/shipping faq/i)).toHaveLength(0)
   })
 
-  it('renders safely when diagnostics are missing from the payload', async () => {
+  it('keeps the overview usable when diagnostics are missing from the payload', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => makeFetchResponse({
       data: {
         ...knowledgePayload.data,
@@ -546,9 +575,9 @@ describe('KnowledgePage', () => {
 
     renderKnowledgePage()
 
-    expect(await screen.findByRole('heading', { name: /data plane status/i })).toBeTruthy()
-    expect(screen.getByText(/sparse backend: unknown/i)).toBeTruthy()
-    expect(screen.getAllByText(/no live diagnostics were returned for this group yet/i).length).toBeGreaterThan(0)
+    expect(await screen.findByRole('heading', { name: /^folders$/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /^files$/i })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /data plane status/i })).toBeNull()
   })
 
   it('starts a website crawl from the add source modal', async () => {

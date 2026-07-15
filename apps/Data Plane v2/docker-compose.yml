@@ -288,16 +288,18 @@ services:
       # NOT direct Azure: no-independent-embeddings-outside-Model-Plane, and the
       # direct-Azure path fails closed on ZDR/restricted content (it is a
       # retaining provider), so it cannot embed restricted docs at all.
-      # NOTE: a prior gRPC-hop error (dpv2→inference-core returning a status with
-      # no server log) drove an azure_openai fallback here; that hop MUST be
-      # re-smoke-tested live (one embedding round-trip returning a 3072-dim
-      # vector) after this flip. Operators can override EMBEDDING_PROVIDER=
-      # azure_openai if the hop regresses (same text-embedding-3-large@3072, so
-      # vectors stay index-compatible either way).
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
+      # Reuse the retrieval service's deployment credential only at Auth Core
+      # to mint an org-bound aud=inference-core bearer with exact
+      # inference:invoke scope. The bearer—not this shared credential—is sent
+      # to inference-core. Missing/invalid issuance fails before gRPC.
+      MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
+      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      MODEL_PLANE_INFERENCE_SERVICE_ID: ${CONTROL_POLICY_SERVICE_ID:-retrieval-engine}
+      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:?CONTROL_POLICY_SERVICE_API_KEY is required}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
@@ -356,6 +358,10 @@ services:
       JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       JWT_REQUIRED_AUDIENCE: ${JWT_REQUIRED_AUDIENCE:-data-plane}
       JWT_REQUIRED_ISSUER: ${JWT_REQUIRED_ISSUER:-http://localhost:3011/api/convex-auth}
+      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
+      RETRIEVAL_EVENT_PRIVATE_KEY_PATH: /run/event-keys/retrieval-events.pem
+      EVENT_AUTH_AUDIENCE: dataplane-events
       # Tower middleware tuning (v2.1)
       GRPC_TIMEOUT_SECS: ${GRPC_TIMEOUT_SECS:-30}
       GRPC_MAX_CONCURRENT: ${GRPC_MAX_CONCURRENT:-256}
@@ -371,6 +377,8 @@ services:
     volumes:
       # auth-core's PUBLIC JWT key (read-only) for verified-JWT viewer binding.
       - ../Control Plane/auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:?DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/documents-events.pub:ro
+      - ${RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH:?RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH is required}:/run/event-keys/retrieval-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -536,6 +544,7 @@ services:
       - "9203"
       - "50053"
     environment:
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
       NATS_URL: nats://data-nats:4222
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
@@ -549,7 +558,12 @@ services:
       MODEL_PLANE_EXTRACTION_MODEL: ${MODEL_PLANE_EXTRACTION_MODEL:-gpt-4o-mini}
       MODEL_PLANE_EXTRACTION_PROVIDER: ${MODEL_PLANE_EXTRACTION_PROVIDER:-azure_openai}
       MODEL_PLANE_EXTRACTION_TIMEOUT_MS: ${MODEL_PLANE_EXTRACTION_TIMEOUT_MS:-60000}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      # Auth Core audited service-principal hop to inference-core. The
+      # credential is deployment-owned; never fall back to a shared x-api-key.
+      MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
+      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_INFERENCE_SERVICE_ID:-graph-index}
+      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_INFERENCE_SERVICE_API_KEY:?MODEL_PLANE_INFERENCE_SERVICE_API_KEY is required}
       JWT_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_REQUIRED_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
       JWT_REQUIRED_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
@@ -606,10 +620,20 @@ services:
       AUTH_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
       AUTH_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
+      INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
+      EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
+      WIKI_EVENT_PUBLIC_KEY_PATH: /run/event-keys/wiki-events.pub
+      EVENT_AUTH_AUDIENCE: dataplane-events
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-warn,quickwit_adapter=info}
     volumes:
       - ../Control Plane/auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:?DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/documents-events.pub:ro
+      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:?INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/index-events.pub:ro
+      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
+      - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:?WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/wiki-events.pub:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -649,8 +673,10 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
       NATS_URL: nats://data-nats:4222
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
-      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-nats://control-shared-nats:4222}
+      NATS_SHARED_USER: documents-api-gdpr
+      NATS_SHARED_PASSWORD: ${DOCUMENTS_GDPR_NATS_PASSWORD:?DOCUMENTS_GDPR_NATS_PASSWORD is required}
+      GDPR_DURABLE_CONSUMER_REQUIRED: "1"
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}
       # Per-user ownership: filter-at-source needs the viewer's granted doc-set
       # from user-core's resource_grants facade. HTTP/facade port is 3012, NOT 8080.
@@ -749,6 +775,12 @@ services:
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
+      SIGNED_COST_EVENTS_ENABLED: "1"
+      EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
+      RETRIEVAL_EVENT_PUBLIC_KEY_PATH: /run/event-keys/retrieval-events.pub
+    volumes:
+      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
+      - ${RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH:?RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/retrieval-events.pub:ro
     networks:
       - dpv2-net
       - inter-plane-bus

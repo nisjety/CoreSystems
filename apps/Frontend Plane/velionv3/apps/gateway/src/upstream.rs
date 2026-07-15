@@ -4,8 +4,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::{
-    body::Body,
-    http::{header::SET_COOKIE, HeaderMap, StatusCode},
+    body::{Body, Bytes},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION, SET_COOKIE},
+        HeaderMap, StatusCode,
+    },
     response::{IntoResponse, Response},
     Json,
 };
@@ -326,15 +329,22 @@ pub(crate) async fn proxy_json(
     actor: Option<&ActionActor>,
     content_type: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
+    let actor_present = actor.is_some();
     let actor = actor_with_defaults(actor);
     let is_user_core = same_upstream_origin(url, &state.user_core_url);
+    let control_audience = control_service_audience(
+        url,
+        &state.org_core_url,
+        &state.billing_core_url,
+        &state.audit_core_url,
+    );
+    let body_bytes = body
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
     let mut headers = if is_user_core {
-        let body_bytes = body
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .unwrap_or_default()
-            .unwrap_or_default();
         user_core_delegation_headers(
             &state.user_core_service_token,
             &method,
@@ -345,6 +355,33 @@ pub(crate) async fn proxy_json(
             "",
             Utc::now(),
         )
+    } else if let Some(audience) = control_audience {
+        let service_token = match audience {
+            "org-core" => &state.org_core_service_token,
+            "billing-core" => &state.billing_core_service_token,
+            "audit-core" => &state.audit_core_service_token,
+            _ => unreachable!("control audience is allow-listed"),
+        };
+        let delegated_org = org_id.map(str::trim).unwrap_or_default();
+        if actor_present && !actor.user_id.trim().is_empty() && !delegated_org.is_empty() {
+            let now = Utc::now();
+            control_service_delegation_headers(
+                service_token,
+                audience,
+                &method,
+                url,
+                &body_bytes,
+                &actor,
+                delegated_org,
+                now,
+                &delegation_nonce(now),
+            )
+        } else {
+            BTreeMap::from([
+                ("x-service-id".to_owned(), "velion-gateway".to_owned()),
+                ("x-service-token".to_owned(), service_token.to_owned()),
+            ])
+        }
     } else {
         BTreeMap::from([
             (
@@ -365,6 +402,57 @@ pub(crate) async fn proxy_json(
     }
     if let Some(org_id) = org_id.filter(|value| !value.trim().is_empty()) {
         headers.insert("x-org-id".to_owned(), org_id.trim().to_owned());
+    }
+
+    proxy_json_with_headers(state, method, url, body, headers, content_type).await
+}
+
+/// Forward an interactive user request with a gateway-minted audience token.
+///
+/// Unlike [`proxy_json`], this deliberately does not attach the shared internal
+/// API key. Data Plane v2 must authorize the verified user claims and scopes in
+/// the bearer token; a shared service credential must never broaden the user's
+/// document visibility.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_user_bearer_json(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    actor: &ActionActor,
+    bearer: &str,
+    content_type: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    let bearer = bearer.trim();
+    if bearer.is_empty() || bearer.chars().any(char::is_whitespace) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "A scoped upstream authorization token could not be minted.",
+            )),
+        );
+    }
+
+    let mut headers = BTreeMap::from([
+        ("authorization".to_owned(), format!("Bearer {bearer}")),
+        ("x-user-id".to_owned(), actor.user_id.trim().to_owned()),
+    ]);
+    if let Some(org_id) = org_id.map(str::trim).filter(|value| !value.is_empty()) {
+        headers.insert("x-org-id".to_owned(), org_id.to_owned());
+    }
+    if !actor.user_email.trim().is_empty() {
+        headers.insert(
+            "x-user-email".to_owned(),
+            actor.user_email.trim().to_owned(),
+        );
+    }
+    if !actor.user_name.trim().is_empty() {
+        headers.insert("x-user-name".to_owned(), actor.user_name.trim().to_owned());
+    }
+    if !actor.user_role.trim().is_empty() {
+        headers.insert("x-user-role".to_owned(), actor.user_role.trim().to_owned());
     }
 
     proxy_json_with_headers(state, method, url, body, headers, content_type).await
@@ -451,6 +539,63 @@ fn service_delegation_headers(
         ("x-user-name".to_owned(), actor.user_name.trim().to_owned()),
         ("x-user-avatar".to_owned(), avatar.trim().to_owned()),
         ("x-delegation-timestamp".to_owned(), timestamp),
+        ("x-delegation-body-sha256".to_owned(), body_digest),
+        ("x-delegation-signature".to_owned(), signature),
+    ]);
+    headers.retain(|_, value| !value.is_empty());
+    headers
+}
+
+#[allow(clippy::too_many_arguments)] // fields intentionally mirror the Go receiver contract
+fn control_service_delegation_headers(
+    service_token: &str,
+    audience: &str,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    actor: &ActionActor,
+    org_id: &str,
+    timestamp: DateTime<Utc>,
+    nonce: &str,
+) -> BTreeMap<String, String> {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let timestamp = timestamp.to_rfc3339_opts(SecondsFormat::Secs, false);
+    let uri = Url::parse(url)
+        .map(|parsed| match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        })
+        .unwrap_or_default();
+    let body_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(body));
+    let canonical = [
+        "v3",
+        "velion-gateway",
+        audience,
+        timestamp.as_str(),
+        nonce,
+        method.as_str(),
+        uri.as_str(),
+        actor.user_id.trim(),
+        org_id.trim(),
+        actor.user_role.trim(),
+        body_digest.as_str(),
+    ]
+    .join("\n");
+    let mut mac = HmacSha256::new_from_slice(service_token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(canonical.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+
+    let mut headers = BTreeMap::from([
+        ("x-service-id".to_owned(), "velion-gateway".to_owned()),
+        ("x-service-token".to_owned(), service_token.to_owned()),
+        ("x-user-id".to_owned(), actor.user_id.trim().to_owned()),
+        ("x-org-id".to_owned(), org_id.trim().to_owned()),
+        ("x-user-role".to_owned(), actor.user_role.trim().to_owned()),
+        ("x-delegation-version".to_owned(), "v3".to_owned()),
+        ("x-delegation-timestamp".to_owned(), timestamp),
+        ("x-delegation-nonce".to_owned(), nonce.to_owned()),
         ("x-delegation-body-sha256".to_owned(), body_digest),
         ("x-delegation-signature".to_owned(), signature),
     ]);
@@ -720,6 +865,23 @@ fn same_upstream_origin(target: &str, configured_base: &str) -> bool {
         && target.port_or_known_default() == base.port_or_known_default()
 }
 
+fn control_service_audience(
+    target: &str,
+    org_core_url: &str,
+    billing_core_url: &str,
+    audit_core_url: &str,
+) -> Option<&'static str> {
+    if same_upstream_origin(target, org_core_url) {
+        Some("org-core")
+    } else if same_upstream_origin(target, billing_core_url) {
+        Some("billing-core")
+    } else if same_upstream_origin(target, audit_core_url) {
+        Some("audit-core")
+    } else {
+        None
+    }
+}
+
 fn session_service_headers(
     service_token: &str,
     method: &Method,
@@ -822,9 +984,12 @@ async fn proxy_json_with_client_and_headers(
                 (status, Json(if body.is_null() { json!({}) } else { body }))
             }
         }
-        Err(request_error) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", request_error.to_string())),
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
         ),
     }
 }
@@ -871,9 +1036,12 @@ async fn proxy_json_bytes_with_client_and_headers(
                 (status, Json(if body.is_null() { json!({}) } else { body }))
             }
         }
-        Err(request_error) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", request_error.to_string())),
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
         ),
     }
 }
@@ -949,12 +1117,154 @@ pub(crate) async fn proxy_auth_with_headers(
             }
             response
         }
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
         )
             .into_response(),
     }
+}
+
+const AUTH_CALLBACK_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+fn auth_callback_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(20))
+            // Provider authorization codes are single-use. Never follow or
+            // retry callback redirects inside the gateway.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("valid auth callback HTTP client")
+    })
+}
+
+/// Forward an opaque OAuth/OIDC/SAML callback to the configured Auth Core only.
+/// The allowlists here are intentionally separate from the JSON auth proxy: a
+/// callback must preserve redirects, form bodies, and every Set-Cookie header,
+/// while never inheriting caller-supplied identity or internal-authority headers.
+pub(crate) async fn proxy_auth_callback(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Bytes>,
+    cookie_header: Option<&str>,
+    content_type: Option<&str>,
+) -> Response {
+    if !same_upstream_origin(url, &state.auth_core_url) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "auth_callback_target_rejected",
+                "Authentication callback target was rejected.",
+            )),
+        )
+            .into_response();
+    }
+
+    let mut request = auth_callback_http_client().request(method, url);
+    if let Some(cookie) = cookie_header.filter(|value| !value.trim().is_empty()) {
+        request = request.header("cookie", cookie.trim());
+    }
+    if let Some(content_type) = content_type.filter(|value| !value.trim().is_empty()) {
+        request = request.header(CONTENT_TYPE, content_type.trim());
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+
+    let upstream = match request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            // reqwest's Display output can contain the full request URL, including
+            // single-use OAuth codes/state. Record only non-sensitive categories.
+            tracing::error!(
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                request = error.is_request(),
+                "auth callback: auth-core unavailable"
+            );
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::envelope::error(
+                    "auth_callback_unavailable",
+                    "Authentication callback service is unavailable.",
+                )),
+            )
+                .into_response();
+        }
+    };
+
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = upstream.headers().clone();
+    if upstream
+        .content_length()
+        .is_some_and(|length| length > AUTH_CALLBACK_MAX_RESPONSE_BYTES as u64)
+    {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "auth_callback_response_too_large",
+                "Authentication callback returned an invalid response.",
+            )),
+        )
+            .into_response();
+    }
+
+    let mut stream = upstream.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "auth_callback_response_invalid",
+                    "Authentication callback returned an invalid response.",
+                )),
+            )
+                .into_response();
+        };
+        if body.len().saturating_add(chunk.len()) > AUTH_CALLBACK_MAX_RESPONSE_BYTES {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "auth_callback_response_too_large",
+                    "Authentication callback returned an invalid response.",
+                )),
+            )
+                .into_response();
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let mut response = Response::builder()
+        .status(status)
+        .body(Body::from(body))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "auth_callback_response_invalid",
+                    "Authentication callback returned an invalid response.",
+                )),
+            )
+                .into_response()
+        });
+    for name in [LOCATION, CONTENT_TYPE, CACHE_CONTROL] {
+        if let Some(value) = headers.get(&name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    for cookie in headers.get_all(SET_COOKIE).iter() {
+        response.headers_mut().append(SET_COOKIE, cookie.clone());
+    }
+    response
 }
 
 /// Normalize the browser origin for Better Auth's CSRF/origin checks.
@@ -1072,9 +1382,12 @@ pub(crate) async fn proxy_bearer_json(
             let b = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
             (status, Json(b))
         }
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
         ),
     }
 }
@@ -1242,15 +1555,15 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
                 loop {
                     tokio::select! {
                         chunk = upstream.next() => match chunk {
-                            Some(Ok(bytes)) => yield Ok(bytes),
-                            Some(Err(err)) => {
-                                yield Err(err);
+                            Some(Ok(bytes)) => yield Ok::<Bytes, std::io::Error>(bytes),
+                            Some(Err(_)) => {
+                                yield Ok::<Bytes, std::io::Error>(sse_transport_error_event());
                                 break;
                             }
                             None => break,
                         },
                         _ = ticker.tick() => {
-                            yield Ok(bytes::Bytes::from_static(b": keep-alive\n\n"));
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keep-alive\n\n"));
                         }
                     }
                 }
@@ -1263,17 +1576,43 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
                 .body(body)
                 .expect("infallible static headers")
         }
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
         )
             .into_response(),
     }
 }
 
+fn sse_transport_error_event() -> Bytes {
+    Bytes::from_static(
+        b"event: error\ndata: {\"error\":{\"code\":\"upstream_unavailable\",\"message\":\"The upstream service is unavailable.\"}}\n\n",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+    use wiremock::{
+        matchers::{header as wm_header, method as wm_method, path as wm_path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    #[test]
+    fn midstream_sse_transport_failure_is_an_opaque_event() {
+        let event = sse_transport_error_event();
+        let text = std::str::from_utf8(&event).expect("static utf8");
+        assert_eq!(
+            text,
+            "event: error\ndata: {\"error\":{\"code\":\"upstream_unavailable\",\"message\":\"The upstream service is unavailable.\"}}\n\n"
+        );
+        assert!(!text.contains("http://"));
+        assert!(!text.contains("https://"));
+    }
     use crate::middleware::AuthenticatedUser;
     use axum::http::{HeaderMap, HeaderValue};
 
@@ -1308,6 +1647,288 @@ mod tests {
         server.abort();
 
         assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    }
+
+    #[tokio::test]
+    async fn json_proxy_preserves_success_and_synthesizes_bounded_failure_envelopes() {
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/json"))
+            .and(wm_header("x-scoped-test", "verified"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "created": true })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/empty-error"))
+            .respond_with(ResponseTemplate::new(502).set_body_raw("bad gateway", "text/plain"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let client = reqwest::Client::new();
+        let headers = BTreeMap::from([
+            ("x-scoped-test".to_owned(), "verified".to_owned()),
+            ("x-empty".to_owned(), "  ".to_owned()),
+        ]);
+        let (status, Json(body)) = proxy_json_with_client_and_headers(
+            &client,
+            Method::POST,
+            &format!("{}/json", upstream.uri()),
+            Some(json!({ "name": "example" })),
+            headers,
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body, json!({ "created": true }));
+
+        let (status, Json(body)) = proxy_json_with_client_and_headers(
+            &client,
+            Method::GET,
+            &format!("{}/empty-error", upstream.uri()),
+            None,
+            BTreeMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body.pointer("/error/code").and_then(Value::as_str),
+            Some("upstream_error")
+        );
+
+        let (status, Json(body)) = proxy_json_with_client_and_headers(
+            &client,
+            Method::GET,
+            "http://127.0.0.1:1/unavailable",
+            None,
+            BTreeMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body.pointer("/error/message").and_then(Value::as_str),
+            Some("The upstream service is unavailable.")
+        );
+    }
+
+    #[tokio::test]
+    async fn byte_proxy_sets_content_type_and_keeps_error_details_opaque() {
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("PUT"))
+            .and(wm_path("/bytes"))
+            .and(wm_header("content-type", "application/octet-stream"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "stored": true })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (status, Json(body)) = proxy_json_bytes_with_client_and_headers(
+            &client,
+            Method::PUT,
+            &format!("{}/bytes", upstream.uri()),
+            Some(b"opaque payload"),
+            BTreeMap::new(),
+            Some("application/octet-stream"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "stored": true }));
+
+        let (status, Json(body)) = proxy_json_bytes_with_client_and_headers(
+            &client,
+            Method::POST,
+            "http://127.0.0.1:1/secret-path",
+            Some(b"secret-body"),
+            BTreeMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!body.to_string().contains("secret"));
+        assert!(!body.to_string().contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn bearer_proxy_forwards_verified_identity_and_fails_closed_on_transport_error() {
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/bearer"))
+            .and(wm_header("authorization", "Bearer scoped-token"))
+            .and(wm_header("x-user-id", "verified-user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "allowed": true })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let state = crate::tests::test_state(false);
+
+        let (status, Json(body)) = proxy_bearer_json(
+            &state,
+            Method::GET,
+            &format!("{}/bearer", upstream.uri()),
+            None,
+            Some("scoped-token"),
+            "verified-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({ "allowed": true }));
+
+        let (status, Json(body)) = proxy_bearer_json(
+            &state,
+            Method::POST,
+            "http://127.0.0.1:1/unavailable",
+            Some(json!({ "secret": true })),
+            None,
+            "verified-user",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body.pointer("/error/code").and_then(Value::as_str),
+            Some("upstream_unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_proxy_strips_body_tokens_and_preserves_http_only_cookie_headers() {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/sign-in"))
+            .and(wm_header("cookie", "better-auth.session=verified"))
+            .and(wm_header("origin", "https://velion.example"))
+            .and(wm_header("x-captcha-response", "captcha-proof"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .append_header("set-cookie", "session=one; HttpOnly; Secure")
+                    .append_header("set-cookie", "csrf=two; HttpOnly; Secure")
+                    .set_body_json(json!({
+                        "token": "top-secret",
+                        "sessionToken": "top-session-secret",
+                        "session": {
+                            "token": "nested-secret",
+                            "sessionToken": "nested-session-secret",
+                            "expiresAt": "2026-07-15T00:00:00Z"
+                        }
+                    })),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+
+        let response = proxy_auth_with_headers(
+            &state,
+            Method::POST,
+            &format!("{}/sign-in", auth.uri()),
+            Some(json!({ "email": "user@example.com" })),
+            Some("better-auth.session=verified"),
+            Some("https://velion.example"),
+            &[("x-captcha-response", " captcha-proof ".to_owned())],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 2);
+        let body: Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("auth body")
+                .to_bytes(),
+        )
+        .unwrap();
+        assert!(body.get("token").is_none());
+        assert!(body.pointer("/session/token").is_none());
+        assert_eq!(
+            body.pointer("/session/expiresAt").and_then(Value::as_str),
+            Some("2026-07-15T00:00:00Z")
+        );
+
+        let unavailable = proxy_auth(
+            &state,
+            Method::GET,
+            "http://127.0.0.1:1/unavailable",
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn auth_callback_is_origin_pinned_bounded_and_redirect_transparent() {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/callback"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "https://velion.example/auth/complete")
+                    .insert_header("content-type", "text/plain")
+                    .append_header("set-cookie", "session=verified; HttpOnly; Secure")
+                    .set_body_string("redirecting"),
+            )
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/large"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
+                b'x';
+                AUTH_CALLBACK_MAX_RESPONSE_BYTES
+                    + 1
+            ]))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+
+        let rejected = proxy_auth_callback(
+            &state,
+            Method::GET,
+            "https://attacker.example/callback",
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_GATEWAY);
+
+        let response = proxy_auth_callback(
+            &state,
+            Method::POST,
+            &format!("{}/callback", auth.uri()),
+            Some(Bytes::from_static(b"code=opaque&state=opaque")),
+            Some("better-auth.session=verified"),
+            Some("application/x-www-form-urlencoded"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("https://velion.example/auth/complete")
+        );
+        assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 1);
+
+        let oversized = proxy_auth_callback(
+            &state,
+            Method::GET,
+            &format!("{}/large", auth.uri()),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(oversized.status(), StatusCode::BAD_GATEWAY);
     }
 
     fn user_with_active_org(active: Option<&str>) -> AuthenticatedUser {
@@ -1568,6 +2189,61 @@ mod tests {
     }
 
     #[test]
+    fn control_service_v3_delegation_binds_audience_role_query_body_and_nonce() {
+        use chrono::{TimeZone, Utc};
+
+        let actor = ActionActor {
+            user_id: "user-1".to_owned(),
+            user_email: "verified@example.com".to_owned(),
+            user_name: "Verified User".to_owned(),
+            user_role: "admin".to_owned(),
+        };
+        let body = br#"{"plan":"pro"}"#;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 14, 20, 0, 0)
+            .single()
+            .expect("fixed timestamp");
+
+        let headers = control_service_delegation_headers(
+            "0123456789abcdef0123456789abcdef",
+            "billing-core",
+            &Method::POST,
+            "http://billing-core:3014/api/v1/billing/orgs/org-1/checkout-session?mode=embed",
+            body,
+            &actor,
+            "org-1",
+            timestamp,
+            "fixed-nonce-1234567890",
+        );
+
+        assert_eq!(
+            headers.get("x-service-id").map(String::as_str),
+            Some("velion-gateway")
+        );
+        assert_eq!(
+            headers.get("x-service-token").map(String::as_str),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            headers.get("x-delegation-version").map(String::as_str),
+            Some("v3")
+        );
+        assert_eq!(
+            headers.get("x-user-role").map(String::as_str),
+            Some("admin")
+        );
+        assert_eq!(
+            headers.get("x-delegation-body-sha256").map(String::as_str),
+            Some("ApxA0uXOJFNQhvraZ-s-yFofgWfVqZ6reRfsBXYSbpk")
+        );
+        assert_eq!(
+            headers.get("x-delegation-signature").map(String::as_str),
+            Some("mqDXNviLBrxUOmDmUzsgWGwNtot7jpD6YawTAcsawZY")
+        );
+        assert!(!headers.contains_key("x-internal-api-key"));
+    }
+
+    #[test]
     fn notification_delegation_binds_scope_role_nonce_and_body_without_shared_key() {
         use chrono::{TimeZone, Utc};
 
@@ -1699,6 +2375,46 @@ mod tests {
             "http://user-core.attacker:3012/api/v1/users/me",
             "http://user-core:3012"
         ));
+    }
+
+    #[test]
+    fn control_service_audience_is_selected_only_for_exact_configured_origin() {
+        assert_eq!(
+            control_service_audience(
+                "http://org-core:8080/orgs/org-1",
+                "http://org-core:8080",
+                "http://billing-core:3014",
+                "http://audit-core:8187",
+            ),
+            Some("org-core")
+        );
+        assert_eq!(
+            control_service_audience(
+                "http://billing-core:3014/api/v1/billing/orgs/org-1/account",
+                "http://org-core:8080",
+                "http://billing-core:3014",
+                "http://audit-core:8187",
+            ),
+            Some("billing-core")
+        );
+        assert_eq!(
+            control_service_audience(
+                "http://audit-core:8187/v1/audit?org_id=org-1",
+                "http://org-core:8080",
+                "http://billing-core:3014",
+                "http://audit-core:8187",
+            ),
+            Some("audit-core")
+        );
+        assert_eq!(
+            control_service_audience(
+                "http://org-core.attacker:8080/orgs/org-1",
+                "http://org-core:8080",
+                "http://billing-core:3014",
+                "http://audit-core:8187",
+            ),
+            None
+        );
     }
 
     #[test]

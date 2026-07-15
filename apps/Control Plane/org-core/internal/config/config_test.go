@@ -14,7 +14,7 @@ func clearEnv(t *testing.T) {
 	vars := []string{
 		"DATABASE_URL", "HTTP_PORT", "GRPC_PORT", "METRICS_PORT",
 		"NATS_URL", "NATS_TOKEN", "NATS_AUTH_TOKEN",
-		"VELION_NATS_URL", "VELION_NATS_TOKEN",
+		"VELION_NATS_URL",
 		"NATS_SHARED_URL", "NATS_SHARED_TOKEN",
 		"AUTH_SERVICE_URL", "USER_SERVICE_URL",
 		"SERVICE_NAME", "DB_SSLMODE",
@@ -169,13 +169,12 @@ func TestLoad_NATSTokenDirectOverride(t *testing.T) {
 	}
 }
 
-func TestLoad_VelionSharedNATSOverridesLegacySharedVars(t *testing.T) {
+func TestLoad_VelionSharedURLRetainsExplicitTokenFallbackVariable(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	t.Setenv("NATS_SHARED_URL", "nats://legacy:4222")
-	t.Setenv("NATS_SHARED_TOKEN", "legacy-token")
+	t.Setenv("NATS_SHARED_TOKEN", "explicit-fallback-token")
 	t.Setenv("VELION_NATS_URL", "nats://velion-nats:4222")
-	t.Setenv("VELION_NATS_TOKEN", "velion-token")
 
 	cfg, err := Load()
 	if err != nil {
@@ -184,8 +183,8 @@ func TestLoad_VelionSharedNATSOverridesLegacySharedVars(t *testing.T) {
 	if cfg.NATSSharedURL != "nats://velion-nats:4222" {
 		t.Errorf("NATSSharedURL = %q, want %q", cfg.NATSSharedURL, "nats://velion-nats:4222")
 	}
-	if cfg.NATSSharedToken != "velion-token" {
-		t.Errorf("NATSSharedToken = %q, want %q", cfg.NATSSharedToken, "velion-token")
+	if cfg.NATSSharedToken != "explicit-fallback-token" {
+		t.Errorf("NATSSharedToken = %q, want explicit fallback token", cfg.NATSSharedToken)
 	}
 }
 

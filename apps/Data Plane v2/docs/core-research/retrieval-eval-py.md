@@ -5,6 +5,12 @@ Updated: 2026-07-10 (live re-verification pass; supersedes the 2026-06-07 snapsh
 
 Scope: `apps/Data Plane v2/services/retrieval-eval-py`
 
+## 2026-07-15 final checkpoint
+
+No state change: this path remains absent from runtime and did not participate in
+the final isolated matrices. `data-quality-go` is still the only active quality
+surface. No implementation, build, deployment, or coverage claim is made here.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented/tested:** nothing. This path has no tracked source, manifest, test,

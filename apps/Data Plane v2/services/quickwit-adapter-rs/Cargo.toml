@@ -26,6 +26,7 @@ blake3.workspace = true
 envy = "0.4"
 async-nats.workspace = true
 nats-connection-rs = { path = "../nats-connection-rs" }
+event-envelope-rs = { path = "../event-envelope-rs" }
 
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }

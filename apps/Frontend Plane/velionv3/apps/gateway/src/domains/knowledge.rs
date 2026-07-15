@@ -6,7 +6,7 @@ mod operating_map;
 mod products;
 mod quarry;
 mod retrieval;
-mod shared;
+pub(crate) mod shared;
 mod sync;
 mod wiki;
 mod workspace;

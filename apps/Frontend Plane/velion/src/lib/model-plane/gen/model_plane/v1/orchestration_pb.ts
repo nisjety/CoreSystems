@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/orchestration.proto.
  */
 export const file_model_plane_v1_orchestration: GenFile = /*@__PURE__*/
-  fileDesc("CiJtb2RlbF9wbGFuZS92MS9vcmNoZXN0cmF0aW9uLnByb3RvEg5tb2RlbF9wbGFuZS52MSLGAQoIUGxhblN0ZXASCgoCaWQYASABKAkSDQoFdGl0bGUYAiABKAkSEQoJb3BlcmF0aW9uGAMgASgJEiwKBXN0YXRlGAQgASgOMh0ubW9kZWxfcGxhbmUudjEuUGxhblN0ZXBTdGF0ZRIuCgpjcmVhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCLIAgoEUGxhbhIKCgJpZBgBIAEoCRIOCgZydW5faWQYAiABKAkSEQoJdGhyZWFkX2lkGAMgASgJEg4KBmF1dGhvchgEIAEoCRIoCgVzdGF0ZRgFIAEoDjIZLm1vZGVsX3BsYW5lLnYxLlBsYW5TdGF0ZRIPCgdzdW1tYXJ5GAYgASgJEicKBXN0ZXBzGAcgAygLMhgubW9kZWxfcGxhbmUudjEuUGxhblN0ZXASEgoKc3VwZXJzZWRlcxgIIAEoCRIpCghtZXRhZGF0YRgJIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QSLgoKY3JlYXRlZF9hdBgKIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKdXBkYXRlZF9hdBgLIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAioAMKCEFwcHJvdmFsEgoKAmlkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRIPCgdzdGVwX2lkGAMgASgJEioKBGtpbmQYBCABKA4yHC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbEtpbmQSLAoFc3RhdGUYBSABKA4yHS5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbFN0YXRlEhQKDHJlcXVlc3RlZF9vZhgGIAEoCRISCgpkZWNpZGVkX2J5GAcgASgJEhcKD2RlY2lzaW9uX3JlYXNvbhgIIAEoCRIoCgdjb250ZXh0GAkgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdBIwCgxyZXF1ZXN0ZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCmRlY2lkZWRfYXQYCyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCmV4cGlyZXNfYXQYDCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg4KBm9yZ19pZBgNIAEoCSKWAwoEVG9kbxIKCgJpZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGcnVuX2lkGAMgASgJEhAKCGFzc2lnbmVlGAQgASgJEg0KBXRpdGxlGAUgASgJEhMKC2Rlc2NyaXB0aW9uGAYgASgJEigKBXN0YXRlGAcgASgOMhkubW9kZWxfcGxhbmUudjEuVG9kb1N0YXRlEi4KCHByaW9yaXR5GAggASgOMhwubW9kZWxfcGxhbmUudjEuVG9kb1ByaW9yaXR5EhIKCmJsb2NrZWRfYnkYCSADKAkSKQoIbWV0YWRhdGEYCiABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0Ei4KCmNyZWF0ZWRfYXQYCyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYDCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKDGNvbXBsZXRlZF9hdBgNIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAilgEKC0xpbmVhZ2VFZGdlEhUKDXBhcmVudF9ydW5faWQYASABKAkSFAoMY2hpbGRfcnVuX2lkGAIgASgJEioKBHJvbGUYAyABKA4yHC5tb2RlbF9wbGFuZS52MS5TdWJhZ2VudFJvbGUSLgoKc3Bhd25lZF9hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiYwoPU3ViYWdlbnRMaW5lYWdlEhEKCXRocmVhZF9pZBgBIAEoCRIRCgltYXhfZGVwdGgYAiABKA0SKgoFZWRnZXMYAyADKAsyGy5tb2RlbF9wbGFuZS52MS5MaW5lYWdlRWRnZSIiChBMaXN0UGxhbnNSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSI4ChFMaXN0UGxhbnNSZXNwb25zZRIjCgVwbGFucxgBIAMoCzIULm1vZGVsX3BsYW5lLnYxLlBsYW4iIQoOR2V0UGxhblJlcXVlc3QSDwoHcGxhbl9pZBgBIAEoCSI1Cg9HZXRQbGFuUmVzcG9uc2USIgoEcGxhbhgBIAEoCzIULm1vZGVsX3BsYW5lLnYxLlBsYW4ieAoVVHJhbnNpdGlvblBsYW5SZXF1ZXN0Eg8KB3BsYW5faWQYASABKAkSLwoMdGFyZ2V0X3N0YXRlGAIgASgOMhkubW9kZWxfcGxhbmUudjEuUGxhblN0YXRlEg0KBWFjdG9yGAMgASgJEg4KBnJlYXNvbhgEIAEoCSI8ChZUcmFuc2l0aW9uUGxhblJlc3BvbnNlEiIKBHBsYW4YASABKAsyFC5tb2RlbF9wbGFuZS52MS5QbGFuIjUKEExpc3RUb2Rvc1JlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCSI4ChFMaXN0VG9kb3NSZXNwb25zZRIjCgV0b2RvcxgBIAMoCzIULm1vZGVsX3BsYW5lLnYxLlRvZG8iIQoOR2V0VG9kb1JlcXVlc3QSDwoHdG9kb19pZBgBIAEoCSI1Cg9HZXRUb2RvUmVzcG9uc2USIgoEdG9kbxgBIAEoCzIULm1vZGVsX3BsYW5lLnYxLlRvZG8ieAoVVHJhbnNpdGlvblRvZG9SZXF1ZXN0Eg8KB3RvZG9faWQYASABKAkSLwoMdGFyZ2V0X3N0YXRlGAIgASgOMhkubW9kZWxfcGxhbmUudjEuVG9kb1N0YXRlEg0KBWFjdG9yGAMgASgJEg4KBnJlYXNvbhgEIAEoCSI8ChZUcmFuc2l0aW9uVG9kb1Jlc3BvbnNlEiIKBHRvZG8YASABKAsyFC5tb2RlbF9wbGFuZS52MS5Ub2RvIvwBChVDcmVhdGVBcHByb3ZhbFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg8KB3N0ZXBfaWQYAiABKAkSKgoEa2luZBgDIAEoDjIcLm1vZGVsX3BsYW5lLnYxLkFwcHJvdmFsS2luZBIUCgxyZXF1ZXN0ZWRfb2YYBCABKAkSDgoGb3JnX2lkGAUgASgJEg8KB3VzZXJfaWQYBiABKAkSDgoGcmVhc29uGAcgASgJEhoKEmV4cGlyZXNfaW5fc2Vjb25kcxgIIAEoDRIaChJjbGllbnRfYXBwcm92YWxfaWQYCSABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAogASgJIkQKFkNyZWF0ZUFwcHJvdmFsUmVzcG9uc2USKgoIYXBwcm92YWwYASABKAsyGC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbCI3ChRMaXN0QXBwcm92YWxzUmVxdWVzdBIOCgZydW5faWQYASABKAkSDwoHc3RlcF9pZBgCIAEoCSJEChVMaXN0QXBwcm92YWxzUmVzcG9uc2USKwoJYXBwcm92YWxzGAEgAygLMhgubW9kZWxfcGxhbmUudjEuQXBwcm92YWwiLAoaT3JnUGVuZGluZ0FwcHJvdmFsc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIkoKG09yZ1BlbmRpbmdBcHByb3ZhbHNSZXNwb25zZRIrCglhcHByb3ZhbHMYASADKAsyGC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbCIpChJHZXRBcHByb3ZhbFJlcXVlc3QSEwoLYXBwcm92YWxfaWQYASABKAkiQQoTR2V0QXBwcm92YWxSZXNwb25zZRIqCghhcHByb3ZhbBgBIAEoCzIYLm1vZGVsX3BsYW5lLnYxLkFwcHJvdmFsIooBChVEZWNpZGVBcHByb3ZhbFJlcXVlc3QSEwoLYXBwcm92YWxfaWQYASABKAkSLwoIZGVjaXNpb24YAiABKA4yHS5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbFN0YXRlEhIKCmRlY2lkZWRfYnkYAyABKAkSFwoPZGVjaXNpb25fcmVhc29uGAQgASgJIkQKFkRlY2lkZUFwcHJvdmFsUmVzcG9uc2USKgoIYXBwcm92YWwYASABKAsyGC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbCIuChlHZXRTdWJhZ2VudExpbmVhZ2VSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCSJOChpHZXRTdWJhZ2VudExpbmVhZ2VSZXNwb25zZRIwCgdsaW5lYWdlGAEgASgLMh8ubW9kZWxfcGxhbmUudjEuU3ViYWdlbnRMaW5lYWdlIoMBChVBdHRhY2hTdWJhZ2VudFJlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEhUKDXBhcmVudF9ydW5faWQYAiABKAkSFAoMY2hpbGRfcnVuX2lkGAMgASgJEioKBHJvbGUYBCABKA4yHC5tb2RlbF9wbGFuZS52MS5TdWJhZ2VudFJvbGUidQoWQXR0YWNoU3ViYWdlbnRSZXNwb25zZRIpCgRlZGdlGAEgASgLMhsubW9kZWxfcGxhbmUudjEuTGluZWFnZUVkZ2USMAoHbGluZWFnZRgCIAEoCzIfLm1vZGVsX3BsYW5lLnYxLlN1YmFnZW50TGluZWFnZSJAChZTdHJlYW1SdW5FdmVudHNSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIWCg5hZnRlcl9ldmVudF9pZBgCIAEoCSLcDgoST3JjaGVzdHJhdGlvbkV2ZW50EiYKAmF0GAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghldmVudF9pZBgCIAEoCRJQChFwbGFuX3RyYW5zaXRpb25lZBgKIAEoCzIzLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5QbGFuVHJhbnNpdGlvbmVkSAASUAoRdG9kb190cmFuc2l0aW9uZWQYCyABKAsyMy5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuVG9kb1RyYW5zaXRpb25lZEgAElkKFmFwcHJvdmFsX3N0YXRlX2NoYW5nZWQYDCABKAsyNy5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQXBwcm92YWxTdGF0ZUNoYW5nZWRIABJQChFzdWJhZ2VudF9hdHRhY2hlZBgNIAEoCzIzLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5TdWJhZ2VudEF0dGFjaGVkSAASTgoQc3ViYWdlbnRfc3RvcHBlZBgOIAEoCzIyLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5TdWJhZ2VudFN0b3BwZWRIABJaChdydW5fcGF1c2VkX2Zvcl9hcHByb3ZhbBgPIAEoCzI3Lm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5SdW5QYXVzZWRGb3JBcHByb3ZhbEgAEmAKGnJ1bl9yZXN1bWVkX2FmdGVyX2FwcHJvdmFsGBAgASgLMjoubW9kZWxfcGxhbmUudjEuT3JjaGVzdHJhdGlvbkV2ZW50LlJ1blJlc3VtZWRBZnRlckFwcHJvdmFsSAASXwoZYnJvd3Nlcl9hY3Rpb25fZGlzcGF0Y2hlZBgRIAEoCzI6Lm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5Ccm93c2VyQWN0aW9uRGlzcGF0Y2hlZEgAEmUKHGJyb3dzZXJfb2JzZXJ2YXRpb25fcmVjZWl2ZWQYEiABKAsyPS5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQnJvd3Nlck9ic2VydmF0aW9uUmVjZWl2ZWRIABqDAQoQUGxhblRyYW5zaXRpb25lZBIPCgdwbGFuX2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRInCgRmcm9tGAMgASgOMhkubW9kZWxfcGxhbmUudjEuUGxhblN0YXRlEiUKAnRvGAQgASgOMhkubW9kZWxfcGxhbmUudjEuUGxhblN0YXRlGoYBChBUb2RvVHJhbnNpdGlvbmVkEg8KB3RvZG9faWQYASABKAkSEQoJdGhyZWFkX2lkGAIgASgJEicKBGZyb20YAyABKA4yGS5tb2RlbF9wbGFuZS52MS5Ub2RvU3RhdGUSJQoCdG8YBCABKA4yGS5tb2RlbF9wbGFuZS52MS5Ub2RvU3RhdGUarwEKFEFwcHJvdmFsU3RhdGVDaGFuZ2VkEhMKC2FwcHJvdmFsX2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRIzCg1hcHByb3ZhbF9raW5kGAMgASgOMhwubW9kZWxfcGxhbmUudjEuQXBwcm92YWxLaW5kEikKAnRvGAQgASgOMh0ubW9kZWxfcGxhbmUudjEuQXBwcm92YWxTdGF0ZRISCgpkZWNpZGVkX2J5GAUgASgJGmsKEFN1YmFnZW50QXR0YWNoZWQSFQoNcGFyZW50X3J1bl9pZBgBIAEoCRIUCgxjaGlsZF9ydW5faWQYAiABKAkSKgoEcm9sZRgDIAEoDjIcLm1vZGVsX3BsYW5lLnYxLlN1YmFnZW50Um9sZRo3Cg9TdWJhZ2VudFN0b3BwZWQSFAoMY2hpbGRfcnVuX2lkGAEgASgJEg4KBnN0YXR1cxgCIAEoCRo7ChRSdW5QYXVzZWRGb3JBcHByb3ZhbBIOCgZydW5faWQYASABKAkSEwoLYXBwcm92YWxfaWQYAiABKAkaPgoXUnVuUmVzdW1lZEFmdGVyQXBwcm92YWwSDgoGcnVuX2lkGAEgASgJEhMKC2FwcHJvdmFsX2lkGAIgASgJGm8KF0Jyb3dzZXJBY3Rpb25EaXNwYXRjaGVkEg4KBnJ1bl9pZBgBIAEoCRIPCgdwbGFuX2lkGAIgASgJEhEKCWFjdGlvbl9pZBgDIAEoCRITCgthY3Rpb25fdHlwZRgEIAEoCRILCgN1cmwYBSABKAkahgEKGkJyb3dzZXJPYnNlcnZhdGlvblJlY2VpdmVkEg4KBnJ1bl9pZBgBIAEoCRIPCgdwbGFuX2lkGAIgASgJEhEKCWFjdGlvbl9pZBgDIAEoCRIOCgZzdGF0dXMYBCABKAkSEAoIcGFnZV91cmwYBSABKAkSEgoKcGFnZV90aXRsZRgGIAEoCUIHCgVldmVudCJUCh9SZWNvcmRPcmNoZXN0cmF0aW9uRXZlbnRSZXF1ZXN0EjEKBWV2ZW50GAEgASgLMiIubW9kZWxfcGxhbmUudjEuT3JjaGVzdHJhdGlvbkV2ZW50IjQKIFJlY29yZE9yY2hlc3RyYXRpb25FdmVudFJlc3BvbnNlEhAKCGV2ZW50X2lkGAEgASgJKocCCglQbGFuU3RhdGUSGgoWUExBTl9TVEFURV9VTlNQRUNJRklFRBAAEhQKEFBMQU5fU1RBVEVfRFJBRlQQARIXChNQTEFOX1NUQVRFX1BST1BPU0VEEAISFwoTUExBTl9TVEFURV9BUFBST1ZFRBADEhcKE1BMQU5fU1RBVEVfUkVKRUNURUQQBBIYChRQTEFOX1NUQVRFX0VYRUNVVElORxAFEhgKFFBMQU5fU1RBVEVfQ09NUExFVEVEEAYSFQoRUExBTl9TVEFURV9GQUlMRUQQBxIZChVQTEFOX1NUQVRFX1NVUEVSU0VERUQQCBIXChNQTEFOX1NUQVRFX0FSQ0hJVkVEEAkqvQEKDVBsYW5TdGVwU3RhdGUSHwobUExBTl9TVEVQX1NUQVRFX1VOU1BFQ0lGSUVEEAASGwoXUExBTl9TVEVQX1NUQVRFX1BFTkRJTkcQARIbChdQTEFOX1NURVBfU1RBVEVfUlVOTklORxACEhgKFFBMQU5fU1RFUF9TVEFURV9ET05FEAMSGwoXUExBTl9TVEVQX1NUQVRFX1NLSVBQRUQQBBIaChZQTEFOX1NURVBfU1RBVEVfRkFJTEVEEAUqtwEKDEFwcHJvdmFsS2luZBIdChlBUFBST1ZBTF9LSU5EX1VOU1BFQ0lGSUVEEAASFgoSQVBQUk9WQUxfS0lORF9QTEFOEAESGwoXQVBQUk9WQUxfS0lORF9UT09MX0NBTEwQAhIcChhBUFBST1ZBTF9LSU5EX1BFUk1JU1NJT04QAxIdChlBUFBST1ZBTF9LSU5EX0RFU1RSVUNUSVZFEAQSFgoSQVBQUk9WQUxfS0lORF9DT1NUEAUqogEKDUFwcHJvdmFsU3RhdGUSHgoaQVBQUk9WQUxfU1RBVEVfVU5TUEVDSUZJRUQQABIcChhBUFBST1ZBTF9TVEFURV9SRVFVRVNURUQQARIaChZBUFBST1ZBTF9TVEFURV9HUkFOVEVEEAISGQoVQVBQUk9WQUxfU1RBVEVfREVOSUVEEAMSHAoYQVBQUk9WQUxfU1RBVEVfVElNRURfT1VUEAQqpwEKCVRvZG9TdGF0ZRIaChZUT0RPX1NUQVRFX1VOU1BFQ0lGSUVEEAASFgoSVE9ET19TVEFURV9QRU5ESU5HEAESGgoWVE9ET19TVEFURV9JTl9QUk9HUkVTUxACEhYKElRPRE9fU1RBVEVfQkxPQ0tFRBADEhgKFFRPRE9fU1RBVEVfQ09NUExFVEVEEAQSGAoUVE9ET19TVEFURV9DQU5DRUxMRUQQBSqQAQoMVG9kb1ByaW9yaXR5Eh0KGVRPRE9fUFJJT1JJVFlfVU5TUEVDSUZJRUQQABIVChFUT0RPX1BSSU9SSVRZX0xPVxABEhgKFFRPRE9fUFJJT1JJVFlfTk9STUFMEAISFgoSVE9ET19QUklPUklUWV9ISUdIEAMSGAoUVE9ET19QUklPUklUWV9VUkdFTlQQBCq3AQoMU3ViYWdlbnRSb2xlEh0KGVNVQkFHRU5UX1JPTEVfVU5TUEVDSUZJRUQQABIXChNTVUJBR0VOVF9ST0xFX0NPREVSEAESGgoWU1VCQUdFTlRfUk9MRV9SRVZJRVdFUhACEhwKGFNVQkFHRU5UX1JPTEVfUkVTRUFSQ0hFUhADEhoKFlNVQkFHRU5UX1JPTEVfRVhQTE9SRVIQBBIZChVTVUJBR0VOVF9ST0xFX0dFTkVSSUMQBTKvCwoYT3JjaGVzdHJhdGlvbkNvcmVTZXJ2aWNlElAKCUxpc3RQbGFucxIgLm1vZGVsX3BsYW5lLnYxLkxpc3RQbGFuc1JlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5MaXN0UGxhbnNSZXNwb25zZRJKCgdHZXRQbGFuEh4ubW9kZWxfcGxhbmUudjEuR2V0UGxhblJlcXVlc3QaHy5tb2RlbF9wbGFuZS52MS5HZXRQbGFuUmVzcG9uc2USXwoOVHJhbnNpdGlvblBsYW4SJS5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uUGxhblJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uUGxhblJlc3BvbnNlElAKCUxpc3RUb2RvcxIgLm1vZGVsX3BsYW5lLnYxLkxpc3RUb2Rvc1JlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5MaXN0VG9kb3NSZXNwb25zZRJKCgdHZXRUb2RvEh4ubW9kZWxfcGxhbmUudjEuR2V0VG9kb1JlcXVlc3QaHy5tb2RlbF9wbGFuZS52MS5HZXRUb2RvUmVzcG9uc2USXwoOVHJhbnNpdGlvblRvZG8SJS5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uVG9kb1JlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uVG9kb1Jlc3BvbnNlEl8KDkNyZWF0ZUFwcHJvdmFsEiUubW9kZWxfcGxhbmUudjEuQ3JlYXRlQXBwcm92YWxSZXF1ZXN0GiYubW9kZWxfcGxhbmUudjEuQ3JlYXRlQXBwcm92YWxSZXNwb25zZRJcCg1MaXN0QXBwcm92YWxzEiQubW9kZWxfcGxhbmUudjEuTGlzdEFwcHJvdmFsc1JlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5MaXN0QXBwcm92YWxzUmVzcG9uc2USbwoUTGlzdFBlbmRpbmdBcHByb3ZhbHMSKi5tb2RlbF9wbGFuZS52MS5PcmdQZW5kaW5nQXBwcm92YWxzUmVxdWVzdBorLm1vZGVsX3BsYW5lLnYxLk9yZ1BlbmRpbmdBcHByb3ZhbHNSZXNwb25zZRJWCgtHZXRBcHByb3ZhbBIiLm1vZGVsX3BsYW5lLnYxLkdldEFwcHJvdmFsUmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkdldEFwcHJvdmFsUmVzcG9uc2USXwoORGVjaWRlQXBwcm92YWwSJS5tb2RlbF9wbGFuZS52MS5EZWNpZGVBcHByb3ZhbFJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5EZWNpZGVBcHByb3ZhbFJlc3BvbnNlEmsKEkdldFN1YmFnZW50TGluZWFnZRIpLm1vZGVsX3BsYW5lLnYxLkdldFN1YmFnZW50TGluZWFnZVJlcXVlc3QaKi5tb2RlbF9wbGFuZS52MS5HZXRTdWJhZ2VudExpbmVhZ2VSZXNwb25zZRJfCg5BdHRhY2hTdWJhZ2VudBIlLm1vZGVsX3BsYW5lLnYxLkF0dGFjaFN1YmFnZW50UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLkF0dGFjaFN1YmFnZW50UmVzcG9uc2USXwoPU3RyZWFtUnVuRXZlbnRzEiYubW9kZWxfcGxhbmUudjEuU3RyZWFtUnVuRXZlbnRzUmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudDABEn0KGFJlY29yZE9yY2hlc3RyYXRpb25FdmVudBIvLm1vZGVsX3BsYW5lLnYxLlJlY29yZE9yY2hlc3RyYXRpb25FdmVudFJlcXVlc3QaMC5tb2RlbF9wbGFuZS52MS5SZWNvcmRPcmNoZXN0cmF0aW9uRXZlbnRSZXNwb25zZUK6AQoSY29tLm1vZGVsX3BsYW5lLnYxQhJPcmNoZXN0cmF0aW9uUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
+  fileDesc("CiJtb2RlbF9wbGFuZS92MS9vcmNoZXN0cmF0aW9uLnByb3RvEg5tb2RlbF9wbGFuZS52MSLGAQoIUGxhblN0ZXASCgoCaWQYASABKAkSDQoFdGl0bGUYAiABKAkSEQoJb3BlcmF0aW9uGAMgASgJEiwKBXN0YXRlGAQgASgOMh0ubW9kZWxfcGxhbmUudjEuUGxhblN0ZXBTdGF0ZRIuCgpjcmVhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCLIAgoEUGxhbhIKCgJpZBgBIAEoCRIOCgZydW5faWQYAiABKAkSEQoJdGhyZWFkX2lkGAMgASgJEg4KBmF1dGhvchgEIAEoCRIoCgVzdGF0ZRgFIAEoDjIZLm1vZGVsX3BsYW5lLnYxLlBsYW5TdGF0ZRIPCgdzdW1tYXJ5GAYgASgJEicKBXN0ZXBzGAcgAygLMhgubW9kZWxfcGxhbmUudjEuUGxhblN0ZXASEgoKc3VwZXJzZWRlcxgIIAEoCRIpCghtZXRhZGF0YRgJIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QSLgoKY3JlYXRlZF9hdBgKIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoKdXBkYXRlZF9hdBgLIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAioAMKCEFwcHJvdmFsEgoKAmlkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRIPCgdzdGVwX2lkGAMgASgJEioKBGtpbmQYBCABKA4yHC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbEtpbmQSLAoFc3RhdGUYBSABKA4yHS5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbFN0YXRlEhQKDHJlcXVlc3RlZF9vZhgGIAEoCRISCgpkZWNpZGVkX2J5GAcgASgJEhcKD2RlY2lzaW9uX3JlYXNvbhgIIAEoCRIoCgdjb250ZXh0GAkgASgLMhcuZ29vZ2xlLnByb3RvYnVmLlN0cnVjdBIwCgxyZXF1ZXN0ZWRfYXQYCiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCmRlY2lkZWRfYXQYCyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCmV4cGlyZXNfYXQYDCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg4KBm9yZ19pZBgNIAEoCSKWAwoEVG9kbxIKCgJpZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGcnVuX2lkGAMgASgJEhAKCGFzc2lnbmVlGAQgASgJEg0KBXRpdGxlGAUgASgJEhMKC2Rlc2NyaXB0aW9uGAYgASgJEigKBXN0YXRlGAcgASgOMhkubW9kZWxfcGxhbmUudjEuVG9kb1N0YXRlEi4KCHByaW9yaXR5GAggASgOMhwubW9kZWxfcGxhbmUudjEuVG9kb1ByaW9yaXR5EhIKCmJsb2NrZWRfYnkYCSADKAkSKQoIbWV0YWRhdGEYCiABKAsyFy5nb29nbGUucHJvdG9idWYuU3RydWN0Ei4KCmNyZWF0ZWRfYXQYCyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEi4KCnVwZGF0ZWRfYXQYDCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKDGNvbXBsZXRlZF9hdBgNIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAilgEKC0xpbmVhZ2VFZGdlEhUKDXBhcmVudF9ydW5faWQYASABKAkSFAoMY2hpbGRfcnVuX2lkGAIgASgJEioKBHJvbGUYAyABKA4yHC5tb2RlbF9wbGFuZS52MS5TdWJhZ2VudFJvbGUSLgoKc3Bhd25lZF9hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiYwoPU3ViYWdlbnRMaW5lYWdlEhEKCXRocmVhZF9pZBgBIAEoCRIRCgltYXhfZGVwdGgYAiABKA0SKgoFZWRnZXMYAyADKAsyGy5tb2RlbF9wbGFuZS52MS5MaW5lYWdlRWRnZSIiChBMaXN0UGxhbnNSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSI4ChFMaXN0UGxhbnNSZXNwb25zZRIjCgVwbGFucxgBIAMoCzIULm1vZGVsX3BsYW5lLnYxLlBsYW4iIQoOR2V0UGxhblJlcXVlc3QSDwoHcGxhbl9pZBgBIAEoCSI1Cg9HZXRQbGFuUmVzcG9uc2USIgoEcGxhbhgBIAEoCzIULm1vZGVsX3BsYW5lLnYxLlBsYW4ieAoVVHJhbnNpdGlvblBsYW5SZXF1ZXN0Eg8KB3BsYW5faWQYASABKAkSLwoMdGFyZ2V0X3N0YXRlGAIgASgOMhkubW9kZWxfcGxhbmUudjEuUGxhblN0YXRlEg0KBWFjdG9yGAMgASgJEg4KBnJlYXNvbhgEIAEoCSI8ChZUcmFuc2l0aW9uUGxhblJlc3BvbnNlEiIKBHBsYW4YASABKAsyFC5tb2RlbF9wbGFuZS52MS5QbGFuIjUKEExpc3RUb2Rvc1JlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCSI4ChFMaXN0VG9kb3NSZXNwb25zZRIjCgV0b2RvcxgBIAMoCzIULm1vZGVsX3BsYW5lLnYxLlRvZG8iIQoOR2V0VG9kb1JlcXVlc3QSDwoHdG9kb19pZBgBIAEoCSI1Cg9HZXRUb2RvUmVzcG9uc2USIgoEdG9kbxgBIAEoCzIULm1vZGVsX3BsYW5lLnYxLlRvZG8ieAoVVHJhbnNpdGlvblRvZG9SZXF1ZXN0Eg8KB3RvZG9faWQYASABKAkSLwoMdGFyZ2V0X3N0YXRlGAIgASgOMhkubW9kZWxfcGxhbmUudjEuVG9kb1N0YXRlEg0KBWFjdG9yGAMgASgJEg4KBnJlYXNvbhgEIAEoCSI8ChZUcmFuc2l0aW9uVG9kb1Jlc3BvbnNlEiIKBHRvZG8YASABKAsyFC5tb2RlbF9wbGFuZS52MS5Ub2RvIvwBChVDcmVhdGVBcHByb3ZhbFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg8KB3N0ZXBfaWQYAiABKAkSKgoEa2luZBgDIAEoDjIcLm1vZGVsX3BsYW5lLnYxLkFwcHJvdmFsS2luZBIUCgxyZXF1ZXN0ZWRfb2YYBCABKAkSDgoGb3JnX2lkGAUgASgJEg8KB3VzZXJfaWQYBiABKAkSDgoGcmVhc29uGAcgASgJEhoKEmV4cGlyZXNfaW5fc2Vjb25kcxgIIAEoDRIaChJjbGllbnRfYXBwcm92YWxfaWQYCSABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAogASgJIkQKFkNyZWF0ZUFwcHJvdmFsUmVzcG9uc2USKgoIYXBwcm92YWwYASABKAsyGC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbCJHChRMaXN0QXBwcm92YWxzUmVxdWVzdBIOCgZydW5faWQYASABKAkSDwoHc3RlcF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkiRAoVTGlzdEFwcHJvdmFsc1Jlc3BvbnNlEisKCWFwcHJvdmFscxgBIAMoCzIYLm1vZGVsX3BsYW5lLnYxLkFwcHJvdmFsIiwKGk9yZ1BlbmRpbmdBcHByb3ZhbHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCSJKChtPcmdQZW5kaW5nQXBwcm92YWxzUmVzcG9uc2USKwoJYXBwcm92YWxzGAEgAygLMhgubW9kZWxfcGxhbmUudjEuQXBwcm92YWwiOQoSR2V0QXBwcm92YWxSZXF1ZXN0EhMKC2FwcHJvdmFsX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCSJBChNHZXRBcHByb3ZhbFJlc3BvbnNlEioKCGFwcHJvdmFsGAEgASgLMhgubW9kZWxfcGxhbmUudjEuQXBwcm92YWwimgEKFURlY2lkZUFwcHJvdmFsUmVxdWVzdBITCgthcHByb3ZhbF9pZBgBIAEoCRIvCghkZWNpc2lvbhgCIAEoDjIdLm1vZGVsX3BsYW5lLnYxLkFwcHJvdmFsU3RhdGUSEgoKZGVjaWRlZF9ieRgDIAEoCRIXCg9kZWNpc2lvbl9yZWFzb24YBCABKAkSDgoGb3JnX2lkGAUgASgJIkQKFkRlY2lkZUFwcHJvdmFsUmVzcG9uc2USKgoIYXBwcm92YWwYASABKAsyGC5tb2RlbF9wbGFuZS52MS5BcHByb3ZhbCIuChlHZXRTdWJhZ2VudExpbmVhZ2VSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCSJOChpHZXRTdWJhZ2VudExpbmVhZ2VSZXNwb25zZRIwCgdsaW5lYWdlGAEgASgLMh8ubW9kZWxfcGxhbmUudjEuU3ViYWdlbnRMaW5lYWdlIoMBChVBdHRhY2hTdWJhZ2VudFJlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEhUKDXBhcmVudF9ydW5faWQYAiABKAkSFAoMY2hpbGRfcnVuX2lkGAMgASgJEioKBHJvbGUYBCABKA4yHC5tb2RlbF9wbGFuZS52MS5TdWJhZ2VudFJvbGUidQoWQXR0YWNoU3ViYWdlbnRSZXNwb25zZRIpCgRlZGdlGAEgASgLMhsubW9kZWxfcGxhbmUudjEuTGluZWFnZUVkZ2USMAoHbGluZWFnZRgCIAEoCzIfLm1vZGVsX3BsYW5lLnYxLlN1YmFnZW50TGluZWFnZSJAChZTdHJlYW1SdW5FdmVudHNSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIWCg5hZnRlcl9ldmVudF9pZBgCIAEoCSLIFQoST3JjaGVzdHJhdGlvbkV2ZW50EiYKAmF0GAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIQCghldmVudF9pZBgCIAEoCRJQChFwbGFuX3RyYW5zaXRpb25lZBgKIAEoCzIzLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5QbGFuVHJhbnNpdGlvbmVkSAASUAoRdG9kb190cmFuc2l0aW9uZWQYCyABKAsyMy5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuVG9kb1RyYW5zaXRpb25lZEgAElkKFmFwcHJvdmFsX3N0YXRlX2NoYW5nZWQYDCABKAsyNy5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQXBwcm92YWxTdGF0ZUNoYW5nZWRIABJQChFzdWJhZ2VudF9hdHRhY2hlZBgNIAEoCzIzLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5TdWJhZ2VudEF0dGFjaGVkSAASTgoQc3ViYWdlbnRfc3RvcHBlZBgOIAEoCzIyLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5TdWJhZ2VudFN0b3BwZWRIABJaChdydW5fcGF1c2VkX2Zvcl9hcHByb3ZhbBgPIAEoCzI3Lm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5SdW5QYXVzZWRGb3JBcHByb3ZhbEgAEmAKGnJ1bl9yZXN1bWVkX2FmdGVyX2FwcHJvdmFsGBAgASgLMjoubW9kZWxfcGxhbmUudjEuT3JjaGVzdHJhdGlvbkV2ZW50LlJ1blJlc3VtZWRBZnRlckFwcHJvdmFsSAASXwoZYnJvd3Nlcl9hY3Rpb25fZGlzcGF0Y2hlZBgRIAEoCzI6Lm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5Ccm93c2VyQWN0aW9uRGlzcGF0Y2hlZEgAEmUKHGJyb3dzZXJfb2JzZXJ2YXRpb25fcmVjZWl2ZWQYEiABKAsyPS5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQnJvd3Nlck9ic2VydmF0aW9uUmVjZWl2ZWRIABJRChJicm93c2VyX3J1bl9wYXVzZWQYEyABKAsyMy5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQnJvd3NlclJ1blBhdXNlZEgAElMKE2Jyb3dzZXJfcnVuX3Jlc3VtZWQYFCABKAsyNC5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQnJvd3NlclJ1blJlc3VtZWRIABJsCiBicm93c2VyX2FjdGlvbl9hcHByb3ZhbF9yZXF1aXJlZBgVIAEoCzJALm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudC5Ccm93c2VyQWN0aW9uQXBwcm92YWxSZXF1aXJlZEgAElkKFmJyb3dzZXJfYWN0aW9uX2RlY2lkZWQYFiABKAsyNy5tb2RlbF9wbGFuZS52MS5PcmNoZXN0cmF0aW9uRXZlbnQuQnJvd3NlckFjdGlvbkRlY2lkZWRIABqDAQoQUGxhblRyYW5zaXRpb25lZBIPCgdwbGFuX2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRInCgRmcm9tGAMgASgOMhkubW9kZWxfcGxhbmUudjEuUGxhblN0YXRlEiUKAnRvGAQgASgOMhkubW9kZWxfcGxhbmUudjEuUGxhblN0YXRlGoYBChBUb2RvVHJhbnNpdGlvbmVkEg8KB3RvZG9faWQYASABKAkSEQoJdGhyZWFkX2lkGAIgASgJEicKBGZyb20YAyABKA4yGS5tb2RlbF9wbGFuZS52MS5Ub2RvU3RhdGUSJQoCdG8YBCABKA4yGS5tb2RlbF9wbGFuZS52MS5Ub2RvU3RhdGUarwEKFEFwcHJvdmFsU3RhdGVDaGFuZ2VkEhMKC2FwcHJvdmFsX2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRIzCg1hcHByb3ZhbF9raW5kGAMgASgOMhwubW9kZWxfcGxhbmUudjEuQXBwcm92YWxLaW5kEikKAnRvGAQgASgOMh0ubW9kZWxfcGxhbmUudjEuQXBwcm92YWxTdGF0ZRISCgpkZWNpZGVkX2J5GAUgASgJGmsKEFN1YmFnZW50QXR0YWNoZWQSFQoNcGFyZW50X3J1bl9pZBgBIAEoCRIUCgxjaGlsZF9ydW5faWQYAiABKAkSKgoEcm9sZRgDIAEoDjIcLm1vZGVsX3BsYW5lLnYxLlN1YmFnZW50Um9sZRo3Cg9TdWJhZ2VudFN0b3BwZWQSFAoMY2hpbGRfcnVuX2lkGAEgASgJEg4KBnN0YXR1cxgCIAEoCRo7ChRSdW5QYXVzZWRGb3JBcHByb3ZhbBIOCgZydW5faWQYASABKAkSEwoLYXBwcm92YWxfaWQYAiABKAkaPgoXUnVuUmVzdW1lZEFmdGVyQXBwcm92YWwSDgoGcnVuX2lkGAEgASgJEhMKC2FwcHJvdmFsX2lkGAIgASgJGn8KF0Jyb3dzZXJBY3Rpb25EaXNwYXRjaGVkEg4KBnJ1bl9pZBgBIAEoCRIPCgdwbGFuX2lkGAIgASgJEhEKCWFjdGlvbl9pZBgDIAEoCRITCgthY3Rpb25fdHlwZRgEIAEoCRILCgN1cmwYBSABKAkSDgoGcmVhc29uGAYgASgJGrgBChpCcm93c2VyT2JzZXJ2YXRpb25SZWNlaXZlZBIOCgZydW5faWQYASABKAkSDwoHcGxhbl9pZBgCIAEoCRIRCglhY3Rpb25faWQYAyABKAkSDgoGc3RhdHVzGAQgASgJEhAKCHBhZ2VfdXJsGAUgASgJEhIKCnBhZ2VfdGl0bGUYBiABKAkSFgoOc2NyZWVuc2hvdF9yZWYYByABKAkSGAoQZG9tX3NuYXBzaG90X3JlZhgIIAEoCRozChBCcm93c2VyUnVuUGF1c2VkEg4KBnJ1bl9pZBgBIAEoCRIPCgdwbGFuX2lkGAIgASgJGjQKEUJyb3dzZXJSdW5SZXN1bWVkEg4KBnJ1bl9pZBgBIAEoCRIPCgdwbGFuX2lkGAIgASgJGsMBCh1Ccm93c2VyQWN0aW9uQXBwcm92YWxSZXF1aXJlZBIOCgZydW5faWQYASABKAkSDwoHcGxhbl9pZBgCIAEoCRIRCglhY3Rpb25faWQYAyABKAkSEwoLYWN0aW9uX3R5cGUYBCABKAkSCwoDdXJsGAUgASgJEhAKCHNlbGVjdG9yGAYgASgJEg4KBnJlYXNvbhgHIAEoCRIVCg1yaXNrX2NhdGVnb3J5GAggASgJEhMKC2FwcHJvdmFsX2lkGAkgASgJGoUBChRCcm93c2VyQWN0aW9uRGVjaWRlZBIOCgZydW5faWQYASABKAkSDwoHcGxhbl9pZBgCIAEoCRIRCglhY3Rpb25faWQYAyABKAkSEwoLYXBwcm92YWxfaWQYBCABKAkSEAoIZGVjaXNpb24YBSABKAkSEgoKZGVjaWRlZF9ieRgGIAEoCUIHCgVldmVudCJUCh9SZWNvcmRPcmNoZXN0cmF0aW9uRXZlbnRSZXF1ZXN0EjEKBWV2ZW50GAEgASgLMiIubW9kZWxfcGxhbmUudjEuT3JjaGVzdHJhdGlvbkV2ZW50IjQKIFJlY29yZE9yY2hlc3RyYXRpb25FdmVudFJlc3BvbnNlEhAKCGV2ZW50X2lkGAEgASgJKocCCglQbGFuU3RhdGUSGgoWUExBTl9TVEFURV9VTlNQRUNJRklFRBAAEhQKEFBMQU5fU1RBVEVfRFJBRlQQARIXChNQTEFOX1NUQVRFX1BST1BPU0VEEAISFwoTUExBTl9TVEFURV9BUFBST1ZFRBADEhcKE1BMQU5fU1RBVEVfUkVKRUNURUQQBBIYChRQTEFOX1NUQVRFX0VYRUNVVElORxAFEhgKFFBMQU5fU1RBVEVfQ09NUExFVEVEEAYSFQoRUExBTl9TVEFURV9GQUlMRUQQBxIZChVQTEFOX1NUQVRFX1NVUEVSU0VERUQQCBIXChNQTEFOX1NUQVRFX0FSQ0hJVkVEEAkqvQEKDVBsYW5TdGVwU3RhdGUSHwobUExBTl9TVEVQX1NUQVRFX1VOU1BFQ0lGSUVEEAASGwoXUExBTl9TVEVQX1NUQVRFX1BFTkRJTkcQARIbChdQTEFOX1NURVBfU1RBVEVfUlVOTklORxACEhgKFFBMQU5fU1RFUF9TVEFURV9ET05FEAMSGwoXUExBTl9TVEVQX1NUQVRFX1NLSVBQRUQQBBIaChZQTEFOX1NURVBfU1RBVEVfRkFJTEVEEAUqtwEKDEFwcHJvdmFsS2luZBIdChlBUFBST1ZBTF9LSU5EX1VOU1BFQ0lGSUVEEAASFgoSQVBQUk9WQUxfS0lORF9QTEFOEAESGwoXQVBQUk9WQUxfS0lORF9UT09MX0NBTEwQAhIcChhBUFBST1ZBTF9LSU5EX1BFUk1JU1NJT04QAxIdChlBUFBST1ZBTF9LSU5EX0RFU1RSVUNUSVZFEAQSFgoSQVBQUk9WQUxfS0lORF9DT1NUEAUqogEKDUFwcHJvdmFsU3RhdGUSHgoaQVBQUk9WQUxfU1RBVEVfVU5TUEVDSUZJRUQQABIcChhBUFBST1ZBTF9TVEFURV9SRVFVRVNURUQQARIaChZBUFBST1ZBTF9TVEFURV9HUkFOVEVEEAISGQoVQVBQUk9WQUxfU1RBVEVfREVOSUVEEAMSHAoYQVBQUk9WQUxfU1RBVEVfVElNRURfT1VUEAQqpwEKCVRvZG9TdGF0ZRIaChZUT0RPX1NUQVRFX1VOU1BFQ0lGSUVEEAASFgoSVE9ET19TVEFURV9QRU5ESU5HEAESGgoWVE9ET19TVEFURV9JTl9QUk9HUkVTUxACEhYKElRPRE9fU1RBVEVfQkxPQ0tFRBADEhgKFFRPRE9fU1RBVEVfQ09NUExFVEVEEAQSGAoUVE9ET19TVEFURV9DQU5DRUxMRUQQBSqQAQoMVG9kb1ByaW9yaXR5Eh0KGVRPRE9fUFJJT1JJVFlfVU5TUEVDSUZJRUQQABIVChFUT0RPX1BSSU9SSVRZX0xPVxABEhgKFFRPRE9fUFJJT1JJVFlfTk9STUFMEAISFgoSVE9ET19QUklPUklUWV9ISUdIEAMSGAoUVE9ET19QUklPUklUWV9VUkdFTlQQBCq3AQoMU3ViYWdlbnRSb2xlEh0KGVNVQkFHRU5UX1JPTEVfVU5TUEVDSUZJRUQQABIXChNTVUJBR0VOVF9ST0xFX0NPREVSEAESGgoWU1VCQUdFTlRfUk9MRV9SRVZJRVdFUhACEhwKGFNVQkFHRU5UX1JPTEVfUkVTRUFSQ0hFUhADEhoKFlNVQkFHRU5UX1JPTEVfRVhQTE9SRVIQBBIZChVTVUJBR0VOVF9ST0xFX0dFTkVSSUMQBTKvCwoYT3JjaGVzdHJhdGlvbkNvcmVTZXJ2aWNlElAKCUxpc3RQbGFucxIgLm1vZGVsX3BsYW5lLnYxLkxpc3RQbGFuc1JlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5MaXN0UGxhbnNSZXNwb25zZRJKCgdHZXRQbGFuEh4ubW9kZWxfcGxhbmUudjEuR2V0UGxhblJlcXVlc3QaHy5tb2RlbF9wbGFuZS52MS5HZXRQbGFuUmVzcG9uc2USXwoOVHJhbnNpdGlvblBsYW4SJS5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uUGxhblJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uUGxhblJlc3BvbnNlElAKCUxpc3RUb2RvcxIgLm1vZGVsX3BsYW5lLnYxLkxpc3RUb2Rvc1JlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5MaXN0VG9kb3NSZXNwb25zZRJKCgdHZXRUb2RvEh4ubW9kZWxfcGxhbmUudjEuR2V0VG9kb1JlcXVlc3QaHy5tb2RlbF9wbGFuZS52MS5HZXRUb2RvUmVzcG9uc2USXwoOVHJhbnNpdGlvblRvZG8SJS5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uVG9kb1JlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5UcmFuc2l0aW9uVG9kb1Jlc3BvbnNlEl8KDkNyZWF0ZUFwcHJvdmFsEiUubW9kZWxfcGxhbmUudjEuQ3JlYXRlQXBwcm92YWxSZXF1ZXN0GiYubW9kZWxfcGxhbmUudjEuQ3JlYXRlQXBwcm92YWxSZXNwb25zZRJcCg1MaXN0QXBwcm92YWxzEiQubW9kZWxfcGxhbmUudjEuTGlzdEFwcHJvdmFsc1JlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5MaXN0QXBwcm92YWxzUmVzcG9uc2USbwoUTGlzdFBlbmRpbmdBcHByb3ZhbHMSKi5tb2RlbF9wbGFuZS52MS5PcmdQZW5kaW5nQXBwcm92YWxzUmVxdWVzdBorLm1vZGVsX3BsYW5lLnYxLk9yZ1BlbmRpbmdBcHByb3ZhbHNSZXNwb25zZRJWCgtHZXRBcHByb3ZhbBIiLm1vZGVsX3BsYW5lLnYxLkdldEFwcHJvdmFsUmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkdldEFwcHJvdmFsUmVzcG9uc2USXwoORGVjaWRlQXBwcm92YWwSJS5tb2RlbF9wbGFuZS52MS5EZWNpZGVBcHByb3ZhbFJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5EZWNpZGVBcHByb3ZhbFJlc3BvbnNlEmsKEkdldFN1YmFnZW50TGluZWFnZRIpLm1vZGVsX3BsYW5lLnYxLkdldFN1YmFnZW50TGluZWFnZVJlcXVlc3QaKi5tb2RlbF9wbGFuZS52MS5HZXRTdWJhZ2VudExpbmVhZ2VSZXNwb25zZRJfCg5BdHRhY2hTdWJhZ2VudBIlLm1vZGVsX3BsYW5lLnYxLkF0dGFjaFN1YmFnZW50UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLkF0dGFjaFN1YmFnZW50UmVzcG9uc2USXwoPU3RyZWFtUnVuRXZlbnRzEiYubW9kZWxfcGxhbmUudjEuU3RyZWFtUnVuRXZlbnRzUmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLk9yY2hlc3RyYXRpb25FdmVudDABEn0KGFJlY29yZE9yY2hlc3RyYXRpb25FdmVudBIvLm1vZGVsX3BsYW5lLnYxLlJlY29yZE9yY2hlc3RyYXRpb25FdmVudFJlcXVlc3QaMC5tb2RlbF9wbGFuZS52MS5SZWNvcmRPcmNoZXN0cmF0aW9uRXZlbnRSZXNwb25zZUK6AQoSY29tLm1vZGVsX3BsYW5lLnYxQhJPcmNoZXN0cmF0aW9uUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
 
 /**
  * An individual step inside a plan.
@@ -849,6 +849,15 @@ export type ListApprovalsRequest = Message<"model_plane.v1.ListApprovalsRequest"
    * @generated from field: string step_id = 2;
    */
   stepId: string;
+
+  /**
+   * Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+   * callers). Non-empty → only approvals owned by this org are returned,
+   * regardless of what org the run itself belongs to.
+   *
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
 };
 
 /**
@@ -927,6 +936,17 @@ export type GetApprovalRequest = Message<"model_plane.v1.GetApprovalRequest"> & 
    * @generated from field: string approval_id = 1;
    */
   approvalId: string;
+
+  /**
+   * Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+   * callers, e.g. session-core's own boot paths). Non-empty → the approval is
+   * only returned when it belongs to this org; a mismatch is treated as
+   * not-found (never a distinguishable "forbidden") so existence is not
+   * leaked across tenants.
+   *
+   * @generated from field: string org_id = 2;
+   */
+  orgId: string;
 };
 
 /**
@@ -986,6 +1006,17 @@ export type DecideApprovalRequest = Message<"model_plane.v1.DecideApprovalReques
    * @generated from field: string decision_reason = 4;
    */
   decisionReason: string;
+
+  /**
+   * Tenant filter (Phase 6 IDOR fix). Empty → unscoped (internal-only
+   * callers, e.g. the in-loop browser-agent timeout/cancel fail-closed
+   * paths that already resolved the row themselves). Non-empty → the
+   * decision is only applied when the approval belongs to this org; a
+   * mismatch is treated as not-found, never a distinguishable "forbidden".
+   *
+   * @generated from field: string org_id = 5;
+   */
+  orgId: string;
 };
 
 /**
@@ -1175,7 +1206,17 @@ export type OrchestrationEvent = Message<"model_plane.v1.OrchestrationEvent"> & 
 
   /**
    * Event payload. Tags 10-16 align with the original 7-variant Rust enum
-   * order; tags 17-18 are additive browser-agent progress events (B4).
+   * order; tags 17-18 are additive browser-agent progress events (B4); tags
+   * 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
+   * tags 21-22 are additive browser-specific HITL approval-gate events
+   * (Phase 5 — "Approvals & policy"). Phase 5 reuses the general
+   * CreateApproval/DecideApproval RPCs and the generic
+   * RunPausedForApproval/RunResumedAfterApproval/ApprovalStateChanged events
+   * above unchanged (a browser-action approval IS a normal Approval record,
+   * kind=DESTRUCTIVE) — tags 21-22 are additive companions that carry the
+   * browser-specific detail (which action, why it was classified risky) the
+   * generic events don't, so the run timeline shows more than a bare
+   * "risky tool" label.
    *
    * @generated from oneof model_plane.v1.OrchestrationEvent.event
    */
@@ -1233,6 +1274,30 @@ export type OrchestrationEvent = Message<"model_plane.v1.OrchestrationEvent"> & 
      */
     value: OrchestrationEvent_BrowserObservationReceived;
     case: "browserObservationReceived";
+  } | {
+    /**
+     * @generated from field: model_plane.v1.OrchestrationEvent.BrowserRunPaused browser_run_paused = 19;
+     */
+    value: OrchestrationEvent_BrowserRunPaused;
+    case: "browserRunPaused";
+  } | {
+    /**
+     * @generated from field: model_plane.v1.OrchestrationEvent.BrowserRunResumed browser_run_resumed = 20;
+     */
+    value: OrchestrationEvent_BrowserRunResumed;
+    case: "browserRunResumed";
+  } | {
+    /**
+     * @generated from field: model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired browser_action_approval_required = 21;
+     */
+    value: OrchestrationEvent_BrowserActionApprovalRequired;
+    case: "browserActionApprovalRequired";
+  } | {
+    /**
+     * @generated from field: model_plane.v1.OrchestrationEvent.BrowserActionDecided browser_action_decided = 22;
+     */
+    value: OrchestrationEvent_BrowserActionDecided;
+    case: "browserActionDecided";
   } | { case: undefined; value?: undefined };
 };
 
@@ -1478,6 +1543,14 @@ export type OrchestrationEvent_BrowserActionDispatched = Message<"model_plane.v1
    * @generated from field: string url = 5;
    */
   url: string;
+
+  /**
+   * Model's rationale for choosing this action (Phase 2). Empty when the
+   * planner is the deterministic fallback (no LLM reason available).
+   *
+   * @generated from field: string reason = 6;
+   */
+  reason: string;
 };
 
 /**
@@ -1534,6 +1607,23 @@ export type OrchestrationEvent_BrowserObservationReceived = Message<"model_plane
    * @generated from field: string page_title = 6;
    */
   pageTitle: string;
+
+  /**
+   * Screenshot artifact reference id (Phase 2). Never inlined bytes — the
+   * client fetches evidence via the existing artifact endpoint. Empty when
+   * unavailable (e.g. a ZDR run that captured no persisted reference).
+   *
+   * @generated from field: string screenshot_ref = 7;
+   */
+  screenshotRef: string;
+
+  /**
+   * DOM snapshot artifact reference id (Phase 2). Same non-inlining rule as
+   * `screenshot_ref`. Empty until Quarry captures DOM snapshot references.
+   *
+   * @generated from field: string dom_snapshot_ref = 8;
+   */
+  domSnapshotRef: string;
 };
 
 /**
@@ -1542,6 +1632,199 @@ export type OrchestrationEvent_BrowserObservationReceived = Message<"model_plane
  */
 export const OrchestrationEvent_BrowserObservationReceivedSchema: GenMessage<OrchestrationEvent_BrowserObservationReceived> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_orchestration, 33, 8);
+
+/**
+ * User-initiated run pause (Phase 2 B5) — distinct from the pre-existing
+ * HITL `RunPausedForApproval`: this fires when a user explicitly pauses a
+ * running browser-agent loop from the UI, not when a risky tool call is
+ * gated behind approval.
+ *
+ * @generated from message model_plane.v1.OrchestrationEvent.BrowserRunPaused
+ */
+export type OrchestrationEvent_BrowserRunPaused = Message<"model_plane.v1.OrchestrationEvent.BrowserRunPaused"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string plan_id = 2;
+   */
+  planId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.OrchestrationEvent.BrowserRunPaused.
+ * Use `create(OrchestrationEvent_BrowserRunPausedSchema)` to create a new message.
+ */
+export const OrchestrationEvent_BrowserRunPausedSchema: GenMessage<OrchestrationEvent_BrowserRunPaused> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_orchestration, 33, 9);
+
+/**
+ * User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
+ *
+ * @generated from message model_plane.v1.OrchestrationEvent.BrowserRunResumed
+ */
+export type OrchestrationEvent_BrowserRunResumed = Message<"model_plane.v1.OrchestrationEvent.BrowserRunResumed"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string plan_id = 2;
+   */
+  planId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.OrchestrationEvent.BrowserRunResumed.
+ * Use `create(OrchestrationEvent_BrowserRunResumedSchema)` to create a new message.
+ */
+export const OrchestrationEvent_BrowserRunResumedSchema: GenMessage<OrchestrationEvent_BrowserRunResumed> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_orchestration, 33, 10);
+
+/**
+ * A browser action was classified risky (login, checkout, posting a form,
+ * a destructive operation, cross-domain navigation, or reuse of a
+ * persistent cookie-bearing profile — plan capability #8) and is paused
+ * for human approval (Phase 5). Fired by execution-core's in-loop gate
+ * right before dispatch, via the SAME `CreateApproval` RPC the generic
+ * tool-call HITL gate uses (`RunPausedForApproval`/`ApprovalStateChanged`
+ * above are broadcast by that RPC as usual) — this event is the
+ * browser-specific companion that names the actual action.
+ *
+ * @generated from message model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
+ */
+export type OrchestrationEvent_BrowserActionApprovalRequired = Message<"model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired"> & {
+  /**
+   * Run this browser session belongs to (stream key).
+   *
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * Browser-agent plan id driving this session.
+   *
+   * @generated from field: string plan_id = 2;
+   */
+  planId: string;
+
+  /**
+   * Id of the gated action. Empty for a run-level gate that isn't tied to
+   * one specific dispatched action (e.g. persistent_cookie_use, gated once
+   * at run start rather than per-action).
+   *
+   * @generated from field: string action_id = 3;
+   */
+  actionId: string;
+
+  /**
+   * Action type slug: goto|click|type|extract|observe|scroll|wait, or a
+   * synthetic slug for a run-level gate (e.g. "start_run").
+   *
+   * @generated from field: string action_type = 4;
+   */
+  actionType: string;
+
+  /**
+   * Target URL, when known. Empty when not applicable.
+   *
+   * @generated from field: string url = 5;
+   */
+  url: string;
+
+  /**
+   * CSS selector, when known. Empty when not applicable.
+   *
+   * @generated from field: string selector = 6;
+   */
+  selector: string;
+
+  /**
+   * Human-readable reason the action was classified risky.
+   *
+   * @generated from field: string reason = 7;
+   */
+  reason: string;
+
+  /**
+   * login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use
+   *
+   * @generated from field: string risk_category = 8;
+   */
+  riskCategory: string;
+
+  /**
+   * Durable approval id (from the CreateApproval call this event
+   * accompanies) — lets a UI jump straight to deciding it via the existing
+   * generic `POST /v1/orchestration/approvals/{id}/decide` route.
+   *
+   * @generated from field: string approval_id = 9;
+   */
+  approvalId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired.
+ * Use `create(OrchestrationEvent_BrowserActionApprovalRequiredSchema)` to create a new message.
+ */
+export const OrchestrationEvent_BrowserActionApprovalRequiredSchema: GenMessage<OrchestrationEvent_BrowserActionApprovalRequired> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_orchestration, 33, 11);
+
+/**
+ * The pending browser-action approval above was decided (granted, denied,
+ * or timed out). The durable decision and the generic
+ * `ApprovalStateChanged`/`RunResumedAfterApproval` events are recorded by
+ * the existing `DecideApproval` RPC as usual; this is the browser-specific
+ * companion that carries the action back so the timeline can show
+ * "checkout on example.com — granted", not just an approval id.
+ *
+ * @generated from message model_plane.v1.OrchestrationEvent.BrowserActionDecided
+ */
+export type OrchestrationEvent_BrowserActionDecided = Message<"model_plane.v1.OrchestrationEvent.BrowserActionDecided"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string plan_id = 2;
+   */
+  planId: string;
+
+  /**
+   * @generated from field: string action_id = 3;
+   */
+  actionId: string;
+
+  /**
+   * @generated from field: string approval_id = 4;
+   */
+  approvalId: string;
+
+  /**
+   * granted|denied|timed_out
+   *
+   * @generated from field: string decision = 5;
+   */
+  decision: string;
+
+  /**
+   * Principal who decided, when known. Empty for a system timeout.
+   *
+   * @generated from field: string decided_by = 6;
+   */
+  decidedBy: string;
+};
+
+/**
+ * Describes the message model_plane.v1.OrchestrationEvent.BrowserActionDecided.
+ * Use `create(OrchestrationEvent_BrowserActionDecidedSchema)` to create a new message.
+ */
+export const OrchestrationEvent_BrowserActionDecidedSchema: GenMessage<OrchestrationEvent_BrowserActionDecided> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_orchestration, 33, 12);
 
 /**
  * @generated from message model_plane.v1.RecordOrchestrationEventRequest

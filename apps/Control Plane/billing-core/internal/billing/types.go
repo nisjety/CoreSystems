@@ -28,6 +28,7 @@ const (
 type Account struct {
 	OrgID              string                 `json:"org_id"`
 	Plan               string                 `json:"plan"`
+	PlanRevision       int64                  `json:"plan_revision"`
 	SubscriptionState  SubscriptionState      `json:"subscription_state"`
 	Credits            int64                  `json:"credits"`
 	Products           map[string]bool        `json:"products"`

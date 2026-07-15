@@ -74,7 +74,7 @@ LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
 # Merge apk layers and create non-root user
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -e; \
-    if ! apk add --quiet ca-certificates postgresql-client \
+    if ! apk add --quiet ca-certificates postgresql-client su-exec \
         > /tmp/apk-add.log 2>&1; then \
         cat /tmp/apk-add.log; \
         exit 1; \

@@ -6,9 +6,11 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { UserServiceClient } from './user-service.client';
 import { UserServiceGrpcClient } from './user-service-grpc.client';
 import { AuthEventPublisher } from './auth-event.publisher';
+import { flushAuthIdentityEventOutbox } from './auth-identity-outbox';
 
 @Injectable()
 export class AuthIntegrationService {
@@ -29,7 +31,7 @@ export class AuthIntegrationService {
     name?: string;
     emailVerified: boolean;
     provider?: string;
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
     microsoftTenantId?: string;
     emailFromProvider?: string;
     scopesGranted?: string[];
@@ -52,20 +54,9 @@ export class AuthIntegrationService {
         emailVerified: userData.emailVerified,
       });
 
-      // Publish async event via NATS
-      await this.authEventPublisher.publishUserRegistered({
-        userId: userData.id,
-        email: userData.email,
-        name: userData.name,
-        provider: userData.provider || 'email',
-        emailVerified: userData.emailVerified,
-        metadata: userData.metadata,
-        microsoftTenantId: userData.microsoftTenantId,
-        emailFromProvider: userData.emailFromProvider,
-        scopesGranted: userData.scopesGranted,
-        tokenRef: userData.tokenRef,
-        profileHints: userData.profileHints,
-      });
+      // The Better Auth user INSERT transaction created the durable event.
+      // Make a best-effort immediate delivery; the scheduled worker retries.
+      await this.flushIdentityEventOutbox(userData.id);
 
       this.logger.log(
         `User registration processed successfully: ${userData.email}`,
@@ -185,19 +176,9 @@ export class AuthIntegrationService {
         emailVerified: true, // OAuth providers deliver verified emails
       });
 
-      // Publish provider linked event so user-core can persist the provider account
-      await this.authEventPublisher.publishUserProviderLinked({
-        userId: linkData.id,
-        email: linkData.email,
-        provider: linkData.provider,
-        providerAccountId: linkData.providerAccountId,
-        tenantId: linkData.tenantId,
-        microsoftTenantId: linkData.microsoftTenantId,
-        emailFromProvider: linkData.emailFromProvider,
-        scopesGranted: linkData.scopesGranted,
-        tokenRef: linkData.tokenRef,
-        profileHints: linkData.profileHints,
-      });
+      // The Better Auth account INSERT transaction created the durable event.
+      // Make a best-effort immediate delivery; the scheduled worker retries.
+      await this.flushIdentityEventOutbox(linkData.id);
 
       this.logger.log(
         `Account link processed: ${linkData.email} → ${linkData.provider}`,
@@ -209,6 +190,15 @@ export class AuthIntegrationService {
       );
       // Don't rethrow — account linking must not interrupt the auth flow
     }
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async retryIdentityEventOutbox(): Promise<void> {
+    await this.flushIdentityEventOutbox();
+  }
+
+  async flushIdentityEventOutbox(userId?: string): Promise<number> {
+    return flushAuthIdentityEventOutbox(this.authEventPublisher, userId);
   }
 
   /**
@@ -259,7 +249,7 @@ export class AuthIntegrationService {
   async handleUserProfileUpdate(updateData: {
     userId: string;
     email: string;
-    changes: Record<string, any>;
+    changes: Record<string, unknown>;
   }): Promise<void> {
     this.logger.log(`Handling profile update: ${updateData.email}`);
 
@@ -336,8 +326,8 @@ export class AuthIntegrationService {
    * Extract profile-relevant data from changes
    */
   private extractProfileData(
-    changes: Record<string, any>,
-  ): Record<string, any> {
+    changes: Record<string, unknown>,
+  ): Record<string, unknown> {
     const profileFields = [
       'firstName',
       'lastName',
@@ -346,11 +336,11 @@ export class AuthIntegrationService {
       'timezone',
       'locale',
     ];
-    const profileData: Record<string, any> = {};
+    const profileData: Record<string, unknown> = {};
 
     for (const field of profileFields) {
-      if ((changes as Record<string, unknown>)[field] !== undefined) {
-        profileData[field] = (changes as Record<string, unknown>)[field];
+      if (changes[field] !== undefined) {
+        profileData[field] = changes[field];
       }
     }
 

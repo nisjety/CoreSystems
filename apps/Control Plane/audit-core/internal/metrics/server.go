@@ -32,10 +32,10 @@ var (
 		},
 		[]string{"bus", "kind", "result"},
 	)
-	eventProcessingLag = prometheus.NewGaugeVec(
+	eventProcessingDelay = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "audit_core_event_processing_lag_seconds",
-			Help: "Wall-clock age of the last successfully persisted event.",
+			Name: "audit_core_event_processing_delay_seconds",
+			Help: "Observed producer-to-persistence delay of the last successfully persisted event.",
 		},
 		[]string{"bus", "kind"},
 	)
@@ -46,10 +46,53 @@ var (
 		},
 		[]string{"bus", "kind"},
 	)
+	eventLastAck = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "audit_core_event_last_ack_timestamp_seconds",
+			Help: "Unix timestamp of the last successful JetStream ACK.",
+		},
+		[]string{"bus", "kind"},
+	)
+	consumerPending = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "audit_core_consumer_pending",
+			Help: "Messages pending delivery for each durable audit-core consumer.",
+		},
+		[]string{"bus", "kind"},
+	)
+	consumerAckPending = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "audit_core_consumer_ack_pending",
+			Help: "Delivered messages awaiting acknowledgement.",
+		},
+		[]string{"bus", "kind"},
+	)
+	consumerRedelivered = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "audit_core_consumer_redelivered",
+			Help: "Messages redelivered for each durable audit-core consumer.",
+		},
+		[]string{"bus", "kind"},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(natsConnected, eventsTotal, eventProcessingLag, eventLastProcessed)
+	prometheus.MustRegister(
+		natsConnected,
+		eventsTotal,
+		eventProcessingDelay,
+		eventLastProcessed,
+		eventLastAck,
+		consumerPending,
+		consumerAckPending,
+		consumerRedelivered,
+	)
+}
+
+func SetConsumerState(bus, kind string, pending uint64, ackPending, redelivered int) {
+	consumerPending.WithLabelValues(bus, kind).Set(float64(pending))
+	consumerAckPending.WithLabelValues(bus, kind).Set(float64(ackPending))
+	consumerRedelivered.WithLabelValues(bus, kind).Set(float64(redelivered))
 }
 
 func SetNATSConnected(bus string, connected bool) {
@@ -70,8 +113,12 @@ func RecordEvent(bus, kind, result string, occurredAt time.Time) {
 	if lag < 0 {
 		lag = 0
 	}
-	eventProcessingLag.WithLabelValues(bus, kind).Set(lag)
+	eventProcessingDelay.WithLabelValues(bus, kind).Set(lag)
 	eventLastProcessed.WithLabelValues(bus, kind).Set(float64(now.Unix()))
+}
+
+func RecordAck(bus, kind string, acknowledgedAt time.Time) {
+	eventLastAck.WithLabelValues(bus, kind).Set(float64(acknowledgedAt.Unix()))
 }
 
 type Server struct {

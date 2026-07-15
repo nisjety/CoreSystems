@@ -16,6 +16,38 @@ Scope: `apps/Frontend Plane/velionv3` (SolidJS SPA at `src/` + Rust BFF gateway 
 
 See also `../../FRONTEND_PLANE_STATUS.md` and `../../FRONTEND_PLANE_ROADMAP.md`.
 
+## 2026-07-15 Data Plane and GraphRAG re-verification
+
+The historical Data findings below are superseded in source. The gateway now
+mints a session-bound `aud=data-plane` bearer through Auth Core for every
+interactive documents, retrieval, wiki, source, graph, navbar-search,
+ingestion-source, and Operating Map path. Canonical session membership supplies
+the org; conflicting browser tenant input cannot widen it. Delegation failure is
+a sanitized 503, with no shared-key user fallback.
+
+The Knowledge workspace now consumes the actual Data envelopes: documents and
+wiki payloads are normalized, retrieval `candidates`/`sources` are mapped to the
+SPA result contract, source cards derive from visible documents, all document
+pages are loaded within a bounded 20-page cap with honest truncation metadata,
+and chunk expansion uses singular `document_id`. Navbar search targets the
+implemented `/v1/knowledge/search`. The onboarding graph-preview IDOR is closed;
+Knowledge and onboarding graph reads use the same verified graph boundary.
+
+Sanitized source evidence dated 2026-07-15:
+
+- `cargo test --all-targets` in `apps/gateway`: **272 passed**;
+- `pnpm test -- --run`: **68 files / 360 tests passed**;
+- `pnpm typecheck` and `pnpm build`: passed;
+- `pnpm lint`: zero errors, one pre-existing Solid reactivity warning.
+
+An isolated Data checkpoint passed **28/28** HTTP auth/tenant checks,
+including authorized retrieval/graph reads and spoofed-tenant denial. That run
+did not include the Velion gateway/browser and did not replace the shared live
+frontend/Data containers, whose revisions remain older than this dirty
+worktree. It also predates the final Documents signed-ZDR/source-object guards.
+The frontend remains implemented/tested/built rather than a full deployed/
+effective claim.
+
 ## 2026-07-11 re-verification — executive summary
 
 Source-only this pass: the velionv3 SPA (:5173) and velion-gateway-rs (:3185) containers are **down** (collateral of the fleet-wide Docker containerd corruption), so no live SPA/gateway curl was possible. Findings graded `[source-only]` / `[inspect]`.

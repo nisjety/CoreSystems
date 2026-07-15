@@ -5,16 +5,213 @@ x-build-metadata-required:
   SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
   BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
 
+secrets:
+  auth_grpc_service_credentials:
+    file: ${AUTH_GRPC_SERVICE_CREDENTIALS_FILE:?AUTH_GRPC_SERVICE_CREDENTIALS_FILE is required in production}
+  auth_internal_service_credentials:
+    file: ${AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE:?AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE is required in production}
+  user_core_grpc_client_credential:
+    file: ${USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE:?USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE is required in production}
+  user_core_grpc_service_credentials:
+    file: ${USER_CORE_GRPC_SERVICE_CREDENTIALS_FILE:?USER_CORE_GRPC_SERVICE_CREDENTIALS_FILE is required in production}
+  user_core_grpc_tls_ca:
+    file: ${USER_CORE_GRPC_TLS_CA_FILE:?USER_CORE_GRPC_TLS_CA_FILE is required in production}
+  user_core_grpc_tls_certificate:
+    file: ${USER_CORE_GRPC_TLS_CERT_FILE:?USER_CORE_GRPC_TLS_CERT_FILE is required in production}
+  user_core_grpc_tls_private_key:
+    file: ${USER_CORE_GRPC_TLS_KEY_FILE:?USER_CORE_GRPC_TLS_KEY_FILE is required in production}
+  user_auth_internal_client_credential:
+    file: ${USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE:?USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE is required in production}
+  auth_convex_private_key:
+    file: ${CONVEX_AUTH_PRIVATE_KEY_FILE:?CONVEX_AUTH_PRIVATE_KEY_FILE is required in production}
+  auth_convex_public_key:
+    file: ${CONVEX_AUTH_PUBLIC_KEY_FILE:?CONVEX_AUTH_PUBLIC_KEY_FILE is required in production}
+
 services:
+  controlplane-postgres:
+    ports: !reset []
+
+  controlplane-dragonfly:
+    ports: !reset []
+
+  controlplane-nats:
+    ports: !reset []
+
+  control-shared-nats:
+    ports: !reset []
+
   auth-core:
+    # File-backed Compose secrets retain host ownership/mode. Start the
+    # bounded handoff as root, then drop to appuser before migrations/app.
+    user: root
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    ports: !reset []
+    # Never load the ignored developer environment file in a release render.
+    env_file: !reset []
     environment:
       # NODE_ENV activates Auth Core's production-only fail-closed checks,
       # secure cookies, and non-development error handling.
       NODE_ENV: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
       RATE_LIMIT_ENABLED: "true"
+      BEARER_TOKEN_ENABLED: "true"
+      EMAIL_PASSWORD_ENABLED: "true"
+      REQUIRE_EMAIL_VERIFICATION: "true"
+      ORGANIZATION_ENABLED: "true"
+      ORG_REQUIRE_EMAIL_VERIFICATION: "true"
+      USE_SECURE_COOKIES_AUTO: "true"
+      DATABASE_URL: ${AUTH_DATABASE_URL:?AUTH_DATABASE_URL is required in production}
+      DRAGONFLY_URL: ${AUTH_DRAGONFLY_URL:?AUTH_DRAGONFLY_URL is required in production}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required in production}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?TOKEN_ENCRYPTION_KEY is required in production}
+      RESEND_API_KEY: ${RESEND_API_KEY:?RESEND_API_KEY is required in production}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:?RESEND_FROM_EMAIL is required in production}
+      AUTH_GRPC_SERVICE_CREDENTIALS: !reset null
+      AUTH_GRPC_SERVICE_CREDENTIALS_FILE: /run/secrets/auth_grpc_service_credentials
+      AUTH_INTERNAL_SERVICE_CREDENTIALS: !reset null
+      AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE: /run/secrets/auth_internal_service_credentials
+      USER_CORE_GRPC_CLIENT_CREDENTIAL: !reset null
+      USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE: /run/secrets/user_core_grpc_client_credential
+      USER_CORE_GRPC_TLS_CA_FILE: /run/secrets/user_core_grpc_tls_ca
+      USER_SERVICE_GRPC_URL: user-core:50012
+      CONVEX_AUTH_PRIVATE_KEY_FILE: /run/secrets/auth_convex_private_key
+      CONVEX_AUTH_PUBLIC_KEY_FILE: /run/secrets/auth_convex_public_key
       # Never inherit the localhost defaults from .env.docker in production.
       # Operators must provide the externally reachable canonical URLs and the
       # exact browser origins trusted by Better Auth and Nest CORS.
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required in production}
       FRONTEND_URL: ${FRONTEND_URL:?FRONTEND_URL is required in production}
       BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:?BETTER_AUTH_TRUSTED_ORIGINS is required in production}
+    volumes: !override
+      - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
+    secrets:
+      - source: auth_grpc_service_credentials
+        target: auth_grpc_service_credentials
+        mode: 0444
+      - source: auth_internal_service_credentials
+        target: auth_internal_service_credentials
+        mode: 0444
+      - source: user_core_grpc_client_credential
+        target: user_core_grpc_client_credential
+        mode: 0444
+      - source: user_core_grpc_tls_ca
+        target: user_core_grpc_tls_ca
+        mode: 0444
+      - source: auth_convex_private_key
+        target: auth_convex_private_key
+        mode: 0444
+      - source: auth_convex_public_key
+        target: auth_convex_public_key
+        mode: 0444
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3011/api/convex-auth/jwks').then(async (response) => { const body = await response.json(); const key = Array.isArray(body.keys) ? body.keys[0] : null; if (!response.ok || body.keys.length !== 1 || !key || key.kty !== 'RSA' || key.alg !== 'RS256' || key.use !== 'sig' || typeof key.kid !== 'string' || typeof key.n !== 'string' || typeof key.e !== 'string') process.exit(1); }).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  user-core:
+    # File-backed Compose secrets retain host ownership/mode. Start the
+    # bounded handoff as root, then drop to appuser before migrations/app.
+    user: root
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    env_file: !reset []
+    environment:
+      ENVIRONMENT: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+      USER_CORE_GRPC_SERVICE_CREDENTIALS: !reset null
+      USER_CORE_GRPC_SERVICE_CREDENTIALS_FILE: /run/secrets/user_core_grpc_service_credentials
+      USER_CORE_GRPC_TLS_CERT_FILE: /run/secrets/user_core_grpc_tls_certificate
+      USER_CORE_GRPC_TLS_KEY_FILE: /run/secrets/user_core_grpc_tls_private_key
+      USER_AUTH_INTERNAL_CLIENT_CREDENTIAL: !reset null
+      USER_AUTH_INTERNAL_CLIENT_CREDENTIAL_FILE: /run/secrets/user_auth_internal_client_credential
+      AUTH_CORE_JWT_PUBLIC_KEY_FILE: /run/secrets/auth_convex_public_key
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required in production}
+    volumes: !reset []
+    secrets:
+      - source: user_core_grpc_service_credentials
+        target: user_core_grpc_service_credentials
+        mode: 0444
+      - source: user_core_grpc_tls_certificate
+        target: user_core_grpc_tls_certificate
+        mode: 0444
+      - source: user_core_grpc_tls_private_key
+        target: user_core_grpc_tls_private_key
+        mode: 0444
+      - source: user_auth_internal_client_credential
+        target: user_auth_internal_client_credential
+        mode: 0444
+      - source: auth_convex_public_key
+        target: auth_convex_public_key
+        mode: 0444
+
+  org-core:
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    ports: !reset []
+    env_file: !reset []
+    environment:
+      ENVIRONMENT: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+
+  billing-core:
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    ports: !reset []
+    env_file: !reset []
+    environment:
+      ENVIRONMENT: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+
+  session-core:
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    ports: !reset []
+    env_file: !reset []
+    environment:
+      ENVIRONMENT: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+
+  audit-core:
+    build:
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+    ports: !reset []
+    env_file: !reset []
+    environment:
+      ENVIRONMENT: production
+      ALLOW_INSECURE_DEV_DEFAULTS: "0"
+
+  lago-db:
+    ports: !reset []
+
+  lago-dragonfly:
+    ports: !reset []
+
+  lago-api:
+    ports: !reset []
+
+  lago-front:
+    ports: !reset []
+
+  controlplane-prometheus:
+    ports: !reset []
+
+  controlplane-grafana:
+    ports: !reset []

@@ -78,6 +78,18 @@ export const natsWebhook = httpAction(async (ctx, request) => {
 
   try {
     switch (handler) {
+      case "onOrganizationProjectionChanged":
+        await ctx.runMutation(
+          internal.nats.onOrganizationProjectionChanged,
+          body as any,
+        );
+        break;
+      case "onOrganizationMembershipProjectionChanged":
+        await ctx.runMutation(
+          internal.nats.onOrganizationMembershipProjectionChanged,
+          body as any,
+        );
+        break;
       // Quarry crawl job events — internalMutation (direct DB writes)
       case "onCrawlStarted":
         await ctx.runMutation(internal.nats.onCrawlStarted, body as any);
@@ -90,22 +102,6 @@ export const natsWebhook = httpAction(async (ctx, request) => {
         break;
       case "onCrawlFailed":
         await ctx.runMutation(internal.nats.onCrawlFailed, body as any);
-        break;
-      // Control Plane org events — internalAction (needs async) 
-      case "onOrganizationCreated":
-        await ctx.runAction(internal.nats.onOrganizationCreated, body as any);
-        break;
-      case "onOrganizationUpdated":
-        await ctx.runAction(internal.nats.onOrganizationUpdated, body as any);
-        break;
-      case "onOrganizationDeleted":
-        await ctx.runAction(internal.nats.onOrganizationDeleted, body as any);
-        break;
-      case "onOrganizationMemberAdded":
-        await ctx.runAction(internal.nats.onOrganizationMemberAdded, body as any);
-        break;
-      case "onOrganizationMemberRemoved":
-        await ctx.runAction(internal.nats.onOrganizationMemberRemoved, body as any);
         break;
       case "onImportCompleted":
         await ctx.runAction(internal.nats.onImportCompleted, body as any);

@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -45,7 +46,11 @@ func (s *Server) listRoles(c *gin.Context) {
 
 	roles, err := s.rbacRepo.List(ctx, orgID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("org-core list roles failed for org %q: %v", orgID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"code":    "roles_unavailable",
+			"message": "Role configuration is temporarily unavailable",
+		}})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"roles": roles})

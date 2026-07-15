@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/billing-core/internal/billing"
@@ -120,6 +121,42 @@ func TestRetrieveCheckoutSessionMapsStatus(t *testing.T) {
 	}
 }
 
+func TestRetrieveCheckoutSessionRejectsUnsafePaymentIDsBeforeProviderCall(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`{"payment":{}}`))
+	}))
+	defer srv.Close()
+
+	a := NewAdapter(Config{BaseURL: srv.URL, SecretKey: "secret"})
+	for _, paymentID := range []string{"../customers", "pay_123?expand=secret", "pay/123", string(make([]byte, 129))} {
+		if _, err := a.RetrieveCheckoutSession(context.Background(), billing.CheckoutLookupParams{PaymentID: paymentID}); err == nil {
+			t.Fatalf("payment id %q should be rejected", paymentID)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("unsafe ids reached the credentialed provider client: requests=%d", requests)
+	}
+}
+
+func TestProviderErrorDoesNotExposeResponseBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`invalid merchant configuration: provider-secret-detail`))
+	}))
+	defer srv.Close()
+
+	a := NewAdapter(Config{BaseURL: srv.URL, SecretKey: "secret"})
+	_, err := a.RetrieveCheckoutSession(context.Background(), billing.CheckoutLookupParams{PaymentID: "pay_123"})
+	if err == nil {
+		t.Fatal("expected provider error")
+	}
+	if strings.Contains(err.Error(), "provider-secret-detail") || strings.Contains(err.Error(), "merchant configuration") {
+		t.Fatalf("provider body escaped in error: %v", err)
+	}
+}
+
 func TestParseMyReference(t *testing.T) {
 	cases := map[string][2]string{
 		"org_1:velion-pro": {"org_1", "velion-pro"},
@@ -158,5 +195,30 @@ func TestMissingSecretKeyFailsClosed(t *testing.T) {
 	a := NewAdapter(Config{BaseURL: "https://unused"})
 	if _, err := a.CreateCheckoutSession(context.Background(), billing.CheckoutParams{OrgID: "o", Plan: "pro", SuccessURL: "https://x"}); err == nil {
 		t.Fatal("expected error when secret key missing")
+	}
+}
+
+func TestNexiAdapterSupportContracts(t *testing.T) {
+	a := NewAdapter(Config{})
+	customerID, err := a.EnsureCustomer(context.Background(), billing.CustomerInput{OrgID: "  org_1  "})
+	if err != nil || customerID != "org_1" {
+		t.Fatalf("EnsureCustomer = %q, %v", customerID, err)
+	}
+	if err := a.ChargeInvoice(context.Background(), billing.Invoice{}); err == nil {
+		t.Fatal("direct invoice charging must remain unsupported")
+	}
+	for plan, amount := range map[string]int64{
+		"hobby": 29900, "standard": 99900, "pro": 149900, "enterprise": 249900, "unknown": 0,
+	} {
+		if got := checkoutPlanAmount(plan); got != amount {
+			t.Errorf("checkoutPlanAmount(%q)=%d want %d", plan, got, amount)
+		}
+	}
+	for plan, name := range map[string]string{
+		"hobby": "Velion Essential", "standard": "Velion Advanced", "pro": "Velion Expert", "enterprise": "Velion Custom", "unknown": "Velion",
+	} {
+		if got := checkoutPlanDisplayName(plan); got != name {
+			t.Errorf("checkoutPlanDisplayName(%q)=%q want %q", plan, got, name)
+		}
 	}
 }

@@ -45,3 +45,31 @@ func TestLoadReadsDedicatedDataPlaneNATSToken(t *testing.T) {
 		t.Fatalf("NatsToken was not loaded from the dedicated environment variable")
 	}
 }
+
+func TestSignedCostConsumerConfigurationDefaultsOff(t *testing.T) {
+	t.Setenv("SIGNED_COST_EVENTS_ENABLED", "")
+	t.Setenv("EMBEDDING_EVENT_PUBLIC_KEY_PATH", "")
+	t.Setenv("RETRIEVAL_EVENT_PUBLIC_KEY_PATH", "")
+
+	cfg := Load()
+	if cfg.SignedCostEventsEnabled {
+		t.Fatal("signed cost consumer unexpectedly enabled")
+	}
+}
+
+func TestSignedCostConsumerConfigurationRequiresBothProducerKeys(t *testing.T) {
+	t.Setenv("SIGNED_COST_EVENTS_ENABLED", "1")
+	t.Setenv("EMBEDDING_EVENT_PUBLIC_KEY_PATH", "/run/event-keys/embedding.pub")
+	t.Setenv("RETRIEVAL_EVENT_PUBLIC_KEY_PATH", "")
+
+	cfg := Load()
+	if err := cfg.ValidateSignedCostEvents(); err == nil {
+		t.Fatal("signed consumer accepted incomplete producer registry")
+	}
+
+	t.Setenv("RETRIEVAL_EVENT_PUBLIC_KEY_PATH", "/run/event-keys/retrieval.pub")
+	cfg = Load()
+	if err := cfg.ValidateSignedCostEvents(); err != nil {
+		t.Fatalf("complete signed consumer configuration failed: %v", err)
+	}
+}

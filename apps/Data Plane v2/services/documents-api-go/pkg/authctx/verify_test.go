@@ -62,9 +62,40 @@ func validClaims() jwt.MapClaims {
 		"iss":            testIssuer,
 		"sub":            "user_123",
 		"principal_type": "user",
+		"zdr":            true,
 		"iat":            now.Add(-1 * time.Minute).Unix(),
 		"nbf":            now.Add(-1 * time.Minute).Unix(),
 		"exp":            now.Add(1 * time.Hour).Unix(),
+	}
+}
+
+func TestVerifyRequiresBooleanZDRPosture(t *testing.T) {
+	key := writeTestKey(t)
+	v := newTestVerifier(t)
+
+	missing := validClaims()
+	delete(missing, "zdr")
+	if _, err := v.Verify(signToken(t, key, missing)); err == nil {
+		t.Fatal("token without signed zdr posture was accepted")
+	}
+
+	malformed := validClaims()
+	malformed["zdr"] = "true"
+	if _, err := v.Verify(signToken(t, key, malformed)); err == nil {
+		t.Fatal("token with non-boolean zdr posture was accepted")
+	}
+}
+
+func TestVerifyPreservesSignedZDRPosture(t *testing.T) {
+	key := writeTestKey(t)
+	v := newTestVerifier(t)
+
+	claims, err := v.Verify(signToken(t, key, validClaims()))
+	if err != nil {
+		t.Fatalf("verify restrictive token: %v", err)
+	}
+	if !claims.ZDR {
+		t.Fatal("verified restrictive zdr posture was lost")
 	}
 }
 

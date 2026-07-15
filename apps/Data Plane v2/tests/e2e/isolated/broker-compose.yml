@@ -1,0 +1,168 @@
+services:
+  nats:
+    image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
+    command: ["-js", "-m", "8222", "-sd", "/data", "--auth", "${BROKER_MATRIX_TOKEN:?required}"]
+    expose:
+      - "4222"
+    volumes:
+      - broker_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    restart: "no"
+
+  broker-probe:
+    image: natsio/nats-box:0.19.2@sha256:8031d190c7ee24081f3f27cc939fb647a1eeb29ebb5c60fef9b5b6c7a846d6a2
+    profiles: ["verify"]
+    restart: "no"
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_TOKEN: ${BROKER_MATRIX_TOKEN:?required}
+    volumes:
+      - ../broker-delivery-matrix.sh:/matrix.sh:ro
+    entrypoint: ["/bin/sh", "/matrix.sh"]
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  control-nats:
+    image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
+    profiles: ["gdpr"]
+    command: ["-c", "/etc/nats/control-shared-nats.conf"]
+    restart: "no"
+    environment:
+      CONTROL_NATS_ADMIN_PASSWORD: ${CONTROL_NATS_ADMIN_PASSWORD:?required}
+      DOCUMENTS_GDPR_NATS_PASSWORD: ${DOCUMENTS_GDPR_NATS_PASSWORD:?required}
+    expose:
+      - "4222"
+    volumes:
+      - control_nats_data:/data
+      - ./control-shared-nats.conf:/etc/nats/control-shared-nats.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  gdpr-data-nats:
+    image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
+    profiles: ["gdpr"]
+    command: ["-js", "-m", "8222", "-sd", "/data", "--auth", "${BROKER_MATRIX_TOKEN:?required}"]
+    restart: "no"
+    expose:
+      - "4222"
+    volumes:
+      - gdpr_data_nats:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  control-init:
+    image: natsio/nats-box:0.19.2@sha256:8031d190c7ee24081f3f27cc939fb647a1eeb29ebb5c60fef9b5b6c7a846d6a2
+    profiles: ["gdpr"]
+    restart: "no"
+    environment:
+      NATS_URL: nats://control-nats:4222
+      NATS_USER: control-admin
+      NATS_PASSWORD: ${CONTROL_NATS_ADMIN_PASSWORD:?required}
+    volumes:
+      - ./gdpr-control-broker-setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
+    depends_on:
+      control-nats:
+        condition: service_healthy
+
+  gdpr-postgres:
+    image: postgres:16.14-alpine3.24
+    profiles: ["gdpr"]
+    restart: "no"
+    environment:
+      POSTGRES_USER: dataplane
+      POSTGRES_PASSWORD: ${BROKER_POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: dataplane
+    expose:
+      - "5432"
+    volumes:
+      - gdpr_postgres_data:/var/lib/postgresql/data
+      - ../../../infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # The official image briefly exposes its temporary init server before
+      # restarting into the final postmaster. Gate on the last required schema
+      # object plus a stable postmaster age so documents-api cannot race that
+      # handoff and exit on a transient connection refusal.
+      test: ["CMD-SHELL", "pg_isready -U dataplane >/dev/null && psql -U dataplane -d dataplane -Atqc \"SELECT to_regclass('public.documents_outbox') IS NOT NULL AND now() - pg_postmaster_start_time() > interval '3 seconds'\" | grep -qx t"]
+      interval: 1s
+      timeout: 2s
+      start_period: 10s
+      retries: 60
+
+  documents-gdpr:
+    build:
+      context: ../../../services/documents-api-go
+      dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: isolated-e2e
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    profiles: ["gdpr"]
+    restart: "no"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      DATABASE_URL: postgres://dataplane:${BROKER_POSTGRES_PASSWORD:?required}@gdpr-postgres:5432/dataplane?sslmode=disable
+      NATS_URL: nats://gdpr-data-nats:4222
+      DATAPLANE_NATS_TOKEN: ${BROKER_MATRIX_TOKEN:?required}
+      NATS_SHARED_URL: nats://control-nats:4222
+      NATS_SHARED_USER: documents-api-gdpr
+      NATS_SHARED_PASSWORD: ${DOCUMENTS_GDPR_NATS_PASSWORD:?required}
+      GDPR_DURABLE_CONSUMER_REQUIRED: "1"
+      USER_CORE_SERVICE_TOKEN: ${BROKER_USER_CORE_TOKEN:?required}
+      USER_CORE_URL: http://127.0.0.1:9
+      HTTP_PORT: "8010"
+      AUTH_CORE_JWKS_URL: http://127.0.0.1:9/isolated-jwks
+      AUTH_CORE_ISSUER: http://isolated-auth.invalid/convex-auth
+      EVENT_SIGNING_PRIVATE_KEY_PATH: /run/event-keys/documents-events.pem
+      OTEL_SDK_DISABLED: "true"
+    expose:
+      - "8010"
+    volumes:
+      - ${BROKER_EVENT_SIGNING_PRIVATE_KEY_PATH:?required}:/run/event-keys/documents-events.pem:ro
+    depends_on:
+      gdpr-data-nats:
+        condition: service_healthy
+      control-init:
+        condition: service_completed_successfully
+      gdpr-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8010/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+
+  control-probe:
+    image: natsio/nats-box:0.19.2@sha256:8031d190c7ee24081f3f27cc939fb647a1eeb29ebb5c60fef9b5b6c7a846d6a2
+    profiles: ["gdpr"]
+    restart: "no"
+    environment:
+      NATS_URL: nats://control-nats:4222
+      NATS_USER: control-admin
+      NATS_PASSWORD: ${CONTROL_NATS_ADMIN_PASSWORD:?required}
+    depends_on:
+      control-nats:
+        condition: service_healthy
+
+volumes:
+  broker_data:
+  control_nats_data:
+  gdpr_postgres_data:
+  gdpr_data_nats:

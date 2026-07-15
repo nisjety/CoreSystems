@@ -173,7 +173,7 @@ assert_status() {
 
   status=$(request_status "$service" "$method" "$url" "$bearer" "$org_header" "$body" || true)
   case "$status" in
-    401|403|404|200) ;;
+    [1-5][0-9][0-9]) ;;
     *) status=transport-error ;;
   esac
 

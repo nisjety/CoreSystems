@@ -57,6 +57,7 @@ async fn writes_one_row_per_event() {
         org_id: TEST_ORG.into(),
         auth_method: AuthMethod::Jwt,
         scopes: vec!["read".into()],
+        zdr: false,
         acl: EffectiveAcl::allow_all(),
         request_id: "req-test-1".into(),
         verified_bearer: None,

@@ -41,4 +41,17 @@ describe('reconciliation HTTP', () => {
     ).resolves.toMatchObject({ status: 204 });
     expect(jest.getTimerCount()).toBe(0);
   });
+
+  it('never forwards scoped reconciliation credentials through redirects', async () => {
+    const fetchMock = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 307 }));
+
+    await fetchReconciliation('http://org-core/internal/reconcile', {
+      method: 'POST',
+      headers: { 'x-service-token': 'scoped-token' },
+    });
+
+    expect(fetchMock.mock.calls[0][1]?.redirect).toBe('manual');
+  });
 });

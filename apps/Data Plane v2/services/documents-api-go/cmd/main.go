@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -91,28 +92,36 @@ func main() {
 	docRepo := repo.NewDocumentRepo(pool)
 	sourceObjectRepo := repo.NewSourceObjectRepo(pool)
 
-	// Per-User Data Ownership (GDPR): subscribe to the cross-plane erasure
-	// fan-out on the SHARED bus and transfer an erased user's owned documents to
-	// the org system account (emitting velion.gdpr.ownership.transferred). The
-	// fan-out is published by user-core on velion-nats, not the Data-Plane bus, so
-	// this uses a separate shared connection. Best-effort: a missing shared bus
-	// just means the transfer doesn't run here (logged), never a startup failure.
-	if unverifiedLegacyEventsEnabled() && cfg.SharedNatsURL != "" {
-		log.Warn().Msg("unsigned GDPR ownership-transfer consumer enabled for insecure development")
-		sharedOpts := []nats.Option{nats.Name("documents-api-gdpr-sub")}
-		if cfg.SharedNatsToken != "" {
-			sharedOpts = append(sharedOpts, nats.Token(cfg.SharedNatsToken))
-		}
-		if sharedNc, sErr := nats.Connect(cfg.SharedNatsURL, sharedOpts...); sErr != nil {
-			log.Warn().Err(sErr).Msg("shared NATS connect failed; GDPR ownership-transfer subscriber disabled")
+	// The shared broker identity is scoped to one pre-provisioned durable,
+	// its ACK subject, ownership receipts, and a single DLQ. It has no stream or
+	// consumer administration rights and no legacy token fallback.
+	var gdprConsumer *gdpr.Consumer
+	if cfg.SharedNatsURL != "" {
+		sharedNc, sharedErr := nats.Connect(
+			cfg.SharedNatsURL,
+			nats.Name("documents-api-gdpr-durable"),
+			nats.UserInfo(cfg.SharedNatsUser, cfg.SharedNatsPassword),
+			nats.CustomInboxPrefix("_INBOX.DOCUMENTS_GDPR"),
+		)
+		if sharedErr != nil {
+			if cfg.GDPRConsumerRequired {
+				log.Fatal().Err(sharedErr).Msg("required scoped GDPR NATS connection failed")
+			}
+			log.Warn().Err(sharedErr).Msg("optional scoped GDPR NATS connection failed")
 		} else {
 			defer sharedNc.Close()
-			if subErr := gdpr.StartSubscriber(sharedNc, docRepo); subErr != nil {
-				log.Warn().Err(subErr).Msg("GDPR ownership-transfer subscriber failed to start")
+			gdprConsumer, sharedErr = gdpr.StartSubscriber(sharedNc, docRepo)
+			if sharedErr != nil {
+				if cfg.GDPRConsumerRequired {
+					log.Fatal().Err(sharedErr).Msg("required durable GDPR consumer failed to bind")
+				}
+				log.Warn().Err(sharedErr).Msg("optional durable GDPR consumer failed to bind")
+			} else {
+				defer gdprConsumer.Close() //nolint:errcheck
 			}
 		}
-	} else {
-		log.Warn().Msg("GDPR ownership-transfer subscriber disabled until signed producer-scoped envelopes are available")
+	} else if cfg.GDPRConsumerRequired {
+		log.Fatal().Msg("required durable GDPR consumer is not configured")
 	}
 	// Phase A · A1.5 — usage + audit publisher. Logs-only on connect
 	// failure (the existing nc above is already required, so failure
@@ -126,7 +135,7 @@ func main() {
 	// document grants so List/Get can enforce ownership at the source.
 	authzClient := userauthz.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
 	docHandler := handler.NewDocumentHandler(docRepo, authzClient)
-	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo, docRepo)
+	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`
 	// every 500ms with FOR UPDATE SKIP LOCKED so multiple replicas don't
@@ -152,7 +161,23 @@ func main() {
 	r.Use(metrics.Middleware)
 
 	r.Get("/health", handler.Health)
-	r.Get("/readyz", handler.Readyz)
+	r.Get("/readyz", func(w http.ResponseWriter, request *http.Request) {
+		if cfg.GDPRConsumerRequired && gdprConsumer == nil {
+			http.Error(w, "required GDPR consumer unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		handler.Readyz(w, request)
+	})
+	r.Get("/internal/gdpr/health", func(w http.ResponseWriter, request *http.Request) {
+		snapshot := gdpr.ConsumerHealthSnapshot{Status: "disabled"}
+		if gdprConsumer != nil {
+			healthContext, healthCancel := context.WithTimeout(request.Context(), 2*time.Second)
+			defer healthCancel()
+			snapshot = gdprConsumer.Health(healthContext)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": snapshot})
+	})
 	r.Method("GET", "/metrics", metrics.Handler())
 
 	authConfig := authctx.Config{

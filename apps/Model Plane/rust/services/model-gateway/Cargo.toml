@@ -37,6 +37,7 @@ jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 redis = { workspace = true }
 base64 = "0.22"
+blake3 = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

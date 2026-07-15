@@ -8,6 +8,13 @@ Scope: `apps/Data Plane v2/services/colqwen-reranker` (+ its call site in
 `services/retrieval-engine-rs/src/search/colqwen.rs` and
 `services/retrieval-engine-rs/src/pipeline/orchestrator.rs`)
 
+## 2026-07-15 final checkpoint
+
+No state change: visual reranking remained disabled and did not participate in
+the final isolated MVP matrices. No build, deployment, reachability, or
+effectiveness claim is made. Enabling it remains outside the secure MVP unless
+it receives verified tenant/ZDR identity and dedicated runtime evidence.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented:** optional ColQwen reranking remains feature-flagged and is not

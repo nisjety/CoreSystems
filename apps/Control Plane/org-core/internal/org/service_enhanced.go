@@ -14,6 +14,7 @@ import (
 var ErrNotFound = errors.New("not found")
 var ErrOwnerConflict = errors.New("organization already has a different owner")
 var ErrOrganizationDeleted = errors.New("organization is deleted and cannot be reprovisioned")
+var ErrProjectionConflict = errors.New("conflicting state for an existing Auth projection revision")
 
 const (
 	orgCacheTTL         = 10 * time.Minute // Orgs change rarely; 10m reduces DB reads
@@ -31,7 +32,7 @@ type SharedPublisher interface {
 	PublishOrgCreated(ctx context.Context, orgID, name, slug, plan string, metadata map[string]any)
 	PublishOrgUpdated(ctx context.Context, orgID string, changes map[string]any)
 	PublishOrgDeleted(ctx context.Context, orgID, name string)
-	PublishPlanChanged(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string)
+	PublishPlanChanged(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string, revision int64) error
 	PublishMemberAdded(ctx context.Context, orgID, orgName, userID, userEmail, role string)
 	PublishMemberRemoved(ctx context.Context, orgID, userID string)
 	PublishPlain(subject string, payload map[string]any)
@@ -43,7 +44,7 @@ type SharedPublisher interface {
 // import cycle. Kept separate from the cross-plane SharedPublisher (velion-nats)
 // so audit stays CP-local and never depends on the shared bus being up.
 type AuditPublisher interface {
-	PublishCore(subject string, payload map[string]any) error
+	PublishAudit(ctx context.Context, subject, eventID string, payload map[string]any) error
 }
 
 // Service handles organization business logic and event publishing
@@ -51,7 +52,7 @@ type Service struct {
 	repo            *Repository
 	publisher       Publisher
 	sharedPublisher SharedPublisher    // cross-plane events on velion-nats
-	auditPublisher  AuditPublisher     // velion.audit.v1.* on the local controlplane-nats bus
+	auditPublisher  AuditPublisher     // durable velion.audit.v2.* dispatch on local controlplane-nats
 	cache           *rediscache.Client // optional, nil if Redis disabled
 }
 
@@ -71,8 +72,8 @@ func (s *Service) SetSharedPublisher(sp SharedPublisher) {
 	s.sharedPublisher = sp
 }
 
-// SetAuditPublisher wires the local control-plane bus publisher used to emit
-// velion.audit.v1.* events to audit-core. nil disables audit emission.
+// SetAuditPublisher wires the local Control JetStream dispatcher. A nil
+// publisher defers delivery; transactional audit intents remain in PostgreSQL.
 func (s *Service) SetAuditPublisher(ap AuditPublisher) {
 	s.auditPublisher = ap
 }
@@ -287,12 +288,16 @@ func (s *Service) ReconcileOrganizationProjection(
 	return true, nil
 }
 
-func (s *Service) ReconcileOrganizationDeletion(ctx context.Context, orgID string) (json.RawMessage, error) {
-	receipt, err := s.repo.ReconcileOrganizationDeletion(ctx, orgID)
+func (s *Service) ReconcileOrganizationDeletion(
+	ctx context.Context,
+	orgID string,
+	revision int64,
+) (json.RawMessage, bool, error) {
+	receipt, applied, err := s.repo.ReconcileOrganizationDeletion(ctx, orgID, revision)
 	if err == nil && s.cache != nil {
 		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
 	}
-	return receipt, err
+	return receipt, applied, err
 }
 
 // AddPendingInvite records an email invite for a user who has not yet registered.
@@ -465,27 +470,73 @@ func (s *Service) UpdatePlan(ctx context.Context, orgID, plan, changedBy, reason
 		return nil, fmt.Errorf("invalid plan")
 	}
 
-	existing, err := s.repo.GetOrganization(ctx, orgID)
+	_, applied, err := s.repo.UpdatePlanWithOutbox(ctx, orgID, plan, changedBy, reason)
 	if err != nil {
 		return nil, err
 	}
 
-	previousPlan := existing.Plan
-	if previousPlan == plan {
-		return existing, nil
-	}
-
-	existing.Plan = plan
-	if err := s.repo.UpsertOrganization(ctx, *existing); err != nil {
-		return nil, err
-	}
-
-	if s.cache != nil {
+	if applied && s.cache != nil {
 		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
 	}
-
-	s.publishPlanChanged(ctx, orgID, existing.Name, previousPlan, plan, changedBy, reason)
+	if _, err := s.FlushPlanChangeOutbox(ctx, 100); err != nil {
+		return nil, err
+	}
 	return s.repo.GetOrganization(ctx, orgID)
+}
+
+// FlushPlanChangeOutbox publishes committed plan intents and acknowledges each
+// row only after JetStream confirms the publish. A crash after publish but
+// before acknowledgement causes a duplicate delivery, which Billing rejects by
+// revision; a publish error remains visible and retryable in the outbox.
+func (s *Service) FlushPlanChangeOutbox(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 || limit > 1000 {
+		return 0, fmt.Errorf("plan outbox limit must be between 1 and 1000")
+	}
+	if s.publisher == nil {
+		return 0, fmt.Errorf("organization plan event publisher is unavailable")
+	}
+	if s.sharedPublisher == nil {
+		return 0, fmt.Errorf("organization shared plan event publisher is unavailable")
+	}
+	rows, err := s.repo.ClaimPlanChangeOutbox(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	published := 0
+	var publishErrors error
+	for _, row := range rows {
+		event := map[string]any{
+			"organization_id":   row.OrgID,
+			"organization_name": row.OrgName,
+			"previous_plan":     row.PreviousPlan,
+			"new_plan":          row.NewPlan,
+			"changed_by":        row.ChangedBy,
+			"change_reason":     row.Reason,
+			"revision":          row.Revision,
+		}
+		if err := s.publisher.Publish(ctx, "organization.plan.changed", event); err != nil {
+			if markErr := s.repo.MarkPlanChangePublishFailed(ctx, row.OrgID, row.Revision, err); markErr != nil {
+				publishErrors = errors.Join(publishErrors, err, markErr)
+			} else {
+				publishErrors = errors.Join(publishErrors, err)
+			}
+			continue
+		}
+		if err := s.publishPlanChanged(ctx, row.PlanChange); err != nil {
+			if markErr := s.repo.MarkPlanChangePublishFailed(ctx, row.OrgID, row.Revision, err); markErr != nil {
+				publishErrors = errors.Join(publishErrors, err, markErr)
+			} else {
+				publishErrors = errors.Join(publishErrors, err)
+			}
+			continue
+		}
+		if err := s.repo.MarkPlanChangePublished(ctx, row.OrgID, row.Revision); err != nil {
+			publishErrors = errors.Join(publishErrors, err)
+			continue
+		}
+		published++
+	}
+	return published, publishErrors
 }
 
 // UpdateBrregVerification sets the org_number, brreg_data, and verification_status
@@ -521,24 +572,33 @@ func (s *Service) UpdateBrregVerification(ctx context.Context, id, orgNumber str
 	return nil
 }
 
-// HardDelete performs an irreversible GDPR hard delete of an organization by
-// invoking the gdpr_hard_delete_organization stored procedure (parameterized).
-// It publishes the org.deleted domain event first (so subscribers see the org
-// name before it is gone), then returns the proc's JSONB receipt. Erasure
-// auditing + the cross-plane fan-out are emitted by the caller (see gdpr.go).
-func (s *Service) HardDelete(ctx context.Context, orgID string) (json.RawMessage, error) {
-	if strings.TrimSpace(orgID) == "" {
-		return nil, fmt.Errorf("organization id is required")
-	}
-
-	// Capture the org name for the domain event before the row is deleted.
-	if org, err := s.repo.GetOrganization(ctx, orgID); err == nil {
-		s.publishOrganizationDeleted(ctx, orgID, org.Name)
-	}
-
-	receipt, err := s.repo.GDPRHardDeleteOrganization(ctx, orgID)
+// HardDelete atomically commits the irreversible organization erasure and its
+// durable audit intent. Publication is asynchronous and retried from the local
+// outbox, so a broker outage cannot create an unaudited successful erasure.
+func (s *Service) HardDelete(ctx context.Context, orgID, actorID, actorRole string) (json.RawMessage, error) {
+	occurredAt := time.Now().UTC()
+	auditEvent, err := newGDPRAuditEvent(
+		orgID, "organization", orgID, actorID, actorRole, "ok", occurredAt,
+	)
 	if err != nil {
 		return nil, err
+	}
+
+	// Capture the org name before the row is deleted, but do not announce the
+	// deletion unless the erasure and its durable audit intent both commit.
+	orgName := ""
+	if org, err := s.repo.GetOrganization(ctx, orgID); err == nil {
+		orgName = org.Name
+	}
+
+	receipt, err := s.repo.GDPRHardDeleteOrganization(ctx, orgID, auditEvent)
+	if err != nil {
+		return nil, errors.Join(err, s.enqueueGDPRErrorAudit(
+			ctx, orgID, "organization", actorID, actorRole, occurredAt,
+		))
+	}
+	if orgName != "" {
+		s.publishOrganizationDeleted(ctx, orgID, orgName)
 	}
 
 	if s.cache != nil {
@@ -547,21 +607,43 @@ func (s *Service) HardDelete(ctx context.Context, orgID string) (json.RawMessage
 	return receipt, nil
 }
 
-// SoftDelete marks an organization deleted (reversible until purged) by
-// invoking the soft_delete_organization stored procedure (parameterized).
-// Returns the proc's JSONB receipt.
-func (s *Service) SoftDelete(ctx context.Context, orgID string) (json.RawMessage, error) {
-	if strings.TrimSpace(orgID) == "" {
-		return nil, fmt.Errorf("organization id is required")
-	}
-	receipt, err := s.repo.SoftDeleteOrganization(ctx, orgID)
+// SoftDelete atomically marks an organization deleted and records its durable
+// audit intent. Reversible soft deletion does not emit cross-plane erasure.
+func (s *Service) SoftDelete(ctx context.Context, orgID, actorID, actorRole string) (json.RawMessage, error) {
+	occurredAt := time.Now().UTC()
+	auditEvent, err := newGDPRAuditEvent(
+		orgID, "organization_soft", orgID, actorID, actorRole, "ok", occurredAt,
+	)
 	if err != nil {
 		return nil, err
+	}
+	receipt, err := s.repo.SoftDeleteOrganization(ctx, orgID, auditEvent)
+	if err != nil {
+		return nil, errors.Join(err, s.enqueueGDPRErrorAudit(
+			ctx, orgID, "organization_soft", actorID, actorRole, occurredAt,
+		))
 	}
 	if s.cache != nil {
 		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
 	}
 	return receipt, nil
+}
+
+func (s *Service) enqueueGDPRErrorAudit(
+	ctx context.Context,
+	orgID, subjectType, actorID, actorRole string,
+	occurredAt time.Time,
+) error {
+	event, err := newGDPRAuditEvent(
+		orgID, subjectType, orgID, actorID, actorRole, "error", occurredAt,
+	)
+	if err != nil {
+		return err
+	}
+	if err := s.repo.EnqueueGDPRAuditEvent(ctx, event); err != nil {
+		return fmt.Errorf("record failed GDPR operation audit: %w", err)
+	}
+	return nil
 }
 
 // PurgeDeletedOrganizations hard-deletes organizations soft-deleted more than
@@ -612,13 +694,6 @@ func (s *Service) SharedPub() SharedPublisher {
 	return s.sharedPublisher
 }
 
-// AuditPub exposes the local control-plane bus publisher so the GDPR handlers
-// can emit durable velion.audit.v1.* events to audit-core. Returns nil when the
-// local NATS connection is disabled.
-func (s *Service) AuditPub() AuditPublisher {
-	return s.auditPublisher
-}
-
 // Event publishing methods
 
 func (s *Service) publishOrganizationCreated(ctx context.Context, orgID, name, slug, plan string, metadata map[string]any) {
@@ -666,32 +741,27 @@ func (s *Service) publishOrganizationDeleted(ctx context.Context, orgID, name st
 	}
 }
 
-func (s *Service) publishPlanChanged(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string) {
-	event := map[string]any{
-		"organization_id":   orgID,
-		"organization_name": orgName,
-		"previous_plan":     previousPlan,
-		"new_plan":          newPlan,
-		"changed_by":        changedBy,
-		"change_reason":     reason,
-	}
-
-	if s.publisher != nil {
-		s.publisher.Publish(ctx, "organization.plan.changed", event)
-	}
+func (s *Service) publishPlanChanged(ctx context.Context, change PlanChange) error {
 	if s.sharedPublisher != nil {
-		s.sharedPublisher.PublishPlanChanged(ctx, orgID, orgName, previousPlan, newPlan, changedBy, reason)
+		if err := s.sharedPublisher.PublishPlanChanged(
+			ctx, change.OrgID, change.OrgName, change.PreviousPlan, change.NewPlan,
+			change.ChangedBy, change.Reason, change.Revision,
+		); err != nil {
+			return err
+		}
 		// Notify the user who initiated the plan change (changedBy = user ID).
-		if changedBy != "" {
+		if change.ChangedBy != "" {
 			s.sharedPublisher.PublishPlain("notifications.billing.plan_changed", map[string]any{
-				"subscriberId": changedBy,
-				"orgId":        orgID,
-				"orgName":      orgName,
-				"previousPlan": previousPlan,
-				"newPlan":      newPlan,
+				"subscriberId": change.ChangedBy,
+				"orgId":        change.OrgID,
+				"orgName":      change.OrgName,
+				"previousPlan": change.PreviousPlan,
+				"newPlan":      change.NewPlan,
+				"revision":     change.Revision,
 			})
 		}
 	}
+	return nil
 }
 
 func (s *Service) publishMemberAdded(ctx context.Context, orgID, orgName, userID, userEmail, role string) {

@@ -5,6 +5,20 @@ Updated: 2026-07-10 (live re-verification pass — container health, HTTP surfac
 
 Scope: `apps/Data Plane v2/services/index-engine-rs`
 
+## 2026-07-15 final isolated acceptance delta
+
+The final rebuilt service reached healthy state and participated in the
+producer-scoped signed broker delivery/redelivery matrix. The restrictive-ZDR
+run left stabilized downstream-store state unchanged. Production subject ACLs,
+shared rollout, and database-backed deletion-outbox coverage remain pending.
+
+## 2026-07-15 isolated runtime delta
+
+The current-source image `b642e7485f5a` carries revision
+`eeebd0bc98c66434936460020958891066eb05fd` and reached healthy state after the
+isolated migrations. No signed broker event, chunk write, or transactional
+deletion-outbox flow was invoked, so this is startup evidence only.
+
 ## Secure-MVP current state — 2026-07-10
 
 - **Implemented/contained:** the unsigned document-event consumer is disabled by
@@ -12,8 +26,9 @@ Scope: `apps/Data Plane v2/services/index-engine-rs`
   remains health/readiness only.
 - **Tested:** 21/21 tests pass after consumer containment, including the two-gate
   regression; strict combined embedding/index all-target clippy passes.
-- **Built/deployed/reachable/effective:** the revised image built locally with
-  verified revision/build labels; no deployment or event-flow test has run. With
+- **Built/reachable in isolation:** the revised image built locally with
+  verified revision/build labels and reached healthy state in the disposable
+  stack; no event-flow test or shared deployment has run. With
   the consumer disabled, document chunk/index progression is intentionally
   ineffective until signed producer-scoped events and NATS authorization exist.
 - **Coverage/audit:** Rust coverage and Rust dependency-audit tools were unavailable;
@@ -200,4 +215,5 @@ Documents events, rejects event ZDR, refetches the canonical document, and does
 zero chunk/outbox work for missing, deleted, restricted, or unknown-classification
 rows. Deletion progression uses a transactional signed outbox and stable broker
 message ID. Focused tests pass (26 passed, 2 explicit disposable-PostgreSQL
-ignores) with strict clippy; runtime broker/database proof remains Docker-blocked.
+ignores) with strict clippy; runtime broker/database proof remains pending after
+the isolated startup pass.

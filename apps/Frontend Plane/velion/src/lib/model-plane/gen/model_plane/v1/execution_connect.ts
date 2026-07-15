@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { ExecuteStepRequest, ExecuteStepResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
+import { ExecuteStepRequest, ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { CancelRunRequest, CancelRunResponse } from "./runs_pbjs";
 
@@ -48,6 +48,20 @@ export const ExecutionCore = {
       name: "CancelRun",
       I: CancelRunRequest,
       O: CancelRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Pause an active run (Phase 2 B5 — user-initiated browser-run control).
+     * Mirrors ResumeRun/CancelRun. A paused run's in-flight loop (e.g. the
+     * browser-agent loop) polls this state and blocks between steps until
+     * resumed or cancelled; it never aborts a step already in flight.
+     *
+     * @generated from rpc model_plane.v1.ExecutionCore.PauseRun
+     */
+    pauseRun: {
+      name: "PauseRun",
+      I: PauseRunRequest,
+      O: PauseRunResponse,
       kind: MethodKind.Unary,
     },
     /**

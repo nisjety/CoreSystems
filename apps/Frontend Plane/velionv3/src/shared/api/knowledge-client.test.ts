@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { streamCrawlRunEvents, type CrawlWorkflowEvent } from './knowledge-client'
+import {
+  getDocument,
+  getWikiPageByPath,
+  listDocuments,
+  listWikiPages,
+  streamCrawlRunEvents,
+  type CrawlWorkflowEvent,
+} from './knowledge-client'
 
 function sseResponse(frames: string[]): Response {
   const encoder = new TextEncoder()
@@ -75,5 +82,56 @@ describe('streamCrawlRunEvents — crawl 0-pages fix', () => {
     const calledUrl = String(fetchMock.mock.calls[0]?.[0] ?? '')
     expect(calledUrl).toContain('/api/v1/knowledge/jobs/job_abc/events')
     expect(calledUrl).not.toContain('/runs/')
+  })
+})
+
+describe('knowledge Data Plane response normalization', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('maps documents-api list and get envelopes into the frontend contract', async () => {
+    const record = {
+      document_id: 'doc-1',
+      title: 'Runbook',
+      source: 'sharepoint',
+      type: 'pdf',
+      created_at: '2026-07-15T00:00:00Z',
+      updated_at: '2026-07-15T01:00:00Z',
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ documents: [record], total: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(record), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [listed, loaded] = await Promise.all([
+      listDocuments('org-1'),
+      getDocument('org-1', 'doc-1'),
+    ])
+
+    expect(listed[0]).toMatchObject({ id: 'doc-1', sourceId: 'sharepoint', kind: 'pdf' })
+    expect(loaded).toMatchObject({ id: 'doc-1', title: 'Runbook' })
+  })
+
+  it('maps wiki-store page/version envelopes into the frontend contract', async () => {
+    const page = {
+      page_id: 'page-1',
+      org_id: 'org-1',
+      title: 'Operations',
+      path: '/operations',
+      updated_at: '2026-07-15T01:00:00Z',
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ pages: [page], total: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ page, version: { content: 'Current guidance' } }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const listed = await listWikiPages('org-1')
+    const loaded = await getWikiPageByPath('org-1', '/operations')
+
+    expect(listed[0]).toMatchObject({ id: 'page-1', orgId: 'org-1', path: '/operations' })
+    expect(loaded.excerpt).toBe('Current guidance')
   })
 })

@@ -2,6 +2,10 @@ package org
 
 import "time"
 
+// MaxSafeAuthRevision is the largest integer represented exactly by every
+// Control contract runtime, including JavaScript producers.
+const MaxSafeAuthRevision int64 = 9007199254740991
+
 type Organization struct {
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`
@@ -88,6 +92,63 @@ type PlanHistory struct {
 	ChangeReason string         `json:"change_reason,omitempty"`
 	ChangedAt    time.Time      `json:"changed_at"`
 	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
+type PlanChange struct {
+	OrgID        string
+	OrgName      string
+	PreviousPlan string
+	NewPlan      string
+	ChangedBy    string
+	Reason       string
+	Revision     int64
+}
+
+type PlanChangeOutboxRow struct {
+	PlanChange
+	Attempts int
+}
+
+const (
+	// GDPRErasureAuditSubject is the producer-authoritative v2 subject consumed
+	// by audit-core's durable Control Plane JetStream consumer.
+	GDPRErasureAuditSubject = "velion.audit.v2.control.org-core.erasure"
+	// GDPRAuditMaxAttempts bounds poison/transient publication retries before the
+	// row becomes operator-visible dead-letter state.
+	GDPRAuditMaxAttempts = 8
+)
+
+type GDPRAuditEvent struct {
+	EventID     string
+	Subject     string
+	OccurredAt  time.Time
+	OrgID       string
+	UserID      string
+	ActorRole   string
+	SubjectType string
+	SubjectID   string
+	Outcome     string
+	Details     map[string]any
+}
+
+type GDPRAuditOutboxRow struct {
+	EventID  string
+	OrgID    string
+	Subject  string
+	Payload  map[string]any
+	Attempts int
+}
+
+type GDPRAuditFlushResult struct {
+	Published    int `json:"published"`
+	DeadLettered int `json:"dead_lettered"`
+}
+
+type GDPRAuditOutboxStatus struct {
+	Pending         int64      `json:"pending"`
+	InFlight        int64      `json:"in_flight"`
+	DeadLettered    int64      `json:"dead_lettered"`
+	OldestPendingAt *time.Time `json:"oldest_pending_at,omitempty"`
 }
 
 // OrgMember represents a user's membership in an organization.

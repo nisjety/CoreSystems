@@ -222,14 +222,14 @@ func (a *Adapter) RetrieveCheckoutSession(
 	params billing.CheckoutLookupParams,
 ) (billing.CheckoutStatus, error) {
 	paymentID := strings.TrimSpace(params.PaymentID)
-	if paymentID == "" {
-		return billing.CheckoutStatus{}, fmt.Errorf("nexi payment id is required")
+	if paymentID == "" || len(paymentID) > 128 || !isOpaquePaymentID(paymentID) {
+		return billing.CheckoutStatus{}, fmt.Errorf("nexi payment id is invalid or missing")
 	}
 	if strings.TrimSpace(a.cfg.SecretKey) == "" {
 		return billing.CheckoutStatus{}, fmt.Errorf("nexi secret api key missing")
 	}
 
-	body, err := a.doJSON(ctx, http.MethodGet, "/v1/payments/"+paymentID, nil)
+	body, err := a.doJSON(ctx, http.MethodGet, "/v1/payments/"+url.PathEscape(paymentID), nil)
 	if err != nil {
 		return billing.CheckoutStatus{}, err
 	}
@@ -298,9 +298,23 @@ func (a *Adapter) doJSON(ctx context.Context, method, path string, payload any) 
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("nexi %s %s returned %d: %s", method, path, resp.StatusCode, truncate(string(body), 300))
+		// Provider bodies may contain merchant configuration or request details.
+		// Keep them out of returned errors, which cross the Billing HTTP boundary.
+		return nil, fmt.Errorf("nexi %s request returned status %d", method, resp.StatusCode)
 	}
 	return body, nil
+}
+
+func isOpaquePaymentID(value string) bool {
+	for _, char := range []byte(value) {
+		if !(char >= 'a' && char <= 'z') &&
+			!(char >= 'A' && char <= 'Z') &&
+			!(char >= '0' && char <= '9') &&
+			char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // deriveTermsURL returns the configured terms URL, or synthesizes one from the
@@ -329,13 +343,6 @@ func parseMyReference(ref string) (orgID, plan string) {
 		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 	}
 	return strings.TrimSpace(parts[0]), ""
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // checkoutPlanAmount returns the monthly price in minor units (øre), matching

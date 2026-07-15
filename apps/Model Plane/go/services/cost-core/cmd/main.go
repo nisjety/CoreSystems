@@ -216,8 +216,13 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
+		nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME"),
 	}
-	if token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN")); token != "" {
+	user := strings.TrimSpace(os.Getenv("NATS_USER"))
+	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
+	if user != "" || password != "" {
+		options = append(options, nats.UserInfo(user, password))
+	} else if token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN")); token != "" && os.Getenv("NATS_ALLOW_TOKEN_FALLBACK") == "1" {
 		options = append(options, nats.Token(token))
 	}
 	nc, err := nats.Connect(natsURL, options...)

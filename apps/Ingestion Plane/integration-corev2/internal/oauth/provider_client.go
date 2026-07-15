@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+var ErrRevocationUnsupported = errors.New("provider token revocation is unsupported")
 
 type ProviderProfile struct {
 	ID            string
@@ -140,7 +143,7 @@ func (c *OAuth2Client) Revoke(ctx context.Context, accessToken string, _ map[str
 		req.Header.Set("Content-Type", "application/json")
 		return c.doRevoke(req)
 	default:
-		return nil
+		return ErrRevocationUnsupported
 	}
 }
 
@@ -522,7 +525,7 @@ func (c *NotionOAuthClient) Refresh(_ context.Context, _ string, _ []string, _ m
 }
 
 func (c *NotionOAuthClient) Revoke(_ context.Context, _ string, _ map[string]string) error {
-	return nil
+	return ErrRevocationUnsupported
 }
 
 func (c *NotionOAuthClient) Profile(ctx context.Context, accessToken string, providerContext map[string]string) (ProviderProfile, error) {
@@ -578,7 +581,7 @@ func (c *ShopifyOAuthClient) Refresh(_ context.Context, _ string, _ []string, _ 
 }
 
 func (c *ShopifyOAuthClient) Revoke(_ context.Context, _ string, _ map[string]string) error {
-	return nil
+	return ErrRevocationUnsupported
 }
 
 func (c *ShopifyOAuthClient) Profile(ctx context.Context, accessToken string, providerContext map[string]string) (ProviderProfile, error) {

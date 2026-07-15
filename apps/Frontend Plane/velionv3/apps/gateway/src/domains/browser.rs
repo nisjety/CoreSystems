@@ -1354,10 +1354,10 @@ async fn get_artifact(
                 .map(str::to_owned);
             let bytes = match upstream.bytes().await {
                 Ok(bytes) => bytes,
-                Err(err) => {
+                Err(_) => {
                     return (
                         StatusCode::BAD_GATEWAY,
-                        Json(error("upstream_unavailable", err.to_string())),
+                        Json(crate::envelope::upstream_unavailable()),
                     )
                         .into_response()
                 }
@@ -1392,9 +1392,9 @@ async fn get_artifact(
                         .into_response()
                 })
         }
-        Err(err) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", err.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )
             .into_response(),
     }
@@ -1667,10 +1667,13 @@ async fn proxy_live_frames_ws(
         ),
     ) {
         Ok(url) => url,
-        Err(message) => {
+        Err(_) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("browser_ws_invalid_upstream", message)),
+                Json(error(
+                    "browser_ws_invalid_upstream",
+                    "The browser websocket upstream is unavailable.",
+                )),
             )
                 .into_response()
         }
@@ -1691,10 +1694,10 @@ async fn browser_ws_proxy_loop(
 ) {
     let mut request = match upstream_url.as_str().into_client_request() {
         Ok(request) => request,
-        Err(err) => {
+        Err(_) => {
             let _ = send_client_ws_error(
                 &mut client_socket,
-                format!("Invalid browser websocket upstream: {err}"),
+                "The browser websocket upstream is unavailable.".to_owned(),
             )
             .await;
             return;
@@ -1705,10 +1708,10 @@ async fn browser_ws_proxy_loop(
             Ok(value) => {
                 request.headers_mut().insert("authorization", value);
             }
-            Err(err) => {
+            Err(_) => {
                 let _ = send_client_ws_error(
                     &mut client_socket,
-                    format!("Invalid browser websocket token: {err}"),
+                    "The browser websocket credential is invalid.".to_owned(),
                 )
                 .await;
                 return;
@@ -1718,10 +1721,10 @@ async fn browser_ws_proxy_loop(
 
     let upstream = match connect_async(request).await {
         Ok((socket, _response)) => socket,
-        Err(err) => {
+        Err(_) => {
             let _ = send_client_ws_error(
                 &mut client_socket,
-                format!("Browser websocket upstream unavailable: {err}"),
+                "The browser websocket upstream is unavailable.".to_owned(),
             )
             .await;
             return;
@@ -1803,11 +1806,11 @@ async fn browser_ws_proxy_loop(
                             break;
                         }
                     }
-                    Some(Err(err)) => {
+                    Some(Err(_)) => {
                         let _ = client_tx
                             .send(AxumWsMessage::Text(json!({
                                 "type": "error",
-                                "message": format!("Browser websocket upstream failed: {err}")
+                                "message": "The browser websocket upstream is unavailable."
                             }).to_string()))
                             .await;
                         break;
@@ -3088,10 +3091,10 @@ async fn fetch_quarry_artifact_bytes(
         req = req.bearer_auth(token);
     }
 
-    let upstream = req.send().await.map_err(|err| {
+    let upstream = req.send().await.map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", err.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )
             .into_response()
     })?;
@@ -3119,10 +3122,10 @@ async fn fetch_quarry_artifact_bytes(
             .into_response());
     }
 
-    let bytes = upstream.bytes().await.map_err(|err| {
+    let bytes = upstream.bytes().await.map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", err.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )
             .into_response()
     })?;
@@ -3697,14 +3700,18 @@ mod tests {
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
+            velion_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
             user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
             billing_core_url: "http://127.0.0.1:1".into(),
+            billing_core_service_token: "billing-test-secret-at-least-32-bytes".into(),
             cost_core_url: "http://127.0.0.1:1".into(),
             org_core_url: "http://127.0.0.1:1".into(),
+            org_core_service_token: "org-test-secret-at-least-32-bytes".into(),
             integration_core_url: "http://127.0.0.1:1".into(),
             audit_core_url: "http://127.0.0.1:1".into(),
+            audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
             shipping_core_url: "http://127.0.0.1:1".into(),

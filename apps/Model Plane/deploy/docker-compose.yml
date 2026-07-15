@@ -36,9 +36,18 @@ services:
   nats:
     <<: *runtime-defaults
     image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
-    command: ["-js", "-m", "8222", "-sd", "/data", "--auth", "${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}"]
+    command: ["-c", "/etc/nats/nats.conf"]
+    environment:
+      MODEL_NATS_RUNTIME_PASSWORD: "\"${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}\""
+      MODEL_GATEWAY_NATS_PASSWORD: "\"${MODEL_GATEWAY_NATS_PASSWORD:?MODEL_GATEWAY_NATS_PASSWORD is required}\""
+      MODEL_SESSION_CORE_NATS_PASSWORD: "\"${MODEL_SESSION_CORE_NATS_PASSWORD:?MODEL_SESSION_CORE_NATS_PASSWORD is required}\""
+      APPLICATION_CONVEX_MODEL_NATS_PASSWORD: "\"${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD is required}\""
+      APPLICATION_INSIGHT_MODEL_NATS_PASSWORD: "\"${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD is required}\""
+      AUDIT_MODEL_NATS_PASSWORD: "\"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}\""
+      MODEL_NATS_PROVISIONER_PASSWORD: "\"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}\""
     volumes:
       - mp-nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
     ports:
       - "127.0.0.1:4228:4222"
       - "127.0.0.1:8228:8222"
@@ -161,7 +170,8 @@ services:
       # This service also joins inter-plane-bus, where the generic `nats`
       # hostname can resolve another plane's broker. Use the plane-unique alias.
       NATS_URL: nats://model-nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-gateway-runtime
+      NATS_PASSWORD: ${MODEL_GATEWAY_NATS_PASSWORD:?MODEL_GATEWAY_NATS_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
       # Empty by default = "Velion Auto": inference-core resolves an unpinned
@@ -320,7 +330,8 @@ services:
       RUST_LOG: info
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       NATS_URL: nats://nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: session-core-runtime
+      NATS_PASSWORD: ${MODEL_SESSION_CORE_NATS_PASSWORD:?MODEL_SESSION_CORE_NATS_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: session-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
@@ -373,7 +384,8 @@ services:
       INFERENCE_ROUTING_SERVICE_API_KEY: ${INFERENCE_ROUTING_SERVICE_API_KEY:-}
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
       NATS_URL: nats://model-nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-runtime
+      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
@@ -512,7 +524,8 @@ services:
       EXECUTION_AGENT_MODEL: ${EXECUTION_AGENT_MODEL:-model-router}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       NATS_URL: nats://model-nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-runtime
+      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
       MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
@@ -606,7 +619,8 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       NATS_URL: nats://nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-runtime
+      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       SESSION_CORE_ADDR: session-core:9091
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
@@ -639,7 +653,8 @@ services:
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
       NATS_URL: nats://nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-runtime
+      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
@@ -803,7 +818,8 @@ services:
       # private to the default Model network. This avoids generated container
       # names and prevents accidental resolution to another plane's NATS.
       NATS_URL: nats://model-nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-runtime
+      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: cost-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
@@ -843,7 +859,8 @@ services:
     environment:
       LOG_LEVEL: info
       NATS_URL: nats://nats:4222
-      NATS_AUTH_TOKEN: ${MODEL_NATS_TOKEN:?MODEL_NATS_TOKEN is required}
+      NATS_USER: model-runtime
+      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: bridge-core
       SESSION_CORE_ADDR: session-core:9091

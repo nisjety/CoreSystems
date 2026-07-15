@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // EventHandler defines the interface for handling events
@@ -43,12 +41,6 @@ func NewSubscriber(client *Client, handler EventHandler) *Subscriber {
 func (s *Subscriber) Start(ctx context.Context) error {
 	log.Println("🎧 Starting NATS event subscriber...")
 
-	// Ensure AUTH_EVENTS stream exists
-	if err := s.ensureAuthStream(ctx); err != nil {
-		log.Printf("⚠️  Warning: Could not ensure AUTH_EVENTS stream: %v", err)
-		// Continue anyway - stream might be created by auth-service
-	}
-
 	// Subscribe to auth events using core NATS (simpler than JetStream for this use case)
 	if err := s.subscribeToAuthEvents(); err != nil {
 		return err
@@ -56,21 +48,6 @@ func (s *Subscriber) Start(ctx context.Context) error {
 
 	log.Println("✅ NATS event subscriber started successfully")
 	return nil
-}
-
-// ensureAuthStream ensures the AUTH_EVENTS stream exists
-func (s *Subscriber) ensureAuthStream(ctx context.Context) error {
-	streamConfig := jetstream.StreamConfig{
-		Name:       StreamAuthEvents,
-		Subjects:   []string{"auth.>"},
-		Retention:  jetstream.LimitsPolicy,
-		MaxMsgs:    10000,
-		MaxAge:     7 * 24 * time.Hour, // 7 days
-		Storage:    jetstream.FileStorage,
-		Duplicates: 1 * time.Minute,
-	}
-
-	return s.client.CreateStream(ctx, streamConfig)
 }
 
 // subscribeToAuthEvents subscribes to all auth event patterns

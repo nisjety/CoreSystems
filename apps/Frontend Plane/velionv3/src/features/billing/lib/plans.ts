@@ -83,5 +83,8 @@ export function paidBillingPlan(plan?: string | null): BillingPlanId | null {
 
 export function isCheckoutActivatingStatus(status?: string): boolean {
   const normalized = (status ?? '').trim().toLowerCase()
-  return normalized === 'succeeded' || normalized === 'processing'
+  return normalized === 'succeeded' ||
+    normalized === 'processing' ||
+    normalized === 'charged' ||
+    normalized === 'reserved'
 }

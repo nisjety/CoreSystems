@@ -23,18 +23,18 @@ fi
 test "$(rg -c 'auth-core/keys/convex-auth\.pub:/app/keys/convex-auth\.pub:ro' "$data_compose")" -eq 2
 
 # Async producers receive only their own private signing key; consumers receive
-# only the direct producer's public verification key. The verified chain is
-# explicitly enabled on index -> embedding -> graph.
-test "$(rg -c 'ENABLE_SIGNED_EVENT_CONSUMERS: "1"' "$data_compose")" -eq 3
+# only direct producers' public verification keys. Signed consumption is enabled
+# on retrieval, index, embedding, graph, and the Quickwit projection adapter.
+test "$(rg -c 'ENABLE_SIGNED_EVENT_CONSUMERS: "1"' "$data_compose")" -eq 5
 test "$(rg -c 'EVENT_SIGNING_PRIVATE_KEY_PATH: /run/event-keys/documents-events\.pem' "$data_compose")" -eq 1
 test "$(rg -c 'INDEX_EVENT_PRIVATE_KEY_PATH: /run/event-keys/index-events\.pem' "$data_compose")" -eq 1
 test "$(rg -c 'EMBEDDING_EVENT_PRIVATE_KEY_PATH: /run/event-keys/embedding-events\.pem' "$data_compose")" -eq 1
-test "$(rg -c 'documents-events\.pub:ro' "$data_compose")" -eq 1
-# embedding verifies index mutations and graph verifies the signed deletion
-# fan-out, so the same producer public key is mounted read-only in both.
-test "$(rg -c 'index-events\.pub:ro' "$data_compose")" -eq 2
+test "$(rg -c 'documents-events\.pub:ro' "$data_compose")" -eq 3
+test "$(rg -c 'index-events\.pub:ro' "$data_compose")" -eq 3
 rg -q 'INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events\.pub' "$data_compose"
-test "$(rg -c 'embedding-events\.pub:ro' "$data_compose")" -eq 1
+test "$(rg -c 'embedding-events\.pub:ro' "$data_compose")" -eq 3
+test "$(rg -c 'wiki-events\.pub:ro' "$data_compose")" -eq 2
+test "$(rg -c 'retrieval-events\.pub:ro' "$data_compose")" -eq 1
 
 # user-core is internal; diagnostics and service ports must not be host-published.
 if rg -q 'PPROF_ENABLED: "true"|"6060:6060"|"3012:3012"|"50012:50012"' "$control_compose"; then

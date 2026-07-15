@@ -1,10 +1,23 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  createSign,
+  createVerify,
+  timingSafeEqual,
+} from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 
 const jwks = JSON.parse(readFileSync('/fixtures/jwks.json', 'utf8'));
+const policyPrivateKey = readFileSync('/fixtures/private.pem');
+const policyPublicKey = readFileSync('/fixtures/public.pem');
 const policyKey = required('CONTROL_POLICY_SERVICE_API_KEY');
-const policyToken = required('CONTROL_POLICY_BEARER');
+const authIssuer = required('AUTH_CORE_ISSUER');
+const policyAudience = 'control-policy';
+const policyScope = 'data:authorization:decide';
+const policyServiceId = 'retrieval-engine';
+const policySubject = `service:${policyServiceId}`;
+const policyReason = 'authorize retrieval request';
 const serviceTokens = new Map([
   ['retrieval-engine', required('USER_CORE_RETRIEVAL_TOKEN')],
   ['documents-api', required('USER_CORE_DOCUMENTS_TOKEN')],
@@ -40,6 +53,69 @@ function equal(left, right) {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function encode(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function signPolicyToken(orgId) {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresInSeconds = 60;
+  const header = encode({ alg: 'RS256', typ: 'JWT', kid: 'isolated-mvp-key' });
+  const payload = encode({
+    iss: authIssuer,
+    aud: policyAudience,
+    sub: policySubject,
+    iat: now,
+    nbf: now - 1,
+    exp: now + expiresInSeconds,
+    org_id: orgId,
+    principal_type: 'service',
+    service_id: policySubject,
+    scopes: [policyScope],
+    reason: policyReason,
+  });
+  const signingInput = `${header}.${payload}`;
+  const signer = createSign('RSA-SHA256');
+  signer.update(signingInput);
+  signer.end();
+  return {
+    token: `${signingInput}.${signer.sign(policyPrivateKey).toString('base64url')}`,
+    expiresAt: new Date((now + expiresInSeconds) * 1000).toISOString(),
+    expiresInSeconds,
+    issuer: authIssuer,
+    audience: policyAudience,
+  };
+}
+
+function verifyPolicyBearer(authorization) {
+  if (!authorization.startsWith('Bearer ')) return null;
+  const token = authorization.slice('Bearer '.length);
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    const verifier = createVerify('RSA-SHA256');
+    verifier.update(`${parts[0]}.${parts[1]}`);
+    verifier.end();
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      !verifier.verify(policyPublicKey, Buffer.from(parts[2], 'base64url')) ||
+      header.alg !== 'RS256' || header.typ !== 'JWT' ||
+      claims.iss !== authIssuer || claims.aud !== policyAudience ||
+      claims.sub !== policySubject || claims.service_id !== policySubject ||
+      claims.principal_type !== 'service' || claims.reason !== policyReason ||
+      !Array.isArray(claims.scopes) || claims.scopes.length !== 1 ||
+      claims.scopes[0] !== policyScope || !claims.org_id ||
+      !Number.isInteger(claims.nbf) || !Number.isInteger(claims.exp) ||
+      claims.nbf > now || claims.exp <= now || claims.exp - now > 60
+    ) return null;
+    return claims;
+  } catch {
+    return null;
+  }
 }
 
 function verifyDelegation(request, body) {
@@ -80,25 +156,34 @@ const authServer = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && request.url === '/api/control-policy/internal-token') {
       if (
-        request.headers['x-service-id'] !== 'retrieval-engine' ||
+        request.headers['x-service-id'] !== policyServiceId ||
         !equal(policyKey, request.headers['x-service-api-key'] ?? '')
       ) return json(response, 403, { error: 'forbidden' });
-      return json(response, 200, {
-        token: policyToken,
-        expiresAt: new Date(Date.now() + 300_000).toISOString(),
-        expiresInSeconds: 300,
-      });
+      const input = JSON.parse(body.toString('utf8'));
+      if (
+        typeof input.orgId !== 'string' || input.orgId.length === 0 ||
+        input.reason !== policyReason || !Array.isArray(input.scopes) ||
+        input.scopes.length !== 1 || input.scopes[0] !== policyScope
+      ) return json(response, 400, { error: 'invalid token request' });
+      return json(response, 200, signPolicyToken(input.orgId));
     }
     if (request.method === 'POST' && request.url === '/api/v1/internal/authorization/data-plane/decision') {
-      if (!equal(`Bearer ${policyToken}`, request.headers.authorization ?? '')) {
-        return json(response, 401, { error: 'unauthorized' });
-      }
+      const principal = verifyPolicyBearer(request.headers.authorization ?? '');
+      if (!principal) return json(response, 401, { error: 'unauthorized' });
       const input = JSON.parse(body.toString('utf8'));
-      if (!input.orgId || !input.userId || input.action !== 'data.read') {
+      if (
+        !input.orgId || !input.userId || input.action !== 'data.read' ||
+        principal.org_id !== input.orgId
+      ) {
         return json(response, 400, { error: 'invalid decision request' });
       }
       return json(response, 200, {
-        version: 'v1', allowed: true, role: 'member', permissions: ['data:read'], reason: 'isolated-fixture',
+        version: 'v1',
+        allowed: true,
+        role: 'member',
+        permissions: ['data:read'],
+        membershipRevision: 'isolated-revision',
+        reason: 'member',
       });
     }
     if (request.method === 'GET' && request.url === '/healthz') return json(response, 200, { ok: true });

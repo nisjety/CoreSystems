@@ -9,10 +9,6 @@ pub(crate) struct StartCheckoutRequest {
     #[serde(alias = "org_id")]
     pub(crate) org_id: String,
     pub(crate) plan: String,
-    #[serde(alias = "success_url")]
-    pub(crate) success_url: String,
-    #[serde(alias = "cancel_url")]
-    pub(crate) cancel_url: String,
 }
 
 #[derive(Debug, Deserialize)]

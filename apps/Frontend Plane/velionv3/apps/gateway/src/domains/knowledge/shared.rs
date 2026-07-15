@@ -1,12 +1,15 @@
 use std::time::Duration;
 
-use axum::http::{HeaderMap, Uri};
+use axum::{
+    http::{HeaderMap, StatusCode, Uri},
+    Json,
+};
 use reqwest::Method;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     audience_tokens::get_audience_token, config::AppState, contracts::ActionActor,
-    middleware::AuthenticatedUser,
+    middleware::AuthenticatedUser, upstream::proxy_user_bearer_json,
 };
 
 pub(super) fn cookie_header(headers: &HeaderMap) -> String {
@@ -51,15 +54,56 @@ pub(super) async fn ingestion_token(
 
 /// Mint the `data-plane` audience token for the current user. Attached as a
 /// Bearer on Data Plane legs (documents-api, retrieval-engine, graph-index) so
-/// documents-api can verify tenant identity once `AUTHCTX_ENFORCE=1`. Cached
-/// per user+audience; `None` when auth-core is unreachable, in which case the
-/// legs degrade to the internal-key + header path (works while enforce is off).
+/// each service verifies tenant identity from signed claims. Cached per
+/// user+audience; `None` when Auth Core is unreachable, which interactive Data
+/// routes treat as a fail-closed 503.
 pub(super) async fn data_plane_token(
     state: &AppState,
     user: &AuthenticatedUser,
     cookie: &str,
 ) -> Option<String> {
     get_audience_token(state, &user.user_id, cookie, "data-plane").await
+}
+
+/// Proxy an interactive Knowledge request to Data Plane v2 with the
+/// session-bound `aud=data-plane` token. Token issuance failure is a hard 503:
+/// falling back to shared-key/header identity would either fail strict auth or
+/// accidentally turn a user read into a broader service-principal read.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_data_plane_json(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    content_type: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    let cookie = cookie_header(headers);
+    let Some(token) = data_plane_token(state, user, &cookie).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "delegated_auth_unavailable",
+                    "message": "A scoped Data Plane authorization token could not be minted."
+                }
+            })),
+        );
+    };
+    let actor = actor_for(user);
+    proxy_user_bearer_json(
+        state,
+        method,
+        url,
+        body,
+        org_id,
+        &actor,
+        &token,
+        content_type,
+    )
+    .await
 }
 
 /// Build an internal service-to-service request (internal API key + actor +
@@ -78,8 +122,10 @@ fn internal_request(
         .client
         .request(method, url)
         .timeout(timeout)
-        .header("x-internal-api-key", &state.internal_api_key)
         .header("x-user-id", actor.user_id.as_str());
+    if bearer.is_none() {
+        req = req.header("x-internal-api-key", &state.internal_api_key);
+    }
     if !actor.user_email.is_empty() {
         req = req.header("x-user-email", actor.user_email.as_str());
     }

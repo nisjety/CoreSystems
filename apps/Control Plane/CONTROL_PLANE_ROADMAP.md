@@ -1,6 +1,6 @@
 # Control Plane — Secure MVP Roadmap
 
-Updated: 2026-07-11. Read `CONTROL_PLANE_STATUS.md` first.
+Updated: 2026-07-15. Read `CONTROL_PLANE_STATUS.md` first.
 
 The production-readiness program remains in the MVP phase. Enterprise readiness must not be planned as if it were the next active phase until every MVP acceptance gate below is proven.
 
@@ -51,86 +51,118 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
    - Rehearsed additive migration rollback paths in isolated transactional schemas.
    - All six Control containers and the gateway are healthy.
 
+8. **Velion v3 Control contract repair**
+   - Added no-redirect OAuth/OIDC/SAML callback proxies that preserve only required callback query/form data, redirects, cookies, and cache/content headers.
+   - Added canonical Auth invitation acceptance with same-origin invitation links and a validated `returnTo` across login, verification, 2FA, OAuth, and SSO. The Auth-owned wrapper uses the canonical trusted-origin/rate-limited Better Auth router and real adapter transactions for member creation plus active-org selection; it is idempotent for committed/lost responses and recovers only from invitation/user/email/membership-bound evidence. Better Auth's preceding invitation-status transition remains outside that transaction and is tracked below.
+   - Replaced fabricated workspace state with Auth-owned organization list/switch and membership list/invite/remove/role-change flows pinned to the live active membership.
+   - Fixed default Nexi checkout selection and `charged`/`reserved` activation handling without exercising a live payment.
+   - Normalized Audit Core's live row schema in the shared SPA client.
+   - Restored fail-closed mandatory ZDR for Model and delegated audience tokens; the full Auth suite now passes.
+   - Scoped locally sticky onboarding completion to the same user and organization; invitation acceptance now selects the accepted org and bypasses stale Better Auth cookie-cache state.
+   - Made gateway/release-nginx access logs path-only, normalized invitation IDs embedded in paths, and scrubbed reset tokens from browser history.
+   - Required canonical HTTPS public origins in production, derived checkout return URLs server-side, pinned executable/redirect origins, disabled unsupported Hyperswitch for the MVP, and bounded/sanitized Nexi confirmation.
+   - Bound invitation acceptance rate limiting to the verified session actor: every Better Auth IP-precedence header is overwritten with a 120-bit HMAC-derived address, the Dragonfly increment/expiry is atomic, and cache failures fail operationally. A short-lived invitation-bound HMAC marker makes the Auth wrapper the only route to the canonical Better Auth mutation.
+   - Replaced raw upstream transport, translation, SSE, and WebSocket failures with bounded gateway envelopes/events so internal URLs and upstream response bodies do not cross the browser boundary.
+   - Rebuilt Auth Core, Billing Core, the gateway, and the SPA; all six Control services, the gateway, and the SPA are healthy.
+
+9. **Scoped Org/Billing/Audit service principals — source and isolated verification complete**
+   - Replaced generic inbound-key authority with required principal registries bound to audience, scope, plane, subject, request path/body, nonce, and short expiry.
+   - Made Gateway, Auth projection/deletion, Session, and Integration callers pairwise distinct and fail startup on placeholder, legacy-key, or token reuse.
+   - Split Control/Model/Application NATS into plane-runtime, Audit-consumer, and deployment-provisioner users with least-privilege publish/subscribe/JetStream ACLs.
+
+10. **Better Auth invitation repair — isolated Postgres complete**
+    - Added migration 017 and a bounded repair worker that records observed acceptance intent and reconciles both partial transaction shapes.
+    - Preserved cancellation/deletion/removal tombstones and existing roles; rejected blind historical inference; reported repaired, superseded, and not-repairable rows separately.
+    - Measured the repair module at 89.47% statements, 81.35% branches, 100% functions, and 90% lines with real Postgres tests.
+
+11. **Lifecycle, ordering, deletion, and billing tombstone E2E — isolated complete**
+   - Seven database-backed phases pass for invitation compensation, deletion resume, Org projection/plan ordering, outbox retry, scoped HTTP, Billing revision/tombstone, and durable retry/DLQ.
+   - An expanded four-phase fresh-image Docker stack passes Auth repair/outbox -> Org convergence, canonical membership retry/role ordering/removal/audit cardinality, Billing-down deletion checkpointing, Billing restart/resume, and delayed-resurrection rejection.
+   - Billing migration 0007 atomically binds a stable usage event ID, the aggregate row, and a durable Lago job. Exact replay is idempotent, conflicting ID reuse fails closed, worker leases recover after crashes, and account writes reject stale or same-revision-conflicting state.
+   - Fixtures use unique disposable databases/containers with no host ports or persistent volumes; no existing tenant was mutated.
+
+12. **Extra-plane Audit consumers — isolated current-image complete**
+    - Provisioned fixed v2 durable consumers on Control, Model, and Application brokers and exposed per-bus readiness/lag.
+    - Isolated live proof reported all three buses ready, persisted two audit and two usage events, denied Audit-principal producer publication, and returned 401 for unauthenticated HTTP.
+
+13. **Release posture and static gates — source complete**
+    - Production overlay renders 22 services with zero host-published ports, zero host-network services, and no development `env_file` on the six Control services, including the scoped shared broker and one-shot topology provisioner.
+    - Broker-only environment wrapping preserves arbitrary generated NATS passwords while clients receive the raw value.
+    - The five Go Control services pass full test/vet; Auth build, 372 active tests, full lint ratchet, and lint-contract tests pass; Gateway format/check/strict-Clippy and 288 tests pass; SPA lint/typecheck/358 tests/build pass.
+
+14. **Historical ownerless-organization preflight — isolated Postgres complete**
+    - Migration 018 reports and stops on unmapped, ambiguous, missing-member, changed-role, and stale-organization evidence.
+    - Repair requires one explicit reviewed mapping to an existing canonical Auth member, locks and rechecks the evidence, updates projection/membership outboxes atomically, and records append-only operator audit evidence.
+    - The workflow never invents an owner; valid multi-owner organizations remain unchanged.
+
+15. **Canonical membership idempotency and audit ordering — source and isolated Postgres complete**
+    - Migration 019 commits append-only invite/member audit intent with the canonical Auth mutation and orders member add, role change, and removal by the same per-subject revision as the Org projection.
+    - Normalized duplicate invitations, same-role updates, and already-absent removals return stable no-op results without a second canonical mutation or audit event.
+    - The container lifecycle runner includes invitation replay, role replay, removal replay, exact audit cardinality, and Auth-to-Org convergence.
+
+16. **Residual producer durability and scoped shared broker — source/isolated complete**
+    - Migration 020 transactionally captures user registration and provider-link events. The worker validates bounded payloads, orders provider-link after registration, claims with `SKIP LOCKED`, publishes with a stable message ID, acknowledges with an exact compare-and-swap, and exposes bounded retry/dead-letter state.
+   - Org plan and Billing plan producers require PubAck before marking durable state delivered and reuse stable organization/revision message IDs under retry.
+   - Billing usage ingress requires caller-stable identity and time, persists its de-duplication binding and Lago delivery job transactionally, and never derives replay identity from wall-clock time.
+    - Runtime services use distinct scoped shared-broker users with token fallback disabled and no stream-administration rights. A one-shot provisioner owns topology; the temporary legacy bridge preserves/derives stable message IDs and acknowledges only after target confirmation.
+
+17. **Auth lint and gateway Rust coverage gates — complete**
+    - Auth's full lint command now ratchets an exact reviewed legacy baseline: every changed TypeScript file is checked with an empty suppression file, new debt and baseline drift fail, and no bulk fix is performed. The current run covers 135 files and 84 changed files; 212 violations remain baselined in seven untouched legacy files.
+    - Gateway security coverage is enforced at 80% per selected module: audience tokens 98.82%, config 90.63%, membership boundary 89.62%, middleware 87.32%, and upstream 81.55%.
+
+18. **Credential rollout and rotation controls — source complete**
+    - A non-printing preflight rejects missing, short, placeholder, or reused values across 58 scoped broker/HTTP/gRPC credentials, validates 10 bounded registry/key/TLS files, and supports an explicit bridge-retired mode. Three valid profiles and 20 negative cases pass. Production file-backed secrets use a root-only handoff into app-owned `0600` files before the services drop to `appuser`.
+    - The ordered rollout provisions topology, consumers, and producers before legacy revocation; rollback restores a prior scoped principal or pauses producers and retains durable outboxes. Release-mode producer token fallback is prohibited.
+    - Exact legacy-token inventory is limited to the root environment template and the compatibility bridge mapping.
+
+19. **Durable multi-org GDPR fanout and scoped Data consumer — source/isolated complete**
+    - User Core migration 016 transactionally snapshots all active organization recipients before Auth/local cleanup and creates one deterministic child per org.
+    - Parent completion is gated on a valid `AQENCIA_CONTROLPLANE` PubAck for every child; per-child retries, terminal state, lag, health degradation, and evidence-preserving bounded requeue are durable.
+    - Documents API binds one fixed explicit-ACK durable with a dedicated principal, NAKs transient failures, and requires a DLQ PubAck before ACKing poison/exhausted source messages.
+    - Embedded JetStream ACL proof denies Documents request forgery and topology administration. GDPR subjects are never copied to the legacy token broker.
+    - Changed User GDPR files measure 80.8% and Documents GDPR measures 84.2%; full tests/vet and targeted race gates pass. Coordinated credential injection and live rollout remain operational.
+
+20. **Auth readiness and reciprocal scoped authority — source/current-image complete**
+    - Auth rejects missing, unreadable, mismatched, non-RSA, and sub-2048-bit signing keys before startup. Production readiness requires exactly one structural RSA/RS256 signing JWK; the current image reached it before lifecycle work began.
+    - Auth gRPC, Auth internal HTTP/NATS, User gRPC, Auth→User, and User→Auth use file-backed exact ID/principal/audience/token/scope-or-method tuples. The real Auth transport matrix passes 9/9 denial/overlap cases.
+    - Auth→User gRPC is CA-pinned TLS in production; User requires a TLS 1.3 certificate/key pair. The fresh real-authority integration passes and rejects a plaintext channel. File-backed Compose secrets are copied by a root-only handoff into app-owned `0600` files before both services drop to `appuser`.
+    - Production User consumes the same Auth public-key secret and requires an explicit issuer; its developer host key mount and localhost issuer default are reset in the release overlay.
+    - The fresh-image 4/4 lifecycle runner permits safe asynchronous delivery/retry while requiring durable state, bounded attempts, stable IDs, exact logical cardinality, and automatic cleanup.
+
+21. **Per-core environment contracts — source complete**
+    - Auth, User, Org, Audit, Billing, and Session each have an independent `.env` plus a tracked `.env.example`; the three previously missing local files were added without production credentials.
+    - Development Compose layers each core's `.env` before its Docker-hostname override and no longer relies on a single root `.env` as a service `env_file`. The production override resets all six service env files and uses external secret/file inputs.
+    - `scripts/control-service-env-contract-test.sh` verifies all six files, required Audit/Billing/Session keys, Compose wiring, ignored local files, and no root service env-file reuse.
+
 ## Remaining dependency-ordered MVP work
 
-### 0. Recover and re-verify the Docker runtime
+### 0. Docker recovery — current-image isolation complete; shared dev degraded 2026-07-15
 
-**Why first:** Docker Desktop's content store and BuildKit metadata are returning filesystem I/O errors. The current container health view is contradictory and the final gateway image did not build, so no later live acceptance result is trustworthy.
+The prior containerd/BuildKit storage incident did not recur in isolated runs. Auth Core and the gateway rebuilt successfully from the current worktree; the current-image Control lifecycle and real-authority Data/Velion matrices are green, and direct/gateway forged-session probes return 401. The pre-existing shared development project is currently degraded/restarting because its ignored `.env` supplies only 8/68 required credential/file inputs; it was not recreated or mutated.
 
-- With operator approval, restart/repair Docker Desktop while preserving every named volume.
-- Do not factory-reset, prune volumes, or recreate databases.
-- Verify Postgres/NATS volume consistency and migration ledgers before starting application services.
-- Rebuild/deploy matched User, Session, Audit, and gateway images; prove `002_jetstream_inbox` live.
-- Re-run health, forged/missing-token, unsigned-delegation, signed-delegation, Audit readiness, and projection-count checks.
+**Safety retained:** never factory-reset, prune volumes, or initialize replacement databases as a routine recovery step. Preserve volumes and verify Postgres/NATS consistency after any future engine incident.
 
-**Rollback/safety:** snapshot/export Docker Desktop data before any repair beyond a normal restart. If volume checks fail, stop and restore from backup; never initialize an empty replacement database over the existing data path.
+### 1. Coordinated integration credential rollout and rotation — external operator gate
 
-### 1. Repair historical ownerless canonical organizations
+The secure-MVP source, static, embedded-broker, disposable-Postgres, current-image Control, and real-authority Data/Velion contracts are green. Production execution is intentionally not claimed: an operator with integration secret-manager and deployment authority must generate pairwise-distinct values and registry files, run the non-printing preflight, deploy registries/servers before clients and consumers before producers, prove health/auth denial/PubAck/lag/outbox convergence from reviewed image digests, and only then revoke old credentials and the legacy bridge token.
 
-**Why first:** Auth-to-Org convergence cannot reach 5=5 while two Auth organizations lack any canonical owner membership. The outbox is correctly fail-closed.
+**Rollback/safety:** restore the prior scoped principal/configuration as a coordinated rollout or pause producers and retain durable outboxes. Never re-enable generic producer token fallback, print credential material, or mutate real tenant lifecycle state for a probe.
 
-- Build a read-only report that accepts an explicit `organization_id -> owner_user_id` mapping and validates that each organization is currently ownerless, each proposed user exists, and no conflicting owner exists.
-- Obtain human review of the mapping from authoritative creation/audit evidence. Do not infer ownership solely from a current/expired session or an invitation.
-- Apply the smallest transactional repair in an isolated rehearsal first, then in live only with explicit approval.
-- Let the existing outbox retry naturally; prove Auth IDs equal Org IDs, no extras exist, projection/membership pending counts are zero, and repeat retries are no-ops.
-
-**Rollback/safety:** one transaction per organization; lock the canonical organization and membership rows; abort on any changed precondition; record an audit event. Never auto-select an owner. A mistaken owner grant is a security incident, not routine data cleanup.
-
-### 2. Finish scoped service authentication
-
-**Why second:** acceptance B is only partial while Org, Billing, and Audit accept a fleet-shared key.
-
-- Define separate audiences/scopes for Org projection, Billing lifecycle, and Audit ingest/query.
-- Configure per-caller principals; reject generic shared keys on privileged routes.
-- Confirm Model/Application/Ingestion/Data contracts include the exact subject, audience, org, user, and scopes each endpoint requires.
-- Close the Model gateway compatibility test where a service principal may not carry a user subject.
-
-**Rollback/safety:** support an explicitly time-bounded dual-read window only in non-production or during a controlled rollout; emit metrics for legacy-key use; remove the fallback before MVP acceptance. Never log credentials.
-
-### 3. Finish end-to-end Audit durability and replay operations
-
-**Why third:** consumer redelivery is now idempotent in source/integration tests, but security-critical producers still use Core NATS fire-and-forget and can lose an event before it reaches the stream. Operators also lack pending-count and replay proof.
-
-- Add transactional producer outboxes and JetStream publish acknowledgements for Auth/User/Org security-critical events.
-- Export consumer pending/redelivery/DLQ counts and oldest-pending age.
-- Document and test the DLQ inspection/replay procedure.
-- Verify disconnect/reconnect without event loss using isolated fixtures.
-
-**Rollback/safety:** retain the current stream and query API, use additive uniqueness/backfill migrations, and reject conflicting duplicate IDs. Never replay a DLQ into production without a dry-run count and bounded subject filter.
-
-### 4. Prove lifecycle E2E with isolated fixtures
-
-- Invite -> verified-email accept -> role change -> remove through gateway/Auth, including duplicate requests and out-of-order projection delivery.
-- Organization delete with Billing unavailable, Org unavailable, and retry after each recovery.
-- Delayed plan/member events after tombstone must not resurrect state.
-- RLS requests with missing/wrong GUC must fail closed.
-- Confirm audit events and reconciliation metrics for every transition.
-
-**Rollback/safety:** create dedicated test tenants or transaction-scoped fixtures. Never mutate the existing live tenant set, subscriptions, invitations, or owner roles.
-
-### 5. Close verification debt
-
-- Add focused tests until changed security-critical modules meet at least 80% measured coverage.
-- Raise Session HTTP, User HTTP/service auth, Org projection/RLS, Billing lifecycle, Auth organization outbox, and Audit store/subscriber coverage first.
-- Establish a reviewed Auth lint baseline and make changed files lint-clean. The current full run reports 591 errors/43 warnings; do not hide this with a blanket disable.
-- Add a Rust coverage command for the gateway or document the chosen coverage tool in CI.
-- Re-run builds, tests, vet, lint, format, Clippy, migration tests, `git diff --check`, and the live authenticated/unauthenticated matrix.
-
-**Rollback/safety:** tests and static checks are non-mutating. Avoid `--fix` across the dirty worktree; apply scoped edits only.
-
-### 6. MVP acceptance review
+### 2. Production integration acceptance review — external operator gate
 
 MVP is accepted only when:
 
 - Auth and Org converge exactly with zero unresolved canonical rows.
 - All privileged service routes use scoped credentials.
 - Audit ingestion is durable and observable.
-- Isolated lifecycle/reordering/deletion E2E passes.
+- Isolated lifecycle/reordering/deletion E2E passes (currently green).
 - All six services and gateway pass tests/build/static gates.
 - Changed critical modules meet the coverage threshold.
 - Docker health and auth matrices pass from the images built from the reviewed worktree.
 - Docs contain no unverified production claim.
 
+Source/isolation completion is not a production release certificate. The integration review must be run from images built from the reviewed worktree with the rotated credentials and must distinguish deployed, isolated, and historical evidence.
+
 ## Enterprise phase
 
-**Deferred.** Once the MVP review above is green, create a separate enterprise-readiness plan covering workload identity/key rotation, HA/DR, multi-region, SLOs/alerting, formal threat modeling/compliance evidence, zero-downtime migrations, chaos/recovery drills, enterprise SSO/SCIM, fine-grained policy administration, and capacity/cost validation. Do not count any of those as completed MVP work unless required to close an active security gate.
+**Deferred and not yet defined.** Create the separate enterprise-readiness plan only after the operator-owned production MVP review above is green. Do not mix workload identity/PKI, HA/DR, multi-region, SLOs/alerting, compliance evidence, zero-downtime migrations, chaos/recovery, enterprise SSO/SCIM, policy administration, or capacity/cost work into the MVP record unless required to close an active security gate.

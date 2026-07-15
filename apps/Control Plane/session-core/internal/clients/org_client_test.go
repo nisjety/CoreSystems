@@ -21,6 +21,31 @@ func TestNewOrgClient_ValidURL_ReturnsNonNil(t *testing.T) {
 	}
 }
 
+func TestOrgClientUsesSessionScopedServicePrincipal(t *testing.T) {
+	const token = "session-to-org-test-secret-at-least-32-bytes"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Service-Id"); got != "session-core" {
+			t.Fatalf("X-Service-Id = %q", got)
+		}
+		if got := r.Header.Get("X-Service-Token"); got != token {
+			t.Fatalf("X-Service-Token = %q", got)
+		}
+		if got := r.Header.Get("X-Internal-Api-Key"); got != "" {
+			t.Fatalf("legacy key leaked: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"members": []map[string]any{{"id": "m1", "org_id": "org1", "user_id": "user1", "role": "member", "status": "active"}},
+			"count":   1,
+		})
+	}))
+	defer ts.Close()
+
+	client := NewOrgClient(ts.URL, token)
+	if _, err := client.ValidateMembership(context.Background(), "org1", "user1"); err != nil {
+		t.Fatalf("ValidateMembership: %v", err)
+	}
+}
+
 func TestValidateMembership_ActiveMember_ReturnsRole(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/members") {

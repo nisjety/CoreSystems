@@ -69,6 +69,19 @@ func rejectsPersistentZDRContent(input *model.CreateDocumentInput) bool {
 	return input != nil && input.IngestPolicy.IsZeroRetention()
 }
 
+func persistentZDRReason(claims *authctx.Claims, input *model.CreateDocumentInput) string {
+	if claims == nil || !claims.Verified || !claims.ZDRPresent {
+		return "verified retention posture is required for durable document persistence"
+	}
+	if claims.ZDR {
+		return "verified token zdr=true forbids durable document persistence"
+	}
+	if rejectsPersistentZDRContent(input) {
+		return "ingest_policy.zdr_mode=on or ephemeral_only=true forbids durable document persistence"
+	}
+	return ""
+}
+
 func lifecycleEventFactory(userID string) repo.OutboxEventFactory {
 	return func(document *model.Document, updated bool) (string, []byte, error) {
 		if updated {
@@ -254,9 +267,8 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// ZDR enforcement at the receive boundary: this durable-document API cannot
 	// create even a metadata row under an ephemeral-only policy.
-	if rejectsPersistentZDRContent(&input) {
-		writeError(w, http.StatusForbidden,
-			"ingest_policy.zdr_mode=on or ephemeral_only=true forbids durable document persistence")
+	if reason := persistentZDRReason(verifiedClaims(r), &input); reason != "" {
+		writeError(w, http.StatusForbidden, reason)
 		return
 	}
 
@@ -356,13 +368,14 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 	rejectionReasons := []string{}
 
 	bulkPrincipal := principalID(r)
+	bulkClaims := verifiedClaims(r)
 	var reused int
 	var updated int
 	for i, input := range req.Documents {
 		input.OrgID = orgID
-		if rejectsPersistentZDRContent(&input) {
+		if reason := persistentZDRReason(bulkClaims, &input); reason != "" {
 			rejected++
-			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: ZDR content cannot be persisted", i))
+			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: %s", i, reason))
 			continue
 		}
 		if pinDocumentOwner(&input, bulkPrincipal) {

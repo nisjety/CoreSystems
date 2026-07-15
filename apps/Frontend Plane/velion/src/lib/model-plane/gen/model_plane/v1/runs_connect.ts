@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse, RunDetail } from "./runs_pbjs";
+import { CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail } from "./runs_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -46,6 +46,19 @@ export const RunService = {
       name: "CancelRun",
       I: CancelRunRequest,
       O: CancelRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * ResolveRunOwner — authoritative tenant/user ownership check for internal
+     * execution mutations. Returns only a boolean to avoid disclosing another
+     * tenant's run metadata.
+     *
+     * @generated from rpc model_plane.v1.RunService.ResolveRunOwner
+     */
+    resolveRunOwner: {
+      name: "ResolveRunOwner",
+      I: ResolveRunOwnerRequest,
+      O: ResolveRunOwnerResponse,
       kind: MethodKind.Unary,
     },
   }

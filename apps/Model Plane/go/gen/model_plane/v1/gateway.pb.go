@@ -5689,7 +5689,12 @@ type ProxyMcpToolRequest struct {
 	ServerId  string                 `protobuf:"bytes,3,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
 	ToolName  string                 `protobuf:"bytes,4,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
 	// JSON-encoded tool input.
-	InputJson     string `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	InputJson string `protobuf:"bytes,5,opt,name=input_json,json=inputJson,proto3" json:"input_json,omitempty"`
+	// Acting user — the gateway re-authorizes that this user may USE the target
+	// server (org-wide / owned / shared-to-them), mirroring the per-user filter
+	// ListMcpTools applies at discovery. Without it, a client-declared
+	// mcp__<other-users-server>__<tool> name bypasses the per-user allowlist.
+	UserId        string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5755,6 +5760,13 @@ func (x *ProxyMcpToolRequest) GetToolName() string {
 func (x *ProxyMcpToolRequest) GetInputJson() string {
 	if x != nil {
 		return x.InputJson
+	}
+	return ""
+}
+
+func (x *ProxyMcpToolRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
 	}
 	return ""
 }
@@ -9137,7 +9149,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x14ListMcpToolsResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x124\n" +
-	"\x05tools\x18\x02 \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\"\xa4\x01\n" +
+	"\x05tools\x18\x02 \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\"\xbd\x01\n" +
 	"\x13ProxyMcpToolRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9145,7 +9157,8 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\tserver_id\x18\x03 \x01(\tR\bserverId\x12\x1b\n" +
 	"\ttool_name\x18\x04 \x01(\tR\btoolName\x12\x1d\n" +
 	"\n" +
-	"input_json\x18\x05 \x01(\tR\tinputJson\"{\n" +
+	"input_json\x18\x05 \x01(\tR\tinputJson\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\"{\n" +
 	"\x14ProxyMcpToolResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +

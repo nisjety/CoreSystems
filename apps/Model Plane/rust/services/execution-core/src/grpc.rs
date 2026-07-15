@@ -327,6 +327,7 @@ impl ExecutionCore for ExecutionService {
                     status: outcome.status.clone(),
                     output: scrubbed_output.clone(),
                     error: scrubbed_error.clone(),
+                    terminal: false,
                 },
                 session_bearer.as_str(),
             )?)

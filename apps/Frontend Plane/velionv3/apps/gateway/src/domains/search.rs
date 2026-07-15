@@ -504,9 +504,9 @@ async fn search_videos(
             StatusCode::GATEWAY_TIMEOUT,
             Json(error("video_search_timeout", "Video search timed out.")),
         ),
-        Err(e) => (
+        Err(_) => (
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         ),
     }
 }
@@ -676,9 +676,9 @@ async fn post_quarry(
             StatusCode::GATEWAY_TIMEOUT,
             Json(error("web_search_timeout", "Search timed out.")),
         )),
-        Err(e) => Err((
+        Err(_) => Err((
             StatusCode::BAD_GATEWAY,
-            Json(error("upstream_unavailable", e.to_string())),
+            Json(crate::envelope::upstream_unavailable()),
         )),
     }
 }

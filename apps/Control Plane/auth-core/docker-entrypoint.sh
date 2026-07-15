@@ -1,19 +1,79 @@
 #!/bin/sh
 set -e
 
-# Parse DB name/host from DATABASE_URL if set
-if [ -n "$DATABASE_URL" ]; then
-  DB_NAME=$(echo "$DATABASE_URL" | sed -n 's|.*/\([^/?]*\).*|\1|p')
-  DB_HOST=$(echo "$DATABASE_URL" | sed -n 's|.*@\([^:/?]*\).*|\1|p')
-  PG_URL="$DATABASE_URL"
+# Docker Compose file-backed secrets retain the source file's ownership and
+# mode. The production override starts this entrypoint as root only long enough
+# to copy each mounted secret into an app-owned private directory, then drops
+# privileges before any database migration or application code runs.
+if [ "$(id -u)" -eq 0 ]; then
+  set -eu
+  mkdir -p /run/control-secrets
+  chown appuser:appgroup /run/control-secrets
+  chmod 0700 /run/control-secrets
+  for variable in \
+    AUTH_GRPC_SERVICE_CREDENTIALS_FILE \
+    AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE \
+    USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE \
+    USER_CORE_GRPC_TLS_CA_FILE \
+    CONVEX_AUTH_PRIVATE_KEY_FILE \
+    CONVEX_AUTH_PUBLIC_KEY_FILE; do
+    eval "source=\${$variable:-}"
+    case "$source" in
+      /run/secrets/*)
+        [ -f "$source" ] || { echo "$variable secret is not a regular file" >&2; exit 1; }
+        target="/run/control-secrets/$(basename "$source")"
+        cp -- "$source" "$target"
+        chown appuser:appgroup "$target"
+        chmod 0600 "$target"
+        export "$variable=$target"
+        ;;
+      "")
+        ;;
+    esac
+  done
+  export CONTROL_SECRET_HANDOFF_DONE=1
+  exec /sbin/su-exec appuser "$0" "$@"
+fi
+
+# Parse DB name/host from DATABASE_URL if set.
+PG_URL=${DATABASE_URL:-}
+if [ -n "$PG_URL" ]; then
+  DB_NAME=$(echo "$PG_URL" | sed -n 's|.*/\([^/?]*\).*|\1|p')
+  DB_HOST=$(echo "$PG_URL" | sed -n 's|.*@\([^:/?]*\).*|\1|p')
 fi
 : ${DB_NAME:=auth_service}
 : ${DB_HOST:=controlplane-postgres}
 : ${DB_USER:=aquatiq}
+: ${POSTGRES_READY_MAX_ATTEMPTS:=90}
+
+case "$POSTGRES_READY_MAX_ATTEMPTS" in
+  ''|*[!0-9]*)
+    echo "POSTGRES_READY_MAX_ATTEMPTS must be a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$POSTGRES_READY_MAX_ATTEMPTS" -lt 1 ]; then
+  echo "POSTGRES_READY_MAX_ATTEMPTS must be a positive integer" >&2
+  exit 1
+fi
+case "$DB_NAME" in
+  *[!A-Za-z0-9_-]*)
+    echo "Configured database name contains unsupported characters" >&2
+    exit 1
+    ;;
+esac
 
 echo "Waiting for Postgres at ${DB_HOST} (using DATABASE_URL? ${PG_URL:+yes})..."
 # Wait for the Postgres server (not the specific DB) to become available
-until pg_isready -h "$DB_HOST" -U "$DB_USER"; do sleep 1; done
+postgres_ready_attempt=1
+until pg_isready -q -h "$DB_HOST" -U "$DB_USER"; do
+  if [ "$postgres_ready_attempt" -ge "$POSTGRES_READY_MAX_ATTEMPTS" ]; then
+    echo "Postgres readiness timed out after ${POSTGRES_READY_MAX_ATTEMPTS} attempts" >&2
+    exit 1
+  fi
+  postgres_ready_attempt=$((postgres_ready_attempt + 1))
+  sleep 1
+done
 
 # Create database if missing
 if [ -n "$PG_URL" ]; then
@@ -22,13 +82,22 @@ if [ -n "$PG_URL" ]; then
   PG_ADMIN_URL="${base%/*}/postgres"
   # If we cannot connect to the target DB, create it via the admin DB
   if ! psql --dbname="$PG_URL" -c '\q' >/dev/null 2>&1; then
-    echo "Creating database $DB_NAME via $PG_ADMIN_URL"
-    psql "$PG_ADMIN_URL" -c "CREATE DATABASE \"$DB_NAME\";" || true
+    echo "Creating database $DB_NAME via configured Postgres admin connection"
+    psql "$PG_ADMIN_URL" -c "CREATE DATABASE \"$DB_NAME\";" >/dev/null 2>&1 || true
+    if ! psql --dbname="$PG_URL" -c '\q' >/dev/null 2>&1; then
+      echo "Database creation did not make the configured target available" >&2
+      exit 1
+    fi
   fi
 else
   if ! psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -c '\q' >/dev/null 2>&1; then
     echo "Creating database $DB_NAME"
-    psql -h "$DB_HOST" -U "$DB_USER" -d postgres -c "CREATE DATABASE \"$DB_NAME\";" || true
+    psql -h "$DB_HOST" -U "$DB_USER" -d postgres \
+      -c "CREATE DATABASE \"$DB_NAME\";" >/dev/null 2>&1 || true
+    if ! psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -c '\q' >/dev/null 2>&1; then
+      echo "Database creation did not make the configured target available" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -100,6 +169,11 @@ if [ -d "/app/migrations" ]; then
     apply_migration "$f"
   done
 fi
+
+# Report-and-stop on historical authority gaps. The preflight is read-only and
+# never selects owners or recreates access without an operator-reviewed Auth
+# action.
+/app/validate-lifecycle-preflight.sh
 
 # Start the node application
 exec "$@"

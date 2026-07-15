@@ -43,6 +43,9 @@ func TestLoadAndValidateRuntimeRequireTrustedProviderWriteAttestationKeys(t *tes
 	cfg.AuthCoreURL = "http://auth-core:3011"
 	cfg.AuthCoreInternalAPIKey = "auth-core-key"
 	cfg.OrgCoreURL = "http://org-core:8080"
+	cfg.OrgCoreServiceToken = "org-service-token-at-least-32-bytes"
+	cfg.BillingCoreServiceToken = "billing-service-token-at-least-32-bytes"
+	cfg.AuditCoreServiceToken = "audit-service-token-at-least-32-bytes"
 	cfg.PublicBaseURL = "http://integration-corev2:3026"
 	cfg.DatabaseURL = "postgres://integration"
 	if err := cfg.ValidateRuntime(); err != nil {
@@ -71,7 +74,9 @@ func TestValidateRuntimeFailsClosedForEveryRequiredBoundary(t *testing.T) {
 	valid := Config{
 		InternalAPIKey: "internal", AuthCoreURL: "http://auth-core:3011", AuthCoreInternalAPIKey: "auth-key",
 		OrgCoreURL: "http://org-core:8080", PublicBaseURL: "http://integration-corev2:3026",
-		DatabaseURL: "postgres://integration", EncryptionKey: []byte("12345678901234567890123456789012"),
+		OrgCoreServiceToken: "org-service-token-at-least-32-bytes", BillingCoreServiceToken: "billing-service-token-at-least-32-bytes",
+		AuditCoreServiceToken: "audit-service-token-at-least-32-bytes",
+		DatabaseURL:           "postgres://integration", EncryptionKey: []byte("12345678901234567890123456789012"),
 		ProviderWriteAttestationKeysJSON: string(rawKeys),
 	}
 	tests := []struct {
@@ -83,6 +88,15 @@ func TestValidateRuntimeFailsClosedForEveryRequiredBoundary(t *testing.T) {
 		{name: "auth url", update: func(c *Config) { c.AuthCoreURL = "" }, want: "AUTH_CORE_URL"},
 		{name: "control key", update: func(c *Config) { c.AuthCoreInternalAPIKey = ""; c.InternalAPIKey = "" }, want: "INTERNAL_API_KEY"},
 		{name: "org url", update: func(c *Config) { c.OrgCoreURL = "" }, want: "ORG_CORE_URL"},
+		{name: "org token", update: func(c *Config) { c.OrgCoreServiceToken = "" }, want: "ORG_CORE_SERVICE_TOKEN"},
+		{name: "test org token", update: func(c *Config) { c.OrgCoreServiceToken = "test-org-service-token-at-least-32-bytes" }, want: "ORG_CORE_SERVICE_TOKEN"},
+		{name: "placeholder billing token", update: func(c *Config) { c.BillingCoreServiceToken = "placeholder-billing-service-token-at-least-32-bytes" }, want: "BILLING_CORE_SERVICE_TOKEN"},
+		{name: "change-me billing token", update: func(c *Config) { c.BillingCoreServiceToken = "change-me-billing-service-token-at-least-32-bytes" }, want: "BILLING_CORE_SERVICE_TOKEN"},
+		{name: "replace-with audit token", update: func(c *Config) { c.AuditCoreServiceToken = "replace-with-audit-service-token-at-least-32-bytes" }, want: "AUDIT_CORE_SERVICE_TOKEN"},
+		{name: "short audit token", update: func(c *Config) { c.AuditCoreServiceToken = "short" }, want: "AUDIT_CORE_SERVICE_TOKEN"},
+		{name: "duplicate audience token", update: func(c *Config) { c.AuditCoreServiceToken = c.OrgCoreServiceToken }, want: "reuse"},
+		{name: "reuse internal key", update: func(c *Config) { c.InternalAPIKey = c.OrgCoreServiceToken }, want: "reuse"},
+		{name: "reuse auth internal key", update: func(c *Config) { c.AuthCoreInternalAPIKey = c.BillingCoreServiceToken }, want: "reuse"},
 		{name: "public url", update: func(c *Config) { c.PublicBaseURL = "" }, want: "INTEGRATION_PUBLIC_BASE_URL"},
 		{name: "database", update: func(c *Config) { c.DatabaseURL = "" }, want: "DATABASE_URL"},
 		{name: "encryption", update: func(c *Config) { c.EncryptionKey = []byte("short") }, want: "INTEGRATION_CREDENTIALS_ENCRYPTION_KEY"},

@@ -4,6 +4,7 @@ mod community;
 mod config;
 mod extractor;
 mod grpc;
+mod inference_auth;
 mod model;
 mod store;
 mod stream;
@@ -47,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("ALLOW_INSECURE_DEV_DEFAULTS")
             .as_deref()
             .unwrap_or(""),
+        std::env::var("APP_ENV").as_deref().unwrap_or(""),
     );
     let event_runtime = if signed_events_enabled {
         if cfg.embedding_event_public_key_path.is_empty()
@@ -145,8 +147,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn unverified_legacy_events_enabled(legacy: &str, insecure_dev: &str) -> bool {
-    legacy == "1" && insecure_dev == "1"
+fn unverified_legacy_events_enabled(legacy: &str, insecure_dev: &str, app_env: &str) -> bool {
+    legacy == "1" && insecure_dev == "1" && !app_env.trim().eq_ignore_ascii_case("production")
 }
 
 fn signed_event_consumers_enabled(value: &str) -> bool {
@@ -159,10 +161,16 @@ mod event_containment_tests {
 
     #[test]
     fn unsigned_graph_mutations_require_two_explicit_dev_gates() {
-        assert!(!unverified_legacy_events_enabled("", ""));
-        assert!(!unverified_legacy_events_enabled("1", ""));
-        assert!(!unverified_legacy_events_enabled("", "1"));
-        assert!(unverified_legacy_events_enabled("1", "1"));
+        assert!(!unverified_legacy_events_enabled("", "", "development"));
+        assert!(!unverified_legacy_events_enabled("1", "", "development"));
+        assert!(!unverified_legacy_events_enabled("", "1", "development"));
+        assert!(unverified_legacy_events_enabled("1", "1", "development"));
+    }
+
+    #[test]
+    fn production_posture_rejects_unsigned_graph_mutations_even_with_dev_flags() {
+        assert!(!unverified_legacy_events_enabled("1", "1", "production"));
+        assert!(!unverified_legacy_events_enabled("1", "1", " Production "));
     }
 
     #[test]

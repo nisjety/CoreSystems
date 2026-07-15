@@ -7,8 +7,8 @@ type MenuModalProps = {
 };
 
 const menuItems = [
-	{ href: "#produkt", label: "Produkt", number: "001" },
-	{ href: "#plattform", label: "Plattform", number: "002" },
+	{ href: "/produkt/arbeidsflyten", label: "Produkt", number: "001" },
+	{ href: "/plattform/felles-kontekst", label: "Plattform", number: "002" },
 	{ href: "/trust", label: "Tillit", number: "003" },
 	{ href: "#kontakt", label: "Kontakt", number: "004" },
 ];
