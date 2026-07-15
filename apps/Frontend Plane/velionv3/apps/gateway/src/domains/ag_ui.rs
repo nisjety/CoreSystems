@@ -90,10 +90,10 @@ async fn stream_agent_ui(
 
     let upstream = match req.json(&body).send().await {
         Ok(resp) => resp,
-        Err(err) => {
+        Err(_) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("upstream_unavailable", err.to_string())),
+                Json(crate::envelope::upstream_unavailable()),
             )
                 .into_response();
         }
@@ -124,8 +124,8 @@ async fn stream_agent_ui(
         while let Some(chunk) = upstream_stream.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
-                Err(err) => {
-                    for event in map_error(&mut run, err.to_string()) {
+                Err(_) => {
+                    for event in map_error(&mut run, "The upstream service is unavailable.".to_owned()) {
                         yield Ok::<Event, std::convert::Infallible>(event);
                     }
                     break;
@@ -253,6 +253,16 @@ fn normalize_run_agent_input(body: Value) -> Result<Value, String> {
 
     if let Some(model) = lookup_string(&body, forwarded, data, &["model"]) {
         out.insert("model".to_owned(), Value::String(model));
+    }
+    // Response-style / verbosity profile (token-efficiency): forward it so the
+    // model-gateway can inject the matching directive. `normal`/unset is a no-op.
+    if let Some(verbosity) = lookup_string(
+        &body,
+        forwarded,
+        data,
+        &["verbosity", "responseStyle", "response_style"],
+    ) {
+        out.insert("verbosity".to_owned(), Value::String(verbosity));
     }
     if let Some(thread_id) = thread_id {
         out.insert("thread_id".to_owned(), Value::String(thread_id));
