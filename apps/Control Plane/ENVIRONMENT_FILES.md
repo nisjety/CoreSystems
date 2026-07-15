@@ -1,32 +1,31 @@
 # Environment Configuration Structure
 
-> **Verified 2026-07-10**: DB_PASSWORD single-source rule, the NATS token, and the
+> **Verified 2026-07-16**: service-local environment ownership, scoped NATS
+> credentials, and the
 > auth-core/user-core port numbers below were re-checked against `docker-compose.yml`
 > and live containers and are accurate. The "Infrastructure Services" hostnames
 > (`aquatiq-postgres-local` / `aquatiq-redis-local` / `aquatiq-nats-local`) were stale —
-> those names only survive today in `.env.example` comments and one unused
-> `org-core/.env.local`, not in `docker-compose.yml` or any `.env.docker` actually
-> referenced by compose — and have been corrected below. The service list and port
-> table were also missing `billing-core`, `session-core`, and `audit-core`; corrected
-> below (audit-core in particular has **no** `.env.docker`/`.env.example` — its env is
-> set inline in `docker-compose.yml`, so the "every service has 4 env files" framing
-> does not apply to it).
+> those names only survive in historical comments and unused files, not in
+> `docker-compose.yml`. The service list and port table include all six active
+> cores. The Control Plane root `.env` and `.env.example` are intentionally absent.
 
-## Secrets: `DB_PASSWORD` has a single source of truth
+## Secrets: service-local credentials plus transient Compose interpolation
 
-`DB_PASSWORD` lives **only** in the root Control Plane `.env` (the live value).
-`docker-compose.yml` injects it into every service as `DATABASE_PASSWORD=${DB_PASSWORD}`.
+Each core owns its ignored `.env` and tracked `.env.example`. Database URLs in
+the service-local files are the development source of truth; the local runner
+derives the shared Postgres interpolation value from those URLs and writes it
+only to a temporary `0600` file. Production resets all development `env_file`
+entries and requires external secret-manager/file-backed inputs.
 
-- Per-service `.env.docker` files **must not** define `DATABASE_PASSWORD` — a baked-in
-  literal silently drifts from the live value and breaks DB auth when a container is
-  recreated.
-- Service config defaults for `DATABASE_PASSWORD` are **empty** (e.g. session-core
-  `config.go`, user-core) so a missing value fails fast instead of connecting with a
-  stale fallback. Never copy the live hex into source or per-service env files.
+- The supported local entry point is `./scripts/run-control-plane.sh`; direct
+  Compose invocation without its generated interpolation inputs is expected to
+  fail closed.
+- Never copy production credentials into `.env`, `.env.docker`, or source.
 
 ## Overview
 
-Each service now has **4 environment files** for different deployment contexts:
+Each active service has an independent `.env` and `.env.example`; Docker-only
+hostname overrides exist where needed:
 
 ### File Structure
 
@@ -50,10 +49,13 @@ org-core/
 └── .env.production      # Production deployment (environment variable placeholders)
 ```
 
-Coverage is uneven for the services added after this doc was written (verified
-2026-07-10): `billing-core` only has `.env.docker` + `.env.example` (no `.env` or
-`.env.production` on disk); `session-core` only has `.env.docker`; `audit-core` has
-none of the four — see the audit-core note in Service Port Mappings below.
+`audit-core`, `billing-core`, and `session-core` follow the same `.env` plus
+`.env.example` contract. Billing and Session also have Docker hostname
+overrides; Audit's runtime interpolation is defined in Compose.
+
+All six cores now have their own ignored `.env` and tracked `.env.example`.
+Local development values are disposable; production values come from the
+external secret manager.
 
 ## File Purposes
 
@@ -64,20 +66,21 @@ none of the four — see the audit-core note in Service Port Mappings below.
 - **Generated From**: `.env.example`
 - **Status**: Not committed to git (in .gitignore)
 
-### `.env.docker` - Docker Compose Local
+### `.env.docker` - Docker Compose Local Override
 - **Purpose**: Docker Compose local development environment
-- **Hostnames**: `aquatiq-postgres-local`, `aquatiq-redis-local`, `aquatiq-nats-local`, `auth-core`, `user-core`
-- **Use Case**: Running via `docker compose up -d`
+- **Hostnames**: `controlplane-postgres`, `controlplane-dragonfly`, `controlplane-nats`, and core service names
+- **Use Case**: Docker hostname overrides layered after the core `.env`
 - **Referenced By**: `docker-compose.yml` (this is what compose uses)
 - **Generated From**: `.env.example` + Docker service names
 - **Status**: Safe to commit (uses placeholder passwords)
 
-### `.env.example` - Template
+### `.env.example` - Service Template
 - **Purpose**: Template showing all required variables
 - **Values**: All set to `CHANGE-ME` or `CHANGE-ME-PROD-*`
 - **Use Case**: Documentation and as base for creating new `.env` files
 - **Status**: Committed to git for reference
-- **Command**: `cp .env.example .env` (then customize)
+- **Command**: create the file inside the service directory; never create a
+  Control Plane root `.env`.
 
 ### `.env.production` - Production Deployment
 - **Purpose**: Production deployment with environment variable placeholders
@@ -96,15 +99,11 @@ none of the four — see the audit-core note in Service Port Mappings below.
 ```bash
 cd '/Volumes/Lagring/Triodelab/CoreSystem/apps/Control Plane'
 
-# Start the full control plane stack
-docker compose up -d
+# Start the full Control Plane stack using all six service-local env files
+./scripts/run-control-plane.sh up -d
 
-# The compose file automatically uses .env.docker for all services
-# because docker-compose.yml specifies:
-#   env_file:
-#     - ./auth-core/.env.docker
-#     - ./user-core/.env.docker
-#     - ./org-core/.env.docker
+# Rebuild current images and start
+./scripts/run-control-plane.sh up -d --build
 ```
 
 ### For Local Development (Without Docker)
@@ -177,17 +176,17 @@ npm start  # or `go run main.go` depending on service
 - Database: `org_core`
 
 ### billing-core
-- HTTP API: `3014` (metrics on `6062`; gRPC `50013`) — has its own `.env.docker`/`.env.example`
-  following the same pattern as auth-core/user-core/org-core.
+- HTTP API: `3014` (metrics on `6062`; gRPC `50013`) — has its own `.env`,
+  `.env.docker`, and `.env.example`.
 
 ### session-core
-- HTTP API: `3017` (gRPC `50017`) — has its own `.env.docker`/`.env.example`.
+- HTTP API: `3017` (gRPC `50017`) — has its own `.env`, `.env.docker`, and
+  `.env.example`.
 
 ### audit-core
-- HTTP API: `8187`. Does **not** follow the 4-file pattern — there is no
-  `audit-core/.env.docker` or `.env.example`; `docker-compose.yml` sets its env
-  (`DATABASE_URL`, `NATS_URL`, `INTERNAL_API_KEY`, etc.) directly in the service's
-  `environment:` block.
+- HTTP API: `8187`. Audit owns `.env` and `.env.example`; its Docker-specific
+  interpolation (`DATABASE_URL`, NATS buses, and scoped credentials) is set in
+  the Compose `environment:` block.
 
 ---
 
@@ -200,8 +199,8 @@ and are not what compose or any live `.env.docker` actually points at):
 
 - **PostgreSQL**: `controlplane-postgres:5432` (container `controlplane-postgres`)
   - User: `aquatiq`
-  - Password: sourced from root `.env` `DB_PASSWORD` (see single-source-of-truth
-    note above) — never a per-service literal.
+  - Password: derived by the local runner from the service-local database URL;
+    production uses an external secret-manager value.
 
 - **Dragonfly** (Redis-protocol-compatible; replaced first-party Redis fleet-wide):
   `controlplane-dragonfly:6379` (container `controlplane-dragonfly`)
@@ -210,8 +209,8 @@ and are not what compose or any live `.env.docker` actually points at):
   - Services use different DB numbers (2, 3, etc.)
 
 - **NATS**: `controlplane-nats:4222` (container `controlplane-nats`)
-  - Token: `nats` (confirmed current in `auth-core`/`user-core`/`org-core`
-    `.env.docker`)
+  - Each core receives its own scoped NATS user/password; there is no shared
+    development token authority.
 
 ---
 
@@ -267,11 +266,11 @@ docker-compose.yml uses:
 
 **New (What You Have Now):**
 ```
-docker-compose.yml references:
-  env_file:
-    - ./auth-core/.env.docker
-    - ./user-core/.env.docker
-    - ./org-core/.env.docker
+each core owns:
+  ./<core>/.env
+  ./<core>/.env.example
+local Compose is invoked through:
+  ./scripts/run-control-plane.sh
 ```
 
 **Benefits:**
@@ -287,15 +286,17 @@ docker-compose.yml references:
 
 ### Service Can't Connect to Database
 
-1. Check correct `.env.docker` is being used (verify `docker-compose.yml`)
+1. Run `./scripts/run-control-plane.sh config --quiet` to validate the six
+   service-local files and Compose interpolation.
 2. Verify database hostname matches:
-   - Docker: `aquatiq-postgres-local:5432`
+   - Docker: `controlplane-postgres:5432`
    - Local: `localhost:5432`
 
 ### "Password mismatch" Errors
 
-1. Ensure `DB_PASSWORD` in root `.env` matches services' `DATABASE_URL`
-2. For Docker, infra password should match what's in service `.env.docker`
+1. Ensure the service-local `DATABASE_URL` credentials agree across the cores.
+2. Re-run `./scripts/run-control-plane.sh up -d` so the temporary interpolation
+   file and container environment are regenerated together.
 
 ### Services Can't Communicate
 
@@ -318,11 +319,11 @@ docker-compose.yml references:
 # View what env file docker-compose uses
 grep -A1 "env_file:" docker-compose.yml
 
-# Start with Docker Compose (uses .env.docker files)
-docker compose up -d
+# Start with the service-local environment runner
+./scripts/run-control-plane.sh up -d
 
-# Check what variables are actually loaded
-docker compose config | grep -A 200 "auth-core:"
+# Check that the interpolated configuration renders (without printing secrets)
+./scripts/run-control-plane.sh config --quiet
 
 # View service logs to verify env loading
 docker logs auth-service | head -20

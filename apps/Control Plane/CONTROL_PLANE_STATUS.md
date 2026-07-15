@@ -1,6 +1,6 @@
 # Control Plane — Current Status
 
-Last verified: 2026-07-15 (continuation of the 2026-07-10 production-readiness audit)
+Last verified: 2026-07-16 (continuation of the 2026-07-10 production-readiness audit)
 
 ## Decision
 
@@ -13,6 +13,44 @@ Independent code/security review then closed five additional boundary defects: o
 Auth's full lint command now enforces an exact reviewed legacy-debt ratchet while checking every changed TypeScript file without suppressions. The Velion gateway has an executable per-module Rust coverage gate above 80% for all five selected security modules. The only remaining acceptance work is operational: inject and rotate pairwise-distinct credentials in an integration deployment, roll provisioner -> consumers -> producers, prove health/PubAck/lag/outbox convergence and the authenticated/unauthenticated matrix from reviewed images, then revoke the legacy bridge token. A bounded check of the pre-existing shared local stack on 2026-07-15 found it degraded/restarting because its `.env` supplied only 8/68 required credential/file inputs; no secrets were generated or changed.
 
 The enterprise-readiness phase is intentionally deferred until the operator-owned production acceptance step is green.
+
+## Service-local development environment — 2026-07-16
+
+The Control Plane no longer has a root `.env` or `.env.example`. Each of the six
+cores owns its own ignored `.env` and tracked `.env.example`; the base Compose
+file loads those files (plus Docker-hostname overrides where required). Use
+`./scripts/run-control-plane.sh ...` for local Compose commands. The runner
+merges the six service-local files and creates a temporary `0600` interpolation
+file containing only disposable development defaults for values that are not
+provided locally; it deletes that file on exit and refuses the production
+overlay. Production still requires the external secret-manager/file-backed
+inputs in `docker-compose.production.yml` and must not use generated defaults.
+
+### Local Docker rebuild evidence — 2026-07-16
+
+The supported local run was rebuilt without resetting or pruning any database
+or Docker volume:
+
+```bash
+./scripts/run-control-plane.sh up -d --build
+./scripts/run-control-plane.sh up -d
+```
+
+All eight local Control images built successfully. The first start created the
+missing external `inter-plane-bus` bridge, then the existing Postgres role was
+aligned with the rotated service-local development credential (data and schema
+were preserved). Final container state is Auth, User, Org, Billing, and
+Session **healthy**. Audit Core is running and serving HTTP, but `/readyz`
+returns **503** because this Control-only project has no `model-nats` or
+`application-nats` endpoints for its configured extra-plane consumers. This is
+an honest cross-plane dependency gap, not a readiness bypass.
+
+Observed local probes: Auth JWKS `200` (436 bytes), Org health `200`, Billing
+health `200`, Session health `200`, missing/forged Session requests `401`, and
+Audit `/readyz` `503` (1,142-byte diagnostic). User Core has no host-published
+HTTP port in this Compose file and was verified healthy through Docker health.
+No tenant lifecycle operation, volume reset, database deletion, or production
+overlay was performed.
 
 ## Final secure-MVP engineering acceptance — 2026-07-15
 
@@ -87,13 +125,13 @@ operator-owned integration gate.
 
 | Component | Live result | Evidence |
 |---|---|---|
-| Docker runtime/infrastructure | **Degraded (pre-existing shared dev project)** | On 2026-07-15 the project reported `restarting(4), running(14)` because required NATS/credential inputs were absent; isolated current-image runs remain green. This is not release evidence. |
+| Docker runtime/infrastructure | **Local stack running; cross-plane Audit readiness pending** | On 2026-07-16 the service-local runner rebuilt all eight images and started the stack without data reset. Auth/User/Org/Billing/Session are healthy; Audit `/readyz` is 503 until external Model/Application NATS endpoints are present. This is not release evidence. |
 | auth-core | **Source + isolated DB/container verified; shared dev image restarting** | Migrations 017-027 cover invitation repair, reviewed owner preflight, revisioned membership/audit intent, identity-event and GDPR outboxes, and Better Auth adapter compatibility without rewriting bootstrap history. Full build, 39 active suites/372 tests, and the 135-file lint ratchet pass. Auth→User TLS and the root-to-appuser secret handoff are contract-tested. |
 | org-core | **Healthy** | Current live counts: 1 Auth organization/member and 1 Org projection/member; projection-version counts are both 1. |
 | user-core | **Source + isolated GDPR durability verified; existing dev image older** | Gateway→User self-service uses audience-bound signed delegation. Multi-org erasure recipients are durably snapshotted before cleanup and require per-child PubAck; terminal evidence/lag and bounded recovery are implemented. No raw browser identity header reaches User Core. |
 | billing-core | **Source + isolated DB/container verified; existing dev image older** | Scoped callers are pairwise distinct; org deletion uses port 3014; monotonic plan revisions and permanent tombstones reject duplicate, reordered, and delayed resurrection events. No live checkout was started. |
 | session-core | **Healthy** | Missing and forged direct bootstrap requests return 401; gateway requests do the same. |
-| audit-core | **Current image isolated-live verified; shared dev image restarting** | Control/Model/Application buses all reported ready in the isolated run; scoped Model/Application events persisted as 2 audit + 2 usage rows; the Audit principal was denied producer rights; unauthenticated HTTP returned 401. The existing dev restart was caused by missing NATS/secret inputs and was not recreated. |
+| audit-core | **Running; local cross-plane readiness pending** | Current source/isolated image still proves Control/Model/Application buses ready, scoped events persisted, producer ACL denial, and unauthenticated HTTP 401. In the 2026-07-16 Control-only run, the configured `model-nats` and `application-nats` endpoints were absent, so `/readyz` correctly returned 503. |
 | Velion v3 gateway/SPA | **Healthy; both rebuilt from current worktree** | Gateway `/health` and SPA `/` return 200. Callback, org, membership, billing, session, logging, and audit contract tests pass. The local SPA is the dev target; release nginx syntax is separately verified. |
 | Cross-plane policy | **Implemented and isolated-tested; coordinated rollout pending** | Org/Billing/Audit HTTP principals and Control/Model/Application NATS users are audience/scope/subject bounded. Runtime services have no stream-admin rights and release producers disable token fallback; only the temporary compatibility bridge retains the legacy token. Critical identity/plan publications use stable-ID outbox/PubAck paths. |
 
@@ -149,10 +187,11 @@ Coverage measured on changed critical paths: invitation repair 89.47% statements
 # Final boundary rebuild from the current worktree:
 SOURCE_REVISION=6b4a42c967890c85271497af31dd5ee4484617fa \
 BUILD_DATE=2026-07-14T20:32:02Z \
-  docker compose up -d --build auth-core
+  ./scripts/run-control-plane.sh up -d --build auth-core
 cd "../Frontend Plane/velionv3"
 SOURCE_REVISION=6b4a42c967890c85271497af31dd5ee4484617fa \
 BUILD_DATE=2026-07-14T20:32:02Z \
+  # Gateway is outside the Control Plane runner; use its own Compose project.
   docker compose up -d --build gateway
 
 docker compose ps auth-core user-core org-core billing-core session-core audit-core

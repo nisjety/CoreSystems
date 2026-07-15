@@ -66,18 +66,17 @@ This runs comprehensive tests:
 ### 3. Monitor Services
 
 ```bash
-# View all service logs
-docker compose logs -f
+# View all Control service logs
+./scripts/run-control-plane.sh logs -f
 
 # View specific service logs
-docker compose logs -f frontend
-docker compose logs -f auth-core
-docker compose logs -f user-core
-docker compose logs -f org-core
-docker compose logs -f billing-core
+./scripts/run-control-plane.sh logs -f auth-core
+./scripts/run-control-plane.sh logs -f user-core
+./scripts/run-control-plane.sh logs -f org-core
+./scripts/run-control-plane.sh logs -f billing-core
 
 # Check service status
-docker compose ps
+./scripts/run-control-plane.sh ps
 
 # Monitor NATS events
 nats sub ">" --server=nats://localhost:4222 --token=nats
@@ -180,13 +179,13 @@ Each service has its own database in the shared PostgreSQL instance:
 
 ```sql
 -- List all databases
-docker exec -it aquatiq-postgres-local psql -U aquatiq -c "\l"
+docker exec -it controlplane-postgres psql -U aquatiq -c "\l"
 
 -- Connect to a specific database
-docker exec -it aquatiq-postgres-local psql -U aquatiq -d aquatiq_dev
+docker exec -it controlplane-postgres psql -U aquatiq -d controlplane
 
 -- Check pgvector extension
-docker exec -it aquatiq-postgres-local psql -U aquatiq -d aquatiq_dev -c "\dx"
+docker exec -it controlplane-postgres psql -U aquatiq -d controlplane -c "\dx"
 ```
 
 ## Environment Variables
@@ -213,29 +212,29 @@ JWT_SECRET=dev-jwt-secret-change-in-production
 ### Start Individual Service
 
 ```bash
-# Start just Org Core
-docker compose up -d org-core
+# Start just Org Core (service-local env runner)
+./scripts/run-control-plane.sh up -d org-core
 
 # Start just Billing Core
-docker compose up -d billing-core
+./scripts/run-control-plane.sh up -d billing-core
 
 # View logs
-docker compose logs -f org-core
+./scripts/run-control-plane.sh logs -f org-core
 ```
 
 ### Rebuild After Code Changes
 
 ```bash
 # Rebuild specific service
-docker compose build org-core
-docker compose up -d org-core
+./scripts/run-control-plane.sh build org-core
+./scripts/run-control-plane.sh up -d org-core
 
-docker compose build billing-core
-docker compose up -d billing-core
+./scripts/run-control-plane.sh build billing-core
+./scripts/run-control-plane.sh up -d billing-core
 
 # Rebuild all services
-docker compose build
-docker compose up -d
+./scripts/run-control-plane.sh build
+./scripts/run-control-plane.sh up -d
 ```
 
 ### Run Locally (without Docker)
@@ -264,49 +263,43 @@ cd Org-core
 
 # Check Docker
 docker ps
-docker compose ps
+./scripts/run-control-plane.sh ps
 
 # View logs
-docker compose logs
+./scripts/run-control-plane.sh logs
 ```
 
 ### Database connection errors
 
 ```bash
 # Test PostgreSQL
-docker exec -it aquatiq-postgres-local psql -U aquatiq -c "SELECT 1"
+docker exec -it controlplane-postgres psql -U aquatiq -c "SELECT 1"
 
 # List databases
-docker exec -it aquatiq-postgres-local psql -U aquatiq -c "\l"
+docker exec -it controlplane-postgres psql -U aquatiq -c "\l"
 
 # Create missing database
-docker exec -it aquatiq-postgres-local psql -U aquatiq -c "CREATE DATABASE {db_name};"
+docker exec -it controlplane-postgres psql -U aquatiq -c "CREATE DATABASE {db_name};"
 ```
 
 ### NATS not working
 
 ```bash
 # Check NATS is running
-docker ps --filter "name=aquatiq-nats-local"
+docker ps --filter "name=controlplane-nats"
 
 # Test NATS
-nats sub test --server=nats://localhost:4222 --token=nats
+nats sub test --server=nats://localhost:4223
 ```
 
-### Reset Everything
+### Stop the local stack safely
 
 ```bash
-# Stop all services
-docker compose down
+# Stop containers without deleting volumes or tenant data
+./scripts/run-control-plane.sh down --remove-orphans
 
-# Reset Aquatiq Root Container (⚠️ DESTRUCTIVE)
-cd /Volumes/Lagring/Aquatiq/aquatiq-root-container
-./reset-local.sh
-./start-local.sh
-
-# Restart services
-cd /Volumes/Lagring/Triodelab/CoreSystem/backend
-./start-services.sh
+# Restart using the service-local runner
+./scripts/run-control-plane.sh up -d
 ```
 
 ## API Documentation
@@ -358,7 +351,7 @@ See individual service documentation for details.
 ## Contributing
 
 1. Make changes to service code
-2. Rebuild: `docker compose build {service}`
+2. Rebuild: `./scripts/run-control-plane.sh build {service}`
 3. Test: `./test-services.sh`
 4. Commit and push
 

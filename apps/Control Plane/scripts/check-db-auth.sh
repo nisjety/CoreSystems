@@ -77,8 +77,8 @@ fi
 if [[ "$problems" -gt 0 ]]; then
   warn ""
   warn "DB-auth problems detected — most likely a stale DB password in a running container."
-  warn "Remediation: cd 'apps/Control Plane' && docker compose up -d --force-recreate --no-deps <service>"
-  warn "(the recreated service picks up the current single-sourced \${DB_PASSWORD} from .env)"
+  warn "Remediation: cd 'apps/Control Plane' && ./scripts/run-control-plane.sh up -d --force-recreate --no-deps <service>"
+  warn "(the recreated service picks up the service-local database credential through the runner)"
   docker ps --filter health=unhealthy --format '  unhealthy: {{.Names}} ({{.Status}})' 2>/dev/null \
     | sed 's/^/[db-auth] /' >&2 || true
   exit 1

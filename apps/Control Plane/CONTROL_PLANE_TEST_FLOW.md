@@ -1,12 +1,15 @@
 # Control Plane Test Flow
 
-This document outlines the expected testing sequence for the control plane once Docker services are running.
+This document outlines the expected testing sequence for the Control Plane once Docker services are running.
+The Control Plane root `.env` and `.env.example` do not exist. Use
+`./scripts/run-control-plane.sh` for every local Compose command; it layers the
+six service-local env files and creates only a temporary interpolation file.
 
 ## Prerequisites
 
 - ✅ Docker daemon healthy and running
-- ✅ Docker images pulled: `postgres:15-alpine`, `redis:7-alpine`, `nats:2.10-alpine`
-- ✅ `.env` file populated with base credentials (see `.env.example`)
+- ✅ Docker images pulled by the runner
+- ✅ Six core-local `.env`/`.env.example` contracts validated
 
 ## Startup Order & Health Checks
 
@@ -14,15 +17,15 @@ This document outlines the expected testing sequence for the control plane once 
 
 Command:
 ```bash
-docker compose --env-file .env up -d aquatiq-postgres-local aquatiq-redis-local aquatiq-nats-local
+./scripts/run-control-plane.sh up -d controlplane-postgres controlplane-dragonfly controlplane-nats
 ```
 
 Expected status after 15 seconds:
 ```
-NAME                      CONTAINER ID   STATUS                     PORTS
-aquatiq-postgres-local    xxxxx          Up 15s (healthy)           0.0.0.0:5432->5432/tcp
-aquatiq-redis-local       xxxxx          Up 15s (healthy)           0.0.0.0:6379->6379/tcp
-aquatiq-nats-local        xxxxx          Up 15s (healthy)           0.0.0.0:4222->4222/tcp
+NAME                    CONTAINER ID   STATUS                     PORTS
+controlplane-postgres   xxxxx          Up 15s (healthy)           127.0.0.1:5433->5432/tcp
+controlplane-dragonfly  xxxxx          Up 15s (healthy)           127.0.0.1:6380->6379/tcp
+controlplane-nats       xxxxx          Up 15s (healthy)           127.0.0.1:4223->4222/tcp
 ```
 
 Verify health:
@@ -30,8 +33,8 @@ Verify health:
 # PostgreSQL
 psql -h localhost -U aquatiq -d postgres -c "SELECT version();"
 
-# Redis
-redis-cli -a change-me-redis-password PING
+# Dragonfly (Redis protocol)
+redis-cli -p 6380 PING
 # Expected: PONG
 
 # NATS
@@ -45,7 +48,7 @@ curl -s http://localhost:8222/healthz | jq .
 
 Command:
 ```bash
-docker compose --env-file .env up -d auth-core user-core org-core
+./scripts/run-control-plane.sh up -d auth-core user-core org-core
 ```
 
 Expected status after 45 seconds:
@@ -66,7 +69,7 @@ Auth service calls user service via `user-core:50012` (internal Docker DNS).
 
 Verify in auth-core logs:
 ```bash
-docker compose logs auth-core | grep -i "user service\|grpc"
+./scripts/run-control-plane.sh logs auth-core | grep -i "user service\|grpc"
 # Expected: "User service gRPC URL: user-core:50012"
 ```
 
@@ -76,17 +79,17 @@ Org service calls auth service via `http://auth-core:3011` for policy validation
 
 Verify in org-core logs:
 ```bash
-docker compose logs org-core | grep -i "auth\|http"
+./scripts/run-control-plane.sh logs org-core | grep -i "auth\|http"
 # Expected: "AUTH_SERVICE_URL=http://auth-core:3011"
 ```
 
 ### 5. NATS Event Stream Connectivity
 
-All services publish/subscribe to NATS at `nats://aquatiq-nats-local:4222`.
+All services publish/subscribe to NATS at `nats://controlplane-nats:4222`.
 
 Verify NATS streams created:
 ```bash
-docker exec aquatiq-nats-local nats stream list -s nats://localhost:4222
+docker exec controlplane-nats nats stream list -s nats://localhost:4222
 # Expected streams:
 # - USER_EVENTS
 # - ORGANIZATION_EVENTS
@@ -227,7 +230,7 @@ When user signs up, auth-core publishes to NATS subjects:
 Subscribe and monitor:
 ```bash
 # Terminal 1: Subscribe to user events
-docker exec aquatiq-nats-local \
+docker exec controlplane-nats \
   nats sub "user.*" \
   -s nats://localhost:4222 \
   --raw
@@ -251,8 +254,7 @@ docker exec aquatiq-nats-local \
 Once testing is complete:
 
 ```bash
-docker compose --env-file .env down --remove-orphans
-docker volume prune -f
+./scripts/run-control-plane.sh down --remove-orphans
 ```
 
 ---
@@ -262,7 +264,7 @@ docker volume prune -f
 | Layer | Service | Port | Role | Expected Health |
 |-------|---------|------|------|-----------------|
 | Infra | PostgreSQL | 5432 | Shared data store | healthy ✓ |
-| Infra | Redis | 6379 | Session/cache | healthy ✓ |
+| Infra | Dragonfly | 6379 | Session/cache | healthy ✓ |
 | Infra | NATS | 4222 | Event stream | healthy ✓ |
 | Control | auth-core | 3011/50011 | Identity & sessions | healthy ✓ |
 | Control | user-core | 3012/50012 | User profiles & keys | healthy ✓ |
@@ -273,19 +275,18 @@ docker volume prune -f
 ## Troubleshooting
 
 ### Service fails to connect to PostgreSQL
-- Check: `docker compose logs user-core` for `hostname resolving error`
-- Verify: Network bridge `aquatiq-local` exists: `docker network ls | grep aquatiq`
-- Restart: `docker compose down && docker compose up -d`
+- Check: `./scripts/run-control-plane.sh logs user-core` for `hostname resolving error`
+- Verify: `controlplane-net` and `inter-plane-bus` exist: `docker network ls | grep -E 'controlplane-net|inter-plane-bus'`
+- Restart: `./scripts/run-control-plane.sh up -d`
 
 ### NATS connection refused
-- Verify: `docker compose exec aquatiq-nats-local nc -zv localhost 4222`
-- Check: Service NATS_URL env var: `docker compose config | grep NATS_URL`
+- Verify: `docker exec controlplane-nats nc -zv localhost 4222`
+- Check: `./scripts/run-control-plane.sh config --quiet`
 
 ### gRPC call fails
 - Verify grpcurl installed: `grpcurl -version`
 - Use plaintext: `grpcurl -plaintext localhost:50012 list`
 
-### Redis auth fails
-- Verify password in `.env` matches compose
-- Test: `redis-cli -h localhost -a $REDIS_PASSWORD ping`
-
+### Dragonfly auth fails
+- Verify the service-local Dragonfly credential and rerun the runner
+- Test: `redis-cli -h localhost -p 6380 ping`

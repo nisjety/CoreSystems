@@ -1,6 +1,6 @@
 # Control Plane — Secure MVP Roadmap
 
-Updated: 2026-07-15. Read `CONTROL_PLANE_STATUS.md` first.
+Updated: 2026-07-16. Read `CONTROL_PLANE_STATUS.md` first.
 
 The production-readiness program remains in the MVP phase. Enterprise readiness must not be planned as if it were the next active phase until every MVP acceptance gate below is proven.
 
@@ -133,12 +133,15 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
     - Auth, User, Org, Audit, Billing, and Session each have an independent `.env` plus a tracked `.env.example`; the three previously missing local files were added without production credentials.
     - Development Compose layers each core's `.env` before its Docker-hostname override and no longer relies on a single root `.env` as a service `env_file`. The production override resets all six service env files and uses external secret/file inputs.
     - `scripts/control-service-env-contract-test.sh` verifies all six files, required Audit/Billing/Session keys, Compose wiring, ignored local files, and no root service env-file reuse.
+    - The Control Plane root `.env` and `.env.example` are removed. `scripts/run-control-plane.sh` is the only supported local Compose entry point: it supplies service-local interpolation inputs and a temporary `0600` development fallback file, deletes that file on exit, and refuses the production overlay.
 
 ## Remaining dependency-ordered MVP work
 
-### 0. Docker recovery — current-image isolation complete; shared dev degraded 2026-07-15
+### 0. Docker recovery — current-image isolation complete; local cross-plane dependency pending 2026-07-16
 
-The prior containerd/BuildKit storage incident did not recur in isolated runs. Auth Core and the gateway rebuilt successfully from the current worktree; the current-image Control lifecycle and real-authority Data/Velion matrices are green, and direct/gateway forged-session probes return 401. The pre-existing shared development project is currently degraded/restarting because its ignored `.env` supplies only 8/68 required credential/file inputs; it was not recreated or mutated.
+The prior containerd/BuildKit storage incident did not recur. The service-local runner built all eight current Control images and started Auth, User, Org, Billing, and Session healthy without resetting volumes or tenant data. Audit Core is running but its readiness remains 503 until the external Model/Application NATS endpoints (`model-nats` and `application-nats`) are attached; the readiness contract is intentionally not weakened. Auth JWKS, Org, Billing, and Session local probes returned 200.
+
+The runner is local-development only: it creates disposable interpolation values in a temporary `0600` file, reuses the service-local database credential, and refuses the production overlay. The deployment authority still owns production secret-manager injection and cross-plane rollout.
 
 **Safety retained:** never factory-reset, prune volumes, or initialize replacement databases as a routine recovery step. Preserve volumes and verify Postgres/NATS consistency after any future engine incident.
 

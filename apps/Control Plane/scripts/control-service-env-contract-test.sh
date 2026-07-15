@@ -4,6 +4,23 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 compose="$root/docker-compose.yml"
 
+if [[ -e "$root/.env" || -e "$root/.env.example" ]]; then
+  printf 'service env contract: Control Plane root .env files must not exist; use per-core files and the local runner\n' >&2
+  exit 1
+fi
+if [[ ! -x "$root/scripts/run-control-plane.sh" ]]; then
+  printf 'service env contract: scripts/run-control-plane.sh must be executable\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'database_value_from_urls' "$root/scripts/run-control-plane.sh"; then
+  printf 'service env contract: local runner must reuse the service-local DATABASE_URL password for Postgres\n' >&2
+  exit 1
+fi
+if ! grep -Fq 'network inspect inter-plane-bus' "$root/scripts/run-control-plane.sh"; then
+  printf 'service env contract: local runner must provision the external inter-plane-bus network when starting\n' >&2
+  exit 1
+fi
+
 services=(auth-core user-core org-core audit-core billing-core session-core)
 for service in "${services[@]}"; do
   for file in "$root/$service/.env" "$root/$service/.env.example"; do

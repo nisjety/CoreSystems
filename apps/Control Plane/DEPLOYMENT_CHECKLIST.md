@@ -20,15 +20,16 @@
   - ✅ org-core: 8080 (HTTP), 9090 (gRPC), 9091 (metrics)
 
 ### Environment & Secrets
-- [x] Created `.env.example` with all required variables
-- [x] Created `.env` from template with safe defaults
+- [x] Each of the six cores owns an independent `.env` and tracked `.env.example`
+- [x] Removed the Control Plane root `.env` and `.env.example`
+- [x] Added `scripts/run-control-plane.sh` for service-local Compose interpolation
 - [x] All hardcoded secrets replaced with `${VAR}` references
-- [x] Network: Bridge (`aquatiq-local`) for proper Docker DNS resolution
+- [x] Networks: private `controlplane-net` plus shared external `inter-plane-bus`
 - [x] Health checks on all services
 
 ### Configuration Standards  
 - [x] Service → Service URLs use DNS names: `http://auth-core:3011`, `user-core:50012`
-- [x] Database URLs normalized: `postgres://${DB_USER}:${DB_PASSWORD}@aquatiq-postgres-local:...`
+- [x] Database URLs normalized to `controlplane-postgres` by the Docker overrides
 - [x] Port standardization per control plane spec
 - [x] Removed obsolete `version:` field from compose
 
@@ -38,46 +39,46 @@
 
 ### 1. Ensure Docker is Healthy
 ```bash
-docker system prune -a -f --volumes
 docker run hello-world  # Verify daemon works
 ```
 
 ### 2. Load Environment
 ```bash
 cd "/Volumes/Lagring/Triodelab/CoreSystem/apps/Control Plane"
-# Verify .env exists
-cat .env | head -5  # Should show DB_USER, DB_PASSWORD, etc.
+# Verify the six service-local contracts and root env removal
+bash scripts/control-service-env-contract-test.sh
+./scripts/run-control-plane.sh config --quiet
 ```
 
 ### 3. Start Infrastructure Tier
 ```bash
-# Starts Postgres, Redis, NATS
-docker compose --env-file .env up -d \
-  aquatiq-postgres-local \
-  aquatiq-redis-local \
-  aquatiq-nats-local
+# Starts Postgres, Dragonfly, and NATS using service-local env files
+./scripts/run-control-plane.sh up -d \
+  controlplane-postgres \
+  controlplane-dragonfly \
+  controlplane-nats
 
 # Wait 15 seconds for health checks
 sleep 15
-docker compose --env-file .env ps
+./scripts/run-control-plane.sh ps
 ```
 
 ### 4. Start Control Plane Services
 ```bash
 # Services will auto-initialize databases on first connection
-docker compose --env-file .env up -d \
+./scripts/run-control-plane.sh up -d \
   auth-core \
   user-core \
   org-core
 
 # Wait 45 seconds for startup and migrations
 sleep 45
-docker compose --env-file .env ps
+./scripts/run-control-plane.sh ps
 ```
 
 ### 5. Verify All Healthy
 ```bash
-docker compose --env-file .env ps
+./scripts/run-control-plane.sh ps
 
 # All services should show: STATUS="Up Xs (healthy)"
 ```
@@ -101,10 +102,10 @@ curl http://localhost:3011/api/auth/get-session
 curl http://localhost:8080/health
 
 # 2. Database connectivity
-psql -h localhost -U aquatiq -d auth_service -c "SELECT version();"
+psql -h localhost -p 5433 -U aquatiq -d auth_service -c "SELECT version();"
 
 # 3. NATS stream check
-docker exec aquatiq-nats-local nats stream list -s nats://localhost:4222
+docker exec controlplane-nats nats stream list -s nats://localhost:4222
 ```
 
 ---
@@ -120,7 +121,7 @@ docker exec aquatiq-nats-local nats stream list -s nats://localhost:4222
 │  │      INFRASTRUCTURE TIER                  │  │
 │  ├───────────────────────────────────────────┤  │
 │  │ PostgreSQL (port 5432) - Shared DB        │  │
-│  │ Redis (port 6379) - Session/Cache         │  │
+│  │ Dragonfly (port 6379) - Session/Cache     │  │
 │  │ NATS (port 4222) - Event Stream           │  │
 │  └───────────────────────────────────────────┘  │
 │                      ↑ ↑ ↑                       │
@@ -150,11 +151,10 @@ No Data Plane | No Reasoning | No Orchestration | No Realtime
 DB_USER=aquatiq
 DB_PASSWORD=<your-secure-password>
 
-# Redis
-REDIS_PASSWORD=<your-secure-password>
+# Dragonfly
+DRAGONFLY_PASSWORD=<service-local-development-password>
 
-# NATS
-NATS_TOKEN=<token or 'nats' for dev>
+# Scoped NATS credentials are defined per core; do not use a shared token.
 
 # Security
 JWT_SECRET=<your-secure-jwt-secret>
@@ -167,9 +167,9 @@ INTERNAL_API_KEY=<same-as-internal-service-secret>
 - auth-core: `http://auth-core:3011` (HTTP), `auth-core:50011` (gRPC)
 - user-core: `http://user-core:3012` (HTTP), `user-core:50012` (gRPC)
 - org-core: `http://org-core:8080` (HTTP), `org-core:9090` (gRPC)
-- postgres: `aquatiq-postgres-local:5432`
-- redis: `aquatiq-redis-local:6379`
-- nats: `nats://aquatiq-nats-local:4222`
+- postgres: `controlplane-postgres:5432`
+- dragonfly: `controlplane-dragonfly:6379`
+- nats: `nats://controlplane-nats:4222`
 
 ### Ports (External/Host)
 | Service | HTTP | gRPC | Metrics |
@@ -178,7 +178,7 @@ INTERNAL_API_KEY=<same-as-internal-service-secret>
 | user-core | 3012 | 50012 | - |
 | org-core | 8080 | 9090 | 9091 |
 | PostgreSQL | - | - | 5432 |
-| Redis | - | - | 6379 |
+| Dragonfly | - | - | 6379 |
 | NATS | - | - | 4222+8222 |
 
 ---
@@ -207,10 +207,9 @@ Once Docker is healthy on your system:
 
 ```bash
 cd "/Volumes/Lagring/Triodelab/CoreSystem/apps/Control Plane"
-docker compose --env-file .env up -d
+./scripts/run-control-plane.sh up -d
 # ... wait 45 seconds
-docker compose --env-file .env ps
+./scripts/run-control-plane.sh ps
 ```
 
 Then run the test flow from `CONTROL_PLANE_TEST_FLOW.md`.
-
