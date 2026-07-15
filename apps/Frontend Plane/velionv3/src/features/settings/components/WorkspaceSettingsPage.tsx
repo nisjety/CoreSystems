@@ -4,6 +4,7 @@ import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
+import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
@@ -180,6 +181,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   mcp: [],
   // Skills renders its own live list + form, so it carries no shared status grid.
   skills: [],
+  // Plugins renders its own live list + form, so it carries no shared status grid.
+  plugins: [],
 }
 
 const businessHourRows = [
@@ -414,6 +417,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'skills'}>
         <SkillsSection />
+      </Match>
+      <Match when={props.section === 'plugins'}>
+        <PluginsSection />
       </Match>
     </Switch>
   )

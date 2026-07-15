@@ -37,6 +37,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/skills/:skill_id",
             post(update_skill).delete(delete_skill),
         )
+        .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
+        .route(
+            "/api/v1/plugins/:plugin_id",
+            post(update_plugin).delete(delete_plugin),
+        )
         .route("/api/v1/capabilities", get(list_capabilities))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -215,6 +220,141 @@ async fn delete_skill(
         "{}/v1/skills/{}",
         state.model_gateway_url,
         urlencoding::encode(&skill_id)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::DELETE,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// List the org's plugin packages (open to members so the UI can show them).
+async fn list_plugins(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let url = format!("{}/v1/plugins{}", state.model_gateway_url, build_query(&params));
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+}
+
+/// Register a plugin package (`name`, `version`, `description`, `manifest_json`).
+/// Admin-gated; proxied to model-gateway `/v1/plugins` → capability-core. New
+/// plugins default disabled until an admin enables them.
+async fn create_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !can_author_skills(&state, &user).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Only organization admins can register plugins.")),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!("{}/v1/plugins", state.model_gateway_url);
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// Update a plugin (enable/disable, pin, rollout state). Admin-gated.
+async fn update_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !can_author_skills(&state, &user).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Only organization admins can change plugins.")),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!(
+        "{}/v1/plugins/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&plugin_id)
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::PATCH,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
+/// Delete (soft) a plugin package. Admin-gated.
+async fn delete_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    if !can_author_skills(&state, &user).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Only organization admins can delete plugins.")),
+        )
+            .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
+    };
+    let url = format!(
+        "{}/v1/plugins/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&plugin_id)
     );
     shared::proxy_model_json_with_capability(
         &state,

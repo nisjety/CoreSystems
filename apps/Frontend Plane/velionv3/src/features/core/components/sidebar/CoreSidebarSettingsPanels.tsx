@@ -6,6 +6,7 @@ import {
   CreditCard,
   Globe2,
   KeyRound,
+  Package,
   Plug,
   Route,
   ServerCog,
@@ -49,6 +50,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
+  { id: 'plugins', label: 'Plugin-pakker', icon: Package, href: '/settings/plugins' },
 ]
 const defaultAccountSectionId = accountSidebarSections[0]!.id
 const defaultSettingsSectionId = settingsSidebarSections[0]!.id
@@ -264,6 +266,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('MCP-servere', 'MCP servers')
     case 'skills':
       return i18n.tr('Ferdigheter', 'Skills')
+    case 'plugins':
+      return i18n.tr('Plugin-pakker', 'Plugins')
     default:
       return fallback
   }

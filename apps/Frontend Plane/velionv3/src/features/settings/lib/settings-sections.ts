@@ -11,6 +11,7 @@ export const workspaceSettingsSectionIds = [
   'finetune',
   'mcp',
   'skills',
+  'plugins',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -108,6 +109,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Ferdigheter',
     description: 'Org-dekkende ferdigheter agenten bruker i chat — instrukser som injiseres når en samtale treffer utløser-nøkkelordene.',
     saveLabel: 'Lagre ferdigheter',
+  },
+  {
+    id: 'plugins',
+    label: 'Plugin-pakker',
+    title: 'Plugin-pakker',
+    description: 'Registrer plugin-manifester som kan bidra med verktøy, ferdigheter og hooks. Inaktiv til en administrator aktiverer dem.',
+    saveLabel: 'Lagre plugins',
   },
 ]
 
