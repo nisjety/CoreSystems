@@ -143,8 +143,15 @@ pub async fn execute_step(
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
 ) -> StepOutcome {
-    if hook::is_blocked(hook_context) {
-        return StepOutcome::failed("blocked by pre-tool hook");
+    // PreToolUse hook policy runs BEFORE the permission engine: a rule may deny
+    // the call outright or escalate it to human approval (HITL). Allow defers to
+    // the permission gate below.
+    match hook::evaluate(hook_context, hook::HookEvent::PreToolUse, tool_name) {
+        hook::HookDecision::Deny { reason } => {
+            return StepOutcome::failed(&format!("blocked by pre-tool hook: {reason}"));
+        }
+        hook::HookDecision::Ask { .. } => return StepOutcome::awaiting_approval(),
+        hook::HookDecision::Allow => {}
     }
 
     let mode = PermissionMode::from_wire(permission_mode);
@@ -256,6 +263,15 @@ pub async fn execute_step(
     }
     if let Some(error) = exec.error {
         return StepOutcome::failed(&error);
+    }
+
+    // PostToolUse hook policy runs on the SUCCESS path: a rule may reject the
+    // result before it is handed back to the model (e.g. an output-scanning
+    // policy). Allow is the default, so this is a no-op unless a rule matches.
+    if let hook::HookDecision::Deny { reason } =
+        hook::evaluate(hook_context, hook::HookEvent::PostToolUse, tool_name)
+    {
+        return StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"));
     }
 
     let output = format!("{}{}", exec.output, subagent_note);
