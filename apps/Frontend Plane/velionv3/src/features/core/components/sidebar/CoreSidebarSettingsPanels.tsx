@@ -11,6 +11,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  Sparkles,
   TestTubeDiagonal,
   User,
   UsersRound,
@@ -47,6 +48,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'router-policy', label: 'Router policy', icon: Route, href: '/settings/router-policy' },
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
+  { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
 ]
 const defaultAccountSectionId = accountSidebarSections[0]!.id
 const defaultSettingsSectionId = settingsSidebarSections[0]!.id
@@ -260,6 +262,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Finjusteringsjobber', 'Fine-tune jobs')
     case 'mcp':
       return i18n.tr('MCP-servere', 'MCP servers')
+    case 'skills':
+      return i18n.tr('Ferdigheter', 'Skills')
     default:
       return fallback
   }

@@ -1,9 +1,9 @@
-import { MoreHorizontal } from 'lucide-solid'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js'
 import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
+import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
@@ -14,6 +14,7 @@ import {
   type BillingAccount,
   type CheckoutSession,
 } from '@/features/billing/lib/api'
+import { resolveCheckoutSurface } from '@/features/billing/lib/checkout'
 import {
   billingPlans,
   isCheckoutActivatingStatus,
@@ -22,6 +23,13 @@ import {
   type BillingPlanId,
 } from '@/features/billing/lib/plans'
 import { requestJson } from '@/shared/api/http'
+import { listAuditEvents, type AuditEvent } from '@/shared/api/audit-client'
+import {
+  inviteMember,
+  removeMember,
+  updateMemberRole,
+  type MembershipRole,
+} from '@/shared/api/membership-client'
 import {
   ensureMetaLogin,
   isMetaFacebookSdkEnabled,
@@ -127,17 +135,6 @@ type IntegrationSettingsRow = {
   status: string
 }
 
-type AuditEvent = {
-  id?: string
-  action?: string
-  actor?: string
-  outcome?: string
-  resource?: string
-  ipAddress?: string
-  requestId?: string
-  createdAt?: string
-}
-
 // Phase 4 PR-2 de-fake: org-security policy controls. No real org-security /
 // MFA / domain-restriction source is wired behind the gateway today, so these
 // render as honest, DISABLED "not configured" controls — a security control is
@@ -181,18 +178,13 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   finetune: [],
   // MCP servers renders its own live list + form, so it carries no shared status grid.
   mcp: [],
+  // Skills renders its own live list + form, so it carries no shared status grid.
+  skills: [],
 }
 
 const businessHourRows = [
   { day: 'Monday-Friday', hours: '08:00-17:00', inbox: 'Priority support' },
   { day: 'Saturday', hours: '10:00-14:00', inbox: 'Overflow' },
-]
-
-const roleRows = [
-  { role: 'Owner', access: 'Full workspace, billing, and security', members: '1' },
-  { role: 'Admin', access: 'Members, inboxes, automations, and integrations', members: '1' },
-  { role: 'Agent', access: 'Assigned conversations and knowledge suggestions', members: '1' },
-  { role: 'Viewer', access: 'Reports and read-only customer context', members: '0' },
 ]
 
 function recordFrom(value: unknown): Record<string, unknown> {
@@ -209,13 +201,23 @@ function stringValue(record: Record<string, unknown>, ...keys: string[]): string
 
 function normalizeMember(value: unknown): LiveMember | null {
   const member = recordFrom(value)
-  const userId = stringValue(member, 'userId', 'user_id', 'id')
-  const email = stringValue(member, 'email', 'userEmail', 'user_email', 'invited_email', 'invitedEmail') || userId
+  const user = recordFrom(member.user)
+  const userId = stringValue(member, 'userId', 'user_id') || stringValue(user, 'id')
+  const email = stringValue(
+    member,
+    'email',
+    'userEmail',
+    'user_email',
+    'invited_email',
+    'invitedEmail',
+  ) || stringValue(user, 'email') || userId
   if (!userId && !email) return null
 
   return {
     userId: userId || email,
-    name: stringValue(member, 'name', 'displayName', 'display_name') || undefined,
+    name: stringValue(member, 'name', 'displayName', 'display_name')
+      || stringValue(user, 'name', 'displayName', 'display_name')
+      || undefined,
     email,
     role: stringValue(member, 'role') || 'member',
     status: stringValue(member, 'status') || 'active',
@@ -410,6 +412,9 @@ function WorkspaceSettingsSection(props: {
       <Match when={props.section === 'mcp'}>
         <McpServersSection />
       </Match>
+      <Match when={props.section === 'skills'}>
+        <SkillsSection />
+      </Match>
     </Switch>
   )
 }
@@ -468,9 +473,23 @@ function WorkspaceSection() {
 }
 
 function MembersSection(props: { orgId: string | null }) {
+  const session = getSession()
   const [members, setMembers] = createSignal<LiveMember[]>([])
   const [loading, setLoading] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
+  const [actionError, setActionError] = createSignal<string | null>(null)
+  const [actionBusy, setActionBusy] = createSignal(false)
+  const [inviteEmail, setInviteEmail] = createSignal('')
+  const [inviteRole, setInviteRole] = createSignal<MembershipRole>('member')
+  const [confirmRemoveId, setConfirmRemoveId] = createSignal<string | null>(null)
+
+  const loadMembers = async (orgId: string, signal?: AbortSignal) => {
+    const data = await requestJson<MemberListResponse | LiveMember[]>(
+      `/api/v1/orgs/${encodeURIComponent(orgId)}/members`,
+      { signal },
+    )
+    setMembers(normalizeMemberList(data))
+  }
 
   createEffect(() => {
     const orgId = props.orgId
@@ -485,12 +504,8 @@ function MembersSection(props: { orgId: string | null }) {
     setLoading(true)
     const controller = new AbortController()
 
-    requestJson<MemberListResponse | LiveMember[]>(
-      `/api/v1/orgs/${encodeURIComponent(orgId)}/members`,
-      { signal: controller.signal },
-    )
-      .then((data) => {
-        setMembers(normalizeMemberList(data))
+    loadMembers(orgId, controller.signal)
+      .then(() => {
         setLoading(false)
       })
       .catch((reason: unknown) => {
@@ -502,22 +517,94 @@ function MembersSection(props: { orgId: string | null }) {
     onCleanup(() => controller.abort())
   })
 
+  const invite = async () => {
+    const orgId = props.orgId
+    const email = inviteEmail().trim().toLowerCase()
+    if (!orgId || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || actionBusy()) {
+      setActionError('Enter a valid email address before inviting a member.')
+      return
+    }
+    setActionBusy(true)
+    setActionError(null)
+    try {
+      await inviteMember(orgId, email, inviteRole())
+      setInviteEmail('')
+      await loadMembers(orgId)
+    } catch {
+      setActionError('The invitation could not be sent. Verify your admin access and try again.')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const changeRole = async (member: LiveMember, role: MembershipRole) => {
+    const orgId = props.orgId
+    if (!orgId || actionBusy() || member.role === role) return
+    setActionBusy(true)
+    setActionError(null)
+    try {
+      await updateMemberRole(orgId, member.userId, role)
+      await loadMembers(orgId)
+    } catch {
+      setActionError('The member role could not be changed. The owner invariant is preserved.')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  const remove = async (member: LiveMember) => {
+    const orgId = props.orgId
+    if (!orgId || actionBusy()) return
+    if (confirmRemoveId() !== member.userId) {
+      setConfirmRemoveId(member.userId)
+      return
+    }
+    setActionBusy(true)
+    setActionError(null)
+    try {
+      await removeMember(orgId, member.userId)
+      setConfirmRemoveId(null)
+      await loadMembers(orgId)
+    } catch {
+      setActionError('The member could not be removed. Auth Core kept the organization owner invariant intact.')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   return (
     <>
       <SectionHeader title="Members & roles" description="Invite teammates, assign access, and review seat status." />
       <div class="velion-settings-invite-grid">
-        <SettingsField id="invite-email" label="Invite by email" type="email" placeholder="teammate@company.com" />
+        <SettingsField
+          id="invite-email"
+          label="Invite by email"
+          type="email"
+          placeholder="teammate@company.com"
+          value={inviteEmail()}
+          onInput={(event) => setInviteEmail(event.currentTarget.value)}
+        />
         <SettingsSelect
           id="invite-role"
           label="Role"
-          value="agent"
+          value={inviteRole()}
+          onChange={(event) => setInviteRole(event.currentTarget.value as MembershipRole)}
           options={[
-            { value: 'agent', label: 'Agent' },
+            { value: 'member', label: 'Member' },
             { value: 'admin', label: 'Admin' },
-            { value: 'owner', label: 'Owner' },
           ]}
         />
+        <SettingsButton
+          variant="primary"
+          disabled={actionBusy() || !props.orgId}
+          onClick={() => void invite()}
+        >
+          Invite member
+        </SettingsButton>
       </div>
+      <Show when={actionError()}>
+        <p role="alert" class="velion-settings-empty-row">{actionError()}</p>
+      </Show>
       <div class="velion-settings-list-card">
         <Show when={!loading()} fallback={<p class="velion-settings-empty-row">Loading members...</p>}>
           <Show when={!error()} fallback={<p class="velion-settings-empty-row">{error()}</p>}>
@@ -529,10 +616,35 @@ function MembersSection(props: { orgId: string | null }) {
                       <p>{member.name ?? member.email}</p>
                       <span>{member.email}</span>
                     </div>
-                    <strong>{member.role}</strong>
+                    <select
+                      aria-label={`Role for ${member.name ?? member.email}`}
+                      value={member.role}
+                      disabled={actionBusy() || member.role === 'owner'}
+                      onChange={(event) => void changeRole(member, event.currentTarget.value as MembershipRole)}
+                    >
+                      <Show when={member.role === 'owner'}>
+                        <option value="owner">Owner</option>
+                      </Show>
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                    </select>
                     <span>{member.status}</span>
-                    <button type="button" aria-label={`More actions for ${member.name ?? member.email}`} class="velion-settings-icon-button">
-                      <MoreHorizontal class="size-4" strokeWidth={1.7} />
+                    <button
+                      type="button"
+                      disabled={
+                        actionBusy()
+                        || member.role === 'owner'
+                        || member.userId === session.user?.id
+                      }
+                      aria-label={
+                        confirmRemoveId() === member.userId
+                          ? `Confirm remove ${member.name ?? member.email}`
+                          : `Remove ${member.name ?? member.email}`
+                      }
+                      class="velion-settings-icon-button"
+                      onClick={() => void remove(member)}
+                    >
+                      {confirmRemoveId() === member.userId ? 'Confirm' : 'Remove'}
                     </button>
                   </div>
                 )}
@@ -541,24 +653,17 @@ function MembersSection(props: { orgId: string | null }) {
           </Show>
         </Show>
       </div>
-      <FeaturePanel
-        title="Role templates"
-        description="Reusable access templates for member invites and SSO role mapping."
-        actionLabel="Create role"
-        class="velion-settings-feature-panel--spaced"
-      >
-        <div class="velion-settings-row-divider">
-          <For each={roleRows}>
-            {(role) => (
-              <DataRow
-                primary={role.role}
-                secondary={role.access}
-                meta={`${role.members} members`}
-              />
-            )}
-          </For>
+      <div class="velion-settings-feature-panel velion-settings-feature-panel--spaced">
+        <div class="velion-settings-feature-panel__header">
+          <div>
+            <h3>Built-in roles</h3>
+            <p>
+              Auth Core currently supports owner, admin, and member. Owner transfer and
+              custom role administration require separate explicit contracts.
+            </p>
+          </div>
         </div>
-      </FeaturePanel>
+      </div>
     </>
   )
 }
@@ -765,17 +870,18 @@ function BillingSection(props: {
         cancelUrl: settingsCheckoutUrl('cancel', planId),
       })
 
-      if (session.url) {
-        window.location.assign(session.url)
-        return
+      const checkoutSurface = resolveCheckoutSurface(session)
+      switch (checkoutSurface) {
+        case 'nexi-embedded':
+        case 'hyperswitch-embedded':
+          setCheckoutSession(session)
+          return
+        case 'redirect':
+          window.location.assign(session.url!)
+          return
+        default:
+          throw new Error('Checkout session did not include a valid payment surface.')
       }
-
-      if (session.provider === 'hyperswitch' && session.client_secret && session.publishable_key) {
-        setCheckoutSession(session)
-        return
-      }
-
-      throw new Error('Checkout session did not include a payment surface.')
     } catch (reason) {
       setCheckoutError(reason instanceof Error ? reason.message : 'Could not start checkout.')
     } finally {
@@ -832,7 +938,7 @@ function BillingSection(props: {
       <section class="velion-settings-plan-picker" aria-labelledby="settings-billing-plan-heading">
         <div class="velion-settings-section-header velion-settings-section-header--compact">
           <h2 id="settings-billing-plan-heading">Choose plan</h2>
-          <p>Change the workspace plan through billing-core checkout. Paid plans open secure Hyperswitch payment.</p>
+          <p>Change the workspace plan through billing-core checkout. Paid plans open the configured secure payment provider.</p>
         </div>
         <div class="velion-settings-plan-list">
           <For each={billingPlans}>
@@ -983,22 +1089,20 @@ function SsoSection() {
 function RecentSecurityEvents() {
   const [events, setEvents] = createSignal<AuditEvent[]>([])
   const [loading, setLoading] = createSignal(true)
+  const [loadFailed, setLoadFailed] = createSignal(false)
 
   onMount(() => {
     const controller = new AbortController()
 
-    fetch('/api/v1/audit', {
-      credentials: 'include',
-      signal: controller.signal,
-    })
-      .then((res) => res.json() as Promise<{ success: boolean; data: AuditEvent[] }>)
-      .then((json) => {
-        setEvents(Array.isArray(json.data) ? json.data : [])
+    listAuditEvents({ limit: 25 }, controller.signal)
+      .then((rows) => {
+        setEvents(rows)
         setLoading(false)
       })
       .catch((reason: unknown) => {
         if (reason instanceof Error && reason.name === 'AbortError') return
         setEvents([])
+        setLoadFailed(true)
         setLoading(false)
       })
 
@@ -1007,18 +1111,24 @@ function RecentSecurityEvents() {
 
   return (
     <Show when={!loading()} fallback={<p class="velion-settings-panel-note">Loading security events...</p>}>
+      <Show when={!loadFailed()} fallback={<p class="velion-settings-panel-note" role="alert">Could not load security events.</p>}>
       <Show when={events().length > 0} fallback={<p class="velion-settings-panel-note">Ingen sikkerhetshendelser ennå</p>}>
         <div class="velion-settings-row-divider">
           <For each={events()}>
             {(event, index) => {
               const dateStr = () => {
-                if (!event.createdAt || Number.isNaN(new Date(event.createdAt).getTime())) return ''
-                return new Date(event.createdAt).toLocaleString()
+                if (!event.occurredAt || Number.isNaN(new Date(event.occurredAt).getTime())) return ''
+                return new Date(event.occurredAt).toLocaleString()
               }
-              const secondary = () => [event.actor, event.ipAddress].filter(Boolean).join(' · ')
+              const secondary = () => [
+                event.actor || event.userId,
+                event.actorRole,
+                event.ipAddress,
+                event.requestId,
+              ].filter(Boolean).join(' · ')
               return (
                 <DataRow
-                  primary={`${event.action ?? 'Event'}${event.outcome ? ` - ${event.outcome}` : ''}`}
+                  primary={`${event.event ?? 'Event'}${event.outcome ? ` - ${event.outcome}` : ''}`}
                   secondary={secondary()}
                   meta={dateStr() || event.requestId || String(index())}
                 />
@@ -1026,6 +1136,7 @@ function RecentSecurityEvents() {
             }}
           </For>
         </div>
+      </Show>
       </Show>
     </Show>
   )

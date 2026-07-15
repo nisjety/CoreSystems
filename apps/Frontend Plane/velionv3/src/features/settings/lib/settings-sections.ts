@@ -10,6 +10,7 @@ export const workspaceSettingsSectionIds = [
   'router-policy',
   'finetune',
   'mcp',
+  'skills',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -100,6 +101,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'MCP-servere',
     description: 'Registrer eksterne MCP-tjenere agenten kan bruke, og styr hvilke verktøy som er tillatt.',
     saveLabel: 'Lagre MCP-servere',
+  },
+  {
+    id: 'skills',
+    label: 'Ferdigheter',
+    title: 'Ferdigheter',
+    description: 'Org-dekkende ferdigheter agenten bruker i chat — instrukser som injiseres når en samtale treffer utløser-nøkkelordene.',
+    saveLabel: 'Lagre ferdigheter',
   },
 ]
 
