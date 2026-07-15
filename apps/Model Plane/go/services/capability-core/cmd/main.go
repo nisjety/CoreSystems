@@ -23,6 +23,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
+	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
@@ -173,6 +174,14 @@ func main() {
 	api.NewMemoryHandler(pool).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	api.NewCronHandler(pool).Register(protectedMux)
+
+	// Cron sweeper: fires due cron_schedules — creates a task per fire, records
+	// cron_fires, and advances next_fire_at, single-flight across replicas via
+	// FOR UPDATE SKIP LOCKED. Opt out with CRON_SWEEPER_ENABLED=false.
+	if os.Getenv("CRON_SWEEPER_ENABLED") != "false" {
+		go cron.NewSweeper(pool).Start(ctx)
+		slog.Info("cron sweeper started")
+	}
 	// /models delegates to inference-core ListModels, /compact to session-core
 	// CompactNow (nil-safe: unwired → honest "unavailable").
 	commands.NewHandler().WithModels(inferenceClient).WithCompactor(sessionClient).Register(protectedMux)

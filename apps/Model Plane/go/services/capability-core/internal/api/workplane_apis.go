@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 )
 
 // ---------------------------------------------------------------------------
@@ -739,12 +741,19 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		tplJSON, _ := json.Marshal(s.TaskTemplate)
 		now := time.Now().UTC()
+		// Validate the cron expression up front and seed next_fire_at so the UI
+		// shows the next run and the sweeper advances it correctly.
+		next, nerr := cron.NextFrom(s.ScheduleExpr, s.Timezone, now)
+		if nerr != nil {
+			jsonErr(w, "invalid cron expression: "+nerr.Error(), http.StatusBadRequest)
+			return
+		}
 		_, err := h.pool.Exec(r.Context(), `
 			INSERT INTO cron_schedules (id, org_id, name, description, schedule_expr, timezone,
-			    task_template, enabled, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			    task_template, enabled, next_fire_at, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		`, s.ID, s.OrgID, s.Name, s.Description, s.ScheduleExpr, s.Timezone,
-			tplJSON, s.Enabled, now, now)
+			tplJSON, s.Enabled, next, now, now)
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
