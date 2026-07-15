@@ -544,6 +544,25 @@ func TestMCPEndpointValidationEdgeCases(t *testing.T) {
 	}
 }
 
+func TestMCPEndpointInternalAllowlist(t *testing.T) {
+	// Baseline: without the operator opt-in, a plain-HTTP internal host is rejected.
+	t.Setenv("MCP_INTERNAL_ALLOWED_HOSTS", "")
+	if _, _, err := parseMCPEndpoint("http://mcp-bridge:9201"); err == nil {
+		t.Fatal("http://mcp-bridge without allowlist should be rejected")
+	}
+	// Opt-in: the trusted internal host is accepted over HTTP and the http scheme
+	// is preserved (the co-located bridge is not TLS-terminated).
+	t.Setenv("MCP_INTERNAL_ALLOWED_HOSTS", "mcp-bridge, other-internal")
+	endpoint, host, err := parseMCPEndpoint("http://mcp-bridge:9201")
+	if err != nil || host != "mcp-bridge" || endpoint != "http://mcp-bridge:9201" {
+		t.Fatalf("allowlisted internal endpoint = %q host=%q err=%v", endpoint, host, err)
+	}
+	// A host NOT on the allowlist still cannot use plain HTTP.
+	if _, _, err := parseMCPEndpoint("http://evil.example"); err == nil {
+		t.Fatal("http://evil.example should still be rejected")
+	}
+}
+
 func TestMCPConfigValidationEdgeCases(t *testing.T) {
 	valid, err := normalizeMCPConfig(mcpServerConfig{
 		ToolAllowlist: []string{"records.read"}, OwnerUserID: "user-1", SharedWith: []string{"user-2"},

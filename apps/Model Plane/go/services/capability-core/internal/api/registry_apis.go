@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -415,22 +416,33 @@ func parseMCPEndpoint(raw string) (string, string, error) {
 		return "", "", errors.New("invalid MCP endpoint")
 	}
 	endpoint, err := url.ParseRequestURI(raw)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Opaque != "" || endpoint.Host == "" ||
+	if err != nil || endpoint.Opaque != "" || endpoint.Host == "" ||
 		endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return "", "", errors.New("MCP endpoint must be a credential-free HTTPS URL")
+		return "", "", errors.New("MCP endpoint must be a credential-free URL")
 	}
 	authority := endpoint.Host
 	if strings.Contains(authority, "%") {
 		return "", "", errors.New("encoded MCP endpoint hosts are forbidden")
 	}
 	host := strings.ToLower(endpoint.Hostname())
-	if host == "" || strings.HasSuffix(host, ".") || mcpHostIsForbidden(host) {
+	// A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may use
+	// plain HTTP on a private address — the bundled bridge sidecar. Every other
+	// server stays public-HTTPS-only + SSRF-guarded. Credential/query/fragment
+	// hygiene is enforced for all.
+	hostAllowed := mcpHostInInternalAllowlist(host)
+	if endpoint.Scheme != "https" && !(hostAllowed && endpoint.Scheme == "http") {
+		return "", "", errors.New("MCP endpoint must be a credential-free HTTPS URL (or an allowlisted internal host)")
+	}
+	if host == "" || strings.HasSuffix(host, ".") || (!hostAllowed && mcpHostIsForbidden(host)) {
 		return "", "", errors.New("MCP endpoint host is forbidden")
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
+	if _, err := netip.ParseAddr(host); err == nil && !hostAllowed {
 		return "", "", errors.New("literal MCP endpoint addresses are forbidden")
 	}
-	if !validMCPHostname(host) {
+	// Allowlisted internal hosts are commonly single-label docker service names
+	// (e.g. "mcp-bridge") which the public-FQDN validator rejects; the operator
+	// allowlist is itself the trust decision, so skip the FQDN shape check.
+	if !hostAllowed && !validMCPHostname(host) {
 		return "", "", errors.New("invalid MCP endpoint hostname")
 	}
 	port := endpoint.Port()
@@ -443,8 +455,27 @@ func parseMCPEndpoint(raw string) (string, string, error) {
 	} else {
 		endpoint.Host = host
 	}
-	endpoint.Scheme = "https"
+	if !(hostAllowed && endpoint.Scheme == "http") {
+		endpoint.Scheme = "https"
+	}
 	return endpoint.String(), host, nil
+}
+
+// mcpHostInInternalAllowlist reports whether host is an operator-trusted internal
+// MCP host (comma-separated MCP_INTERNAL_ALLOWED_HOSTS). Empty env => nothing is
+// allowed, so the public-HTTPS-only + SSRF guard is unchanged by default.
+func mcpHostInInternalAllowlist(host string) bool {
+	csv := os.Getenv("MCP_INTERNAL_ALLOWED_HOSTS")
+	if csv == "" {
+		return false
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	for entry := range strings.SplitSeq(csv, ",") {
+		if e := strings.TrimSpace(strings.ToLower(entry)); e != "" && e == host {
+			return true
+		}
+	}
+	return false
 }
 
 func mcpHostIsForbidden(host string) bool {

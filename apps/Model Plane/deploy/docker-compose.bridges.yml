@@ -72,8 +72,18 @@ services:
   model-gateway:
     environment:
       LSP_BRIDGE_URL: "http://lsp-bridge:9202"
+      # Trust the co-located MCP bridge sidecar so a registered server whose
+      # endpoint is http://mcp-bridge:9201 passes the public-HTTPS-only + SSRF
+      # guard (opt-in; empty everywhere else keeps the guard strict).
+      MCP_INTERNAL_ALLOWED_HOSTS: "mcp-bridge"
     depends_on:
       mcp-bridge:
         condition: service_healthy
       lsp-bridge:
         condition: service_healthy
+
+  # capability-core is the durable MCP system-of-record; the gateway writes
+  # registrations through to it, so it must apply the same internal-host trust.
+  capability-core:
+    environment:
+      MCP_INTERNAL_ALLOWED_HOSTS: "mcp-bridge"

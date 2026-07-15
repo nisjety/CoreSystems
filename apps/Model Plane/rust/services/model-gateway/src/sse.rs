@@ -528,6 +528,28 @@ pub async fn invoke_stream_sse(
             },
         );
     }
+    // Skills: match this turn against the org's skill catalogue (disk-loaded +
+    // learned) and inject the top matches as system context so a triggered skill
+    // actually steers the model. This is the load-bearing Claude-Code skill
+    // behaviour that was previously absent (MatchSkills had no internal caller).
+    let skill_context = fetch_skill_context(&state, &model_bearer, &org_id, &req.content).await;
+    if !skill_context.is_empty() {
+        let joined = skill_context.join("\n\n");
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(
+            insert_at,
+            ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{joined}"
+                ),
+                name: String::new(),
+            },
+        );
+    }
     if crate::tool_loop::asks_about_conversation_state(&req.content) {
         if let Some(message) = generated_image_state_message(&messages) {
             let insert_at = messages
@@ -990,6 +1012,9 @@ fn chunk_for_stream(text: &str, target: usize) -> Vec<String> {
 }
 
 const MAX_THREAD_CONTEXT_MESSAGES: usize = 24;
+/// Cap on skills injected as system context per turn (keeps the prompt bounded;
+/// the matcher already ranks by keyword overlap so the top few are the relevant ones).
+const MAX_INJECTED_SKILLS: i32 = 3;
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
 const MAX_CONTEXT_ASSEMBLY_TOKENS: u32 = 32_768;
@@ -1200,6 +1225,70 @@ async fn load_recent_thread_messages(
     }
 
     messages
+}
+
+/// Match this org's skills (disk-loaded + learned) against the user's turn and
+/// return the top skill bodies as system-context blocks, so a triggered skill
+/// actually steers the model — the load-bearing Claude-Code skill behaviour.
+/// Lazy-loads the org's LEARNED skills from session-core once per org (mirrors
+/// the `MatchSkills` gRPC read path). Advisory: any failure yields an empty Vec
+/// so inference still proceeds.
+async fn fetch_skill_context(
+    state: &AppState,
+    bearer: &VerifiedModelBearer,
+    org_id: &str,
+    query: &str,
+) -> Vec<String> {
+    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest};
+
+    if org_id.trim().is_empty() {
+        return Vec::new();
+    }
+    // §G7 read path: lazily pull this org's LEARNED skills (session-core
+    // agent_skills) into the match cache once per org.
+    if !state.skills.is_org_loaded(org_id) {
+        if let Ok(request) = authenticated_session_request(
+            ListAgentSkillsRequest {
+                org_id: org_id.to_owned(),
+                enabled_only: true,
+            },
+            bearer,
+        ) {
+            match state.session_client.clone().list_agent_skills(request).await {
+                Ok(resp) => {
+                    for a in resp.into_inner().skills {
+                        state
+                            .skills
+                            .upsert(org_id, crate::skills::agent_skill_to_skill(a));
+                    }
+                    state.skills.mark_org_loaded(org_id);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
+                }
+            }
+        }
+    }
+    let matched = match crate::skills::handle_match_skills(
+        &state.skills,
+        MatchSkillsRequest {
+            request_id: String::new(),
+            org_id: org_id.to_owned(),
+            query: query.to_owned(),
+            limit: MAX_INJECTED_SKILLS,
+            min_score: 0.0,
+        },
+    ) {
+        Ok(resp) => resp,
+        Err(_) => return Vec::new(),
+    };
+    matched
+        .matches
+        .into_iter()
+        .filter_map(|m| m.skill)
+        .filter(|s| !s.body.trim().is_empty())
+        .map(|s| crate::skills::format_skill_block(&s))
+        .collect()
 }
 
 /// SSE stream for a multimodal (vision) turn: route the image + the user's

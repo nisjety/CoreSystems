@@ -133,6 +133,14 @@ pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
     }
 }
 
+/// Format a matched skill as a system-context block for live prompt injection.
+/// This is the shape the SSE chat path prepends so a triggered skill steers the
+/// model (Claude-Code skill semantics).
+#[must_use]
+pub fn format_skill_block(s: &Skill) -> String {
+    format!("## Skill: {}\n{}", s.name, s.body)
+}
+
 /// Keyword overlap score. Lowercases everything and counts how many
 /// of the query's tokens appear in the skill's name/tags/body. Cheap
 /// and good enough for the < 100 skills regime; promote to BM25 if
@@ -281,6 +289,12 @@ mod tests {
                 .any(|m| m.skill.as_ref().is_some_and(|s| s.name == "Cache Tips")),
             "learned skill should be matchable after mapping+upsert"
         );
+    }
+
+    #[test]
+    fn format_skill_block_renders_name_and_body() {
+        let block = format_skill_block(&s("Deploy Runbook", &["deploy"], "1. build\n2. ship"));
+        assert_eq!(block, "## Skill: Deploy Runbook\n1. build\n2. ship");
     }
 
     #[test]

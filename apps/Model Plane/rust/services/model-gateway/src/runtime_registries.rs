@@ -145,8 +145,17 @@ async fn http_list_tools(url: &str, token: &str) -> Result<Vec<McpToolDef>, Stri
 
 async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Url), String> {
     let endpoint = reqwest::Url::parse(url).map_err(|_| "invalid MCP endpoint URL".to_owned())?;
-    if endpoint.scheme() != "https" || endpoint_host_is_forbidden(&endpoint) {
-        return Err("MCP endpoint must use public HTTPS".to_owned());
+    // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may use
+    // plain HTTP and resolve to a private address — that is the whole point of a
+    // co-located bridge sidecar. Everything else stays public-HTTPS-only + SSRF
+    // guarded. We still pin the connection to the resolved addresses below so an
+    // allowlisted hostname cannot be rebound to an arbitrary target.
+    let host_allowed = endpoint
+        .host_str()
+        .is_some_and(host_in_internal_allowlist);
+    let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
+    if !scheme_ok || (!host_allowed && endpoint_host_is_forbidden(&endpoint)) {
+        return Err("MCP endpoint must use public HTTPS (or be an allowlisted internal host)".to_owned());
     }
     let host = endpoint
         .host_str()
@@ -159,9 +168,10 @@ async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Ur
         .map_err(|error| format!("MCP endpoint DNS resolution failed: {error}"))?
         .collect();
     if addresses.is_empty()
-        || addresses
-            .iter()
-            .any(|address| ip_is_forbidden(address.ip()))
+        || (!host_allowed
+            && addresses
+                .iter()
+                .any(|address| ip_is_forbidden(address.ip())))
     {
         return Err("MCP endpoint DNS resolved to a forbidden address".to_owned());
     }
@@ -361,17 +371,25 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
     }
     let endpoint = reqwest::Url::parse(&server.url)
         .map_err(|_| Status::invalid_argument("server.url must be a valid HTTPS URL"))?;
-    if endpoint.scheme() != "https"
+    // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may register
+    // over plain HTTP on a private address (the bundled bridge sidecar); all other
+    // servers stay public-HTTPS-only + SSRF-guarded. Credential/query/fragment
+    // hygiene is enforced for every server regardless.
+    let host_allowed = endpoint
+        .host_str()
+        .is_some_and(host_in_internal_allowlist);
+    let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
+    if !scheme_ok
         || endpoint.host().is_none()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
         || endpoint.query().is_some()
         || endpoint.fragment().is_some()
         || endpoint.port_or_known_default().is_none()
-        || endpoint_host_is_forbidden(&endpoint)
+        || (!host_allowed && endpoint_host_is_forbidden(&endpoint))
     {
         return Err(Status::invalid_argument(
-            "server.url must be a public HTTPS base URL without credentials, query, or fragment",
+            "server.url must be a public HTTPS base URL (or an allowlisted internal MCP host) without credentials, query, or fragment",
         ));
     }
     if !server.token.trim().is_empty() {
@@ -404,6 +422,29 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
     }
     server.tool_allowlist = exact_names;
     Ok(())
+}
+
+/// Pure allowlist membership test: is `host` one of the comma-separated entries
+/// in `allowlist_csv`? Case- and trailing-dot-insensitive.
+fn host_in_allowlist(host: &str, allowlist_csv: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    allowlist_csv
+        .split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .any(|allowed| !allowed.is_empty() && allowed == host)
+}
+
+/// Operator-configured allowlist of trusted INTERNAL MCP hosts that may be
+/// registered/reached over plain HTTP on a private/loopback address — e.g. the
+/// bundled `mcp-bridge` sidecar at `http://mcp-bridge:9201`. Empty by default,
+/// so the public-HTTPS-only + SSRF guard is unchanged unless an operator opts a
+/// known internal host in via `MCP_INTERNAL_ALLOWED_HOSTS` (comma-separated).
+/// This is the runtime unlock that lets a registered MCP server actually be
+/// discovered/proxied end-to-end without exposing arbitrary user URLs to SSRF.
+fn host_in_internal_allowlist(host: &str) -> bool {
+    std::env::var("MCP_INTERNAL_ALLOWED_HOSTS")
+        .map(|csv| host_in_allowlist(host, &csv))
+        .unwrap_or(false)
 }
 
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
@@ -586,6 +627,16 @@ mod mcp_secure_registration_tests {
                 .expect_err("stdio registration must be quarantined");
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
         }
+    }
+
+    #[test]
+    fn internal_host_allowlist_is_case_and_dot_insensitive_and_fails_closed_when_empty() {
+        assert!(host_in_allowlist("mcp-bridge", "mcp-bridge"));
+        assert!(host_in_allowlist("MCP-Bridge.", " mcp-bridge , other-host "));
+        assert!(!host_in_allowlist("evil.example", "mcp-bridge"));
+        // Empty / whitespace-only allowlist opts nothing in (SSRF guard intact).
+        assert!(!host_in_allowlist("mcp-bridge", ""));
+        assert!(!host_in_allowlist("mcp-bridge", "  ,  "));
     }
 
     #[test]
