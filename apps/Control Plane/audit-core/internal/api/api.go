@@ -63,6 +63,16 @@ type Readiness struct {
 	LagMetric         string             `json:"lag_metric"`
 }
 
+// ControlReady reports whether Audit can serve its local Control-plane
+// responsibilities. Optional Model/Application buses are deliberately not
+// included here; their full convergence is exposed by Readyz instead.
+func (r Readiness) ControlReady() bool {
+	if !r.DatabaseConnected || len(r.NATSBuses) == 0 {
+		return false
+	}
+	return r.NATSBuses[0].Ready()
+}
+
 func (r Readiness) Ready() bool {
 	if !r.DatabaseConnected || len(r.NATSBuses) == 0 {
 		return false
@@ -154,9 +164,16 @@ func (a *API) readyz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *API) healthz(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}`))
+func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
+	status := a.readiness(r.Context())
+	if !status.ControlReady() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":       "degraded",
+			"dependencies": status,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (a *API) internalAuth(next http.Handler) http.Handler {

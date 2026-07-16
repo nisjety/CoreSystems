@@ -237,6 +237,49 @@ func TestReadyzReportsAllDependenciesConnected(t *testing.T) {
 	}
 }
 
+func TestHealthzFailsWhenControlDependenciesAreDisconnected(t *testing.T) {
+	r := chi.NewRouter()
+	handler, err := api.New(store.New(nil), testCredentials, func(context.Context) api.Readiness {
+		return api.Readiness{
+			DatabaseConnected: false,
+			NATSBuses:         []api.NATSBusReadiness{{Name: "primary", Connected: false}},
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.Mount(r)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHealthzIgnoresUnavailableOptionalBus(t *testing.T) {
+	r := chi.NewRouter()
+	handler, err := api.New(store.New(nil), testCredentials, func(context.Context) api.Readiness {
+		return api.Readiness{
+			DatabaseConnected: true,
+			NATSBuses: []api.NATSBusReadiness{
+				readyBus("primary"),
+				{Name: "model", Connected: false},
+			},
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.Mount(r)
+
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func readyBus(name string) api.NATSBusReadiness {
 	return api.NATSBusReadiness{
 		Name:            name,

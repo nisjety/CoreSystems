@@ -139,7 +139,7 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
 
 ### 0. Docker recovery — current-image isolation complete; local cross-plane dependency pending 2026-07-16
 
-The prior containerd/BuildKit storage incident did not recur. The service-local runner built all eight current Control images and started Auth, User, Org, Billing, and Session healthy without resetting volumes or tenant data. Audit Core is running but its readiness remains 503 until the external Model/Application NATS endpoints (`model-nats` and `application-nats`) are attached; the readiness contract is intentionally not weakened. Auth JWKS, Org, Billing, and Session local probes returned 200.
+The prior containerd/BuildKit storage incident did not recur. The service-local runner built all eight current Control images and started Auth, User, Org, Billing, Session, and Audit Docker-healthy without resetting volumes or tenant data. Audit `/healthz` checks only the local Control DB/NATS dependencies; full `/readyz` remains 503 until the external Model/Application NATS endpoints (`model-nats` and `application-nats`) are attached, while the supervisor retries them. Auth JWKS, Org, Billing, and Session local probes returned 200.
 
 The runner is local-development only: it creates disposable interpolation values in a temporary `0600` file, reuses the service-local database credential, and refuses the production overlay. The deployment authority still owns production secret-manager injection and cross-plane rollout.
 

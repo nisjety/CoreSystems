@@ -707,7 +707,10 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8187/readyz"]
+      # Docker health tracks local Control-plane availability only. `/readyz`
+      # remains the full cross-plane gate and reports Model/Application lag or
+      # absence without preventing this service from starting independently.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8187/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

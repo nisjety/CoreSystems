@@ -40,14 +40,16 @@ All eight local Control images built successfully. The first start created the
 missing external `inter-plane-bus` bridge, then the existing Postgres role was
 aligned with the rotated service-local development credential (data and schema
 were preserved). Final container state is Auth, User, Org, Billing, and
-Session **healthy**. Audit Core is running and serving HTTP, but `/readyz`
-returns **503** because this Control-only project has no `model-nats` or
+Session **healthy**. Audit Core is Docker-**healthy** via its local `/healthz`
+probe and serving HTTP, while `/readyz` returns **503** because this
+Control-only project has no `model-nats` or
 `application-nats` endpoints for its configured extra-plane consumers. This is
 an honest cross-plane dependency gap, not a readiness bypass.
 
 Observed local probes: Auth JWKS `200` (436 bytes), Org health `200`, Billing
-health `200`, Session health `200`, missing/forged Session requests `401`, and
-Audit `/readyz` `503` (1,142-byte diagnostic). User Core has no host-published
+health `200`, Session health `200`, missing/forged Session requests `401`,
+Audit `/healthz` `200`, and Audit `/readyz` `503` (1,142-byte diagnostic).
+User Core has no host-published
 HTTP port in this Compose file and was verified healthy through Docker health.
 No tenant lifecycle operation, volume reset, database deletion, or production
 overlay was performed.
@@ -131,7 +133,7 @@ operator-owned integration gate.
 | user-core | **Source + isolated GDPR durability verified; existing dev image older** | Gateway→User self-service uses audience-bound signed delegation. Multi-org erasure recipients are durably snapshotted before cleanup and require per-child PubAck; terminal evidence/lag and bounded recovery are implemented. No raw browser identity header reaches User Core. |
 | billing-core | **Source + isolated DB/container verified; existing dev image older** | Scoped callers are pairwise distinct; org deletion uses port 3014; monotonic plan revisions and permanent tombstones reject duplicate, reordered, and delayed resurrection events. No live checkout was started. |
 | session-core | **Healthy** | Missing and forged direct bootstrap requests return 401; gateway requests do the same. |
-| audit-core | **Running; local cross-plane readiness pending** | Current source/isolated image still proves Control/Model/Application buses ready, scoped events persisted, producer ACL denial, and unauthenticated HTTP 401. In the 2026-07-16 Control-only run, the configured `model-nats` and `application-nats` endpoints were absent, so `/readyz` correctly returned 503. |
+| audit-core | **Docker-healthy; local cross-plane readiness pending** | `/healthz` is healthy from the Control DB/NATS dependencies and does not gate on optional planes. Current source/isolated image still proves Control/Model/Application buses ready, scoped events persisted, producer ACL denial, and unauthenticated HTTP 401. In the 2026-07-16 Control-only run, `model-nats` and `application-nats` were absent, so `/readyz` correctly returned 503 while the supervisor retried attachment. |
 | Velion v3 gateway/SPA | **Healthy; both rebuilt from current worktree** | Gateway `/health` and SPA `/` return 200. Callback, org, membership, billing, session, logging, and audit contract tests pass. The local SPA is the dev target; release nginx syntax is separately verified. |
 | Cross-plane policy | **Implemented and isolated-tested; coordinated rollout pending** | Org/Billing/Audit HTTP principals and Control/Model/Application NATS users are audience/scope/subject bounded. Runtime services have no stream-admin rights and release producers disable token fallback; only the temporary compatibility bridge retains the legacy token. Critical identity/plan publications use stable-ID outbox/PubAck paths. |
 

@@ -149,6 +149,28 @@ func TestRequiredProvisioningIsIndependentFromOptionalExtraPlanes(t *testing.T) 
 	}
 }
 
+func TestAuditHealthcheckUsesControlHealthNotOptionalPlaneReadiness(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test path")
+	}
+	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+	composeBytes, err := os.ReadFile(filepath.Join(controlRoot, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit, err := composeServiceBlock(string(composeBytes), "audit-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(audit, "http://127.0.0.1:8187/healthz") {
+		t.Fatal("Audit Docker healthcheck must use local Control-plane health")
+	}
+	if strings.Contains(audit, "http://127.0.0.1:8187/readyz") {
+		t.Fatal("Audit Docker healthcheck must not gate startup on optional plane readiness")
+	}
+}
+
 func TestPlaneRuntimePrincipalsCannotReachJetStreamAdminOrAuditConsumerSubjects(t *testing.T) {
 	const password = "0123456789abcdef0123456789abcdef"
 	_, file, _, ok := runtime.Caller(0)
