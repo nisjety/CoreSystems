@@ -29,6 +29,14 @@ func runProvisioning(ctx context.Context, buses []provisioner.Bus, provision fun
 	failures := make([]error, 0, len(buses))
 	for _, bus := range buses {
 		if err := provision(ctx, bus); err != nil {
+			if bus.Optional {
+				// An optional external-plane bus (e.g. a plane that is currently
+				// down) must not block this stack — log and continue. Matches the
+				// compose intent: "Model/Application outages cannot block this
+				// stack." Prevents the crash-loop when application-nats is absent.
+				log.Printf("skipping optional provisioner bus %q: %v", bus.Name, err)
+				continue
+			}
 			failures = append(failures, err)
 		}
 	}

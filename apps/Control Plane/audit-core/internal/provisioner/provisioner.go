@@ -62,6 +62,11 @@ type Bus struct {
 	URL      string `json:"url"`
 	User     string `json:"user"`
 	Password string `json:"password"`
+	// Optional marks an external-plane bus whose outage must NOT fail this
+	// stack: if provisioning it fails (e.g. the plane is down), the provisioner
+	// logs a warning and continues rather than exiting non-zero (which would
+	// crash-loop under `restart: on-failure`).
+	Optional bool `json:"optional,omitempty"`
 }
 
 func ParseBuses(raw string) ([]Bus, error) {
