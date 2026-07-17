@@ -11,6 +11,7 @@ Contract (matches services/retrieval-engine-rs/src/search/colqwen.rs):
     GET  /healthz -> { "ok": true, "model": ..., "device": ... }
 """
 
+import concurrent.futures
 import io
 import os
 
@@ -70,20 +71,34 @@ def healthz():
     return {"ok": True, "model": MODEL_ID, "device": DEVICE}
 
 
+# A single pooled client reused across requests/threads (httpx.Client is safe to
+# share) — avoids per-image connection setup and keep-alive teardown.
+_HTTP = httpx.Client(timeout=30.0, follow_redirects=True)
+
+# Cap fan-out so a large candidate set can't spawn one thread per URL.
+_FETCH_MAX_WORKERS = int(os.environ.get("COLQWEN_FETCH_WORKERS", "8"))
+
+
 def _fetch_image(url: str) -> Image.Image:
     for frm, to in _URL_REWRITES:
         url = url.replace(frm, to)
-    with httpx.Client(timeout=30.0, follow_redirects=True) as c:
-        r = c.get(url)
-        r.raise_for_status()
-        return Image.open(io.BytesIO(r.content)).convert("RGB")
+    r = _HTTP.get(url)
+    r.raise_for_status()
+    return Image.open(io.BytesIO(r.content)).convert("RGB")
 
 
 @app.post("/rerank")
 def rerank(req: RerankRequest):
     if not req.image_urls:
         return {"scores": []}
-    images = [_fetch_image(u) for u in req.image_urls]
+    # Fetch candidate images concurrently instead of serially: at
+    # visual_rerank_top_k=20 the old list-comprehension issued 20 blocking GETs
+    # (each up to the 30s timeout) back-to-back on the visual-rerank hot path.
+    # ThreadPoolExecutor.map preserves input order (scores map back by index) and
+    # re-raises the first fetch error, keeping the previous fail-on-error contract.
+    workers = max(1, min(_FETCH_MAX_WORKERS, len(req.image_urls)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        images = list(pool.map(_fetch_image, req.image_urls))
     with torch.no_grad():
         bq = processor.process_queries([req.query]).to(model.device)
         q_emb = model(**bq)
