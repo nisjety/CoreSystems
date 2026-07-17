@@ -367,15 +367,19 @@ services:
       META_BUSINESS_LOGIN_CONFIG_ID: ${META_BUSINESS_LOGIN_CONFIG_ID:-}
       META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID: ${META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID:-}
       NATS_ENABLED: ${NATS_ENABLED:-false}
-      # Publish integration events (velion.ingestion.integration.*) to the local
-      # ingestion NATS — the same broker imports-api publishes velion.ingestion.*
-      # to — instead of the deferred cross-plane velion-nats. Cross-plane delivery
-      # to Application-Plane consumers (VELION_INGESTION stream) rides the same
-      # ingestion→app bridge every other velion.ingestion.* publisher uses.
-      NATS_URL: nats://nats:4222
-      NATS_USERNAME: ${NATS_USERNAME:-}
-      NATS_PASSWORD: ${NATS_PASSWORD:-}
-      NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
+      # Cross-plane bridge (#3): publish integration events
+      # (velion.ingestion.integration.*) DIRECTLY into the Application Plane's
+      # app-nats (alias application-nats on inter-plane-bus), where the
+      # VELION_INGESTION JetStream stream captures them and conversation-core's
+      # webhook-received consumer delivers them. Uses the dedicated per-user
+      # publisher principal (app-nats is per-user auth, not single-token), so
+      # NATS_TOKEN and its VELION_NATS_TOKEN fallback are both emptied to force
+      # UserInfo auth (publisher.go picks token over UserInfo when a token is set).
+      NATS_URL: nats://application-nats:4222
+      NATS_USERNAME: ingestion-integration-publisher
+      NATS_PASSWORD: ${APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD:?APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD is required}
+      NATS_TOKEN: ""
+      VELION_NATS_TOKEN: ""
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
       # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
       INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
