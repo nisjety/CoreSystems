@@ -97,7 +97,11 @@ func main() {
 	w.RegisterWorkflow(workflows.EvaluatorOptimizerWorkflow)
 
 	w.RegisterActivity(a.StartRunActivity)
+	// ExecuteStepLoopActivity stays registered for replay of in-flight runs that
+	// recorded the legacy (DefaultVersion) single-activity step loop; new runs
+	// use the durable per-turn ExecuteStepActivity instead.
 	w.RegisterActivity(a.ExecuteStepLoopActivity)
+	w.RegisterActivity(a.ExecuteStepActivity)
 	w.RegisterActivity(a.CompleteRunActivity)
 	w.RegisterActivity(a.FailRunActivity)
 	w.RegisterActivity(a.QueryMemoryEntriesActivity)

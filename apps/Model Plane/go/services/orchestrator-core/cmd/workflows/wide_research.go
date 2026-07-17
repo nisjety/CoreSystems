@@ -29,9 +29,9 @@ type ResearchBranchResult struct {
 
 // WideResearchOutput collects and merges all research branch results.
 type WideResearchOutput struct {
-	BranchResults []ResearchBranchResult `json:"branch_results"`
-	MergedSummary string                 `json:"merged_summary"`
-	UniqueFactCount int                  `json:"unique_fact_count"`
+	BranchResults   []ResearchBranchResult `json:"branch_results"`
+	MergedSummary   string                 `json:"merged_summary"`
+	UniqueFactCount int                    `json:"unique_fact_count"`
 }
 
 // WideResearchWorkflow fans-out parallel research queries, then fans-in results.
@@ -68,6 +68,15 @@ func WideResearchWorkflow(ctx workflow.Context, input WideResearchInput) (WideRe
 	}
 	actCtx := workflow.WithActivityOptions(ctx, activityOpts)
 
+	// Version gate: in-flight runs (DefaultVersion) keep dispatching each branch
+	// as one ExecuteStepLoopActivity; new runs make every branch a durable
+	// per-turn loop (executeStepLoop) so a worker crash resumes mid-branch
+	// instead of restarting the branch from turn 0. The GetVersion marker is
+	// recorded once here in the main goroutine (never inside a coroutine), so
+	// each branch's coroutine calls executeStepLoop directly rather than the
+	// gated runStepLoop.
+	durableStepLoop := workflow.GetVersion(ctx, stepLoopPerTurnChange, workflow.DefaultVersion, stepLoopPerTurnVersion) != workflow.DefaultVersion
+
 	// Fan-out: spawn parallel research branches with bounded concurrency.
 	results := make([]ResearchBranchResult, len(input.Queries))
 	selector := workflow.NewSelector(ctx)
@@ -87,10 +96,21 @@ func WideResearchWorkflow(ctx workflow.Context, input WideResearchInput) (WideRe
 			UserID:   input.UserID,
 		}
 
-		future := workflow.ExecuteActivity(actCtx,
-			"ExecuteStepLoopActivity",
-			stepInput,
-		)
+		// Each branch is its own future so the bounded fan-out is preserved on
+		// both paths. On the durable path the branch runs in a coroutine driving
+		// the per-turn loop, resolving a settable future when it finishes.
+		var future workflow.Future
+		if durableStepLoop {
+			f, settable := workflow.NewFuture(ctx)
+			future = f
+			workflow.Go(ctx, func(gctx workflow.Context) {
+				gActCtx := workflow.WithActivityOptions(gctx, activityOpts)
+				out, err := executeStepLoop(gActCtx, stepInput)
+				settable.Set(out, err)
+			})
+		} else {
+			future = workflow.ExecuteActivity(actCtx, "ExecuteStepLoopActivity", stepInput)
+		}
 
 		selector.AddFuture(future, func(f workflow.Future) {
 			var output activities.StepLoopOutput

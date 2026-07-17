@@ -73,7 +73,10 @@ func newTestEnv(t *testing.T) (*testsuite.TestWorkflowEnvironment, *activities.A
 	// non-activity helper methods (e.g. SetPublisher) that do not match
 	// Temporal's activity signature contract.
 	env.RegisterActivityWithOptions(a.StartRunActivity, activity.RegisterOptions{Name: "StartRunActivity"})
+	// New runs drive the step loop per turn via ExecuteStepActivity; the legacy
+	// whole-loop ExecuteStepLoopActivity stays registered for old-history replay.
 	env.RegisterActivityWithOptions(a.ExecuteStepLoopActivity, activity.RegisterOptions{Name: "ExecuteStepLoopActivity"})
+	env.RegisterActivityWithOptions(a.ExecuteStepActivity, activity.RegisterOptions{Name: "ExecuteStepActivity"})
 	env.RegisterActivityWithOptions(a.CompleteRunActivity, activity.RegisterOptions{Name: "CompleteRunActivity"})
 	env.RegisterActivityWithOptions(a.FailRunActivity, activity.RegisterOptions{Name: "FailRunActivity"})
 
@@ -209,21 +212,12 @@ func TestInteractiveRun_CancelSignal_EmitsRunFailed(t *testing.T) {
 func TestInteractiveRun_ApprovalSignal_AllowsCompletion(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 
-	first := activities.StepLoopOutput{
-		Steps: []activities.StepResult{
-			{StepIndex: 0, ToolName: "needs-human", NeedsApproval: true},
-		},
-		Completed: false,
-	}
-	second := activities.StepLoopOutput{
-		Steps: []activities.StepResult{
-			{StepIndex: 0, ToolName: "final", Completed: true},
-		},
-		Completed: true,
-		Summary:   "done",
-	}
-	call := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.Anything).Return(first, nil).Once()
-	env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.Anything).Return(second, nil).NotBefore(call)
+	// Per-turn driver: the first turn needs human approval (loop breaks); after
+	// the approval signal the resumed loop's first turn completes.
+	firstTurn := env.OnActivity("ExecuteStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{StepIndex: 0, ToolName: "needs-human", NeedsApproval: true}, nil).Once()
+	env.OnActivity("ExecuteStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{StepIndex: 0, ToolName: "final", Completed: true}, nil).NotBefore(firstTurn)
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalApproval, nil)
@@ -255,8 +249,8 @@ func TestInteractiveRun_ApprovalSignal_AllowsCompletion(t *testing.T) {
 func TestInteractiveRun_StepLoopFailure_EmitsRunFailed(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 
-	env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.Anything).
-		Return(activities.StepLoopOutput{}, errors.New("step boom"))
+	env.OnActivity("ExecuteStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{}, errors.New("step boom"))
 
 	input := InteractiveRunInput{
 		RunID:    "run-steploop-1",
@@ -290,12 +284,8 @@ func TestInteractiveRun_StepLoopFailure_EmitsRunFailed(t *testing.T) {
 func TestInteractiveRun_CompleteRunFailure_FallsBackToFailRun(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 
-	env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.Anything).
-		Return(activities.StepLoopOutput{
-			Steps:     []activities.StepResult{{StepIndex: 0, ToolName: "final", Completed: true}},
-			Completed: true,
-			Summary:   "ok",
-		}, nil)
+	env.OnActivity("ExecuteStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{StepIndex: 0, ToolName: "final", Completed: true}, nil)
 
 	env.OnActivity("CompleteRunActivity", mock.Anything, mock.Anything).
 		Return(errors.New("complete boom"))
@@ -329,8 +319,8 @@ func TestInteractiveRun_CompleteRunFailure_FallsBackToFailRun(t *testing.T) {
 
 func TestInteractiveRun_CancelMidActivity_StillEmitsRunFailed(t *testing.T) {
 	env, _, stub := newTestEnv(t)
-	env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.Anything).
-		Return(activities.StepLoopOutput{}, context.Canceled)
+	env.OnActivity("ExecuteStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{}, context.Canceled)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCancel, nil)
 	}, 100*time.Millisecond)
