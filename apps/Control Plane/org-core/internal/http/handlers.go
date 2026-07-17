@@ -329,11 +329,17 @@ func (s *Server) updateOrgSettings(c *gin.Context) {
 	changedBy := c.GetHeader("x-user-id")
 	orgData, err := s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
 	if err != nil {
-		if err == org.ErrNotFound {
+		switch {
+		case err == org.ErrNotFound:
 			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
-			return
+		case err == org.ErrPlanUpgradeRequired:
+			c.JSON(http.StatusPaymentRequired, gin.H{
+				"error":   "plan_upgrade_required",
+				"message": "Zero Data Retention is available on a higher plan.",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
 		return
 	}
 	c.JSON(http.StatusOK, orgData)

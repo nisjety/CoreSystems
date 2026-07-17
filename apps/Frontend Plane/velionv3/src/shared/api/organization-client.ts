@@ -61,9 +61,30 @@ export async function getOrganizationZdr(organizationId: string): Promise<boolea
 }
 
 /**
+ * Whether the organization's plan entitles it to enable Zero Data Retention.
+ * ZDR is a premium, plan-gated privacy feature; ineligible orgs see it locked.
+ */
+export async function getOrganizationZdrEntitled(organizationId: string): Promise<boolean> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/entitlements`,
+  )
+  const container = record(payload)
+  const list = Array.isArray(container?.entitlements)
+    ? container.entitlements
+    : Array.isArray(payload)
+      ? payload
+      : []
+  return list.some((entry) => {
+    const entitlement = record(entry)
+    return entitlement?.key === 'feature.zero_data_retention' && entitlement?.enabled === true
+  })
+}
+
+/**
  * Persist the organization's interactive Zero-Data-Retention posture. Org-admin
- * gated at the gateway; the value is durable org intent, not a per-request
- * override. Returns the resolved posture after the write.
+ * gated at the gateway; enabling ZDR is plan-gated (a 402 plan_upgrade_required
+ * is returned for ineligible plans). The value is durable org intent, not a
+ * per-request override. Returns the resolved posture after the write.
  */
 export async function updateOrganizationZdr(
   organizationId: string,

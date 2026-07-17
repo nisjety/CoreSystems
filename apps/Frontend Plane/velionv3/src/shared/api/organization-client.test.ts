@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getOrganizationZdr,
+  getOrganizationZdrEntitled,
   listOrganizations,
   switchActiveOrganization,
   updateOrganizationZdr,
@@ -73,5 +74,43 @@ describe('organization client', () => {
     expect(init.method).toBe('PATCH')
     expect(JSON.parse(String(init.body))).toEqual({ zeroDataRetention: false })
     expect(result).toBe(false)
+  })
+
+  it('reports ZDR entitlement from the plan-gated entitlements list', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          organization_id: 'org_1',
+          entitlements: [
+            { key: 'feature.chat', enabled: true },
+            { key: 'feature.zero_data_retention', enabled: true },
+          ],
+        }),
+      ),
+    )
+
+    const entitled = await getOrganizationZdrEntitled('org_1')
+
+    const [path] = vi.mocked(fetch).mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/orgs/org_1/entitlements')
+    expect(entitled).toBe(true)
+  })
+
+  it('treats a disabled or absent ZDR entitlement as not entitled', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          organization_id: 'org_1',
+          entitlements: [
+            { key: 'feature.chat', enabled: true },
+            { key: 'feature.zero_data_retention', enabled: false },
+          ],
+        }),
+      ),
+    )
+
+    await expect(getOrganizationZdrEntitled('org_1')).resolves.toBe(false)
   })
 })

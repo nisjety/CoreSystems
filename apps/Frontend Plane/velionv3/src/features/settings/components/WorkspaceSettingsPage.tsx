@@ -40,7 +40,12 @@ import {
 } from '@/shared/integrations/meta-facebook-sdk'
 import { getSession } from '@/shared/session/session-store'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
-import { getOrganizationZdr, updateOrganizationZdr } from '@/shared/api/organization-client'
+import {
+  getOrganizationZdr,
+  getOrganizationZdrEntitled,
+  updateOrganizationZdr,
+} from '@/shared/api/organization-client'
+import { ApiError } from '@/shared/api/http'
 import {
   getWorkspaceSettingsSection,
   isWorkspaceSettingsSection,
@@ -1164,6 +1169,7 @@ function OrgSecuritySection() {
   const orgId = () => session.activeOrg?.id ?? null
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
   const [zdr, setZdr] = createSignal(false)
+  const [zdrEntitled, setZdrEntitled] = createSignal(false)
   const [zdrLoaded, setZdrLoaded] = createSignal(false)
   const [zdrBusy, setZdrBusy] = createSignal(false)
   const [zdrError, setZdrError] = createSignal<string | null>(null)
@@ -1175,7 +1181,12 @@ function OrgSecuritySection() {
       return
     }
     try {
-      setZdr(await getOrganizationZdr(id))
+      const [posture, entitled] = await Promise.all([
+        getOrganizationZdr(id),
+        getOrganizationZdrEntitled(id).catch(() => false),
+      ])
+      setZdr(posture)
+      setZdrEntitled(entitled)
     } catch {
       // Fall back to the product default (off) on read failure; live retention
       // enforcement stays fail-closed server-side regardless of this toggle.
@@ -1195,24 +1206,32 @@ function OrgSecuritySection() {
       setZdr(await updateOrganizationZdr(id, next))
     } catch (reason) {
       setZdr(previous) // revert on failure
-      setZdrError(
-        reason instanceof Error ? reason.message : 'Could not update Zero Data Retention.',
-      )
+      if (reason instanceof ApiError && reason.code === 'plan_upgrade_required') {
+        setZdrError('Zero Data Retention is available on a higher plan. Upgrade to enable it.')
+      } else {
+        setZdrError(
+          reason instanceof Error ? reason.message : 'Could not update Zero Data Retention.',
+        )
+      }
     } finally {
       setZdrBusy(false)
     }
   }
+
+  // Enabling ZDR is plan-gated; disabling is always allowed. Block the control
+  // only when the org can't enable it and it is currently off.
+  const zdrLocked = createMemo(() => !zdrEntitled() && !zdr())
 
   return (
     <>
       <SectionHeader title="Security policy" description="Set organization-wide security requirements and audit controls." />
       <div class="velion-settings-divided-list">
         <ToggleRow
-          title="Zero Data Retention"
+          title={zdrLocked() ? 'Zero Data Retention (premium)' : 'Zero Data Retention'}
           description="When on, interactive AI content is not retained. Turn off to let Velion store conversation history and power memory."
           info={ZDR_TOOLTIP}
           enabled={zdr()}
-          disabled={!isAdmin() || zdrBusy() || !zdrLoaded() || !orgId()}
+          disabled={!isAdmin() || zdrBusy() || !zdrLoaded() || !orgId() || zdrLocked()}
           onChange={(value) => void toggleZdr(value)}
         />
         <For each={securityControls}>
@@ -1223,6 +1242,9 @@ function OrgSecuritySection() {
       </div>
       <Show when={zdrError()}>
         <p class="velion-settings-panel-note" role="alert">{zdrError()}</p>
+      </Show>
+      <Show when={zdrLoaded() && zdrLocked()}>
+        <p class="velion-settings-panel-note">Zero Data Retention is a premium privacy feature. Upgrade your plan to enable zero-retention processing.</p>
       </Show>
       <Show when={!isAdmin()}>
         <p class="velion-settings-panel-note">Only organization owners and admins can change Zero Data Retention.</p>

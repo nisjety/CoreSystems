@@ -12,7 +12,7 @@ import { VelionSelectableRow } from '@/shared/ui/velion/VelionSelectableRow'
 import { VelionSwitch } from '@/shared/ui/velion/VelionSwitch'
 
 const ZDR_TOOLTIP =
-  'Zero Data Retention (ZDR): når det er på, lagres ikke samtaleinnhold og det forlater ikke tjenesten. Slå på for maksimalt personvern (null lagring). Organisasjonens valg håndheves gjennom Velions administrerte oppbevaringspolicy, og kan endres senere i organisasjonsinnstillingene.'
+  'Zero Data Retention (ZDR): når det er på, lagres ikke samtaleinnhold og det forlater ikke tjenesten. Slå på for maksimalt personvern (null lagring). ZDR er en premium-funksjon som krever en betalt plan. Organisasjonens valg håndheves gjennom Velions administrerte oppbevaringspolicy, og kan endres senere i organisasjonsinnstillingene.'
 
 type OrganizationStepContentProps = {
   organization: OnboardingState['organization']
@@ -104,6 +104,7 @@ export function OrganizationStepContent(props: OrganizationStepContentProps) {
         <div class="onboarding-zdr-row__text">
           <div class="onboarding-zdr-row__label">
             <span>Zero Data Retention</span>
+            <Badge tone="accent">Premium</Badge>
             <span
               class="onboarding-info"
               tabindex="0"
@@ -114,7 +115,7 @@ export function OrganizationStepContent(props: OrganizationStepContentProps) {
               <Info size={14} aria-hidden="true" />
             </span>
           </div>
-          <p>Samtaleinnhold lagres ikke når dette er på.</p>
+          <p>Samtaleinnhold lagres ikke når dette er på. Krever en betalt plan.</p>
         </div>
         <VelionSwitch
           label="Zero Data Retention"

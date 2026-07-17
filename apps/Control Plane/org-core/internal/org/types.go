@@ -228,6 +228,19 @@ var defaultEntitlements = []Entitlement{
 	{Key: "feature.sso", Enabled: false},
 }
 
+// InteractiveZdrEntitlementKey is a COMPUTED (never stored) entitlement:
+// interactive Zero Data Retention is a premium privacy feature gated by plan.
+// It surfaces in the entitlements response so the UI can lock/upsell it.
+const InteractiveZdrEntitlementKey = "feature.zero_data_retention"
+
+// zeroDataRetentionPlans lists the plans entitled to enable ZDR. ZDR restricts
+// inference to ZDR-verified providers, so it is offered on premium tiers only;
+// free/trial/hobby/standard must upgrade. Adjust here to change the paywall line.
+var zeroDataRetentionPlans = map[string]bool{
+	"pro":        true,
+	"enterprise": true,
+}
+
 var defaultQuotas = map[string]map[string]int64{
 	"free": {
 		"api_calls":  1000,

@@ -12,6 +12,7 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrPlanUpgradeRequired = errors.New("plan upgrade required for this feature")
 var ErrOwnerConflict = errors.New("organization already has a different owner")
 var ErrOrganizationDeleted = errors.New("organization is deleted and cannot be reprovisioned")
 var ErrProjectionConflict = errors.New("conflicting state for an existing Auth projection revision")
@@ -160,6 +161,16 @@ func (s *Service) GetEntitlements(ctx context.Context, id string) ([]Entitlement
 		if b, merr := json.Marshal(ents); merr == nil {
 			_ = s.cache.Set(ctx, "org:ent:"+id, string(b), entitlementCacheTTL)
 		}
+	}
+
+	// Zero Data Retention is a computed, plan-gated entitlement (never stored).
+	// Append it fresh so the UI can render it locked/upsell for ineligible plans
+	// without depending on the cached stored-entitlement set.
+	if current, err := s.repo.GetOrganization(ctx, id); err == nil {
+		ents = append(ents, Entitlement{
+			Key:     InteractiveZdrEntitlementKey,
+			Enabled: PlanAllowsZeroDataRetention(current.Plan),
+		})
 	}
 
 	return ents, nil
@@ -484,13 +495,30 @@ func (s *Service) UpdatePlan(ctx context.Context, orgID, plan, changedBy, reason
 	return s.repo.GetOrganization(ctx, orgID)
 }
 
+// PlanAllowsZeroDataRetention reports whether an organization on the given plan
+// may enable interactive Zero Data Retention (a premium, plan-gated feature).
+func PlanAllowsZeroDataRetention(plan string) bool {
+	return zeroDataRetentionPlans[strings.ToLower(strings.TrimSpace(plan))]
+}
+
 // SetInteractiveRetention persists the org's interactive Zero-Data-Retention
-// posture (zdr=true is the privacy-preserving default). It records durable
-// org-admin intent; live enforcement is applied through auth-core's managed,
-// attested retention policy. Returns the refreshed organization projection.
+// posture. Enabling ZDR (zdr=true) is a premium feature gated by plan — it is
+// rejected with ErrPlanUpgradeRequired unless the org's plan is entitled;
+// disabling it is always allowed. The stored value is durable org-admin intent;
+// live enforcement is applied through auth-core's managed retention policy.
+// Returns the refreshed organization projection.
 func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) (*Organization, error) {
 	if strings.TrimSpace(orgID) == "" {
 		return nil, fmt.Errorf("organization id is required")
+	}
+	if zdr {
+		current, err := s.repo.GetOrganization(ctx, orgID)
+		if err != nil {
+			return nil, err
+		}
+		if !PlanAllowsZeroDataRetention(current.Plan) {
+			return nil, ErrPlanUpgradeRequired
+		}
 	}
 	if err := s.repo.SetInteractiveRetention(ctx, orgID, zdr, changedBy); err != nil {
 		return nil, err
