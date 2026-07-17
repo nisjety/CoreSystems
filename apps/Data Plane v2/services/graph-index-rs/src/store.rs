@@ -1,7 +1,10 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::model::{Claim, Community, Entity, ExtractionResult, Relationship};
+use crate::model::{
+    Claim, Community, Entity, ExtractionResult, MirrorEntity, MirrorRelationship,
+    PersistedExtraction, Relationship,
+};
 
 pub struct GraphStore {
     pool: PgPool,
@@ -60,16 +63,20 @@ impl GraphStore {
         org_id: &str,
         knowledge_id: &str,
         result: &ExtractionResult,
-    ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    ) -> anyhow::Result<PersistedExtraction> {
         if !self
             .knowledge_unit_is_org_visible(org_id, knowledge_id)
             .await?
         {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
+            // Not org-visible → persist nothing. The empty result means the
+            // Neo4j mirror is a no-op too, so the read-model inherits this gate
+            // (and the upstream restrictive-ZDR drop) with no extra code.
+            return Ok(PersistedExtraction::default());
         }
         let source_ref = serde_json::json!([knowledge_id]);
 
         let mut entity_ids = Vec::new();
+        let mut mirror_entities = Vec::new();
         for e in &result.entities {
             let id = Uuid::new_v4().to_string();
             sqlx::query(
@@ -85,6 +92,12 @@ impl GraphStore {
             .bind(&source_ref)
             .execute(&self.pool)
             .await?;
+            mirror_entities.push(MirrorEntity {
+                entity_id: id.clone(),
+                entity_type: e.entity_type.clone(),
+                entity_text: e.entity_text.clone(),
+                confidence: e.confidence,
+            });
             entity_ids.push(id);
         }
 
@@ -96,6 +109,7 @@ impl GraphStore {
             .collect();
 
         let mut rel_ids = Vec::new();
+        let mut mirror_relationships = Vec::new();
         for r in &result.relationships {
             let a_id = entity_map
                 .get(r.source_entity.as_str())
@@ -123,6 +137,13 @@ impl GraphStore {
             .bind(&source_ref)
             .execute(&self.pool)
             .await?;
+            mirror_relationships.push(MirrorRelationship {
+                rel_id: id.clone(),
+                entity_a_id: a_id.to_string(),
+                entity_b_id: b_id.to_string(),
+                relation_type: r.relation_type.clone(),
+                confidence: r.confidence,
+            });
             rel_ids.push(id);
         }
 
@@ -150,7 +171,13 @@ impl GraphStore {
             claim_ids.push(id);
         }
 
-        Ok((entity_ids, rel_ids, claim_ids))
+        Ok(PersistedExtraction {
+            entity_ids,
+            rel_ids,
+            claim_ids,
+            mirror_entities,
+            mirror_relationships,
+        })
     }
 
     pub async fn persist_text_unit_mappings(

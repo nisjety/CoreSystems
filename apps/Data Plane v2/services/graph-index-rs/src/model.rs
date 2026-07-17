@@ -53,6 +53,41 @@ pub struct ExtractionResult {
     pub claims: Vec<ExtractedClaim>,
 }
 
+/// An entity row shaped for the Neo4j graph read-model mirror. Built alongside
+/// the canonical Postgres insert in `GraphStore::persist_extraction` so the
+/// mirror carries the SAME `entity_id` (Postgres PK) — the join key that lets
+/// the two stores cross-reference and makes `MERGE` idempotent.
+#[derive(Debug, Clone)]
+pub struct MirrorEntity {
+    pub entity_id: String,
+    pub entity_type: String,
+    pub entity_text: String,
+    pub confidence: f64,
+}
+
+/// A relationship row shaped for the Neo4j read-model mirror (Postgres PKs).
+#[derive(Debug, Clone)]
+pub struct MirrorRelationship {
+    pub rel_id: String,
+    pub entity_a_id: String,
+    pub entity_b_id: String,
+    pub relation_type: String,
+    pub confidence: f64,
+}
+
+/// Result of a canonical Postgres extraction persist. The `*_ids` back the
+/// `graph_text_units` mappings (as before); the `mirror_*` rows feed the
+/// optional Neo4j read-model. Empty (default) when the knowledge unit is not
+/// org-visible — so the mirror inherits the org-visibility + ZDR gate for free.
+#[derive(Debug, Clone, Default)]
+pub struct PersistedExtraction {
+    pub entity_ids: Vec<String>,
+    pub rel_ids: Vec<String>,
+    pub claim_ids: Vec<String>,
+    pub mirror_entities: Vec<MirrorEntity>,
+    pub mirror_relationships: Vec<MirrorRelationship>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedEntity {
     pub entity_type: String,

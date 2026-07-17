@@ -161,11 +161,18 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("graph-index gRPC on {grpc_addr}");
 
+    let consumer_neo4j = neo4j.clone();
     let consumer_task = async move {
         match event_runtime {
             Some((consumer, cleanup_consumer, nats, verifier, cleanup_verifier, _)) => {
-                let extraction =
-                    stream::run_consumer(consumer, store.clone(), extractor, nats, verifier);
+                let extraction = stream::run_consumer(
+                    consumer,
+                    store.clone(),
+                    extractor,
+                    nats,
+                    verifier,
+                    consumer_neo4j,
+                );
                 let cleanup =
                     stream::run_cleanup_consumer(cleanup_consumer, store, cleanup_verifier);
                 tokio::try_join!(extraction, cleanup).map(|_| ())
