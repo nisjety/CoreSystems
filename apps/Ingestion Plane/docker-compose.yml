@@ -3,6 +3,8 @@ name: ingestion-plane
 services:
   # ==================== QUARRY v2 (Web Crawler) ====================
   quarry-edge:
+    env_file:
+      - ./Quarry-v2/.env
     build:
       context: ./Quarry-v2
       dockerfile: deploy/compose/Dockerfile.edge
@@ -158,6 +160,8 @@ services:
       start_period: 30s
 
   quarry-control:
+    env_file:
+      - ./Quarry-v2/.env
     build:
       context: ./Quarry-v2
       dockerfile: deploy/compose/Dockerfile.control
@@ -192,7 +196,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8081:8081"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:28081:8081"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -209,6 +213,8 @@ services:
       start_period: 20s
 
   quarry-orchestrator:
+    env_file:
+      - ./Quarry-v2/.env
     build:
       context: ./Quarry-v2
       dockerfile: deploy/compose/Dockerfile.orchestrator
@@ -361,12 +367,15 @@ services:
       META_BUSINESS_LOGIN_CONFIG_ID: ${META_BUSINESS_LOGIN_CONFIG_ID:-}
       META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID: ${META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID:-}
       NATS_ENABLED: ${NATS_ENABLED:-false}
-      NATS_URL: ${NATS_URL:-nats://velion-nats:4222}
+      # Publish integration events (velion.ingestion.integration.*) to the local
+      # ingestion NATS — the same broker imports-api publishes velion.ingestion.*
+      # to — instead of the deferred cross-plane velion-nats. Cross-plane delivery
+      # to Application-Plane consumers (VELION_INGESTION stream) rides the same
+      # ingestion→app bridge every other velion.ingestion.* publisher uses.
+      NATS_URL: nats://nats:4222
       NATS_USERNAME: ${NATS_USERNAME:-}
       NATS_PASSWORD: ${NATS_PASSWORD:-}
-      # velion-nats enforces single-token auth (see nats-shared.conf); reuse
-      # the same shared token every other plane authenticates with.
-      NATS_TOKEN: ${NATS_TOKEN:-${VELION_NATS_TOKEN:-}}
+      NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
       # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
       INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
@@ -427,6 +436,8 @@ services:
   # pattern dials.
   # ============================================================
   shipping-core:
+    env_file:
+      - ./shipping-core/.env
     build:
       context: ./shipping-core
       dockerfile: Dockerfile
@@ -594,6 +605,8 @@ services:
         max-file: "3"
 
   integration-webhook-normalizer:
+    env_file:
+      - ./integration-corev2/.env
     build:
       context: ./integration-corev2/services/webhook-normalizer-rs
       dockerfile: Dockerfile
@@ -610,7 +623,7 @@ services:
         reservations:
           memory: 32M
     ports:
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3036:3036"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:13036:3036"
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -628,6 +641,8 @@ services:
 
   # ==================== FINSPO-CORE (SharePoint Manager) ====================
   finspo-api:
+    env_file:
+      - ./finspo-core/.env
     build:
       context: ./finspo-core
       dockerfile: Dockerfile
@@ -794,7 +809,7 @@ services:
       # imports-api, etc.) reach Postgres via DNS as `ingestion-postgres`
       # and don't need a host port. Loopback binding still lets local
       # tools (`psql -h localhost`, `pgcli`) connect from the host.
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:5432:5432"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:15432:5432"
     volumes:
       - ingestion-postgres-data:/var/lib/postgresql/data
       # Viktig: må være en FIL, ikke mappe (ellers får du "Is a directory")
@@ -944,7 +959,7 @@ services:
     ports:
       # Temporal frontend exposes admin gRPC with no built-in auth.
       # Loopback only — orchestrator reaches it via compose DNS.
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:7233:7233"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:17233:7233"
     networks:
       - ingestion-net
     healthcheck:
@@ -968,7 +983,11 @@ services:
     volumes:
       - ingestion-nats-data:/data
     ports:
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:4224:4222"
+      # Host 4224 is owned by Control Plane's control-shared-nats; use 4225 to
+      # avoid a bind conflict when both planes run on the same host. Services
+      # reach this NATS via the Docker network (nats://nats:4222), not the host
+      # port, so this only affects host-side debugging access.
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:4225:4222"
     networks:
       - ingestion-net
     deploy:
@@ -1013,6 +1032,8 @@ services:
         max-file: "3"
 
   autocomplete-core:
+    env_file:
+      - ./autocomplete-core/.env
     build:
       context: ./autocomplete-core
       dockerfile: Dockerfile
@@ -1069,8 +1090,8 @@ services:
     volumes:
       - ingestion-qdrant-data:/qdrant/storage
     ports:
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:6333:6333"
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:6334:6334"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:16333:6333"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:16334:6334"
     networks:
       - ingestion-net
     deploy:
@@ -1227,7 +1248,7 @@ services:
     expose:
       - "8080"
     ports:
-      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8888:8080"
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:18888:8080"
     networks:
       - ingestion-net
       - inter-plane-bus

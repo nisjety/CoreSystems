@@ -133,3 +133,13 @@ CREATE DATABASE finspo
          LC_COLLATE = 'en_US.utf8'
          LC_CTYPE   = 'en_US.utf8'
          TEMPLATE   = template0;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 7. shipping_core database  (used by shipping-core / carrier quotes+booking)
+--    shipping-core runs its own migrator at startup (init migrator), so keep the
+--    database empty here. Idempotent create so re-running this script is safe.
+-- ─────────────────────────────────────────────────────────────────────────────
+\connect ingestion_plane_db
+
+SELECT 'CREATE DATABASE shipping_core OWNER ingestion_user'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'shipping_core')\gexec
