@@ -58,6 +58,11 @@ pub struct Config {
     pub confidence_threshold: f32,
     #[serde(default = "default_true")]
     pub hybrid_enabled: bool,
+    /// Smart hybrid — query-adaptive mode-mix suggestion (ON by default).
+    /// Applies only when neither the request nor the agent config set an
+    /// explicit blend; precedence: request > agent > smart > static defaults.
+    #[serde(default = "default_true")]
+    pub smart_hybrid_enabled: bool,
     #[serde(default = "default_bm25_weight")]
     #[allow(dead_code)] // legacy single-weight knob; superseded by w_bm25 in mode_mix
     pub bm25_weight: f32,
@@ -78,8 +83,10 @@ pub struct Config {
     #[serde(default = "default_collection")]
     pub qdrant_collection: String,
     // Visual RAG arm — Cohere Embed v4 (Azure AI Foundry) page-image embeddings.
-    // `w_visual` defaults 0 (shadow). The page-image collection is written by
-    // embedding-engine; the query embedder hits the Embed v4 text route.
+    // `w_visual` defaults 0.05 (ON by default; the arm no-op-skips when the
+    // visual embedder isn't configured, so text-only deployments are unaffected).
+    // The page-image collection is written by embedding-engine; the query
+    // embedder hits the Embed v4 text route.
     #[serde(default = "default_visual_collection")]
     pub qdrant_visual_collection: String,
     #[serde(default = "default_visual_dim")]
@@ -94,12 +101,12 @@ pub struct Config {
     pub cohere_embed_v4_api_version: String,
 
     // ColQwen visual reranker (late-interaction MaxSim over Embed-v4's top-K
-    // page-image candidates). OFF by default. The model runs as a separate GPU
-    // inference server (local for verification, Hetzner/Azure for prod), reached
-    // over HTTP at `colqwen_endpoint_url`. When enabled, the orchestrator reorders
-    // the visual candidates by ColQwen relevance; any failure degrades to the
-    // Embed-v4 order (non-fatal).
-    #[serde(default)]
+    // page-image candidates). ON by default, but a no-op until
+    // `colqwen_endpoint_url` is set (the model runs as a separate GPU inference
+    // server — local for verification, Hetzner/Azure for prod). When active,
+    // the orchestrator reorders the visual candidates by ColQwen relevance; any
+    // failure degrades to the Embed-v4 order (non-fatal).
+    #[serde(default = "default_true")]
     pub visual_rerank_enabled: bool,
     #[serde(default)]
     pub colqwen_endpoint_url: String,
@@ -107,8 +114,9 @@ pub struct Config {
     pub visual_rerank_top_k: usize,
 
     // Semantic *response* cache (Data-Plane-v2-owned vector tier for the
-    // model-gateway SemanticCache seam). Opt-in via SEMANTIC_CACHE_ENABLED=true.
-    #[serde(default)]
+    // model-gateway SemanticCache seam). ON by default (CAG read path); the
+    // scope-key fail-closed gate below still governs cross-principal sharing.
+    #[serde(default = "default_true")]
     pub semantic_cache_enabled: bool,
     #[serde(default = "default_semantic_cache_collection")]
     pub semantic_cache_collection: String,
@@ -230,7 +238,7 @@ fn default_bm25_weight() -> f32 {
     0.3
 }
 fn default_w_dense() -> f32 {
-    0.5
+    0.45
 }
 fn default_w_bm25() -> f32 {
     0.2
@@ -245,7 +253,9 @@ fn default_collection() -> String {
     "dataplane_knowledge".into()
 }
 fn default_w_visual() -> f32 {
-    0.0
+    // ON by default: sum with dense .45 + bm25 .2 + graph .2 + wiki .1 = 1.0.
+    // The visual arm no-op-skips when no visual embedder is configured.
+    0.05
 }
 fn default_visual_collection() -> String {
     "dataplane_page_images".into()

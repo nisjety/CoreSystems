@@ -541,18 +541,40 @@ impl RetrievalPipeline {
         // `agent_id` AND a row exists for (org_id, agent_id), the row's
         // `weights` becomes the default; any explicit per-request
         // `mode_mix` still overrides. Cohort precedence:
-        //   per-request mode_mix > agent default > global config
+        //   per-request mode_mix > agent default > smart hybrid > global config
         let agent_default = if let Some(agent_id) = req.agent_id.as_deref() {
             crate::agent_config::lookup(&self.pool, &req.org_id, agent_id).await
         } else {
             None
         };
-        let starting_mix = req.mode_mix.clone().unwrap_or_else(|| {
-            agent_default
-                .as_ref()
-                .and_then(|c| serde_json::from_value::<ModeMixWeights>(c.weights.clone()).ok())
-                .unwrap_or_default()
-        });
+        let starting_mix = req
+            .mode_mix
+            .clone()
+            .or_else(|| {
+                agent_default
+                    .as_ref()
+                    .and_then(|c| serde_json::from_value::<ModeMixWeights>(c.weights.clone()).ok())
+            })
+            .or_else(|| {
+                // Smart hybrid — query-adaptive weight suggestion. Only when
+                // neither the caller nor the agent config expressed a blend;
+                // a neutral query yields all-None (static defaults apply).
+                // The resolved mix lands on the trace either way (auditable).
+                if self.config.smart_hybrid_enabled {
+                    let smart = crate::pipeline::smart_mix::smart_mode_mix(&req.query);
+                    tracing::debug!(
+                        w_dense = ?smart.w_dense,
+                        w_bm25 = ?smart.w_bm25,
+                        w_graph = ?smart.w_graph,
+                        w_visual = ?smart.w_visual,
+                        "smart hybrid mode-mix suggestion"
+                    );
+                    Some(smart)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
         let mix_for_scoring = starting_mix.resolve(
             self.config.w_dense,
             self.config.w_bm25,
