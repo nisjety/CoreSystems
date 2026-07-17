@@ -26,6 +26,9 @@ func TestAcquireGrant_P95Latency(t *testing.T) {
 			OrgId:      "org1",
 			SessionKey: fmt.Sprintf("session-lat-%d", i),
 			Mode:       "cloud",
+			AllowedDomains: []string{
+				"example.com",
+			},
 		}
 		start := time.Now()
 		_, err := srv.AcquireGrant(ctx, req)

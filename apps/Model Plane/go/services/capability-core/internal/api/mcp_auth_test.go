@@ -106,12 +106,25 @@ func (resolver fixedMCPResolver) LookupNetIP(context.Context, string, string) ([
 type mcpTestClaims struct {
 	OrgID         string   `json:"org_id"`
 	UserID        string   `json:"user_id"`
+	ServiceID     string   `json:"service_id,omitempty"`
 	PrincipalType string   `json:"principal_type"`
 	Scopes        []string `json:"scopes,omitempty"`
+	ZDR           *bool    `json:"zdr,omitempty"`
 	jwt.RegisteredClaims
 }
 
 func mcpAuthenticatedHandler(t *testing.T, handler http.Handler) (http.Handler, string, string) {
+	t.Helper()
+	authenticated, sign := mcpAuthenticatedHandlerWithSigner(t, handler)
+	nonZDR := false
+	return authenticated,
+		sign("user", nil, &nonZDR),
+		sign("user", []string{authz.WriteScope}, &nonZDR)
+}
+
+type mcpTokenSigner func(principalType string, scopes []string, zdr *bool) string
+
+func mcpAuthenticatedHandlerWithSigner(t *testing.T, handler http.Handler) (http.Handler, mcpTokenSigner) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -130,22 +143,98 @@ func mcpAuthenticatedHandler(t *testing.T, handler http.Handler) (http.Handler, 
 		t.Fatal(err)
 	}
 	now := time.Now()
-	sign := func(scopes []string) string {
+	sign := func(principalType string, scopes []string, zdr *bool) string {
+		actorID := "user-a"
 		claims := mcpTestClaims{
-			OrgID: "org-a", UserID: "user-a", PrincipalType: "user", Scopes: scopes,
+			OrgID: "org-a", PrincipalType: principalType, Scopes: scopes, ZDR: zdr,
 			RegisteredClaims: jwt.RegisteredClaims{
-				Issuer: mcpTestIssuer, Subject: "user-a", Audience: jwt.ClaimStrings{"capability-core"},
+				Issuer: mcpTestIssuer, Audience: jwt.ClaimStrings{"capability-core"},
 				IssuedAt: jwt.NewNumericDate(now.Add(-time.Minute)), NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
 				ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 			},
 		}
+		if principalType == "service" {
+			actorID = "capability-writer"
+			claims.ServiceID = actorID
+		} else {
+			claims.UserID = actorID
+		}
+		claims.Subject = actorID
 		raw, signErr := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
 		if signErr != nil {
 			t.Fatal(signErr)
 		}
 		return raw
 	}
-	return verifier.HTTPMiddleware(authz.AuthorizeHTTP)(handler), sign(nil), sign([]string{authz.WriteScope})
+	return verifier.HTTPMiddleware(authz.AuthorizeHTTP)(handler), sign
+}
+
+func TestZDRDurableMutationsAreDeniedBeforeCapabilityCoreHandlers(t *testing.T) {
+	database := &recordingDatabase{}
+	memory := NewMemoryHandler(nil)
+	memory.pool = database
+	mcp := NewMCPHandler(nil)
+	mcp.pool = database
+	mcp.resolver = publicMCPResolver{}
+	mux := http.NewServeMux()
+	memory.Register(mux)
+	mcp.Register(mux)
+	handler, sign := mcpAuthenticatedHandlerWithSigner(t, mux)
+
+	zdr := true
+	for _, test := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "memory body cannot downgrade issuer ZDR",
+			path: "/api/v1/memory",
+			body: `{"scope":"org","key":"retention","content":"must not persist","zdr":false}`,
+		},
+		{
+			name: "MCP body cannot downgrade issuer ZDR",
+			path: "/api/v1/mcp",
+			body: validMCPRegistrationJSON("org-a"),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			beforeExecs, beforeQueries, beforeRows := len(database.execs), len(database.queries), len(database.queryRows)
+			request := httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer "+sign("service", []string{authz.WriteScope}, &zdr))
+			request.Header.Set("X-ZDR", "false")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, body=%s, want 403", response.Code, response.Body.String())
+			}
+			if len(database.execs) != beforeExecs || len(database.queries) != beforeQueries || len(database.queryRows) != beforeRows {
+				t.Fatal("issuer-ZDR mutation reached a capability-core handler side effect")
+			}
+		})
+	}
+
+	nonZDR := false
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(`{"scope":"org","key":"retention","content":"explicitly permitted"}`))
+	request.Header.Set("Authorization", "Bearer "+sign("service", []string{authz.WriteScope}, &nonZDR))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("explicit non-ZDR service writer status = %d, body=%s", response.Code, response.Body.String())
+	}
+
+	beforeExecs := len(database.execs)
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(`{"scope":"org","key":"retention","content":"read scope cannot persist"}`))
+	request.Header.Set("Authorization", "Bearer "+sign("service", []string{authz.ReadScope}, &nonZDR))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("read-scoped service status = %d, want 403", response.Code)
+	}
+	if len(database.execs) != beforeExecs {
+		t.Fatal("service without capability:write reached durable storage")
+	}
 }
 
 func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {

@@ -11,7 +11,9 @@ use mp_contracts::dataplane::{
 use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
-    inference_core_client::InferenceCoreClient, memory_service_client::MemoryServiceClient,
+    inference_core_client::InferenceCoreClient,
+    managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    memory_service_client::MemoryServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient,
@@ -22,8 +24,10 @@ use std::sync::Arc;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::finetune_azure::AzureFinetuneClient;
+use crate::managed_start_key::ManagedStartKeyDeriver;
 use crate::nats_publisher::NatsPublisher;
 use crate::rate_limit::RateLimiter;
+use crate::session_terminal_auth::SessionTerminalTokenProvider;
 
 /// Type-erased publisher that dispatches to either NATS or in-memory.
 pub enum DynPublisher {
@@ -94,6 +98,18 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     pub inference_client: InferenceCoreClient<Channel>,
     pub session_client: SessionCoreClient<Channel>,
+    /// Additive managed-run terminalization service hosted by Session Core on
+    /// the same gRPC endpoint. It deliberately remains separate from the
+    /// legacy `SessionCore` client so existing callers retain their contracts.
+    pub managed_run_client: ManagedRunLifecycleClient<Channel>,
+    /// Fixed-scope Auth Core minting client used only for managed lifecycle
+    /// terminal receipts and heartbeats. `None` is permitted solely for the
+    /// in-memory unit-test constructor; `from_env` fails closed when absent.
+    pub(crate) session_terminal_tokens: Option<Arc<SessionTerminalTokenProvider>>,
+    /// Keyed, opaque transformer for all values persisted as managed start
+    /// identities. This prevents public request/idempotency strings from
+    /// becoming durable data (including on ZDR paths).
+    pub(crate) managed_start_keys: ManagedStartKeyDeriver,
     /// Run read model + cancel path. Hosted by session-core on the same gRPC
     /// server, so it reuses the session endpoint/channel.
     pub run_client: RunServiceClient<Channel>,
@@ -159,8 +175,8 @@ pub struct AppState {
     /// Wave 10e — in-memory approval store. Gateway-scoped, ephemeral.
     pub approvals: crate::approvals::ApprovalStore,
     /// Wave 10f — in-memory trajectory ring-buffer. Bounded; older
-    /// entries evicted FIFO. Durable retention should subscribe to
-    /// the `agents.trajectory.recorded` NATS subject.
+    /// entries evicted FIFO. Durable retention should subscribe to the
+    /// fixed `mp.v1.run.*.event` subject and filter `TRAJECTORY_RECORDED`.
     pub trajectories: crate::trajectory::TrajectoryStore,
     /// Resumable chat-stream delta buffer (`HARNESS_PHASE1` §3b). Process-local;
     /// powers `/v1/invoke/{request_id}/resume`. Swap for Redis in multi-replica.
@@ -197,6 +213,7 @@ impl AppState {
         // Arc<Inner>.
         let finetune_channel = session_channel.clone();
         let run_channel = session_channel.clone();
+        let managed_run_channel = session_channel.clone();
         let orchestration_channel = Endpoint::from_static("http://localhost:9080").connect_lazy();
         let execution_channel = Endpoint::from_static("http://localhost:9093").connect_lazy();
         let sandbox_channel = Endpoint::from_static("http://localhost:9094").connect_lazy();
@@ -213,6 +230,9 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             session_client: SessionCoreClient::new(session_channel),
+            managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
+            session_terminal_tokens: None,
+            managed_start_keys: ManagedStartKeyDeriver::test_only(),
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             execution_client: ExecutionCoreClient::new(execution_channel),
@@ -260,6 +280,32 @@ impl AppState {
             analytics: crate::runtime_registries::AnalyticsStore::new(),
             tasks: crate::runtime_registries::TaskStore::new(),
         }
+    }
+
+    /// Configure the narrow service credential exchange used only for managed
+    /// run terminal receipts and heartbeats.
+    ///
+    /// This is intentionally separate from any caller or downstream user
+    /// bearer. Production startup uses [`Self::from_env`]; explicit setup is
+    /// provided for an embedding that supplies its own configuration source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded Auth Core client cannot be created.
+    pub fn configure_managed_terminalization(
+        &mut self,
+        auth_core_url: &str,
+        service_id: &str,
+        service_api_key: &str,
+    ) -> anyhow::Result<()> {
+        let provider = SessionTerminalTokenProvider::from_service_credential(
+            auth_core_url,
+            service_id.to_owned(),
+            service_api_key.to_owned(),
+        )
+        .context("managed-run terminalization credential configuration failed")?;
+        self.session_terminal_tokens = Some(Arc::new(provider));
+        Ok(())
     }
 
     /// Create a new `AppState` with a NATS publisher.
@@ -313,6 +359,17 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let managed_run_client = ManagedRunLifecycleClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let session_terminal_tokens = Arc::new(
+            SessionTerminalTokenProvider::from_env()
+                .context("managed-run terminalization credential configuration failed")?,
+        );
+        let managed_start_keys = ManagedStartKeyDeriver::from_env()
+            .context("managed-run start-key credential configuration failed")?;
         let orchestration_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
             "ORCHESTRATOR_CORE_URL",
             "ORCHESTRATOR_CORE_ADDR",
@@ -435,6 +492,9 @@ impl AppState {
             let mut state = Self::with_nats(nats);
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.managed_run_client = managed_run_client;
+            state.session_terminal_tokens = Some(session_terminal_tokens);
+            state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
             state.execution_client = execution_client.clone();
@@ -465,6 +525,9 @@ impl AppState {
             let mut state = Self::new();
             state.inference_client = inference_client;
             state.session_client = session_client;
+            state.managed_run_client = managed_run_client;
+            state.session_terminal_tokens = Some(session_terminal_tokens);
+            state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
             state.execution_client = execution_client;
@@ -533,6 +596,15 @@ mod tests {
         let prev_lsp = swap_env("LSP_BRIDGE_URL", Some("http://localhost:9099"));
         let prev_nats = swap_env("NATS_URL", None);
         let prev_redis = swap_env("REDIS_URL", None);
+        let prev_auth_core = swap_env("AUTH_CORE_URL", Some("http://localhost:3011"));
+        let prev_terminal_credential = swap_env(
+            "MODEL_GATEWAY_SERVICE_API_KEY",
+            Some("test-terminalization-credential"),
+        );
+        let prev_start_key_secret = swap_env(
+            "MODEL_GATEWAY_MANAGED_START_KEY_SECRET",
+            Some("test-managed-start-key-secret"),
+        );
 
         let result = AppState::from_env().await;
 
@@ -541,11 +613,79 @@ mod tests {
         restore_env("LSP_BRIDGE_URL", prev_lsp);
         restore_env("NATS_URL", prev_nats);
         restore_env("REDIS_URL", prev_redis);
+        restore_env("AUTH_CORE_URL", prev_auth_core);
+        restore_env("MODEL_GATEWAY_SERVICE_API_KEY", prev_terminal_credential);
+        restore_env(
+            "MODEL_GATEWAY_MANAGED_START_KEY_SECRET",
+            prev_start_key_secret,
+        );
 
         let state = result.expect("from_env must succeed on the in-memory path");
         assert!(
             state.lsp.available(),
             "in-memory branch must wire the LSP bridge when LSP_BRIDGE_URL is set"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_env_fails_closed_without_managed_terminalization_credentials() {
+        let prev_nats = swap_env("NATS_URL", None);
+        let prev_redis = swap_env("REDIS_URL", None);
+        let prev_auth_core = swap_env("AUTH_CORE_URL", None);
+        let prev_terminal_credential = swap_env("MODEL_GATEWAY_SERVICE_API_KEY", None);
+
+        let result = AppState::from_env().await;
+
+        restore_env("NATS_URL", prev_nats);
+        restore_env("REDIS_URL", prev_redis);
+        restore_env("AUTH_CORE_URL", prev_auth_core);
+        restore_env("MODEL_GATEWAY_SERVICE_API_KEY", prev_terminal_credential);
+
+        let error = match result {
+            Ok(_) => panic!("managed terminalization credentials are mandatory"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("managed-run terminalization credential configuration failed"),
+            "unexpected startup failure: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_env_fails_closed_without_managed_start_key_secret() {
+        let prev_nats = swap_env("NATS_URL", None);
+        let prev_redis = swap_env("REDIS_URL", None);
+        let prev_auth_core = swap_env("AUTH_CORE_URL", Some("http://localhost:3011"));
+        let prev_terminal_credential = swap_env(
+            "MODEL_GATEWAY_SERVICE_API_KEY",
+            Some("test-terminalization-credential"),
+        );
+        let prev_start_key_secret = swap_env("MODEL_GATEWAY_MANAGED_START_KEY_SECRET", None);
+
+        let result = AppState::from_env().await;
+
+        restore_env("NATS_URL", prev_nats);
+        restore_env("REDIS_URL", prev_redis);
+        restore_env("AUTH_CORE_URL", prev_auth_core);
+        restore_env("MODEL_GATEWAY_SERVICE_API_KEY", prev_terminal_credential);
+        restore_env(
+            "MODEL_GATEWAY_MANAGED_START_KEY_SECRET",
+            prev_start_key_secret,
+        );
+
+        let error = match result {
+            Ok(_) => panic!("managed start-key secret is mandatory"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("managed-run start-key credential configuration failed"),
+            "unexpected startup failure: {error:#}"
         );
     }
 }

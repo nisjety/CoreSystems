@@ -1,4 +1,4 @@
-.PHONY: up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell velion-net go-tidy
+.PHONY: up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell velion-net go-tidy
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unverified)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -9,23 +9,50 @@ export INTER_PLANE_BUS_NETWORK
 # ── Environment ────────────────────────────────────────────────────────────────
 
 cp-env:
-	@[ -f .env ] || cp .env.example .env && echo "Created .env from .env.example"
+	@if [ -f .env ]; then :; else cp .env.example .env; echo "Created .env from .env.example"; fi
 
 # ── Docker Compose ─────────────────────────────────────────────────────────────
 
 # inter-plane-bus is the cross-plane shared network. The historical target name
-# remains for command compatibility. For local-only testing without
-# Control Plane, we still need it to exist or compose will refuse to start.
+# remains for command compatibility and is used only by the explicit connected
+# target; the default Compose file creates a private local network itself.
 velion-net:
 	@docker network inspect "$(INTER_PLANE_BUS_NETWORK)" >/dev/null 2>&1 || \
 		(echo "Creating $(INTER_PLANE_BUS_NETWORK) (local stub)..." && docker network create "$(INTER_PLANE_BUS_NETWORK)")
 
-up: cp-env velion-net
+up: cp-env
 	$(COMPOSE_BUILD_ENV) docker compose up -d
 	@echo ""
-	@echo "  Data Plane services are private to dpv2-net/inter-plane-bus."
+	@echo "  Data Plane services are private to dpv2-net/dpv2-cross-plane."
 	@echo "  Use 'docker compose exec <service> curl http://127.0.0.1:<port>/readyz' for health checks."
 	@echo ""
+
+standalone-up: cp-env
+	$(COMPOSE_BUILD_ENV) docker compose -f docker-compose.yml -f docker-compose.standalone.yml up -d
+	@echo "  Standalone posture: cross-plane calls remain fail-closed; Control GDPR/event consumers are paused."
+
+cross-plane-env: cp-env
+	@set -eu; \
+	env_dump="$$(mktemp)"; \
+	trap 'rm -f "$$env_dump"' EXIT; \
+	$(COMPOSE_BUILD_ENV) docker compose config --environment >"$$env_dump"; \
+	for name in NATS_SHARED_URL DOCUMENTS_GDPR_NATS_PASSWORD MODEL_PLANE_INFERENCE_SERVICE_API_KEY MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY USER_CORE_DOCUMENTS_TOKEN USER_CORE_RETRIEVAL_TOKEN CONTROL_POLICY_SERVICE_API_KEY AUTH_CORE_PUBLIC_KEY_PATH DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH; do \
+		if ! awk -F= -v name="$$name" '$$1 == name && length(substr($$0, index($$0, "=") + 1)) > 0 { found=1 } END { exit !found }' "$$env_dump"; then \
+			echo "$$name must be provisioned before cross-plane-up" >&2; exit 1; \
+		fi; \
+	done; \
+	for name in AUTH_CORE_PUBLIC_KEY_PATH DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH; do \
+		path="$$(awk -F= -v name="$$name" '$$1 == name { print substr($$0, index($$0, "=") + 1); exit }' "$$env_dump")"; \
+		case "$$path" in .secrets/event-keys/*|*/.secrets/event-keys/*) echo "$$name still points at local sandbox key material" >&2; exit 1 ;; esac; \
+		case "$$path" in /*) ;; *) path="$(CURDIR)/$$path" ;; esac; \
+		test -r "$$path" || { echo "$$name points to an unreadable file" >&2; exit 1; }; \
+	done
+
+cross-plane-up: cp-env cross-plane-env
+	@docker network inspect "$(INTER_PLANE_BUS_NETWORK)" >/dev/null 2>&1 || \
+		(echo "$(INTER_PLANE_BUS_NETWORK) must be provisioned by Control Plane before cross-plane-up" >&2; exit 1)
+	$(COMPOSE_BUILD_ENV) docker compose -f docker-compose.yml -f docker-compose.cross-plane.yml up -d
+	@echo "  Connected posture: using the pre-provisioned $(INTER_PLANE_BUS_NETWORK) network."
 
 down:
 	docker compose down
@@ -49,11 +76,11 @@ status:
 
 # Build all 8 service images. Reuses cargo-chef layer cache; first run is slow,
 # rebuilds on source changes are fast.
-docker-build: velion-net
+docker-build:
 	$(COMPOSE_BUILD_ENV) docker compose build
 
 # Build with no cache — use after dep changes (Cargo.toml, go.mod) or to force a fresh build.
-docker-build-clean: velion-net
+docker-build-clean:
 	$(COMPOSE_BUILD_ENV) docker compose build --no-cache
 
 # Start all services (without observability stack). Same as `make up`.
@@ -62,7 +89,7 @@ docker-up: up
 # Start with Prometheus + Grafana (profile "obs"). Adds ~512 MiB memory.
 #   Prometheus → http://localhost:9090
 #   Grafana    → http://localhost:3001  (admin / GRAFANA_ADMIN_PASSWORD)
-docker-up-obs: cp-env velion-net
+docker-up-obs: cp-env
 	@grep -Eq '^GRAFANA_ADMIN_PASSWORD=.+$$' .env || \
 		(echo "GRAFANA_ADMIN_PASSWORD is required for the obs profile" >&2; exit 1)
 	$(COMPOSE_BUILD_ENV) docker compose --profile obs up -d

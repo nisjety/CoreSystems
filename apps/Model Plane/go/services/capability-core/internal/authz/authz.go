@@ -22,12 +22,20 @@ const (
 	// capability health. Ordinary catalog writers and users cannot mint
 	// availability.
 	HealthWriteScope = "capability:health:write"
+	// GlobalHealthWriteScope is reserved for the dedicated workload identity
+	// that attests process-wide execution-dispatch capability health. It never
+	// grants catalog mutation and tenant health reporters cannot use it.
+	GlobalHealthWriteScope = "capability:health:global:write"
 )
 
 var errDenied = errors.New("capability-core authorization denied")
 
 // AuthorizeHTTP permits tenant-contained user reads. Service reads require a
-// signed capability scope and every mutation requires capability:write.
+// signed capability scope. Every non-read request is treated as a durable
+// mutation unless it is explicitly added to the read-only set below: a caller
+// must present an explicit, verified non-ZDR posture before any handler can
+// reach a database, publisher, or other durable side effect. Request headers,
+// query parameters, and bodies cannot weaken that signed posture.
 func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 	if principal.OrganizationID == "" || principal.ActorID == "" {
 		return errDenied
@@ -37,10 +45,13 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 		conflicts(query.Get("user_id"), principal.ActorID) {
 		return errDenied
 	}
+	if !isReadMethod(request.Method) && (!principal.RetentionPolicyPresent || principal.ZeroDataRetention) {
+		return errDenied
+	}
 	if request.URL.Path == "/api/v1/capabilities/availability" {
 		if request.Method == http.MethodPost &&
 			principal.PrincipalType == "service" &&
-			principal.HasScope(HealthWriteScope) {
+			(principal.HasScope(HealthWriteScope) || principal.HasScope(GlobalHealthWriteScope)) {
 			return nil
 		}
 		return errDenied
@@ -82,6 +93,12 @@ func AuthorizeGRPC(principal authctx.Principal, method string, request any) erro
 		return errDenied
 	}
 	if method == mpv1.CapabilityCore_PromoteSkill_FullMethodName {
+		// Promotion changes the shared registry scope. Its caller has no body
+		// field that may weaken the signed retention posture, so reject both
+		// issuer-ZDR and omitted posture before this mutating RPC can run.
+		if !principal.RetentionPolicyPresent || principal.ZeroDataRetention {
+			return errDenied
+		}
 		if principal.PrincipalType == "service" && principal.HasScope(GlobalWriteScope) {
 			return nil
 		}

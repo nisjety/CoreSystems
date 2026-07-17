@@ -1,11 +1,114 @@
 # auth-core Research Dive
 
 Original generated: 2026-06-07
-Updated (source + isolated verification): 2026-07-15
+Updated (source + isolated + local integration verification): 2026-07-16
 
 Scope: `apps/Control Plane/auth-core` (NestJS/TypeScript, container `auth-service`, port 3011 / gRPC 50011)
 
-## 2026-07-15 final secure-MVP addendum (current)
+## 2026-07-16 Model/Data cross-plane issuer addendum
+
+Control Compose now sets both `MODEL_PLANE_AUTH_ISSUER` and
+`PLANE_TOKEN_ISSUER` from the required canonical `AUTH_CORE_ISSUER`. This keeps
+service-plane JWT claims independent of the public Better Auth callback origin;
+containers may reach `auth-core:3011`, but every verifier must compare the same
+canonical claim value. A deployment-contract regression was written first and
+the focused suite passes 30/30.
+
+Local integration evidence uses the canonical issuer
+`http://localhost:3011/api/convex-auth`. No-auth, malformed service credential,
+and wrong-tenant exchanges deny; exact registered principals succeed only for
+their fixed audience, tenant, and scope. A resulting inference-core token was
+accepted by Model Session RoutingPolicy, and a Data retrieval-engine token was
+accepted by Model Inference. The latter retained issuer-selected ZDR even when
+the request supplied `zdr=false`; Model skipped every unattested provider and
+made zero provider attempts. No paid provider request was made.
+
+The least-privilege Model/Data principal registry used for this proof currently
+exists only in the running container environment. Source now provides a
+production-only file-backed path: raw JSON is rejected outside exact
+development/test, ambiguous file+JSON configuration fails, the loader requires
+a normalized absolute private regular file, rejects symlinks and open-time
+inode changes, and caps reads at 1 MiB. The production Compose/entrypoint uses a
+dedicated root-owned tmpfs handoff and an app-owned `0600` file. Focused loader,
+controller, and deployment-contract verification passes 93/93; Auth Core build,
+merged production Compose parsing, shell syntax, scoped lint, and diff hygiene
+pass, with 91.58% changed-module line coverage. This source was not deployed to
+the healthy running Auth container, and no credential content was read or
+printed.
+
+File-backed delivery does not by itself solve tenant delegation. Registry
+entries with `allowAnyOrg` let a valid workload credential request a token for
+a body-selected organization. The file loader now rejects that shape outside
+exact development/test, so the secure-MVP production registry must enumerate
+each principal's permitted organizations. Dynamic workers remain unavailable
+until a second, independently verified user/work proof is bound to the exact
+organization, ZDR posture, audience, expiry, and—where applicable—action/
+resource. The healthy development container was not rebuilt and still uses its
+runtime-only dynamic registry.
+
+## 2026-07-16 interactive retention-policy source update (current source evidence)
+
+Auth Core now has a deliberately narrow, issuer-owned interactive retention
+policy adapter. `AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON` is a strict
+versioned organization map: absence or an empty map preserves all-ZDR; an exact
+organization may select `persistent` only with a syntactically valid,
+64-lowercase-hex SHA-256 reference to managed policy evidence. Request bodies,
+headers (including `x-zdr`), frontend state, and service credentials cannot
+choose or weaken an interactive user's posture. Malformed non-empty policy
+configuration fails closed and the Model/plane token controllers return 503
+rather than minting a fallback token. Service-principal posture remains a
+separate exact-audience registry decision.
+
+Focused verification on 2026-07-16 passed 72 Jest tests across the parser,
+Model/plane token issuance, and controller failure paths; Prettier and
+`pnpm build` also passed. The tests use local ephemeral signing material and
+make no provider call. The addendum above verifies healthy local Auth and
+cross-plane issuance, but no live persistent-policy entry or provider ZDR
+attestation exists. The unconfigured runtime therefore remains all-ZDR, and external inference must
+remain unavailable until an approved persistence policy or independently
+verified ZDR provider path is live-proven.
+
+## 2026-07-17 retention policy APPLIED live + frontend toggle plan (current)
+
+The "no live persistent-policy entry" statement above is now superseded for one
+organization. Two things changed on 2026-07-17:
+
+1. **Secret persistence unblocked safe recreates.** `run-control-plane.sh`
+   previously minted all scoped NATS/token secrets fresh into an ephemeral file
+   every bring-up, so any single-service recreate rotated credentials and
+   mismatched the running stack (and silently rotated `BETTER_AUTH_SECRET` /
+   `TOKEN_ENCRYPTION_KEY`). The runner now persists generated secrets to a
+   gitignored `0600` `.env.generated-secrets`, pre-seeded from the live
+   containers. `config` resolution matches the running stack byte-for-byte
+   (524 keys, 0 drift) — a zero-rotation recreate is proven.
+
+2. **`persistent` posture applied for one org.**
+   `AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON` now carries a live entry for org
+   `G240yBgMDU0OjWKnJpdienKD9I7KY4kr` (`posture: persistent`, valid 64-hex
+   `policyEvidenceSha256`). auth-core was recreated (zero secret rotation,
+   healthy, 0 restarts, no cascade to the other 18 CP services). Behavioral
+   proof inside the running container: that org resolves `posture=persistent`,
+   `zdr=false`; every other org still resolves the all-ZDR default.
+
+**Deferred (needs the operator/user):** the end-to-end *live-proof* — an
+authenticated interactive chat request for that org reaching a non-ZDR-verified
+provider and confirming content-persisting behavior — was NOT run. It requires a
+real password login, which is a hard boundary the agent will not cross. Drive
+that login to complete the live-proof.
+
+**Frontend ZDR toggle (planned).** Product intent is a ZDR toggle in Velion v3
+onboarding step 2/3 ("confirm your org") and in org settings, with an "i" hover
+tooltip. IMPORTANT architectural constraint: today the posture is resolved ONLY
+from the managed env JSON and interactive-retention-policy.ts deliberately
+rejects request/header/frontend influence and requires a policy-evidence hash.
+A UI toggle that genuinely changes enforcement therefore requires a durable,
+admin-writable per-org posture source (e.g. an org-core settings column plus an
+auth-core read path) — it must remain org-admin-gated and preserve the
+evidence/attestation semantics; it must NOT become a per-request client override.
+Until that backend exists, a toggle can only capture org intent, not change
+enforcement.
+
+## 2026-07-15 final secure-MVP addendum (historical)
 
 The original fresh-image run exited before `/api/convex-auth/jwks` became ready; bounded redacted logs isolated legacy internal-key startup configuration without printing credentials. Auth now consumes file-backed gRPC, internal HTTP/NATS, and Auth→User credential registries. Exact credential ID, principal, audience, token, scope/method, ambiguity, retirement, and bounded rotation overlap are fail-closed. The real Nest gRPC transport matrix passes 9/9 cases.
 
@@ -25,7 +128,20 @@ Auth Core was rebuilt from the current worktree and is healthy. Its public Bette
 
 The same-origin gateway now exposes bounded OAuth/OIDC and SAML callback routes. They pin Auth Core as upstream, do not follow upstream redirects, forward no browser-supplied identity/internal-auth headers, bound provider/body/response size, restrict SAML to form posts, and preserve only the callback response headers required by the browser. Production Auth/frontend URLs must be canonical HTTPS origins with no credentials/path/query/fragment; non-production HTTP is loopback-only. Gateway and release-nginx access logs are path-only and normalize invitation IDs, without changing query forwarding. Live fake-state OAuth produced a 302 to `http://localhost:5173/api/auth/error?error=state_mismatch`; an invalid provider returned 400, and fake callback/reset/invitation markers were absent from gateway/SPA logs.
 
-A full Auth regression run exposed a fail-open ZDR posture in delegated token claims. Existing tests failed first; Model and plane token payloads now always set issuer-selected `zdr: true`, ignoring caller attempts to relax it. All 20 Jest suites/170 tests and `pnpm run build` pass; focused ESLint passes for the acceptance/rate-limit, atomic Dragonfly, Redis failure, and deployment-contract changes. The selected changed Auth security modules measure 95.16% lines, 94.07% statements, 93.75% functions, and 90% branches; the invitation controller measures 92.3% lines, 92.77% statements, 90% functions, and 90.47% branches; the atomic limiter is 100% covered. Public-origin/invitation-email logic measures 94.11% line coverage. This fail-closed contract can deliberately block a downstream provider that is not ZDR-attested; that is the secure-MVP behavior, not a UI fallback.
+A full Auth regression run exposed a fail-open ZDR posture in delegated token claims. Existing tests failed first; interactive Model and plane token payloads now always set issuer-selected `zdr: true`, ignoring caller attempts to relax it. All 20 Jest suites/170 tests and `pnpm run build` pass; focused ESLint passes for the acceptance/rate-limit, atomic Dragonfly, Redis failure, and deployment-contract changes. The selected changed Auth security modules measure 95.16% lines, 94.07% statements, 93.75% functions, and 90% branches; the invitation controller measures 92.3% lines, 92.77% statements, 90% functions, and 90.47% branches; the atomic limiter is 100% covered. Public-origin/invitation-email logic measures 94.11% line coverage. This fail-closed contract can deliberately block a downstream provider that is not ZDR-attested; that is the secure-MVP behavior, not a UI fallback.
+
+The earlier 2026-07-16 retention follow-up found no canonical organization
+retention-policy source. Its all-ZDR conclusion is superseded by the narrowly
+scoped policy adapter above; no live persistent entry or provider attestation
+has been supplied, so the current live-safe outcome remains the same until
+operator evidence exists. Service tokens may carry `zdr: false` only when the
+deployment-owned principal registry has a complete, exact
+`retentionByAudience` entry selecting `persistent` for that service and
+audience. The internal token routes reject both body `zdr` and `x-zdr`, and no
+service token is returned until its durable issuance audit receives a PubAck.
+The legacy caller-selected `allowPersistentData` registry shape is rejected
+and requires operator migration. The historical coverage/test numbers in this
+paragraph are retained as prior evidence, not current release proof.
 
 At the 2026-07-14 verification, Org/Billing/Audit still accepted a shared inbound key and lifecycle fault E2E was pending. The 2026-07-15 addendum above supersedes those source/isolation gaps; no live invitation, role, or deletion mutation was exercised in either pass.
 

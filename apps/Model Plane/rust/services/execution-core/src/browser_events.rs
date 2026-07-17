@@ -462,15 +462,16 @@ mod tests {
         orchestration_core_service_server::{
             OrchestrationCoreService, OrchestrationCoreServiceServer,
         },
-        AttachSubagentRequest, AttachSubagentResponse, CreateApprovalRequest,
-        CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest,
-        GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest,
-        GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest,
-        ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest,
-        ListTodosResponse, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse,
-        RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StreamRunEventsRequest,
-        TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest,
-        TransitionTodoResponse,
+        AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
+        AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest,
+        ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse,
+        DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse,
+        GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse,
+        GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse,
+        ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse,
+        OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordOrchestrationEventRequest,
+        RecordOrchestrationEventResponse, StreamRunEventsRequest, TransitionPlanRequest,
+        TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
     };
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -623,6 +624,18 @@ mod tests {
                     org_id: "org_test".into(),
                 }),
             }))
+        }
+        async fn claim_approval_deliveries(
+            &self,
+            _: TonicRequest<ClaimApprovalDeliveriesRequest>,
+        ) -> Result<Response<ClaimApprovalDeliveriesResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn acknowledge_approval_delivery(
+            &self,
+            _: TonicRequest<AcknowledgeApprovalDeliveryRequest>,
+        ) -> Result<Response<AcknowledgeApprovalDeliveryResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
         }
         async fn get_subagent_lineage(
             &self,

@@ -194,6 +194,9 @@ services:
       - ./auth-core/.env
       - ./auth-core/.env.docker
     environment:
+      # Base Compose is the loopback development stack. Production override
+      # switches this to production and requires a file-backed principal registry.
+      NODE_ENV: development
       VELION_NATS_URL: nats://control-shared-nats:4222
       NATS_SHARED_USER: auth-core-shared
       NATS_SHARED_PASSWORD: ${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}
@@ -218,6 +221,12 @@ services:
       DATA_PLANE_POLICY_AUTH_AUDIENCE: ${DATA_PLANE_POLICY_AUTH_AUDIENCE:-control-policy}
       DATA_PLANE_POLICY_CALLER_SERVICE_ID: ${DATA_PLANE_POLICY_CALLER_SERVICE_ID:-retrieval-engine}
       PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS: ${PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS:-300}
+      # One canonical issuer must sign both interactive Model tokens and
+      # service-to-service plane tokens. Deriving either issuer from the public
+      # Better Auth callback origin makes otherwise-valid cross-plane JWTs fail
+      # verification whenever the frontend and Auth Core origins differ.
+      MODEL_PLANE_AUTH_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+      PLANE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       PLANE_SERVICE_PRINCIPALS_JSON: ${PLANE_SERVICE_PRINCIPALS_JSON:?PLANE_SERVICE_PRINCIPALS_JSON is required}
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}
       # Dedicated read-only credential for user-core's exact Better Auth
@@ -651,7 +660,7 @@ services:
     entrypoint: ["/usr/local/bin/nats-provisioner"]
     environment:
       AUDIT_NATS_PROVISION_BUSES: >-
-        [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}"}]
+        [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}","optional":true}]
     networks:
       - inter-plane-bus
 

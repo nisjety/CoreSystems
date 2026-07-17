@@ -1,9 +1,11 @@
 //! gRPC server implementing `ExecutionCore` on :9093.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use mp_contracts::model_plane::v1::{
     self as pb,
+    browser_broker_client::BrowserBrokerClient,
     execution_core_server::{ExecutionCore, ExecutionCoreServer},
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient,
@@ -15,10 +17,12 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{
-    delegated_session_bearer, AuthenticatedUser, DelegatedSessionBearer, JwtVerifier,
+    delegated_session_bearer, AuthenticatedUser, DelegatedBrowserBearer, DelegatedSessionBearer,
+    JwtVerifier,
 };
 use crate::http_health::Readiness;
 use crate::runtime_loop;
+use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalTokenProvider};
 use crate::state::{RunSnapshot, RunStatus, StateStore};
 
 pub(crate) struct ExecutionService {
@@ -26,7 +30,10 @@ pub(crate) struct ExecutionService {
     auth: JwtVerifier,
     session_channel: tonic::transport::Channel,
     inference_channel: tonic::transport::Channel,
+    browser_channel: tonic::transport::Channel,
     ownership: Arc<dyn RunOwnershipResolver>,
+    capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
+    terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
 }
 
 #[tonic::async_trait]
@@ -78,6 +85,9 @@ impl ExecutionService {
         auth: JwtVerifier,
         session_channel: tonic::transport::Channel,
         inference_channel: tonic::transport::Channel,
+        browser_channel: tonic::transport::Channel,
+        capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
+        terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
     ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
@@ -87,7 +97,10 @@ impl ExecutionService {
             auth,
             session_channel,
             inference_channel,
+            browser_channel,
             ownership,
+            capability_policy,
+            terminal_tokens,
         }
     }
 
@@ -104,6 +117,40 @@ impl ExecutionService {
     /// Channel to inference-core for the agent run driver's `Infer` round.
     fn inference_channel(&self) -> tonic::transport::Channel {
         self.inference_channel.clone()
+    }
+
+    async fn validate_browser_grant(
+        &self,
+        tool_input: &str,
+        browser_bearer: &DelegatedBrowserBearer,
+    ) -> Result<crate::tool_bridge::ValidatedBrowserGrant, Status> {
+        let grant_id = crate::tool_bridge::requested_browser_grant_id(tool_input)
+            .map_err(|_| Status::invalid_argument("browser grant_id is required"))?;
+        let request = authenticated_browser_request(
+            pb::ValidateGrantRequest {
+                grant_id: grant_id.clone(),
+            },
+            browser_bearer.as_str(),
+        )?;
+        let mut client = BrowserBrokerClient::new(self.browser_channel.clone());
+        let response = tokio::time::timeout(Duration::from_secs(3), client.validate_grant(request))
+            .await
+            .map_err(|_| Status::unavailable("browser grant validation unavailable"))?
+            .map_err(|error| {
+                warn!(code = ?error.code(), "browser grant validation failed");
+                if matches!(
+                    error.code(),
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                ) {
+                    Status::unavailable("browser grant validation unavailable")
+                } else {
+                    // Do not disclose whether a forged or cross-tenant grant exists.
+                    Status::permission_denied("browser grant is not authorized")
+                }
+            })?
+            .into_inner();
+        crate::tool_bridge::ValidatedBrowserGrant::from_broker_response(&grant_id, &response)
+            .map_err(|_| Status::permission_denied("browser grant is not authorized"))
     }
 
     async fn authorize_run(
@@ -166,6 +213,93 @@ fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<Request<T>
     Ok(request)
 }
 
+#[allow(clippy::result_large_err)]
+fn authenticated_browser_request<T>(value: T, bearer: &str) -> Result<Request<T>, Status> {
+    let mut request = Request::new(value);
+    let authorization = format!("Bearer {bearer}")
+        .parse()
+        .map_err(|_| Status::internal("verified browser credential is not forwardable"))?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
+/// Persist an approval before any caller may report a HITL pause as durable.
+///
+/// # Errors
+///
+/// Returns the local request-construction error, or `unavailable` when
+/// session-core cannot durably create the approval record. Callers must return
+/// the error before they checkpoint or expose `AwaitingApproval` state.
+#[allow(clippy::result_large_err)]
+async fn create_durable_approval(
+    session_channel: &tonic::transport::Channel,
+    approval: pb::CreateApprovalRequest,
+    bearer: &str,
+) -> Result<(), Status> {
+    let request = authenticated_session_request(approval, bearer)?;
+    OrchestrationCoreServiceClient::new(session_channel.clone())
+        .create_approval(request)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            warn!(code = ?error.code(), "durable approval persistence unavailable");
+            Status::unavailable("approval persistence unavailable")
+        })
+}
+
+#[allow(clippy::result_large_err)]
+fn enforce_persistence_free_execution(
+    caller: &AuthenticatedUser,
+    request_zdr: bool,
+    operation: &'static str,
+) -> Result<(), Status> {
+    if caller.zdr || request_zdr {
+        return Err(Status::failed_precondition(format!(
+            "ZDR {operation} is disabled until its lifecycle is persistence-free"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_granted_approval(
+    approval: Option<&pb::Approval>,
+    approval_id: &str,
+    run_id: &str,
+    org_id: &str,
+) -> Result<(), Status> {
+    let Some(approval) = approval else {
+        return Err(Status::failed_precondition(
+            "durable granted approval is required",
+        ));
+    };
+    if approval.id != approval_id || approval.run_id != run_id || approval.org_id != org_id {
+        return Err(Status::permission_denied("approval scope mismatch"));
+    }
+    if approval.state != pb::ApprovalState::Granted as i32 {
+        return Err(Status::failed_precondition(
+            "approval is not durably granted",
+        ));
+    }
+    Ok(())
+}
+
+/// Approval delivery must restart the suspended work, not merely change the
+/// in-memory status of a task that has already exited. The durable outbox is
+/// the source of truth until execution-core has a restartable continuation
+/// contract and a worker that can acknowledge that delivery.
+#[allow(clippy::result_large_err)]
+fn resume_durable_approval_continuation(
+    _state: &StateStore,
+    _run_id: &str,
+) -> Result<Option<u32>, Status> {
+    Err(Status::unavailable(
+        "durable approval is queued; execution continuation delivery is not available",
+    ))
+}
+
 #[tonic::async_trait]
 impl ExecutionCore for ExecutionService {
     // single-step RPC: gate → execute → HITL → persist is one linear flow
@@ -184,15 +318,31 @@ impl ExecutionCore for ExecutionService {
             .auth
             .authenticate_delegated_inference(&request, &caller)
             .await?;
+        let browser_bearer = if request.get_ref().tool_name == "browser_agent" {
+            Some(
+                self.auth
+                    .authenticate_delegated_browser(&request, &caller)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        if req.zdr {
-            return Err(Status::failed_precondition(
-                "ZDR tool execution is disabled until the step lifecycle is persistence-free",
-            ));
-        }
+        enforce_persistence_free_execution(&caller, req.zdr, "tool execution")?;
+        // Resolve the opaque JSON grant id with BrowserBroker only after the
+        // signed caller and durable run owner are authorized. The resulting
+        // immutable policy is passed to the runtime; raw tool JSON cannot
+        // select a different grant or expand its allowed domains.
+        let browser_grant = match browser_bearer.as_ref() {
+            Some(browser_bearer) => Some(
+                self.validate_browser_grant(&req.tool_input, browser_bearer)
+                    .await?,
+            ),
+            None => None,
+        };
         let run_id = req.run_id.clone();
         let step_id = req.step_id.clone();
 
@@ -208,7 +358,7 @@ impl ExecutionCore for ExecutionService {
         )
         .with_verified_bearer(session_bearer.as_str());
 
-        let outcome = runtime_loop::execute_step(
+        let outcome = runtime_loop::execute_step_with_browser_grant(
             &req.tool_name,
             &req.tool_input,
             &req.permission_mode,
@@ -230,45 +380,47 @@ impl ExecutionCore for ExecutionService {
             Some(data_plane_bearer.as_str()),
             Some(session_bearer.as_str()),
             Some(inference_bearer.as_str()),
+            self.capability_policy.as_ref(),
+            browser_grant.as_ref(),
         )
         .await;
 
-        // HITL enforcement: when the posture gated this step, create the
-        // durable Approval and pause the run. session-core broadcasts
-        // RUN_PAUSED_FOR_APPROVAL so operator surfaces show the pause. Best
-        // effort — the step is already paused regardless of the record write.
+        // HITL enforcement: a pause is durable only after session-core accepts
+        // the Approval. On persistence failure, fail the RPC before checkpoint
+        // or StateStore writes can expose a fictional AwaitingApproval state.
         if outcome.status == "awaiting_approval" {
-            let mut orchestration = self.orchestration_client();
-            if let Err(error) = orchestration
-                .create_approval(authenticated_session_request(
-                    pb::CreateApprovalRequest {
-                        run_id: run_id.clone(),
-                        step_id: step_id.clone(),
-                        kind: pb::ApprovalKind::Destructive as i32,
-                        requested_of: req.org_id.clone(),
-                        org_id: req.org_id.clone(),
-                        user_id: String::new(),
-                        reason: format!("tool '{}' requires approval", req.tool_name),
-                        expires_in_seconds: 3600,
-                        // execution-core has no upstream cache id to align — let
-                        // session-core mint the durable approval id (matrix §4.1).
-                        client_approval_id: String::new(),
-                        // Stable per-(run, step) idempotency key (D-1): a re-paused
-                        // step collapses onto the existing durable approval via the
-                        // (org_id, idempotency_key) ON CONFLICT guard.
-                        idempotency_key: format!("{run_id}:{step_id}"),
-                    },
-                    session_bearer.as_str(),
-                )?)
-                .await
-            {
-                warn!(error = %error, run_id = %run_id, "failed to create approval for paused step");
-            }
+            create_durable_approval(
+                &self.session_channel,
+                pb::CreateApprovalRequest {
+                    run_id: run_id.clone(),
+                    step_id: step_id.clone(),
+                    kind: pb::ApprovalKind::Destructive as i32,
+                    requested_of: req.org_id.clone(),
+                    org_id: req.org_id.clone(),
+                    user_id: String::new(),
+                    reason: format!("tool '{}' requires approval", req.tool_name),
+                    expires_in_seconds: 3600,
+                    // execution-core has no upstream cache id to align — let
+                    // session-core mint the durable approval id (matrix §4.1).
+                    client_approval_id: String::new(),
+                    // Stable per-(run, step) idempotency key (D-1): a re-paused
+                    // step collapses onto the existing durable approval via the
+                    // (org_id, idempotency_key) ON CONFLICT guard.
+                    idempotency_key: format!("{run_id}:{step_id}"),
+                },
+                session_bearer.as_str(),
+            )
+            .await?;
         }
 
         let status = match outcome.status.as_str() {
             "completed" => RunStatus::Completed,
             "awaiting_approval" => RunStatus::AwaitingApproval,
+            // Browser-agent cancellations/aborts are terminal non-successful
+            // states, not generic failures to be reinterpreted as completed.
+            // Keep their exact string in the response/checkpoint step while
+            // projecting the in-memory run lifecycle as cancelled.
+            "cancelled" | "aborted" => RunStatus::Cancelled,
             _ => RunStatus::Failed,
         };
 
@@ -353,11 +505,41 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::ResumeRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
+        // A resumed retained run can emit session events and perform external
+        // browser actions. Do not rely on Model Gateway alone: Execution Core
+        // is the authoritative execution-dispatch boundary.
+        enforce_persistence_free_execution(&caller, false, "run control")?;
         let req = request.into_inner();
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        let resumed_step = self.state.resume(&req.run_id);
+        let resumed_step = if req.approval_id.trim().is_empty() {
+            self.state.resume_paused(&req.run_id)
+        } else {
+            let approval = self
+                .orchestration_client()
+                .get_approval(authenticated_session_request(
+                    pb::GetApprovalRequest {
+                        approval_id: req.approval_id.clone(),
+                        org_id: req.org_id.clone(),
+                    },
+                    session_bearer.as_str(),
+                )?)
+                .await
+                .map_err(|error| {
+                    warn!(code = ?error.code(), "durable approval verification unavailable");
+                    Status::unavailable("durable approval verification unavailable")
+                })?
+                .into_inner()
+                .approval;
+            validate_granted_approval(
+                approval.as_ref(),
+                &req.approval_id,
+                &req.run_id,
+                &req.org_id,
+            )?;
+            resume_durable_approval_continuation(&self.state, &req.run_id)?
+        };
         let resumed = resumed_step.is_some();
         let snapshot = self.state.snapshot(&req.run_id);
         let step_index = resumed_step
@@ -373,7 +555,7 @@ impl ExecutionCore for ExecutionService {
             warn!(
                 run_id = %req.run_id,
                 status = snapshot.as_ref().map_or("unknown", |current| current.status.as_str()),
-                "resume_run rejected: run is not AwaitingApproval or Paused"
+                "resume_run rejected: transition does not match durable authority"
             );
         }
 
@@ -389,6 +571,7 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
+        enforce_persistence_free_execution(&caller, false, "run control")?;
         let req = request.into_inner();
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
@@ -407,6 +590,7 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::PauseRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
+        enforce_persistence_free_execution(&caller, false, "run control")?;
         let req = request.into_inner();
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -421,9 +605,11 @@ impl ExecutionCore for ExecutionService {
     ///
     /// Delegates to [`runtime_loop::agent::run_agent`], which transitions the
     /// run's draft plan to executing, runs a single `InferenceCore.Infer`
-    /// round, persists the assistant answer, and finalizes the run with one
-    /// terminal `CompleteStep`. A run is never left `'queued'`: failures take
-    /// the graceful path and still produce a terminal `"failed"` outcome.
+    /// round, persists the assistant answer when retention permits, and records
+    /// one immutable managed terminal receipt. A run is never left `'queued'`:
+    /// failures take the graceful path and produce a durable `"failed"` outcome,
+    /// while receipt failures remain explicitly unavailable rather than claiming
+    /// terminal completion.
     async fn run_agent(
         &self,
         request: Request<pb::RunAgentRequest>,
@@ -442,11 +628,7 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        if req.zdr {
-            return Err(Status::failed_precondition(
-                "ZDR agent runs are disabled until the full run lifecycle is persistence-free",
-            ));
-        }
+        enforce_persistence_free_execution(&caller, req.zdr, "agent run")?;
         info!(
             run_id = %req.run_id,
             thread_id = %req.thread_id,
@@ -461,8 +643,10 @@ impl ExecutionCore for ExecutionService {
             Some(data_plane_bearer.as_str().to_owned()),
             Some(session_bearer.as_str().to_owned()),
             inference_bearer.as_str().to_owned(),
+            self.capability_policy.as_ref(),
+            self.terminal_tokens.as_ref(),
         )
-        .await;
+        .await?;
         Ok(Response::new(response))
     }
 }
@@ -501,8 +685,31 @@ pub async fn serve(
     let inference_url = std::env::var("INFERENCE_CORE_URL")
         .or_else(|_| std::env::var("INFERENCE_CORE_ADDR"))
         .unwrap_or_else(|_| "http://inference-core:9092".to_owned());
+    let browser_url = std::env::var("BROWSER_BROKER_URL")
+        .or_else(|_| std::env::var("BROWSER_BROKER_ADDR"))
+        .unwrap_or_else(|_| "http://browser-broker:9095".to_owned());
+    let capability_url = std::env::var("CAPABILITY_CORE_ADDR")
+        .unwrap_or_else(|_| "http://capability-core:9097".to_owned());
+    let capability_channel =
+        tonic::transport::Endpoint::from_shared(capability_url)?.connect_lazy();
+    let capability_policy = Arc::new(crate::capability_policy::GrpcCapabilityPolicy::from_env(
+        capability_channel,
+    )?);
+    let terminal_tokens: Arc<dyn ManagedRunTokenProvider> =
+        Arc::new(SessionTerminalTokenProvider::from_env()?);
 
-    serve_with_listener(state, readiness, auth, listener, session_url, inference_url).await
+    serve_with_listener(
+        state,
+        readiness,
+        auth,
+        listener,
+        session_url,
+        inference_url,
+        browser_url,
+        capability_policy,
+        terminal_tokens,
+    )
+    .await
 }
 
 async fn serve_with_listener(
@@ -512,9 +719,13 @@ async fn serve_with_listener(
     listener: tokio::net::TcpListener,
     session_url: String,
     inference_url: String,
+    browser_url: String,
+    capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
+    terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
 ) -> anyhow::Result<()> {
     let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
     let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
+    let browser_channel = tonic::transport::Endpoint::from_shared(browser_url)?.connect_lazy();
 
     readiness.set_grpc_ready(true);
     let _readiness_guard = ReadinessGuard(readiness);
@@ -526,6 +737,9 @@ async fn serve_with_listener(
             auth,
             session_channel,
             inference_channel,
+            browser_channel,
+            capability_policy,
+            terminal_tokens,
         )))
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await?;
@@ -536,11 +750,45 @@ async fn serve_with_listener(
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    use crate::session_terminal_auth::SessionTerminalTokenError;
     use mp_contracts::model_plane::v1::execution_core_client::ExecutionCoreClient;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn session_bearer() -> crate::auth::DelegatedSessionBearer {
         crate::auth::DelegatedSessionBearer::for_test()
+    }
+
+    struct AllowCapabilityPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowCapabilityPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    struct StaticTerminalTokens;
+
+    #[tonic::async_trait]
+    impl ManagedRunTokenProvider for StaticTerminalTokens {
+        async fn terminalize_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-terminalize-service-token".to_owned())
+        }
+
+        async fn heartbeat_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-heartbeat-service-token".to_owned())
+        }
     }
 
     struct FakeOwnershipResolver {
@@ -649,6 +897,116 @@ mod auth_tests {
         assert!(!state.authorizes("run-existing", "org-owner", "user-owner"));
     }
 
+    #[test]
+    fn approval_resume_requires_a_granted_durable_record_bound_to_run_and_tenant() {
+        let granted = pb::Approval {
+            id: "appr_1".to_owned(),
+            run_id: "run_1".to_owned(),
+            state: pb::ApprovalState::Granted as i32,
+            org_id: "org_1".to_owned(),
+            ..Default::default()
+        };
+
+        validate_granted_approval(Some(&granted), "appr_1", "run_1", "org_1")
+            .expect("exact durable grant");
+        assert_eq!(
+            validate_granted_approval(Some(&granted), "appr_1", "run_other", "org_1")
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            validate_granted_approval(Some(&granted), "appr_1", "run_1", "org_other")
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let pending = pb::Approval {
+            state: pb::ApprovalState::Requested as i32,
+            ..granted
+        };
+        assert_eq!(
+            validate_granted_approval(Some(&pending), "appr_1", "run_1", "org_1")
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            validate_granted_approval(None, "appr_1", "run_1", "org_1")
+                .unwrap_err()
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    #[test]
+    fn durable_grant_stays_gated_until_a_real_continuation_delivery_exists() {
+        let state = StateStore::new();
+        state.update(RunSnapshot {
+            run_id: "run_approval".to_owned(),
+            step_index: 7,
+            status: RunStatus::AwaitingApproval,
+            last_error: None,
+        });
+
+        let error = resume_durable_approval_continuation(&state, "run_approval")
+            .expect_err("a state flip must not impersonate continuation delivery");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            state.snapshot("run_approval").map(|run| run.status),
+            Some(RunStatus::AwaitingApproval)
+        );
+    }
+
+    #[test]
+    fn signed_zdr_blocks_execution_dispatch_and_durable_run_control() {
+        let caller = AuthenticatedUser::for_test_with_zdr("org-owner", "user-owner", true);
+        for operation in ["tool execution", "run control"] {
+            let error = enforce_persistence_free_execution(&caller, false, operation)
+                .expect_err("signed ZDR must dominate a caller-controlled request flag");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_hitl_rejects_an_undurable_approval_pause() {
+        // Bind then release an ephemeral address so the real CreateApproval
+        // client receives a deterministic connection failure rather than this
+        // test relying on a shared well-known port.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let address = listener.local_addr().expect("listener address");
+        drop(listener);
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("endpoint")
+            .connect_lazy();
+        let state = StateStore::new();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            create_durable_approval(
+                &channel,
+                pb::CreateApprovalRequest {
+                    run_id: "run-undurable".to_owned(),
+                    step_id: "step-undurable".to_owned(),
+                    ..Default::default()
+                },
+                "session-token",
+            ),
+        )
+        .await
+        .expect("CreateApproval connection failure should be bounded")
+        .expect_err("an unpersisted approval must fail the direct HITL path");
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(
+            state.snapshot("run-undurable").is_none(),
+            "the failed persistence path must not claim AwaitingApproval"
+        );
+    }
+
     #[tokio::test]
     async fn live_grpc_listener_is_ready_and_rejects_unsigned_execution() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -665,6 +1023,9 @@ mod auth_tests {
             listener,
             "http://127.0.0.1:1".to_owned(),
             "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:1".to_owned(),
+            Arc::new(AllowCapabilityPolicy),
+            Arc::new(StaticTerminalTokens),
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {

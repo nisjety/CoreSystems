@@ -38,6 +38,8 @@ import (
 // publishes to: mp.v1.usage.{org_id}. See mp-events subjects::usage_subject.
 const usageSubjectWildcard = "mp.v1.usage.*"
 
+const natsInboxPrefix = "_INBOX.COST_CORE_RUNTIME"
+
 const (
 	usageEnvelopeProducer = "model-gateway"
 	maxUsageMessageBytes  = 64 << 10
@@ -212,20 +214,7 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 		return
 	}
 
-	options := []nats.Option{
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2 * time.Second),
-		nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME"),
-	}
-	user := strings.TrimSpace(os.Getenv("NATS_USER"))
-	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
-	if user != "" || password != "" {
-		options = append(options, nats.UserInfo(user, password))
-	} else if token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN")); token != "" && os.Getenv("NATS_ALLOW_TOKEN_FALLBACK") == "1" {
-		options = append(options, nats.Token(token))
-	}
-	nc, err := nats.Connect(natsURL, options...)
+	nc, err := nats.Connect(natsURL, natsAuthOptions()...)
 	if err != nil {
 		slog.Error("NATS connect failed; USAGE_ENVELOPE subscriber disabled", "error", err)
 		runFeedFallback(ctx, srv)
@@ -245,6 +234,24 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 
 	slog.Info("USAGE_ENVELOPE subscriber active", "subject", usageSubjectWildcard)
 	<-ctx.Done()
+}
+
+func natsAuthOptions() []nats.Option {
+	options := []nats.Option{
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+		nats.CustomInboxPrefix(natsInboxPrefix),
+	}
+	user := strings.TrimSpace(os.Getenv("NATS_USER"))
+	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
+	if user != "" || password != "" {
+		return append(options, nats.UserInfo(user, password))
+	}
+	if token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN")); token != "" && os.Getenv("NATS_ALLOW_TOKEN_FALLBACK") == "1" {
+		return append(options, nats.Token(token))
+	}
+	return options
 }
 
 // handleUsageMessage decodes a usage envelope and records it in the ledger.

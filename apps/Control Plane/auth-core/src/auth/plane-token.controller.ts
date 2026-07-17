@@ -53,8 +53,10 @@ import { DirectNatsService } from '../nats/direct-nats.service';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import { ConvexTokenService } from './convex-token.service';
+import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
+  loadPlaneServicePrincipalRegistry,
   ServicePrincipalConfigurationError,
   type AuthorizedPlaneServicePrincipal,
 } from './plane-service-principal';
@@ -89,7 +91,6 @@ interface PlaneInternalTokenBody {
   orgId?: string;
   scopes?: readonly string[];
   reason?: string;
-  zdr?: boolean;
 }
 
 @ApiTags('Plane Auth')
@@ -198,12 +199,25 @@ export class PlaneTokenController {
     // rebuild is intentionally absent from every interactive-user token.
     const scopes = planeScopesForRole(sessionContext.role, audience);
 
-    const bundle = this.convexTokenService.issuePlaneToken(audience, {
-      userId: session.user.id,
-      orgId: sessionContext.orgId,
-      email: session.user.email ?? undefined,
-      scopes,
-    });
+    let bundle;
+    try {
+      bundle = this.convexTokenService.issuePlaneToken(audience, {
+        userId: session.user.id,
+        orgId: sessionContext.orgId,
+        email: session.user.email ?? undefined,
+        scopes,
+      });
+    } catch (error) {
+      if (error instanceof InteractiveRetentionPolicyConfigurationError) {
+        this.logger.error(
+          'Interactive retention policy unavailable; refusing plane token issuance',
+        );
+        throw new ServiceUnavailableException(
+          'Interactive retention policy is unavailable',
+        );
+      }
+      throw error;
+    }
 
     return {
       ...bundle,
@@ -228,9 +242,18 @@ export class PlaneTokenController {
     @NestHeaders('x-service-id') serviceId: string | undefined,
     @NestHeaders('x-service-api-key') credential: string | undefined,
     @Body() body: PlaneInternalTokenBody,
+    @NestHeaders('x-zdr') requestedZdr?: string,
   ) {
     if (!this.convexTokenService.isKnownPlaneAudience(audience)) {
       throw new NotFoundException(`Unknown plane audience: ${audience}`);
+    }
+    if (
+      requestedZdr !== undefined ||
+      Object.prototype.hasOwnProperty.call(body, 'zdr')
+    ) {
+      throw new BadRequestException(
+        'Retention posture is selected by deployment policy',
+      );
     }
     const orgId = (body.orgId ?? '').trim();
     const scopes = Array.isArray(body.scopes) ? body.scopes : [];
@@ -238,7 +261,7 @@ export class PlaneTokenController {
     let principal: AuthorizedPlaneServicePrincipal;
     try {
       principal = authorizePlaneServicePrincipal(
-        process.env.PLANE_SERVICE_PRINCIPALS_JSON ?? '',
+        loadPlaneServicePrincipalRegistry(),
         {
           serviceId: serviceId ?? '',
           credential: credential ?? '',
@@ -246,7 +269,6 @@ export class PlaneTokenController {
           orgId,
           requestedScopes: scopes,
           reason,
-          zdr: body.zdr,
         },
       );
     } catch (error) {

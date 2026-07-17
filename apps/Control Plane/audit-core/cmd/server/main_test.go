@@ -188,11 +188,12 @@ func TestPlaneRuntimePrincipalsCannotReachJetStreamAdminOrAuditConsumerSubjects(
 		delivery       string
 		ack            string
 	}{
-		{name: "model", path: filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"), runtimeUser: "model-runtime", inbox: "_INBOX.MODEL_RUNTIME", allowedSubject: "mp.v1.run.fixture.event", roundTrip: true, delivery: "_VELION.AUDIT.DELIVER.model.audit-v2", ack: "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.1.1.1.1.1"},
+		{name: "model", path: filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"), runtimeUser: "model-gateway-runtime", inbox: "_INBOX.MODEL_GATEWAY_RUNTIME", allowedSubject: "mp.v1.run.fixture.event", delivery: "_VELION.AUDIT.DELIVER.model.audit-v2", ack: "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.1.1.1.1.1"},
 		{name: "application", path: filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"), runtimeUser: "application-social", inbox: "_INBOX.APPLICATION_SOCIAL", allowedSubject: "velion.application.social.fixture", delivery: "_VELION.AUDIT.DELIVER.application.audit-v2", ack: "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-application-v3-audit.1.1.1.1.1"},
 	}
 	for _, envName := range []string{
-		"MODEL_NATS_RUNTIME_PASSWORD", "MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD",
+		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
+		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
 		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
@@ -276,7 +277,8 @@ func TestPlaneRuntimePrincipalsCannotReachJetStreamAdminOrAuditConsumerSubjects(
 func TestApplicationModelConsumersUseScopedCredentialsAndLegacyTokenIsRejected(t *testing.T) {
 	const password = "0123456789abcdef0123456789abcdef"
 	for _, envName := range []string{
-		"MODEL_NATS_RUNTIME_PASSWORD", "MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD",
+		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
+		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
 	} {
@@ -320,7 +322,7 @@ func TestApplicationModelConsumersUseScopedCredentialsAndLegacyTokenIsRejected(t
 	if err := provisioner.Provision(context.Background(), topologyJS, provisioner.Bus{Name: "model", Plane: "model"}); err != nil {
 		t.Fatal(err)
 	}
-	producer, err := nats.Connect(instance.ClientURL(), nats.UserInfo("model-runtime", password), nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME"))
+	producer, err := nats.Connect(instance.ClientURL(), nats.UserInfo("model-gateway-runtime", password), nats.CustomInboxPrefix("_INBOX.MODEL_GATEWAY_RUNTIME"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +408,21 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 			inbox: "_INBOX.SESSION_CORE_RUNTIME.>", auditSubject: "velion.audit.v2.model.session-core.>",
 			source: filepath.Join(modelRoot, "rust", "services", "session-core", "src", "nats_connection.rs"),
 		},
+		{
+			service: "capability-core", user: "capability-core-runtime", password: "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
+			inbox:  "_INBOX.CAPABILITY_CORE_RUNTIME.>",
+			source: filepath.Join(modelRoot, "go", "services", "capability-core", "cmd", "main.go"),
+		},
+		{
+			service: "orchestrator-core", user: "orchestrator-core-runtime", password: "MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD",
+			inbox:  "_INBOX.ORCHESTRATOR_CORE_RUNTIME.>",
+			source: filepath.Join(modelRoot, "go", "services", "orchestrator-core", "cmd", "main.go"),
+		},
+		{
+			service: "cost-core", user: "cost-core-runtime", password: "MODEL_COST_CORE_NATS_PASSWORD",
+			inbox:  "_INBOX.COST_CORE_RUNTIME.>",
+			source: filepath.Join(modelRoot, "go", "services", "cost-core", "cmd", "main.go"),
+		},
 	}
 	for _, principal := range principals {
 		block, blockErr := composeServiceBlock(compose, principal.service)
@@ -455,6 +472,11 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 	if strings.Contains(gatewayBlock, "velion.audit.v2.model.") || strings.Contains(gatewayBlock, "session-core-tools") {
 		t.Fatal("model-gateway principal can cross the session audit or durable-consumer boundary")
 	}
+	for _, forbidden := range []string{"agents.>", "org.>", "notify.>"} {
+		if strings.Contains(gatewayBlock, forbidden) {
+			t.Fatalf("model-gateway principal retains quarantined ambient publish capability %q", forbidden)
+		}
+	}
 	sessionBlock, err := natsUserConfigBlock(broker, "session-core-runtime")
 	if err != nil {
 		t.Fatal(err)
@@ -475,25 +497,33 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 	if strings.Contains(sessionBlock, "velion.audit.v2.model.model-gateway.>") {
 		t.Fatal("session-core principal can publish model-gateway audit events")
 	}
-	sharedBlock, err := natsUserConfigBlock(broker, "model-runtime")
+	if strings.Contains(broker, `user: "model-runtime"`) || strings.Contains(compose, "NATS_USER: model-runtime") {
+		t.Fatal("Model Plane retains a generic runtime principal")
+	}
+	toolCompletionBlock, err := natsUserConfigBlock(broker, "tool-completion-producer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{
-		"velion.audit.v2.model.model-gateway.>", "velion.audit.v2.model.session-core.>",
-		"session-core-tools", "session-core-orchestration",
-	} {
-		if strings.Contains(sharedBlock, forbidden) {
-			t.Fatalf("shared model-runtime retains producer-specific capability %q", forbidden)
+	for _, required := range []string{"password: $MODEL_TOOL_COMPLETION_NATS_PASSWORD", "tools.completions.*", "_INBOX.TOOL_COMPLETION_PRODUCER.>"} {
+		if !strings.Contains(toolCompletionBlock, required) {
+			t.Fatalf("tool-completion producer missing scoped capability %q", required)
+		}
+	}
+	for _, forbidden := range []string{"mp.v1.", "velion.audit.v2.model.", "session-core-tools", "session-core-orchestration"} {
+		if strings.Contains(toolCompletionBlock, forbidden) {
+			t.Fatalf("tool-completion producer retains unrelated capability %q", forbidden)
 		}
 	}
 }
 
 func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T) {
 	passwords := map[string]string{
-		"MODEL_NATS_RUNTIME_PASSWORD":             "shared-runtime-0123456789abcdef0123456789",
 		"MODEL_GATEWAY_NATS_PASSWORD":             "gateway-runtime-0123456789abcdef01234567",
 		"MODEL_SESSION_CORE_NATS_PASSWORD":        "session-runtime-0123456789abcdef01234567",
+		"MODEL_CAPABILITY_CORE_NATS_PASSWORD":     "capability-runtime-0123456789abcdef012345",
+		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD":   "orchestrator-runtime-0123456789abcdef01234",
+		"MODEL_TOOL_COMPLETION_NATS_PASSWORD":     "tool-completion-0123456789abcdef0123456789",
+		"MODEL_COST_CORE_NATS_PASSWORD":           "cost-runtime-0123456789abcdef012345678901",
 		"AUDIT_MODEL_NATS_PASSWORD":               "audit-consumer-0123456789abcdef012345678",
 		"MODEL_NATS_PROVISIONER_PASSWORD":         "topology-admin-0123456789abcdef01234567",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD":  "convex-reader-0123456789abcdef012345678",
@@ -551,7 +581,9 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 
 	gateway, gatewayErrors := connect("model-gateway-runtime", passwords["MODEL_GATEWAY_NATS_PASSWORD"], "_INBOX.MODEL_GATEWAY_RUNTIME")
 	session, sessionErrors := connect("session-core-runtime", passwords["MODEL_SESSION_CORE_NATS_PASSWORD"], "_INBOX.SESSION_CORE_RUNTIME")
-	shared, sharedErrors := connect("model-runtime", passwords["MODEL_NATS_RUNTIME_PASSWORD"], "_INBOX.MODEL_RUNTIME")
+	capability, capabilityErrors := connect("capability-core-runtime", passwords["MODEL_CAPABILITY_CORE_NATS_PASSWORD"], "_INBOX.CAPABILITY_CORE_RUNTIME")
+	orchestrator, orchestratorErrors := connect("orchestrator-core-runtime", passwords["MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD"], "_INBOX.ORCHESTRATOR_CORE_RUNTIME")
+	toolCompletion, toolCompletionErrors := connect("tool-completion-producer", passwords["MODEL_TOOL_COMPLETION_NATS_PASSWORD"], "_INBOX.TOOL_COMPLETION_PRODUCER")
 	sessionPublishJS, jsErr := session.JetStream(nats.MaxWait(2 * time.Second))
 	if jsErr != nil {
 		t.Fatal(jsErr)
@@ -565,6 +597,18 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 	assertMainPermissionDenied(t, gateway, gatewayErrors, "gateway legacy self-producer audit publish", func() error {
 		return gateway.Publish("velion.audit.v2.model.model-gateway.forged", nil)
 	})
+	for _, subject := range []string{
+		"agents.forged",
+		"org.org-forged.events",
+		"notify.user-forged",
+	} {
+		assertMainPermissionDenied(t, gateway, gatewayErrors, "gateway quarantined ambient publish", func() error {
+			return gateway.Publish(subject, nil)
+		})
+	}
+	if err := gateway.Publish("mp.v1.run.run-fixture.event", []byte(`{"event_id":"run-fixture"}`)); err != nil {
+		t.Fatalf("gateway canonical mp.v1 run publish denied: %v", err)
+	}
 	assertMainPermissionDenied(t, session, sessionErrors, "session cross-producer audit publish", func() error {
 		return session.Publish("velion.audit.v2.model.model-gateway.forged", nil)
 	})
@@ -572,10 +616,23 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 		"velion.audit.v2.model.model-gateway.forged",
 		"velion.audit.v2.model.session-core.forged",
 	} {
-		assertMainPermissionDenied(t, shared, sharedErrors, "shared runtime audit publish", func() error {
-			return shared.Publish(subject, nil)
+		assertMainPermissionDenied(t, toolCompletion, toolCompletionErrors, "tool-completion audit publish", func() error {
+			return toolCompletion.Publish(subject, nil)
 		})
 	}
+	if err := capability.Publish("mp.v1.capability.skill.updated", []byte(`{"event_id":"capability-fixture"}`)); err != nil {
+		t.Fatalf("capability-core exact publish denied: %v", err)
+	}
+	assertMainPermissionDenied(t, capability, capabilityErrors, "capability usage publish", func() error {
+		return capability.Publish("mp.v1.usage.org-forged", nil)
+	})
+	if err := orchestrator.Publish("mp.v1.run.run-fixture.event", []byte(`{"event_id":"run-fixture"}`)); err != nil {
+		t.Fatalf("orchestrator-core exact run publish denied: %v", err)
+	}
+	assertMainPermissionDenied(t, orchestrator, orchestratorErrors, "orchestrator legacy subscribe", func() error {
+		_, subscribeErr := orchestrator.Subscribe("velion.agent.run.*.event", func(*nats.Msg) {})
+		return subscribeErr
+	})
 
 	sessionJS, err := session.JetStream(nats.MaxWait(2 * time.Second))
 	if err != nil {
@@ -587,10 +644,10 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 		t.Fatalf("bind session-core fixed tool consumer: %v", err)
 	}
 	t.Cleanup(func() { _ = toolConsumer.Unsubscribe() })
-	if err := shared.Publish("tools.completions.fixture", []byte(`{"event_id":"tool-fixture"}`)); err != nil {
+	if err := toolCompletion.Publish("tools.completions.fixture", []byte(`{"event_id":"tool-fixture"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := shared.Flush(); err != nil {
+	if err := toolCompletion.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	messages, err := toolConsumer.Fetch(1, nats.MaxWait(2*time.Second))
@@ -606,32 +663,44 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 		t.Fatalf("bind session-core fixed orchestration consumer: %v", err)
 	}
 	t.Cleanup(func() { _ = orchestrationConsumer.Unsubscribe() })
-	if err := shared.Publish("mp.v1.orchestration.fixture", []byte(`{"event_id":"orchestration-fixture"}`)); err != nil {
+	if err := gateway.Publish("mp.v1.orchestration.run", []byte(`{"event_id":"orchestration-fixture"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := shared.Flush(); err != nil {
+	if err := gateway.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	orchestrationMessages, err := orchestrationConsumer.Fetch(1, nats.MaxWait(2*time.Second))
 	if err != nil || len(orchestrationMessages) != 1 {
 		t.Fatalf("session-core fixed orchestration consumer fetch = %d messages, %v", len(orchestrationMessages), err)
 	}
-	sharedJS, err := shared.JetStream(nats.MaxWait(time.Second))
+	toolCompletionJS, err := toolCompletion.JetStream(nats.MaxWait(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertMainPermissionDenied(t, shared, sharedErrors, "shared runtime session consumer bind", func() error {
-		_, bindErr := sharedJS.PullSubscribe("tools.completions.*", provisioner.SessionToolsConsumerName,
+	assertMainPermissionDenied(t, toolCompletion, toolCompletionErrors, "tool-completion session consumer bind", func() error {
+		_, bindErr := toolCompletionJS.PullSubscribe("tools.completions.*", provisioner.SessionToolsConsumerName,
 			nats.Bind(provisioner.ModelToolsStreamName, provisioner.SessionToolsConsumerName))
 		return bindErr
 	})
 
-	for _, user := range []string{"model-gateway-runtime", "session-core-runtime"} {
+	for _, credential := range []struct {
+		user          string
+		wrongPassword string
+	}{
+		{user: "model-gateway-runtime", wrongPassword: passwords["MODEL_SESSION_CORE_NATS_PASSWORD"]},
+		{user: "session-core-runtime", wrongPassword: passwords["MODEL_CAPABILITY_CORE_NATS_PASSWORD"]},
+		{user: "capability-core-runtime", wrongPassword: passwords["MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD"]},
+		{user: "orchestrator-core-runtime", wrongPassword: passwords["MODEL_TOOL_COMPLETION_NATS_PASSWORD"]},
+	} {
 		if forged, connectErr := nats.Connect(instance.ClientURL(),
-			nats.UserInfo(user, passwords["MODEL_NATS_RUNTIME_PASSWORD"]), nats.Timeout(time.Second)); connectErr == nil {
+			nats.UserInfo(credential.user, credential.wrongPassword), nats.Timeout(time.Second)); connectErr == nil {
 			forged.Close()
-			t.Fatalf("%s accepted the shared model-runtime password", user)
+			t.Fatalf("%s accepted another service principal password", credential.user)
 		}
+	}
+	if removed, connectErr := nats.Connect(instance.ClientURL(), nats.UserInfo("model-runtime", "removed-runtime-password"), nats.Timeout(time.Second)); connectErr == nil {
+		removed.Close()
+		t.Fatal("removed generic Model runtime principal was accepted")
 	}
 	if legacy, connectErr := nats.Connect(instance.ClientURL(), nats.Token("legacy-model-token"), nats.Timeout(time.Second)); connectErr == nil {
 		legacy.Close()
@@ -1088,7 +1157,8 @@ func TestScopedBrokerConfigsParse(t *testing.T) {
 	for _, name := range []string{
 		"AUTH_NATS_PASSWORD", "USER_NATS_PASSWORD", "ORG_NATS_PASSWORD", "BILLING_NATS_PASSWORD", "SESSION_NATS_PASSWORD",
 		"AUDIT_CONTROL_NATS_PASSWORD", "CONTROL_NATS_PROVISIONER_PASSWORD",
-		"MODEL_NATS_RUNTIME_PASSWORD", "MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD",
+		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
+		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
 		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
@@ -1131,7 +1201,8 @@ func TestScopedBrokerMonitoringBindsLoopback(t *testing.T) {
 		"SESSION_SHARED_NATS_PASSWORD", "APPLICATION_CONVEX_CONTROL_NATS_PASSWORD", "CONTROL_SHARED_BRIDGE_PASSWORD",
 		"DOCUMENTS_GDPR_NATS_PASSWORD",
 		"CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
-		"MODEL_NATS_RUNTIME_PASSWORD", "MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD",
+		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
+		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
 		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",

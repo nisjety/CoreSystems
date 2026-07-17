@@ -13,6 +13,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 use mp_contracts::model_plane::v1::{
     self as pb,
     finetune_jobs_server::FinetuneJobsServer,
+    managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     memory_service_server::MemoryServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
     routing_policy_server::RoutingPolicyServer,
@@ -28,12 +29,14 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{authorize_operation, identity, JwtVerifier, VerifiedIdentity};
-use crate::letta_adapter::LettaMemoryAdapter;
+use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
+use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 6] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 7] = [
     "model_plane.v1.SessionCore",
+    "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
     "model_plane.v1.FinetuneJobs",
     "model_plane.v1.MemoryService",
@@ -83,7 +86,7 @@ fn validate_user_checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<(), Sta
 
 /// The configured Model-Plane data-residency region, stamped onto each run at
 /// `StartRun`. Defaults to the EU region [`DEFAULT_RESIDENCY`].
-fn configured_residency() -> String {
+pub(crate) fn configured_residency() -> String {
     resolve_residency(std::env::var("MODEL_PLANE_RESIDENCY").ok())
 }
 
@@ -183,6 +186,13 @@ pub struct SessionService {
     /// Transactional audit outbox. Tool-step intent is committed with the step;
     /// delivery retries independently until Audit Core acknowledges it.
     audit_publisher: Option<std::sync::Arc<crate::audit_publisher::AuditOutbox>>,
+}
+
+/// Additive managed-run protocol. Keeping this service separate preserves the
+/// legacy `SessionCore` trait and its existing mocks while giving producers a
+/// durable, source-bound terminal receipt contract.
+pub struct ManagedRunLifecycleService {
+    pool: PgPool,
 }
 
 #[allow(clippy::result_large_err)]
@@ -562,6 +572,28 @@ async fn lock_run_status(
         .ok_or_else(|| Status::not_found("run not found"))
 }
 
+/// Lock and identify a managed-run terminalization obligation while the
+/// caller already holds the run row lock. This uses the same lock order as
+/// `record_terminal_outcome_inner` (run, then obligation), so a legacy
+/// `CompleteStep` call cannot race a source-bound terminal receipt into
+/// assigning a second terminal state.
+async fn lock_managed_terminalization_obligation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, Status> {
+    let obligation: Option<String> = sqlx::query_scalar(
+        "SELECT run_id
+         FROM managed_run_terminalization_outbox
+         WHERE run_id = $1
+         FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    Ok(obligation.is_some())
+}
+
 fn step_payload_matches(existing: &serde_json::Value, requested: &serde_json::Value) -> bool {
     if existing == requested {
         return true;
@@ -752,6 +784,19 @@ async fn complete_step_inner(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
     let (run_status, org_id) = lock_run_status(&mut tx, &req.run_id).await?;
+
+    // `CompleteStep` is retained for legacy unmanaged run compatibility, but
+    // it is not a terminalization authority for a managed run. A managed
+    // obligation is settled only by the separately authenticated,
+    // source-bound `ManagedRunLifecycle.RecordTerminalOutcome` path.
+    if desired_terminal_status.is_some()
+        && lock_managed_terminalization_obligation(&mut tx, &req.run_id).await?
+    {
+        return Err(Status::failed_precondition(
+            "managed run terminal outcome must use ManagedRunLifecycle.RecordTerminalOutcome",
+        ));
+    }
+
     let step = insert_or_replay_step(&mut tx, &req, &org_id).await?;
 
     if !step.created {
@@ -1251,20 +1296,59 @@ fn semantic_memory_query(thread_messages: &[(String, String)]) -> String {
         .join("\n")
 }
 
-async fn append_letta_memory_rows(
-    svc: &SessionService,
-    org_id: Option<&str>,
-    thread_id: &str,
-    thread_messages: &[(String, String)],
-    memory_rows: &mut Vec<(String, String)>,
-) {
-    let (Some(letta), Some(org_id)) = (svc.letta_memory.as_ref(), org_id) else {
-        return;
-    };
+/// Bounded operational outcome of semantic augmentation in the default chat
+/// context path. The reason originates from `LettaReadiness`, whose values are
+/// static protocol codes rather than provider-supplied text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticContextSearchStatus {
+    Empty,
+    Results,
+    Degraded(&'static str),
+}
 
-    let query = semantic_memory_query(thread_messages);
-    let entries = letta.search(org_id, thread_id, &query, &[], 8).await;
-    for entry in entries {
+fn semantic_context_search_status(
+    entry_count: usize,
+    degradation_reason: Option<&'static str>,
+) -> SemanticContextSearchStatus {
+    match degradation_reason {
+        Some(reason) => SemanticContextSearchStatus::Degraded(reason),
+        None if entry_count == 0 => SemanticContextSearchStatus::Empty,
+        None => SemanticContextSearchStatus::Results,
+    }
+}
+
+fn record_semantic_context_search(status: SemanticContextSearchStatus) {
+    let outcome = match status {
+        SemanticContextSearchStatus::Empty => "empty",
+        SemanticContextSearchStatus::Results => "results",
+        SemanticContextSearchStatus::Degraded(_) => "degraded",
+    };
+    metrics::counter!(
+        "mp_session_semantic_memory_context_searches_total",
+        "outcome" => outcome,
+    )
+    .increment(1);
+
+    if let SemanticContextSearchStatus::Degraded(reason) = status {
+        metrics::counter!(
+            "mp_session_semantic_memory_context_degraded_total",
+            "reason" => reason,
+        )
+        .increment(1);
+        warn!(reason, "semantic memory context augmentation degraded");
+    }
+}
+
+fn append_letta_search_outcome(
+    memory_rows: &mut Vec<(String, String)>,
+    outcome: LettaSearchOutcome,
+    max_entries: usize,
+) -> SemanticContextSearchStatus {
+    let status = semantic_context_search_status(outcome.entries.len(), outcome.degradation_reason);
+    record_semantic_context_search(status);
+
+    let mut appended = 0_usize;
+    for entry in outcome.entries {
         let content = entry.content.trim();
         if content.is_empty()
             || memory_rows
@@ -1279,7 +1363,31 @@ async fn append_letta_memory_rows(
             entry.topic.trim()
         };
         memory_rows.push(("MEMORY".to_owned(), format!("letta/{topic}: {content}")));
+        appended += 1;
+        if appended >= max_entries {
+            break;
+        }
     }
+
+    status
+}
+
+async fn append_letta_memory_rows(
+    svc: &SessionService,
+    org_id: Option<&str>,
+    thread_id: &str,
+    thread_messages: &[(String, String)],
+    memory_rows: &mut Vec<(String, String)>,
+) {
+    let (Some(letta), Some(org_id)) = (svc.letta_memory.as_ref(), org_id) else {
+        return;
+    };
+
+    let query = semantic_memory_query(thread_messages);
+    let outcome = letta
+        .search_detailed(org_id, thread_id, &query, &[], 8)
+        .await;
+    append_letta_search_outcome(memory_rows, outcome, 8);
 }
 
 async fn load_context_memory_rows(
@@ -2026,6 +2134,81 @@ impl SessionCore for SessionService {
     }
 }
 
+#[tonic::async_trait]
+impl ManagedRunLifecycle for ManagedRunLifecycleService {
+    async fn start_managed_run(
+        &self,
+        request: Request<pb::StartManagedRunRequest>,
+    ) -> Result<Response<pb::StartManagedRunResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            let mut req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller.user_id().ok_or_else(|| {
+                Status::permission_denied("user-bound managed-run credential required")
+            })?;
+            req.user_id = user_id.to_owned();
+
+            // ZDR users use the intentionally narrow metadata-only start
+            // branch. It does not append a message or durable prompt; their
+            // content remains exclusively in the live gateway request path.
+            if !caller.zdr() {
+                authorize_operation(&caller, "session:write")?;
+                authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            }
+            terminalization::start_managed_run_inner(&self.pool, req, caller.zdr())
+                .await
+                .map(|started| Response::new(started.into_proto()))
+        }
+        .await;
+        record_metrics("start_managed_run", started, result.is_ok());
+        result
+    }
+
+    async fn record_terminal_outcome(
+        &self,
+        request: Request<pb::RecordTerminalOutcomeRequest>,
+    ) -> Result<Response<pb::RecordTerminalOutcomeResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            let source = terminalization::source_from_wire(req.source)?;
+            terminalization::authorize_terminalization_source(&caller, source)?;
+            // The outbox deliberately carries no caller-controlled tenant
+            // fields; bind the service token to the durable run owner instead.
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            terminalization::record_terminal_outcome_inner(&self.pool, req)
+                .await
+                .map(|receipt| Response::new(receipt.into_proto()))
+        }
+        .await;
+        record_metrics("record_terminal_outcome", started, result.is_ok());
+        result
+    }
+
+    async fn heartbeat_managed_run(
+        &self,
+        request: Request<pb::HeartbeatManagedRunRequest>,
+    ) -> Result<Response<pb::HeartbeatManagedRunResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            let source = terminalization::source_from_wire(req.source)?;
+            terminalization::authorize_heartbeat_source(&caller, source)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            terminalization::heartbeat_managed_run_inner(&self.pool, req)
+                .await
+                .map(|heartbeat| Response::new(heartbeat.into_proto()))
+        }
+        .await;
+        record_metrics("heartbeat_managed_run", started, result.is_ok());
+        result
+    }
+}
+
 const RETRIEVAL_BUDGET_FRACTION: u32 = 4;
 const RETRIEVAL_DEFAULT_TOP_K: i32 = 10;
 const GRAPH_CONTRADICTIONS_LIMIT: i32 = 5;
@@ -2617,6 +2800,8 @@ pub async fn serve(
     audit_outbox.start();
     let audit_publisher = Some(audit_outbox);
 
+    let managed_lifecycle = ManagedRunLifecycleService { pool: pool.clone() };
+
     let session = SessionService {
         pool,
         retrieval_client,
@@ -2636,6 +2821,10 @@ pub async fn serve(
     tonic::transport::Server::builder()
         .add_service(health_service)
         .add_service(SessionCoreServer::with_interceptor(session, auth.clone()))
+        .add_service(ManagedRunLifecycleServer::with_interceptor(
+            managed_lifecycle,
+            auth.clone(),
+        ))
         .add_service(OrchestrationCoreServiceServer::with_interceptor(
             orchestration,
             auth.clone(),
@@ -2655,7 +2844,8 @@ mod tests {
     use super::{
         assemble_segments, complete_step_inner, derive_idempotency_hash,
         finalize_tool_action_inner, pb, reserve_tool_action_inner, resolve_residency,
-        validate_user_checkpoint, AssemblyInputs, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES,
+        semantic_context_search_status, validate_user_checkpoint, AssemblyInputs,
+        SemanticContextSearchStatus, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES,
         MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES, STEP_COMPLETED_TYPE_URL,
     };
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
@@ -2690,12 +2880,32 @@ mod tests {
             HEALTH_SERVICE_NAMES,
             [
                 "model_plane.v1.SessionCore",
+                "model_plane.v1.ManagedRunLifecycle",
                 "model_plane.v1.OrchestrationCoreService",
                 "model_plane.v1.FinetuneJobs",
                 "model_plane.v1.MemoryService",
                 "model_plane.v1.RoutingPolicy",
                 "model_plane.v1.RunService",
             ]
+        );
+    }
+
+    #[test]
+    fn semantic_context_search_distinguishes_empty_from_rpc_and_timeout_degradation() {
+        assert_eq!(
+            semantic_context_search_status(0, None),
+            SemanticContextSearchStatus::Empty,
+            "an empty verified semantic result is not a dependency failure"
+        );
+        assert_eq!(
+            semantic_context_search_status(0, Some("DEGRADED_LETTA_UNAVAILABLE")),
+            SemanticContextSearchStatus::Degraded("DEGRADED_LETTA_UNAVAILABLE"),
+            "an RPC failure must remain observable on the context-assembly path"
+        );
+        assert_eq!(
+            semantic_context_search_status(0, Some("DEGRADED_LETTA_TIMEOUT")),
+            SemanticContextSearchStatus::Degraded("DEGRADED_LETTA_TIMEOUT"),
+            "a timeout must not be collapsed into an empty result"
         );
     }
 
@@ -3240,6 +3450,144 @@ mod tests {
         ] {
             sqlx::query(q).bind(&org).execute(&pool).await.ok();
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn legacy_terminal_step_cannot_settle_a_managed_run_in_postgres() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let thread_id = format!("managed-terminal-thread-{suffix}");
+        let org_id = format!("managed-terminal-org-{suffix}");
+        let legacy_run_id = format!("managed-terminal-legacy-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id)
+             VALUES ($1, $1, $2, 'user-1')",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status)
+             VALUES ($1, $2, 'legacy goal', $3, 'user-1', 'running')",
+        )
+        .bind(&legacy_run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .execute(&pool)
+        .await
+        .expect("seed legacy run");
+
+        // Control: the legacy API remains compatible for a run with no
+        // managed-terminalization obligation.
+        complete_step_inner(
+            &pool,
+            None,
+            pb::CompleteStepRequest {
+                run_id: legacy_run_id.clone(),
+                step_id: "legacy-final".to_owned(),
+                status: "completed".to_owned(),
+                output: String::new(),
+                error: String::new(),
+                terminal: true,
+            },
+        )
+        .await
+        .expect("legacy terminal completion remains supported");
+
+        let managed = crate::terminalization::start_managed_run_inner(
+            &pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread_id.clone(),
+                parent_run_id: String::new(),
+                agent_id: "managed-agent".to_owned(),
+                goal: "managed goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org_id.clone(),
+                user_id: "user-1".to_owned(),
+                start_key: format!("managed-terminal-{suffix}"),
+                terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            },
+            false,
+        )
+        .await
+        .expect("start managed run");
+
+        let error = complete_step_inner(
+            &pool,
+            None,
+            pb::CompleteStepRequest {
+                run_id: managed.run_id.clone(),
+                step_id: "forged-final".to_owned(),
+                status: "completed".to_owned(),
+                output: "forged terminal output".to_owned(),
+                error: String::new(),
+                terminal: true,
+            },
+        )
+        .await
+        .expect_err("legacy terminal step must not bypass a managed receipt");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        let managed_status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(&managed.run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read managed status");
+        assert_eq!(managed_status, "queued");
+        let obligation: (String, Option<String>) = sqlx::query_as(
+            "SELECT state, outcome
+             FROM managed_run_terminalization_outbox
+             WHERE run_id = $1",
+        )
+        .bind(&managed.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read managed obligation");
+        assert_eq!(obligation, ("open".to_owned(), None));
+        let terminal_events: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events
+             WHERE run_id = $1 AND event_type IN ('RUN_COMPLETED', 'RUN_FAILED')",
+        )
+        .bind(&managed.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count managed terminal events");
+        assert_eq!(terminal_events, 0);
+
+        sqlx::query("DELETE FROM events WHERE run_id IN ($1, $2)")
+            .bind(&legacy_run_id)
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .expect("clean event fixtures");
+        sqlx::query("DELETE FROM plans WHERE run_id = $1")
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .expect("clean managed plan");
+        sqlx::query("DELETE FROM runs WHERE id IN ($1, $2)")
+            .bind(&legacy_run_id)
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .expect("clean run fixtures");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .expect("clean thread fixture");
     }
 
     #[tokio::test]

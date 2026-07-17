@@ -39,6 +39,11 @@ export BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 export DATAPLANE_NATS_TOKEN="$(openssl rand -hex 32)"
+# The base Compose contract requires a non-empty shared-broker URL at
+# interpolation time. The isolated override clears this value and disables
+# durable GDPR delivery inside the disposable MVP stack; this value is never
+# used to attach to the shared Control Plane broker.
+export NATS_SHARED_URL="nats://nats:4222"
 export DOCUMENTS_GDPR_NATS_PASSWORD="$(openssl rand -hex 32)"
 export DATAPLANE_DRAGONFLY_PASSWORD="$(openssl rand -hex 32)"
 export MINIO_ROOT_USER="isolated$(openssl rand -hex 8)"
@@ -46,6 +51,7 @@ export MINIO_ROOT_PASSWORD="$(openssl rand -hex 24)"
 export GRAFANA_ADMIN_PASSWORD="$(openssl rand -hex 24)"
 export CONTROL_POLICY_SERVICE_API_KEY="$(openssl rand -hex 32)"
 export MODEL_PLANE_INFERENCE_SERVICE_API_KEY="$(openssl rand -hex 32)"
+export MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY="$(openssl rand -hex 32)"
 export USER_CORE_RETRIEVAL_TOKEN="$(openssl rand -hex 32)"
 export USER_CORE_DOCUMENTS_TOKEN="$(openssl rand -hex 32)"
 export AUTH_CORE_ISSUER="http://auth-core:3011/api/convex-auth"

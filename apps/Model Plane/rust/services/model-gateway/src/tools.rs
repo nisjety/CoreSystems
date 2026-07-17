@@ -3,7 +3,7 @@
 //! - `WebSearch`:       `quarry::Client::search` proxy
 //! - Sleep:           `tokio::time::sleep` with server-side cap
 //! - `RemoteTrigger`:   outbound HTTP webhook + SSRF guard
-//! - `SendMessage`:     NATS publish via the shared publisher
+//! - `SendMessage`:     quarantined legacy RPC (fails closed)
 //! - `SyntheticOutput`: deterministic echo (test/dev only)
 //!
 //! Each handler is intentionally < 60 LOC. The corresponding v2 Python
@@ -13,9 +13,6 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use chrono::Utc;
-use mp_events::{envelope::Envelope, publisher::EventPublisher};
-use mp_ids::new_ulid;
 use tonic::Status;
 use tracing::warn;
 
@@ -39,11 +36,6 @@ const MAX_REMOTE_TIMEOUT_MS: i32 = 30_000;
 /// this we truncate. Keeps a misbehaving webhook from blowing the gRPC
 /// 4 MB message limit.
 const MAX_REMOTE_BODY_BYTES: usize = 2 * 1024 * 1024;
-
-/// Allowed NATS subject prefixes for `SendMessage`. Anything outside
-/// these namespaces is rejected so a runaway agent can't publish to
-/// system subjects (e.g. `_INBOX.>`, `js.>`).
-const ALLOWED_SUBJECT_PREFIXES: &[&str] = &["agents.", "org.", "notify."];
 
 // ---------------- WebSearch ----------------
 
@@ -270,68 +262,21 @@ fn is_egress_safe(addr: IpAddr) -> bool {
 
 // ---------------- SendMessage ----------------
 
-/// Publishes an agent message envelope to a NATS subject.
+/// Rejects the legacy free-form NATS publishing RPC.
 ///
 /// # Errors
 ///
-/// Returns `Status::invalid_argument` if `subject` is empty, or `Status::permission_denied`
-/// if it is not in the allowed-prefix list. Publish failures are reported in the
-/// response's `published` flag, not as an `Err`.
-pub async fn handle_send_message(
-    state: &AppState,
-    req: SendMessageRequest,
+/// Always returns `Status::failed_precondition`. The previous prefix allowlist
+/// accepted caller-selected ambient subjects, bypassing capability policy and
+/// approval enforcement. The RPC remains in the protocol only for backward
+/// compatibility; it must not publish through any backend.
+pub fn handle_send_message(
+    _state: &AppState,
+    _req: SendMessageRequest,
 ) -> Result<SendMessageResponse, Status> {
-    let subject = req.subject.trim();
-    if subject.is_empty() {
-        return Err(Status::invalid_argument("subject is required"));
-    }
-    if !ALLOWED_SUBJECT_PREFIXES
-        .iter()
-        .any(|p| subject.starts_with(p))
-    {
-        return Err(Status::permission_denied(format!(
-            "subject must start with one of {ALLOWED_SUBJECT_PREFIXES:?}"
-        )));
-    }
-
-    let idempotency = if req.idempotency_key.is_empty() {
-        new_ulid()
-    } else {
-        req.idempotency_key.clone()
-    };
-
-    let envelope = Envelope {
-        event_id: new_ulid(),
-        event_type: "AGENT_MESSAGE".to_owned(),
-        schema_version: 1,
-        ts: Utc::now(),
-        producer: "model-gateway".to_owned(),
-        correlation_id: req.request_id.clone(),
-        causation_id: String::new(),
-        idempotency_key: idempotency.clone(),
-        org_id: req.org_id.clone(),
-        user_id: "agent".to_owned(),
-        resource_ref: format!("message/{}", req.request_id),
-        payload: serde_json::from_str(&req.payload_json).unwrap_or_else(|_| {
-            // Tolerate non-JSON payloads — wrap as a string. v2 did
-            // the same; downstream consumers can branch on shape.
-            serde_json::json!({"raw": req.payload_json})
-        }),
-        zdr: false,
-    };
-
-    let published = match state.publisher.publish(subject, &envelope).await {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(error = %e, subject = %subject, "send_message publish failed");
-            false
-        }
-    };
-
-    Ok(SendMessageResponse {
-        request_id: req.request_id,
-        published,
-    })
+    Err(Status::failed_precondition(
+        "send_message is quarantined: free-form NATS publishing is disabled for the secure MVP",
+    ))
 }
 
 // ---------------- SyntheticOutput ----------------
@@ -456,5 +401,31 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(r.echoed_payload, "hello");
+    }
+
+    #[tokio::test]
+    async fn send_message_is_quarantined_without_publishing_ambient_subjects() {
+        let state = AppState::new();
+
+        for subject in ["agents.worker-1", "org.org-test.events", "notify.user-test"] {
+            let error = handle_send_message(
+                &state,
+                SendMessageRequest {
+                    request_id: "request-test".to_owned(),
+                    org_id: "org-test".to_owned(),
+                    subject: subject.to_owned(),
+                    payload_json: r#"{\"message\":\"must not publish\"}"#.to_owned(),
+                    idempotency_key: "idempotency-test".to_owned(),
+                },
+            )
+            .expect_err("ambient SendMessage must be quarantined");
+
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+
+        assert!(
+            state.publisher.drain().is_empty(),
+            "quarantined SendMessage must not reach any publisher backend"
+        );
     }
 }

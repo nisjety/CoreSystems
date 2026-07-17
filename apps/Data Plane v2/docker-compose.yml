@@ -273,6 +273,7 @@ services:
       - "8004"
       - "50052"
     environment:
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
       QDRANT_URL: http://qdrant:6334
       DRAGONFLY_URL: redis://:${DATAPLANE_DRAGONFLY_PASSWORD:?DATAPLANE_DRAGONFLY_PASSWORD is required}@dragonfly:6379
@@ -299,7 +300,7 @@ services:
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
       MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${CONTROL_POLICY_SERVICE_ID:-retrieval-engine}
-      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:?CONTROL_POLICY_SERVICE_API_KEY is required}
+      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
@@ -338,14 +339,14 @@ services:
       # Per-user ownership: resolve viewer grants from user-core's resource_grants
       # facade (reached over inter-plane-bus). HTTP/facade port is 3012, NOT 8080.
       USER_CORE_HTTP_URL: ${USER_CORE_HTTP_URL:-http://user-core:3012}
-      USER_CORE_SERVICE_TOKEN: ${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_RETRIEVAL_TOKEN:-}
       # Org-axis membership and per-user ownership are both enforced. Only an
       # explicitly gated insecure development posture can select the no-op.
       CONTROL_PLANE_ENFORCEMENT: strict
       CONTROL_POLICY_TOKEN_URL: ${CONTROL_POLICY_TOKEN_URL:-http://auth-core:3011/api/control-policy/internal-token}
       CONTROL_PLANE_DECISION_URL: ${CONTROL_PLANE_DECISION_URL:-http://auth-core:3011/api/v1/internal/authorization/data-plane/decision}
       CONTROL_POLICY_SERVICE_ID: ${CONTROL_POLICY_SERVICE_ID:-retrieval-engine}
-      CONTROL_POLICY_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:?CONTROL_POLICY_SERVICE_API_KEY is required}
+      CONTROL_POLICY_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:-}
       # Verified-JWT path: when the gateway forwards a Bearer token minted by
       # auth-core (POST /api/data-plane/internal-token | GET /api/data-plane/token,
       # aud=data-plane), the HTTP middleware + gRPC interceptor verify it against
@@ -358,7 +359,7 @@ services:
       JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       JWT_REQUIRED_AUDIENCE: ${JWT_REQUIRED_AUDIENCE:-data-plane}
       JWT_REQUIRED_ISSUER: ${JWT_REQUIRED_ISSUER:-http://localhost:3011/api/convex-auth}
-      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       RETRIEVAL_EVENT_PRIVATE_KEY_PATH: /run/event-keys/retrieval-events.pem
       EVENT_AUTH_AUDIENCE: dataplane-events
@@ -376,9 +377,9 @@ services:
       RUST_LOG: ${RUST_LOG:-warn,retrieval_engine=info,tower_http=info}
     volumes:
       # auth-core's PUBLIC JWT key (read-only) for verified-JWT viewer binding.
-      - ../Control Plane/auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
-      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:?DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/documents-events.pub:ro
-      - ${RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH:?RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH is required}:/run/event-keys/retrieval-events.pem:ro
+      - "${AUTH_CORE_PUBLIC_KEY_PATH:-../Control Plane/auth-core/keys/convex-auth.pub}:/app/keys/convex-auth.pub:ro"
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/documents-events.pub}:/run/event-keys/documents-events.pub:ro
+      - ${RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/retrieval-events.pem}:/run/event-keys/retrieval-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -424,13 +425,13 @@ services:
       BATCH_SIZE: "10"
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-warn,index_engine=info}
-      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       INDEX_EVENT_PRIVATE_KEY_PATH: /run/event-keys/index-events.pem
       EVENT_AUTH_AUDIENCE: dataplane-events
     volumes:
-      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:?DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/documents-events.pub:ro
-      - ${INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH:?INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH is required}:/run/event-keys/index-events.pem:ro
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/documents-events.pub}:/run/event-keys/documents-events.pub:ro
+      - ${INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/index-events.pem}:/run/event-keys/index-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -481,7 +482,13 @@ services:
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
+      # Background embedding calls mint an org-bound, aud=inference-core
+      # service bearer through Auth Core. A shared x-api-key is never accepted
+      # by inference-core and is intentionally not wired here.
+      MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
+      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_ID:-embedding-engine}
+      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
@@ -501,15 +508,15 @@ services:
       # silent empty logs. (Code default in main.rs has the same wrong name — fix on
       # next rebuild; this compose value overrides it at runtime.)
       RUST_LOG: ${RUST_LOG:-warn,embedding_engine=info}
-      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       WIKI_EVENT_PUBLIC_KEY_PATH: /run/event-keys/wiki-events.pub
       EMBEDDING_EVENT_PRIVATE_KEY_PATH: /run/event-keys/embedding-events.pem
       EVENT_AUTH_AUDIENCE: dataplane-events
     volumes:
-      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:?INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/index-events.pub:ro
-      - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:?WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/wiki-events.pub:ro
-      - ${EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH:?EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH is required}:/run/event-keys/embedding-events.pem:ro
+      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
+      - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/wiki-events.pub}:/run/event-keys/wiki-events.pub:ro
+      - ${EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/embedding-events.pem}:/run/event-keys/embedding-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -563,8 +570,8 @@ services:
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
       MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_INFERENCE_SERVICE_ID:-graph-index}
-      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_INFERENCE_SERVICE_API_KEY:?MODEL_PLANE_INFERENCE_SERVICE_API_KEY is required}
-      JWT_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_INFERENCE_SERVICE_API_KEY:-}
+      JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       JWT_REQUIRED_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
       JWT_REQUIRED_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
@@ -572,13 +579,17 @@ services:
       AZURE_OPENAI_EXTRACTION_DEPLOYMENT: ${AZURE_OPENAI_EXTRACTION_DEPLOYMENT:-gpt-4o}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-warn,graph_index=info}
-      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       EVENT_AUTH_AUDIENCE: dataplane-events
     volumes:
-      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
-      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:?INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/index-events.pub:ro
+      # A public verification key is local configuration, not a live Auth Core
+      # dependency. This lets graph-index bind while Auth Core is offline; each
+      # protected request still fails closed until a valid bearer is available.
+      - "${AUTH_CORE_PUBLIC_KEY_PATH:-../Control Plane/auth-core/keys/convex-auth.pub}:/app/keys/convex-auth.pub:ro"
+      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
+      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -620,7 +631,7 @@ services:
       AUTH_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
       AUTH_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
-      ENABLE_SIGNED_EVENT_CONSUMERS: "1"
+      ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
@@ -629,11 +640,11 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-warn,quickwit_adapter=info}
     volumes:
-      - ../Control Plane/auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
-      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:?DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/documents-events.pub:ro
-      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:?INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/index-events.pub:ro
-      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
-      - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:?WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/wiki-events.pub:ro
+      - "${AUTH_CORE_PUBLIC_KEY_PATH:-../Control Plane/auth-core/keys/convex-auth.pub}:/app/keys/convex-auth.pub:ro"
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/documents-events.pub}:/run/event-keys/documents-events.pub:ro
+      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
+      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
+      - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/wiki-events.pub}:/run/event-keys/wiki-events.pub:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -670,14 +681,20 @@ services:
     expose:
       - "8010"
     environment:
+      APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
       NATS_URL: nats://data-nats:4222
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
-      NATS_SHARED_URL: ${NATS_SHARED_URL:-nats://control-shared-nats:4222}
-      NATS_SHARED_USER: documents-api-gdpr
-      NATS_SHARED_PASSWORD: ${DOCUMENTS_GDPR_NATS_PASSWORD:?DOCUMENTS_GDPR_NATS_PASSWORD is required}
-      GDPR_DURABLE_CONSUMER_REQUIRED: "1"
-      USER_CORE_SERVICE_TOKEN: ${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}
+      # GDPR durable delivery crosses into Control Plane. Empty values are
+      # allowed only so the explicit standalone overlay can boot; production
+      # keeps GDPR_DURABLE_CONSUMER_REQUIRED=1 and the service config rejects
+      # missing scoped broker credentials.
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
+      NATS_SHARED_USER: ${DOCUMENTS_GDPR_NATS_USER:-documents-api-gdpr}
+      NATS_SHARED_PASSWORD: ${DOCUMENTS_GDPR_NATS_PASSWORD:-}
+      GDPR_DURABLE_CONSUMER_REQUIRED: ${GDPR_DURABLE_CONSUMER_REQUIRED:-1}
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_DOCUMENTS_TOKEN:-}
+      USER_CORE_GRANTS_REQUIRED: ${USER_CORE_GRANTS_REQUIRED:-1}
       # Per-user ownership: filter-at-source needs the viewer's granted doc-set
       # from user-core's resource_grants facade. HTTP/facade port is 3012, NOT 8080.
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
@@ -692,7 +709,7 @@ services:
       EVENT_SIGNING_KEY_ID: documents-events-v1
       EVENT_AUTH_AUDIENCE: dataplane-events
     volumes:
-      - ${DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH:?DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH is required}:/run/event-keys/documents-events.pem:ro
+      - ${DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/documents-events.pem}:/run/event-keys/documents-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -737,7 +754,7 @@ services:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
     volumes:
-      - ${WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH:?WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH is required}:/run/event-keys/wiki-events.pem:ro
+      - ${WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/wiki-events.pem}:/run/event-keys/wiki-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -775,12 +792,12 @@ services:
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
-      SIGNED_COST_EVENTS_ENABLED: "1"
+      SIGNED_COST_EVENTS_ENABLED: ${SIGNED_COST_EVENTS_ENABLED:-1}
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       RETRIEVAL_EVENT_PUBLIC_KEY_PATH: /run/event-keys/retrieval-events.pub
     volumes:
-      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
-      - ${RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH:?RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/retrieval-events.pub:ro
+      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
+      - ${RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/retrieval-events.pub}:/run/event-keys/retrieval-events.pub:ro
     networks:
       - dpv2-net
       - inter-plane-bus
@@ -888,8 +905,12 @@ networks:
     name: ${DPV2_NETWORK_NAME:-dpv2-net}
     driver: bridge
   inter-plane-bus:
-    external: true
-    name: ${INTER_PLANE_BUS_NETWORK:-inter-plane-bus}
+    # Local-only default. The explicit docker-compose.cross-plane.yml overlay
+    # replaces this with the pre-provisioned Control/Model shared network.
+    # Services therefore bind independently and can be attached later without
+    # creating or guessing a shared production network.
+    name: ${DPV2_CROSS_PLANE_NETWORK:-dpv2-cross-plane}
+    driver: bridge
 
 volumes:
   dpv2_postgres:

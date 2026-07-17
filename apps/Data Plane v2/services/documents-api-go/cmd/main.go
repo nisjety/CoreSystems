@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,11 +39,13 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("config load failed")
 	}
-	if cfg.UserCoreServiceToken == "" {
+	if err := requireUserCoreGrants(cfg); err != nil {
 		// This audience-bound credential is outbound-only for user-core grant
 		// resolution. Missing grant authority must fail the
 		// service closed instead of silently broadening document visibility.
-		log.Fatal().Msg("USER_CORE_SERVICE_TOKEN is required for user-core grant resolution")
+		log.Fatal().Err(err).Msg("user-core grant authority is required")
+	} else if cfg.UserCoreServiceToken == "" {
+		log.Warn().Msg("standalone posture: user-core grants unavailable; grant-only documents remain hidden")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -133,7 +136,10 @@ func main() {
 	// though no call site forwards it yet.
 	// Per-user authz facade client (user-core). Resolves a viewer's explicit
 	// document grants so List/Get can enforce ownership at the source.
-	authzClient := userauthz.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
+	var authzClient *userauthz.Client
+	if cfg.UserCoreServiceToken != "" {
+		authzClient = userauthz.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
+	}
 	docHandler := handler.NewDocumentHandler(docRepo, authzClient)
 	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo)
 
@@ -239,6 +245,16 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 	srv.Shutdown(shutdownCtx)
+}
+
+func requireUserCoreGrants(cfg *config.Config) error {
+	if cfg == nil || cfg.UserCoreServiceToken != "" {
+		return nil
+	}
+	if cfg.UserCoreGrantsRequired || strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "production") {
+		return fmt.Errorf("USER_CORE_SERVICE_TOKEN is required outside explicit standalone mode")
+	}
+	return nil
 }
 
 func unverifiedLegacyEventsEnabled() bool {

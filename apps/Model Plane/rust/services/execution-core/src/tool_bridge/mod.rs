@@ -1,11 +1,79 @@
 //! Tool execution bridge.
 
+use mp_contracts::model_plane::v1::ValidateGrantResponse;
+
 use crate::{browser_agent, wiki_agent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecution {
     pub output: String,
     pub error: Option<String>,
+}
+
+/// Structured terminal result of the live browser-agent loop.
+///
+/// Browser work is not a generic text tool: cancelling a run, denying its
+/// approval, or timing out an approval must retain that lifecycle meaning
+/// through the runtime and gRPC response. Keeping this separate from
+/// [`ToolExecution`] prevents the generic `error: None => completed` fallback
+/// from manufacturing a successful browser result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BrowserAgentExecution {
+    Completed { output: String },
+    Failed { reason: String },
+    PermissionDenied { reason: String },
+    TimedOut { reason: String },
+    ResourceExhausted { reason: String },
+    Cancelled { reason: String },
+    Aborted { reason: String },
+    AwaitingApproval,
+}
+
+/// Browser authority resolved by BrowserBroker against a separately verified
+/// `aud=browser-broker` credential. The raw tool JSON never becomes authority:
+/// it may name a grant for lookup, but only this object can reach Quarry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidatedBrowserGrant {
+    grant_id: String,
+    allowed_domains: Vec<String>,
+}
+
+impl ValidatedBrowserGrant {
+    /// Construct a dispatch capability from a BrowserBroker response. Bind the
+    /// echoed id and require the response policy to already be canonical so a
+    /// malformed broker/proxy response cannot weaken a browser run.
+    pub(crate) fn from_broker_response(
+        requested_grant_id: &str,
+        response: &ValidateGrantResponse,
+    ) -> Result<Self, String> {
+        let requested_grant_id = requested_grant_id.trim();
+        if requested_grant_id.is_empty()
+            || !response.active
+            || response.grant_id.trim() != requested_grant_id
+        {
+            return Err(
+                "browser grant is not active or does not match the requested grant".to_owned(),
+            );
+        }
+        let canonical = browser_agent::canonicalize_allowed_domains(&response.allowed_domains)?;
+        if canonical != response.allowed_domains {
+            return Err("browser grant domain policy is not canonical".to_owned());
+        }
+        Ok(Self {
+            grant_id: requested_grant_id.to_owned(),
+            allowed_domains: canonical,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn grant_id(&self) -> &str {
+        &self.grant_id
+    }
+
+    #[must_use]
+    pub(crate) fn allowed_domains(&self) -> &[String] {
+        &self.allowed_domains
+    }
 }
 
 /// Execute a tool by name.
@@ -101,30 +169,40 @@ pub(crate) async fn execute_browser_agent(
     sink: Option<&dyn browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     inference_bearer: Option<&str>,
-) -> ToolExecution {
+    validated_grant: Option<&ValidatedBrowserGrant>,
+) -> BrowserAgentExecution {
     if verified_org_id.trim().is_empty() {
-        return ToolExecution {
-            output: String::new(),
-            error: Some("browser_agent requires the verified run organization".to_owned()),
+        return BrowserAgentExecution::Failed {
+            reason: "browser_agent requires the verified run organization".to_owned(),
         };
     }
+    let Some(validated_grant) = validated_grant else {
+        return BrowserAgentExecution::Failed {
+            reason: "browser_agent requires a broker-validated grant".to_owned(),
+        };
+    };
     let config: Result<BrowserAgentInput, _> = serde_json::from_str(tool_input);
     match config {
         Ok(input) => {
-            let plan_config = browser_plan_config(input, verified_org_id, verified_zdr);
+            let plan_config =
+                match browser_plan_config(input, verified_org_id, verified_zdr, validated_grant) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        return BrowserAgentExecution::Failed { reason: error };
+                    }
+                };
             // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
             // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
             let client = match crate::quarry_agent::QuarryAgentClient::from_env() {
                 Ok(client) => client,
                 Err(error) => {
-                    return ToolExecution {
-                        output: String::new(),
-                        error: Some(format!("browser_agent unavailable: {error}")),
+                    return BrowserAgentExecution::Failed {
+                        reason: format!("browser_agent unavailable: {error}"),
                     };
                 }
             };
             let planner = crate::llm_planner::LlmPlanner::from_env(inference_bearer);
-            let (status, _observations, summary) = browser_agent::run_browser_agent_loop(
+            let result = browser_agent::run_browser_agent_loop(
                 plan_config,
                 client.as_ref(),
                 planner.as_ref(),
@@ -132,18 +210,60 @@ pub(crate) async fn execute_browser_agent(
                 state,
             )
             .await;
-            ToolExecution {
-                output: format!("status={} summary={}", status.as_str(), summary),
-                error: if status == browser_agent::PlanStatus::Failed {
-                    Some(summary)
-                } else {
-                    None
-                },
-            }
+            browser_execution_from_loop_result(result)
         }
-        Err(e) => ToolExecution {
-            output: String::new(),
-            error: Some(format!("invalid browser_agent input: {e}")),
+        Err(e) => BrowserAgentExecution::Failed {
+            reason: format!("invalid browser_agent input: {e}"),
+        },
+    }
+}
+
+fn browser_execution_from_loop_result(
+    result: browser_agent::BrowserAgentLoopResult,
+) -> BrowserAgentExecution {
+    use browser_agent::{BrowserAbortReason, BrowserResourceLimit, PlanStatus};
+
+    if let Some(resource_limit) = result.resource_limit {
+        return match resource_limit {
+            BrowserResourceLimit::MaxSteps => BrowserAgentExecution::ResourceExhausted {
+                reason: result.summary,
+            },
+            BrowserResourceLimit::Runtime => BrowserAgentExecution::TimedOut {
+                reason: result.summary,
+            },
+        };
+    }
+
+    match result.status {
+        PlanStatus::Completed => BrowserAgentExecution::Completed {
+            output: format!("status=completed summary={}", result.summary),
+        },
+        PlanStatus::Failed => BrowserAgentExecution::Failed {
+            reason: result.summary,
+        },
+        PlanStatus::WaitingApproval => BrowserAgentExecution::AwaitingApproval,
+        PlanStatus::Aborted => match result.abort_reason {
+            Some(BrowserAbortReason::Cancelled) => BrowserAgentExecution::Cancelled {
+                reason: result.summary,
+            },
+            Some(BrowserAbortReason::ApprovalDenied) => BrowserAgentExecution::PermissionDenied {
+                reason: result.summary,
+            },
+            Some(BrowserAbortReason::ApprovalTimedOut) => BrowserAgentExecution::TimedOut {
+                reason: result.summary,
+            },
+            Some(BrowserAbortReason::Other) | None => BrowserAgentExecution::Aborted {
+                reason: result.summary,
+            },
+        },
+        // The loop contract should not return an in-progress state after its
+        // run future resolves. If it does, fail closed rather than falling
+        // through to generic successful tool handling.
+        PlanStatus::Planning | PlanStatus::Executing => BrowserAgentExecution::Failed {
+            reason: format!(
+                "browser agent returned a non-terminal plan status: {}",
+                result.status.as_str()
+            ),
         },
     }
 }
@@ -156,7 +276,8 @@ struct BrowserAgentInput {
     system_prompt: Option<String>,
     max_steps: Option<i32>,
     max_runtime_s: Option<i32>,
-    allowed_domains: Option<Vec<String>>,
+    #[serde(rename = "allowed_domains")]
+    _allowed_domains: Option<Vec<String>>,
     stop_criteria: Option<String>,
     require_approval: Option<bool>,
     max_cost_usd: Option<f64>,
@@ -171,23 +292,46 @@ fn browser_plan_config(
     input: BrowserAgentInput,
     verified_org_id: &str,
     verified_zdr: bool,
-) -> browser_agent::PlanConfig {
-    browser_agent::PlanConfig {
+    validated_grant: &ValidatedBrowserGrant,
+) -> Result<browser_agent::PlanConfig, String> {
+    if input.grant_id.trim() != validated_grant.grant_id() {
+        return Err(
+            "browser tool input grant does not match the broker-validated grant".to_owned(),
+        );
+    }
+    let plan = browser_agent::PlanConfig {
         plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
-        grant_id: input.grant_id,
+        grant_id: validated_grant.grant_id().to_owned(),
         run_id: input.run_id.unwrap_or_default(),
         org_id: verified_org_id.to_owned(),
         system_prompt: input.system_prompt.unwrap_or_default(),
         max_steps: input.max_steps.unwrap_or(20),
         max_runtime_s: input.max_runtime_s.unwrap_or(120),
-        allowed_domains: input.allowed_domains.unwrap_or_default(),
+        // Caller-supplied `allowed_domains` is deliberately ignored. The
+        // only policy that reaches Quarry is the broker-owned validation.
+        allowed_domains: validated_grant.allowed_domains().to_vec(),
         stop_criteria: input.stop_criteria.unwrap_or_default(),
         require_approval: input.require_approval.unwrap_or(false),
         max_cost_usd: input.max_cost_usd,
         zdr: verified_zdr,
         profile_id: input.profile_id,
         start_url: input.start_url,
+    };
+    browser_agent::validate_plan_config(&plan)?;
+    Ok(plan)
+}
+
+/// Parse an opaque browser grant lookup key. This intentionally performs no
+/// authorization; callers must send it to BrowserBroker with a verified
+/// browser audience credential before a `ValidatedBrowserGrant` is created.
+pub(crate) fn requested_browser_grant_id(tool_input: &str) -> Result<String, String> {
+    let input: BrowserAgentInput = serde_json::from_str(tool_input)
+        .map_err(|error| format!("invalid browser_agent input: {error}"))?;
+    let grant_id = input.grant_id.trim();
+    if grant_id.is_empty() {
+        return Err("browser_agent grant_id is required".to_owned());
     }
+    Ok(grant_id.to_owned())
 }
 
 #[cfg(test)]
@@ -201,12 +345,153 @@ mod tests {
         )
         .unwrap();
 
-        let plan = browser_plan_config(input, "verified-org", true);
+        let grant = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "grant-1".to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let plan = browser_plan_config(input, "verified-org", true, &grant).unwrap();
         assert_eq!(plan.org_id, "verified-org");
         assert!(
             plan.zdr,
             "verified run ZDR cannot be downgraded by tool input"
         );
         assert_eq!(plan.max_steps, 3);
+    }
+
+    #[test]
+    fn broker_validated_policy_replaces_caller_domains() {
+        let input: BrowserAgentInput = serde_json::from_str(
+            r#"{"grant_id":"grant-1","allowed_domains":["evil.example"],"start_url":"https://api.example.com/start"}"#,
+        )
+        .unwrap();
+        let grant = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "grant-1".to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let config = browser_plan_config(input, "verified-org", false, &grant).unwrap();
+        assert_eq!(config.allowed_domains, vec!["example.com"]);
+        let plan = browser_agent::AgentPlan::new(config);
+        assert!(plan.is_domain_allowed("https://api.example.com/start"));
+        assert!(!plan.is_domain_allowed("https://evil.example/"));
+    }
+
+    #[test]
+    fn broker_response_rejects_empty_or_mismatched_policy() {
+        let empty = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "grant-1".to_owned(),
+                active: true,
+                ..Default::default()
+            },
+        );
+        assert!(empty.is_err());
+
+        let mismatched = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "forged-grant".to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                ..Default::default()
+            },
+        );
+        assert!(mismatched.is_err());
+    }
+
+    #[test]
+    fn requested_grant_id_is_only_an_opaque_lookup_key() {
+        assert_eq!(
+            requested_browser_grant_id(r#"{"grant_id":"grant-1","org_id":"attacker"}"#).unwrap(),
+            "grant-1"
+        );
+        assert!(requested_browser_grant_id(r#"{"grant_id":"   "}"#).is_err());
+    }
+
+    #[test]
+    fn browser_abort_reasons_remain_non_successful_across_the_tool_bridge() {
+        use browser_agent::BrowserAbortReason;
+
+        let cases = [
+            (
+                BrowserAbortReason::Cancelled,
+                BrowserAgentExecution::Cancelled {
+                    reason: "cancelled by user".to_owned(),
+                },
+            ),
+            (
+                BrowserAbortReason::ApprovalDenied,
+                BrowserAgentExecution::PermissionDenied {
+                    reason: "cancelled by user".to_owned(),
+                },
+            ),
+            (
+                BrowserAbortReason::ApprovalTimedOut,
+                BrowserAgentExecution::TimedOut {
+                    reason: "cancelled by user".to_owned(),
+                },
+            ),
+        ];
+
+        for (abort_reason, expected) in cases {
+            let result = browser_agent::BrowserAgentLoopResult {
+                status: browser_agent::PlanStatus::Aborted,
+                observations: Vec::new(),
+                summary: "cancelled by user".to_owned(),
+                abort_reason: Some(abort_reason),
+                resource_limit: None,
+            };
+
+            assert_eq!(browser_execution_from_loop_result(result), expected);
+        }
+    }
+
+    #[test]
+    fn browser_resource_limits_remain_non_successful_across_the_tool_bridge() {
+        use browser_agent::BrowserResourceLimit;
+
+        let cases = [
+            (
+                BrowserResourceLimit::MaxSteps,
+                BrowserAgentExecution::ResourceExhausted {
+                    reason: "max_steps exceeded".to_owned(),
+                },
+            ),
+            (
+                BrowserResourceLimit::Runtime,
+                BrowserAgentExecution::TimedOut {
+                    reason: "max_runtime_s exceeded".to_owned(),
+                },
+            ),
+        ];
+
+        for (resource_limit, expected) in cases {
+            let result = browser_agent::BrowserAgentLoopResult {
+                status: browser_agent::PlanStatus::Failed,
+                observations: Vec::new(),
+                summary: match resource_limit {
+                    BrowserResourceLimit::MaxSteps => "max_steps exceeded".to_owned(),
+                    BrowserResourceLimit::Runtime => "max_runtime_s exceeded".to_owned(),
+                },
+                abort_reason: None,
+                resource_limit: Some(resource_limit),
+            };
+
+            assert_eq!(browser_execution_from_loop_result(result), expected);
+        }
     }
 }

@@ -1,4 +1,8 @@
-# Dev profile overrides — debug logging, compat adapter, relaxed limits.
+# Dev profile overrides — debug logging and relaxed limits.
+#
+# Legacy compatibility is intentionally disabled here as well as in the
+# release compose file. Enabling it needs a separately reviewed migration
+# profile with a scoped NATS principal; the default ACLs are canonical-v1 only.
 
 services:
   model-gateway:
@@ -28,7 +32,8 @@ services:
   orchestrator-core:
     environment:
       LOG_LEVEL: debug
-      ENABLE_COMPAT_ADAPTER: "true"
+      ENABLE_COMPAT_ADAPTER: "false"
+      MP_COMPAT_MODE: v1_only
 
   capability-core:
     environment:

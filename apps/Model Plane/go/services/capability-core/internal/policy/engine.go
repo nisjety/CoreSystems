@@ -22,6 +22,7 @@ import (
 const (
 	DecisionAllow = "allow"
 	DecisionDeny  = "deny"
+	DecisionAsk   = "ask"
 )
 
 // ScopeWildcard matches any scope in an EnabledForScopes entry.
@@ -149,11 +150,11 @@ func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capabi
 	switch capEntry.RiskLevel {
 	case models.RiskHigh:
 		telemetry.PolicyDecisionsTotal.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("decision", DecisionDeny),
+			attribute.String("decision", DecisionAsk),
 			attribute.String("risk", string(capEntry.RiskLevel)),
 		))
 		return &Result{
-			Decision:      DecisionDeny,
+			Decision:      DecisionAsk,
 			Reason:        fmt.Sprintf("capability %s is high-risk and requires human approval", capEntry.ID),
 			BudgetContext: "",
 		}, nil

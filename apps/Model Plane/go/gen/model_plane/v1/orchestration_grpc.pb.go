@@ -19,21 +19,23 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	OrchestrationCoreService_ListPlans_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/ListPlans"
-	OrchestrationCoreService_GetPlan_FullMethodName                  = "/model_plane.v1.OrchestrationCoreService/GetPlan"
-	OrchestrationCoreService_TransitionPlan_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
-	OrchestrationCoreService_ListTodos_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/ListTodos"
-	OrchestrationCoreService_GetTodo_FullMethodName                  = "/model_plane.v1.OrchestrationCoreService/GetTodo"
-	OrchestrationCoreService_TransitionTodo_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
-	OrchestrationCoreService_CreateApproval_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/CreateApproval"
-	OrchestrationCoreService_ListApprovals_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ListApprovals"
-	OrchestrationCoreService_ListPendingApprovals_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
-	OrchestrationCoreService_GetApproval_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/GetApproval"
-	OrchestrationCoreService_DecideApproval_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
-	OrchestrationCoreService_GetSubagentLineage_FullMethodName       = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
-	OrchestrationCoreService_AttachSubagent_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
-	OrchestrationCoreService_StreamRunEvents_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents"
-	OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordOrchestrationEvent"
+	OrchestrationCoreService_ListPlans_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ListPlans"
+	OrchestrationCoreService_GetPlan_FullMethodName                     = "/model_plane.v1.OrchestrationCoreService/GetPlan"
+	OrchestrationCoreService_TransitionPlan_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
+	OrchestrationCoreService_ListTodos_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ListTodos"
+	OrchestrationCoreService_GetTodo_FullMethodName                     = "/model_plane.v1.OrchestrationCoreService/GetTodo"
+	OrchestrationCoreService_TransitionTodo_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
+	OrchestrationCoreService_CreateApproval_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/CreateApproval"
+	OrchestrationCoreService_ListApprovals_FullMethodName               = "/model_plane.v1.OrchestrationCoreService/ListApprovals"
+	OrchestrationCoreService_ListPendingApprovals_FullMethodName        = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
+	OrchestrationCoreService_GetApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/GetApproval"
+	OrchestrationCoreService_DecideApproval_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
+	OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName = "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery"
+	OrchestrationCoreService_GetSubagentLineage_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
+	OrchestrationCoreService_AttachSubagent_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
+	OrchestrationCoreService_StreamRunEvents_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents"
+	OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName    = "/model_plane.v1.OrchestrationCoreService/RecordOrchestrationEvent"
 )
 
 // OrchestrationCoreServiceClient is the client API for OrchestrationCoreService service.
@@ -76,6 +78,14 @@ type OrchestrationCoreServiceClient interface {
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
+	// Claim due durable approval deliveries for an authenticated internal
+	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
+	// is derived from its verified service credential, never from this request.
+	ClaimApprovalDeliveries(ctx context.Context, in *ClaimApprovalDeliveriesRequest, opts ...grpc.CallOption) (*ClaimApprovalDeliveriesResponse, error)
+	// Acknowledge a claimed delivery as retryable or terminal. There is no
+	// delivered outcome until Execution Core can present a durable, authenticated
+	// continuation receipt proving that the paused work actually restarted.
+	AcknowledgeApprovalDelivery(ctx context.Context, in *AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*AcknowledgeApprovalDeliveryResponse, error)
 	// Fetch the subagent lineage for a thread.
 	GetSubagentLineage(ctx context.Context, in *GetSubagentLineageRequest, opts ...grpc.CallOption) (*GetSubagentLineageResponse, error)
 	// Attach a subagent lineage edge (parent_run_id -> child_run_id).
@@ -211,6 +221,26 @@ func (c *orchestrationCoreServiceClient) DecideApproval(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) ClaimApprovalDeliveries(ctx context.Context, in *ClaimApprovalDeliveriesRequest, opts ...grpc.CallOption) (*ClaimApprovalDeliveriesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimApprovalDeliveriesResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) AcknowledgeApprovalDelivery(ctx context.Context, in *AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*AcknowledgeApprovalDeliveryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcknowledgeApprovalDeliveryResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) GetSubagentLineage(ctx context.Context, in *GetSubagentLineageRequest, opts ...grpc.CallOption) (*GetSubagentLineageResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetSubagentLineageResponse)
@@ -300,6 +330,14 @@ type OrchestrationCoreServiceServer interface {
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
+	// Claim due durable approval deliveries for an authenticated internal
+	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
+	// is derived from its verified service credential, never from this request.
+	ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error)
+	// Acknowledge a claimed delivery as retryable or terminal. There is no
+	// delivered outcome until Execution Core can present a durable, authenticated
+	// continuation receipt proving that the paused work actually restarted.
+	AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error)
 	// Fetch the subagent lineage for a thread.
 	GetSubagentLineage(context.Context, *GetSubagentLineageRequest) (*GetSubagentLineageResponse, error)
 	// Attach a subagent lineage edge (parent_run_id -> child_run_id).
@@ -357,6 +395,12 @@ func (UnimplementedOrchestrationCoreServiceServer) GetApproval(context.Context, 
 }
 func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecideApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcknowledgeApprovalDelivery not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) GetSubagentLineage(context.Context, *GetSubagentLineageRequest) (*GetSubagentLineageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubagentLineage not implemented")
@@ -590,6 +634,42 @@ func _OrchestrationCoreService_DecideApproval_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_ClaimApprovalDeliveries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimApprovalDeliveriesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ClaimApprovalDeliveries(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ClaimApprovalDeliveries(ctx, req.(*ClaimApprovalDeliveriesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcknowledgeApprovalDeliveryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).AcknowledgeApprovalDelivery(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).AcknowledgeApprovalDelivery(ctx, req.(*AcknowledgeApprovalDeliveryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_GetSubagentLineage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetSubagentLineageRequest)
 	if err := dec(in); err != nil {
@@ -705,6 +785,14 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DecideApproval",
 			Handler:    _OrchestrationCoreService_DecideApproval_Handler,
+		},
+		{
+			MethodName: "ClaimApprovalDeliveries",
+			Handler:    _OrchestrationCoreService_ClaimApprovalDeliveries_Handler,
+		},
+		{
+			MethodName: "AcknowledgeApprovalDelivery",
+			Handler:    _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler,
 		},
 		{
 			MethodName: "GetSubagentLineage",

@@ -3,7 +3,9 @@
 //! Authenticated gRPC inference on :9092, HTTP health/metrics on :8082.
 
 use anyhow::Result;
-use inference_core::{auth::JwtVerifier, config, grpc, http_health, provider};
+use inference_core::{
+    auth::JwtVerifier, config, grpc, http_health, provider, readiness::GrpcReadiness,
+};
 use tracing::info;
 
 #[tokio::main]
@@ -62,7 +64,8 @@ async fn main() -> Result<()> {
         policy: chain.policy_handle(),
         client: chain.policy_client(),
     };
-    let grpc_handle = tokio::spawn(grpc::serve_with_providers(
+    let grpc_readiness = GrpcReadiness::new();
+    let grpc_handle = tokio::spawn(grpc::serve_with_providers_and_readiness(
         grpc::ProviderChains {
             chain: chain.clone(),
             speech,
@@ -74,8 +77,9 @@ async fn main() -> Result<()> {
             video,
         },
         auth,
+        grpc_readiness.clone(),
     ));
-    let http_handle = tokio::spawn(http_health::serve(policy_state));
+    let http_handle = tokio::spawn(http_health::serve(policy_state, grpc_readiness));
 
     let shutdown = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

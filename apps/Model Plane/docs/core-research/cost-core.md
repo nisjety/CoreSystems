@@ -4,6 +4,21 @@ Generated: 2026-07-11 (supersedes 2026-06-09 pass)
 
 Scope: `apps/Model Plane/go/services/cost-core`
 
+## 2026-07-16 delta
+
+Model Plane Cost Core is running in Docker, reports healthy, and had zero
+restarts in the 2026-07-16 read-only inspection. Live probes prove missing and
+malformed bearer credentials are rejected and forged tenant/user headers do not
+grant ledger access. Public pricing remains deliberately separate. A legitimate
+positive scoped ledger read is still outstanding because no safe seeded
+fixed-organization principal was available; this is a release gate, not a
+reason to weaken authorization. Source authorization and tenant/user scope are
+hardened. NATS config uses distinct named principals for actual Model Plane
+workloads, removes the generic `model-runtime` principal, and keeps cost-core on
+its narrow usage-consumer role. The scoped NATS consumer is connected in the
+local stack, but transport TLS/mTLS and managed workload identity are not
+configured and remain production gates.
+
 ## 2026-07-13 secure-MVP correction
 
 The 2026-07-11 observations below remain useful as **historical live evidence**, but their source-code conclusions are no longer current.

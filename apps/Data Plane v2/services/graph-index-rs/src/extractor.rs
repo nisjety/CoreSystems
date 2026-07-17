@@ -64,17 +64,27 @@ impl GraphExtractor {
                     .connect_timeout(timeout)
                     .timeout(timeout)
                     .connect_lazy();
+                let token_client = if standalone_startup() {
+                    InferenceTokenClient::new_allow_unconfigured(
+                        &cfg.model_plane_inference_token_url,
+                        &cfg.model_plane_inference_token_issuer,
+                        &cfg.model_plane_inference_service_id,
+                        &cfg.model_plane_inference_service_api_key,
+                    )?
+                } else {
+                    InferenceTokenClient::new(
+                        &cfg.model_plane_inference_token_url,
+                        &cfg.model_plane_inference_token_issuer,
+                        &cfg.model_plane_inference_service_id,
+                        &cfg.model_plane_inference_service_api_key,
+                    )?
+                };
                 Backend::ModelPlane(Box::new(ModelPlaneExtractor {
                     client: model_plane::v1::inference_core_client::InferenceCoreClient::new(channel),
                     model: cfg.model_plane_extraction_model.clone(),
                     provider: cfg.model_plane_extraction_provider.clone(),
                     timeout,
-                    token_client: InferenceTokenClient::new(
-                        &cfg.model_plane_inference_token_url,
-                        &cfg.model_plane_inference_token_issuer,
-                        &cfg.model_plane_inference_service_id,
-                        &cfg.model_plane_inference_service_api_key,
-                    )?,
+                    token_client,
                 }))
             }
             "azure_openai" => {
@@ -134,6 +144,13 @@ impl GraphExtractor {
         );
         Ok(result)
     }
+}
+
+fn standalone_startup() -> bool {
+    std::env::var("APP_ENV")
+        .ok()
+        .map(|value| value.trim().eq_ignore_ascii_case("standalone"))
+        .unwrap_or(false)
 }
 
 impl ModelPlaneExtractor {

@@ -205,13 +205,6 @@ impl VerifiedIdentity {
         Ok(request)
     }
 
-    #[allow(clippy::result_large_err)]
-    pub(crate) fn execution_bearer(&self) -> Result<&str, Status> {
-        self.execution_bearer
-            .as_deref()
-            .ok_or_else(|| Status::unauthenticated("verified execution-core credential required"))
-    }
-
     #[cfg(test)]
     #[must_use]
     pub(crate) fn user_for_test(org_id: &str, user_id: &str, issuer_zdr: bool) -> Self {

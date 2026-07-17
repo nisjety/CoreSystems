@@ -73,6 +73,7 @@ struct Claims {
     principal_type: Option<String>,
     #[serde(default)]
     service_id: Option<String>,
+    zdr: bool,
 }
 
 /// Verified caller identity. The Execution Core ingress credential is never
@@ -81,6 +82,7 @@ struct Claims {
 pub struct AuthenticatedUser {
     pub org_id: String,
     pub user_id: String,
+    pub zdr: bool,
 }
 
 /// Opaque, independently verified `aud=data-plane` credential. It is bound to
@@ -126,9 +128,28 @@ impl DelegatedInferenceBearer {
     }
 }
 
+/// Opaque, independently verified `aud=browser-broker` credential. It is
+/// bound to the same canonical user, tenant, and ZDR posture as the Execution
+/// Core caller and is used only to revalidate a browser grant before dispatch.
+#[derive(Clone)]
+pub struct DelegatedBrowserBearer(Arc<str>);
+
+impl DelegatedBrowserBearer {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Debug for DelegatedInferenceBearer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DelegatedInferenceBearer([REDACTED])")
+    }
+}
+
+impl fmt::Debug for DelegatedBrowserBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DelegatedBrowserBearer([REDACTED])")
     }
 }
 
@@ -166,6 +187,7 @@ impl fmt::Debug for AuthenticatedUser {
             .debug_struct("AuthenticatedUser")
             .field("org_id", &self.org_id)
             .field("user_id", &self.user_id)
+            .field("zdr", &self.zdr)
             .finish()
     }
 }
@@ -176,6 +198,16 @@ impl AuthenticatedUser {
         Self {
             org_id: org_id.to_owned(),
             user_id: user_id.to_owned(),
+            zdr: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_zdr(org_id: &str, user_id: &str, zdr: bool) -> Self {
+        Self {
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            zdr,
         }
     }
 
@@ -312,12 +344,42 @@ impl JwtVerifier {
     ) -> Result<DelegatedInferenceBearer, Status> {
         let token = extract_metadata_bearer(request, "x-inference-authorization")?;
         let delegated = self.verify_user_token(token, "inference-core").await?;
-        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
+        if delegated.org_id != caller.org_id
+            || delegated.user_id != caller.user_id
+            || delegated.zdr != caller.zdr
+        {
             return Err(Status::permission_denied(
-                "delegated inference identity does not match caller",
+                "delegated inference identity or retention posture does not match caller",
             ));
         }
         Ok(DelegatedInferenceBearer(Arc::from(token)))
+    }
+
+    /// Verify a separately delegated BrowserBroker credential and bind it to
+    /// the authenticated execution caller. A browser grant is revalidated with
+    /// this token immediately before any Quarry launch, so a model-authored
+    /// `grant_id` or forged scoping header can never provide authority.
+    ///
+    /// # Errors
+    /// Returns an authentication or authorization status for a missing,
+    /// malformed, wrong-audience, unavailable, or identity-mismatched bearer.
+    #[allow(clippy::result_large_err)]
+    pub async fn authenticate_delegated_browser<T>(
+        &self,
+        request: &Request<T>,
+        caller: &AuthenticatedUser,
+    ) -> Result<DelegatedBrowserBearer, Status> {
+        let token = extract_metadata_bearer(request, "x-browser-authorization")?;
+        let delegated = self.verify_user_token(token, "browser-broker").await?;
+        if delegated.org_id != caller.org_id
+            || delegated.user_id != caller.user_id
+            || delegated.zdr != caller.zdr
+        {
+            return Err(Status::permission_denied(
+                "delegated browser identity or retention posture does not match caller",
+            ));
+        }
+        Ok(DelegatedBrowserBearer(Arc::from(token)))
     }
 
     /// Verify a separately delegated Data Plane credential and bind it to the
@@ -335,9 +397,12 @@ impl JwtVerifier {
     ) -> Result<DelegatedDataPlaneBearer, Status> {
         let token = extract_metadata_bearer(request, "x-data-plane-authorization")?;
         let delegated = self.verify_user_token(token, "data-plane").await?;
-        if delegated.org_id != caller.org_id || delegated.user_id != caller.user_id {
+        if delegated.org_id != caller.org_id
+            || delegated.user_id != caller.user_id
+            || delegated.zdr != caller.zdr
+        {
             return Err(Status::permission_denied(
-                "delegated Data Plane identity does not match caller",
+                "delegated Data Plane identity or retention posture does not match caller",
             ));
         }
         Ok(DelegatedDataPlaneBearer(Arc::from(token)))
@@ -471,6 +536,7 @@ fn validate_user_claims(claims: Claims) -> Result<AuthenticatedUser, Status> {
     Ok(AuthenticatedUser {
         org_id: claims.org_id,
         user_id: claims.user_id,
+        zdr: claims.zdr,
     })
 }
 
@@ -602,7 +668,8 @@ mod tests {
             "nbf": now() - 5,
             "org_id": "org-1",
             "user_id": "user-1",
-            "principal_type": "user"
+            "principal_type": "user",
+            "zdr": true
         })
     }
 
@@ -734,6 +801,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegated_browser_credential_requires_exact_audience_and_identity() {
+        let verifier = verifier("key-browser").await;
+        let execution_token = sign(&claims(), "key-browser");
+        let caller = verifier
+            .authenticate(&authenticated_request(&execution_token))
+            .await
+            .expect("execution caller");
+
+        let missing = Request::new(());
+        assert_eq!(
+            verifier
+                .authenticate_delegated_browser(&missing, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        let mut browser_claims = claims();
+        browser_claims["aud"] = json!("browser-broker");
+        let browser_token = sign(&browser_claims, "key-browser");
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {browser_token}").parse().expect("metadata"),
+        );
+        let delegated = verifier
+            .authenticate_delegated_browser(&request, &caller)
+            .await
+            .expect("delegated browser bearer");
+        assert_eq!(delegated.as_str(), browser_token);
+        assert_eq!(
+            format!("{delegated:?}"),
+            "DelegatedBrowserBearer([REDACTED])"
+        );
+
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {execution_token}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_delegated_browser(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        let mut wrong_identity = browser_claims;
+        wrong_identity["sub"] = json!("user-2");
+        wrong_identity["user_id"] = json!("user-2");
+        let wrong_identity = sign(&wrong_identity, "key-browser");
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {wrong_identity}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_delegated_browser(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
     async fn data_plane_credential_is_separate_identity_bound_and_never_ingress_authority() {
         let verifier = verifier("key-data-plane").await;
         let execution_token = sign(&claims(), "key-data-plane");
@@ -827,7 +966,52 @@ mod tests {
 
         assert_eq!(user.org_id, "org-1");
         assert_eq!(user.user_id, "user-1");
+        assert!(user.zdr);
         assert!(!format!("{user:?}").contains(&token));
+    }
+
+    #[tokio::test]
+    async fn signed_zdr_posture_is_required_and_delegated_posture_must_match() {
+        let verifier = verifier("key-zdr").await;
+        let mut missing_zdr = claims();
+        missing_zdr
+            .as_object_mut()
+            .expect("claims object")
+            .remove("zdr");
+        let missing_token = sign(&missing_zdr, "key-zdr");
+        assert_eq!(
+            verifier
+                .authenticate(&authenticated_request(&missing_token))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        let execution_token = sign(&claims(), "key-zdr");
+        let caller = verifier
+            .authenticate(&authenticated_request(&execution_token))
+            .await
+            .expect("execution caller");
+        let mut delegated_claims = claims();
+        delegated_claims["aud"] = json!("inference-core");
+        delegated_claims["zdr"] = json!(false);
+        let delegated_token = sign(&delegated_claims, "key-zdr");
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "x-inference-authorization",
+            format!("Bearer {delegated_token}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_delegated_inference(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
     }
 
     #[tokio::test]

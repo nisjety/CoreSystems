@@ -4,9 +4,9 @@
 //! A hook rule matches a tool (exact name, a `prefix*` glob, or `*` for any) for
 //! a given [`HookEvent`] and yields a [`HookDecision`]:
 //! - `Allow`  — proceed (defers to the permission engine).
-//! - `Deny`   — refuse the call (PreToolUse) or reject the result (PostToolUse).
+//! - `Deny`   — refuse the call (`PreToolUse`) or reject the result (`PostToolUse`).
 //! - `Ask`    — pause the run for human approval (routes into the existing HITL
-//!              path in `runtime_loop::execute_step`).
+//!   path in `runtime_loop::execute_step`).
 //!
 //! Rules arrive on the `hook_context` JSON that flows into `ExecuteStep`, so the
 //! orchestration layer (or a future durable capability-core hooks registry) can

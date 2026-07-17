@@ -10,6 +10,8 @@ secrets:
     file: ${AUTH_GRPC_SERVICE_CREDENTIALS_FILE:?AUTH_GRPC_SERVICE_CREDENTIALS_FILE is required in production}
   auth_internal_service_credentials:
     file: ${AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE:?AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE is required in production}
+  plane_service_principals:
+    file: ${PLANE_SERVICE_PRINCIPALS_FILE:?PLANE_SERVICE_PRINCIPALS_FILE is required in production}
   user_core_grpc_client_credential:
     file: ${USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE:?USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE is required in production}
   user_core_grpc_service_credentials:
@@ -49,6 +51,8 @@ services:
         SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
         BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
     ports: !reset []
+    tmpfs:
+      - /run/control-secrets:rw,noexec,nosuid,nodev,size=2m,mode=0710
     # Never load the ignored developer environment file in a release render.
     env_file: !reset []
     environment:
@@ -73,6 +77,8 @@ services:
       AUTH_GRPC_SERVICE_CREDENTIALS_FILE: /run/secrets/auth_grpc_service_credentials
       AUTH_INTERNAL_SERVICE_CREDENTIALS: !reset null
       AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE: /run/secrets/auth_internal_service_credentials
+      PLANE_SERVICE_PRINCIPALS_JSON: !reset null
+      PLANE_SERVICE_PRINCIPALS_FILE: /run/secrets/plane_service_principals
       USER_CORE_GRPC_CLIENT_CREDENTIAL: !reset null
       USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE: /run/secrets/user_core_grpc_client_credential
       USER_CORE_GRPC_TLS_CA_FILE: /run/secrets/user_core_grpc_tls_ca
@@ -93,6 +99,9 @@ services:
         mode: 0444
       - source: auth_internal_service_credentials
         target: auth_internal_service_credentials
+        mode: 0444
+      - source: plane_service_principals
+        target: plane_service_principals
         mode: 0444
       - source: user_core_grpc_client_credential
         target: user_core_grpc_client_credential

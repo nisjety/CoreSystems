@@ -154,6 +154,30 @@ fn require_explicit_zdr_contract(
     Ok(())
 }
 
+/// Resolve the caller-selected run against Session Core before a gateway RPC
+/// can mutate local run-scoped state or publish a run event. The request body
+/// contributes only the run id; tenant and user are always the verified ingress
+/// identity, and the dedicated Session Core bearer is forwarded only after it
+/// was independently verified by the gateway interceptor.
+#[allow(clippy::result_large_err)]
+async fn require_durable_run_owner(
+    state: &AppState,
+    identity: &VerifiedIdentity,
+    run_id: &str,
+) -> Result<(), Status> {
+    let user_id = identity
+        .user_id()
+        .ok_or_else(|| Status::permission_denied("a verified user must mutate a run"))?;
+    session_flow::require_durable_run_owner_with_token(
+        state,
+        run_id,
+        identity.org_id(),
+        user_id,
+        identity.session_bearer()?,
+    )
+    .await
+}
+
 /// Maximum page content (markdown chars) forwarded to inference-core
 /// for `ExtractStructured`. Tuned to stay well below the 128k context
 /// floor every in-use model shares, leaving headroom for the schema +
@@ -170,6 +194,26 @@ fn request_id_or_new(request_id: &str) -> String {
     } else {
         request_id.to_owned()
     }
+}
+
+/// Derive the durable managed-start retry identity for both unary and streaming
+/// gRPC invocation. A client-provided idempotency key wins over the tracing
+/// request id so a response-loss retry cannot create a second provider call.
+fn managed_start_key(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    request_id: &str,
+    idempotency_key: &str,
+    managed_source: &str,
+) -> String {
+    state.managed_start_keys.derive(
+        org_id,
+        user_id,
+        (!idempotency_key.trim().is_empty()).then_some(idempotency_key),
+        request_id,
+        managed_source,
+    )
 }
 
 fn model_or_default(model: &str) -> String {
@@ -307,7 +351,7 @@ async fn publish_ingress_accepted(
 async fn try_serve_from_cache(
     state: &AppState,
     identity: &VerifiedIdentity,
-    thread_id: &str,
+    run: &session_flow::SessionRun,
     request_id: &str,
     org_id: &str,
     model: &str,
@@ -323,7 +367,7 @@ async fn try_serve_from_cache(
     if !zdr {
         session_flow::append_assistant_message_with_token(
             state,
-            thread_id,
+            &run.thread_id,
             &cached,
             identity.session_bearer()?,
         )
@@ -332,6 +376,16 @@ async fn try_serve_from_cache(
             Status::internal(format!("session-core append assistant failed: {error}"))
         })?;
     }
+    session_flow::terminalize_direct_inference_run_with_token(
+        state,
+        run,
+        session_flow::DirectInferenceTerminal::Completed,
+        identity.session_bearer()?,
+    )
+    .await
+    .map_err(|error| {
+        Status::unavailable(format!("session-core terminalization failed: {error}"))
+    })?;
     info!(request_id = %request_id, "gateway invoke served from langcache");
     Ok(Some(InvokeResponse {
         request_id: request_id.to_owned(),
@@ -416,26 +470,43 @@ impl ModelGateway for GatewayService {
         let user_id = identity
             .user_id()
             .unwrap_or_else(|| identity.principal_id());
-        let session_run = if req.zdr {
-            session_flow::SessionRun {
-                thread_id: String::new(),
-                run_id: request_id.clone(),
-            }
-        } else {
-            session_flow::prepare_run_with_token(
-                &self.state,
-                Some(&req.thread_id),
-                Some(&req.session_key),
-                &org_id,
-                user_id,
-                &content,
-                identity.session_bearer()?,
-            )
+        let start_key = managed_start_key(
+            &self.state,
+            &org_id,
+            user_id,
+            &request_id,
+            &req.idempotency_key,
+            "gateway-direct",
+        );
+        let session_run = session_flow::prepare_managed_run_with_token(
+            &self.state,
+            Some(&req.thread_id),
+            Some(&req.session_key),
+            &org_id,
+            user_id,
+            &content,
+            "model-gateway",
+            "execute",
+            &start_key,
+            mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect,
+            req.zdr,
+            identity.session_bearer()?,
+        )
+        .await
+        .map_err(|error| {
+            Status::unavailable(format!("session-core managed start failed: {error}"))
+        })?;
+        if session_run.already_started {
+            return Err(Status::already_exists(
+                "managed run already exists; observe or resume it instead of dispatching again",
+            ));
+        }
+        session_flow::ensure_direct_inference_run_liveness(&self.state, &session_run)
             .await
             .map_err(|error| {
-                Status::internal(format!("session-core prepare_run failed: {error}"))
-            })?
-        };
+                warn!(%error, run_id = %session_run.run_id, "initial gRPC direct-inference liveness heartbeat failed");
+                Status::unavailable("session-core liveness heartbeat failed")
+            })?;
 
         publish_ingress_accepted(
             &self.state,
@@ -467,7 +538,7 @@ impl ModelGateway for GatewayService {
         if let Some(hit) = try_serve_from_cache(
             &self.state,
             &identity,
-            &session_run.thread_id,
+            &session_run,
             &request_id,
             &org_id,
             &model,
@@ -480,27 +551,64 @@ impl ModelGateway for GatewayService {
         }
 
         let mut client = self.state.inference_client.clone();
-        let infer_resp = client
-            .infer(identity.inference_request(infer_req)?)
-            .await
-            .map_err(|status| {
+        let infer = match client.infer(identity.inference_request(infer_req)?).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
                 warn!(%status, "inference-core Infer failed");
-                Status::internal(format!("inference failed: {}", status.message()))
-            })?;
-        let infer = infer_resp.into_inner();
+                session_flow::terminalize_direct_inference_run_with_token(
+                    &self.state,
+                    &session_run,
+                    session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                    identity.session_bearer()?,
+                )
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("session-core terminalization failed: {error}"))
+                })?;
+                return Err(Status::internal(format!(
+                    "inference failed: {}",
+                    status.message()
+                )));
+            }
+        };
 
         if !req.zdr {
-            session_flow::append_assistant_message_with_token(
+            if let Err(error) = session_flow::append_assistant_message_with_token(
                 &self.state,
                 &session_run.thread_id,
                 &infer.content,
                 identity.session_bearer()?,
             )
             .await
-            .map_err(|error| {
-                Status::internal(format!("session-core append assistant failed: {error}"))
-            })?;
+            {
+                session_flow::terminalize_direct_inference_run_with_token(
+                    &self.state,
+                    &session_run,
+                    session_flow::DirectInferenceTerminal::Failed("assistant_persist_failed"),
+                    identity.session_bearer()?,
+                )
+                .await
+                .map_err(|terminal_error| {
+                    Status::unavailable(format!(
+                        "session-core terminalization failed: {terminal_error}"
+                    ))
+                })?;
+                return Err(Status::internal(format!(
+                    "session-core append assistant failed: {error}"
+                )));
+            }
         }
+
+        session_flow::terminalize_direct_inference_run_with_token(
+            &self.state,
+            &session_run,
+            session_flow::DirectInferenceTerminal::Completed,
+            identity.session_bearer()?,
+        )
+        .await
+        .map_err(|error| {
+            Status::unavailable(format!("session-core terminalization failed: {error}"))
+        })?;
 
         // Store the fresh response so future semantically-similar prompts hit
         // the cache. Best-effort: never fails the request.
@@ -563,26 +671,43 @@ impl ModelGateway for GatewayService {
         let user_id = identity
             .user_id()
             .unwrap_or_else(|| identity.principal_id());
-        let session_run = if req.zdr {
-            session_flow::SessionRun {
-                thread_id: String::new(),
-                run_id: request_id.clone(),
-            }
-        } else {
-            session_flow::prepare_run_with_token(
-                &self.state,
-                Some(&req.thread_id),
-                Some(&req.session_key),
-                &org_id,
-                user_id,
-                &content,
-                identity.session_bearer()?,
-            )
+        let start_key = managed_start_key(
+            &self.state,
+            &org_id,
+            user_id,
+            &request_id,
+            &req.idempotency_key,
+            "gateway-direct",
+        );
+        let session_run = session_flow::prepare_managed_run_with_token(
+            &self.state,
+            Some(&req.thread_id),
+            Some(&req.session_key),
+            &org_id,
+            user_id,
+            &content,
+            "model-gateway",
+            "execute",
+            &start_key,
+            mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect,
+            req.zdr,
+            identity.session_bearer()?,
+        )
+        .await
+        .map_err(|error| {
+            Status::unavailable(format!("session-core managed start failed: {error}"))
+        })?;
+        if session_run.already_started {
+            return Err(Status::already_exists(
+                "managed run already exists; observe or resume it instead of dispatching again",
+            ));
+        }
+        session_flow::ensure_direct_inference_run_liveness(&self.state, &session_run)
             .await
             .map_err(|error| {
-                Status::internal(format!("session-core prepare_run failed: {error}"))
-            })?
-        };
+                warn!(%error, run_id = %session_run.run_id, "initial gRPC direct-stream liveness heartbeat failed");
+                Status::unavailable("session-core liveness heartbeat failed")
+            })?;
 
         publish_ingress_accepted(
             &self.state,
@@ -617,17 +742,43 @@ impl ModelGateway for GatewayService {
         if let Some(cache) = crate::langcache::global() {
             if let Some(cached) = cache.lookup(&content, &org_id, &model, req.zdr).await {
                 if !req.zdr {
-                    session_flow::append_assistant_message_with_token(
+                    if let Err(error) = session_flow::append_assistant_message_with_token(
                         &self.state,
                         &session_run.thread_id,
                         &cached,
                         identity.session_bearer()?,
                     )
                     .await
-                    .map_err(|error| {
-                        Status::internal(format!("session-core append assistant failed: {error}"))
-                    })?;
+                    {
+                        session_flow::terminalize_direct_inference_run_with_token(
+                            &self.state,
+                            &session_run,
+                            session_flow::DirectInferenceTerminal::Failed(
+                                "assistant_persist_failed",
+                            ),
+                            identity.session_bearer()?,
+                        )
+                        .await
+                        .map_err(|terminal_error| {
+                            Status::unavailable(format!(
+                                "session-core terminalization failed: {terminal_error}"
+                            ))
+                        })?;
+                        return Err(Status::internal(format!(
+                            "session-core append assistant failed: {error}"
+                        )));
+                    }
                 }
+                session_flow::terminalize_direct_inference_run_with_token(
+                    &self.state,
+                    &session_run,
+                    session_flow::DirectInferenceTerminal::Completed,
+                    identity.session_bearer()?,
+                )
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("session-core terminalization failed: {error}"))
+                })?;
                 let (tx, rx) = tokio::sync::mpsc::channel::<Result<InvokeChunk, Status>>(1);
                 let _ = tx
                     .send(Ok(InvokeChunk {
@@ -647,32 +798,77 @@ impl ModelGateway for GatewayService {
         }
 
         let mut client = self.state.inference_client.clone();
-        let upstream = client
+        let upstream = match client
             .infer_stream(identity.inference_request(infer_req)?)
             .await
-            .map_err(|status| {
+        {
+            Ok(response) => response,
+            Err(status) => {
                 warn!(%status, "inference-core InferStream failed");
-                Status::internal(format!("inference stream failed: {}", status.message()))
-            })?;
+                session_flow::terminalize_direct_inference_run_with_token(
+                    &self.state,
+                    &session_run,
+                    session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                    identity.session_bearer()?,
+                )
+                .await
+                .map_err(|error| {
+                    Status::unavailable(format!("session-core terminalization failed: {error}"))
+                })?;
+                return Err(Status::internal(format!(
+                    "inference stream failed: {}",
+                    status.message()
+                )));
+            }
+        };
         let mut upstream_stream = upstream.into_inner();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<InvokeChunk, Status>>(32);
         let fallback_model = model.clone();
         let fallback_request_id = request_id.clone();
         let state = self.state.clone();
-        let thread_id = session_run.thread_id.clone();
-        let run_id = session_run.run_id.clone();
+        let managed_run = session_run.clone();
         // Captured for the post-stream semantic-cache write.
         let cache_content = content.clone();
         let cache_org = org_id.clone();
         let cache_model = model.clone();
         let cache_zdr = req.zdr;
-        let session_bearer = identity.session_bearer().ok().map(str::to_owned);
+        let session_bearer = identity.session_bearer()?.to_owned();
 
         tokio::spawn(async move {
             let mut assistant_output = String::new();
-            while let Some(next) = upstream_stream.next().await {
-                let send_result = match next {
+            let mut terminal_chunk: Option<InvokeChunk> = None;
+            let mut heartbeat = tokio::time::interval(session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);
+            // The request path obtained the initial receipt before contacting
+            // inference-core. Consume interval's immediate tick so it does
+            // not duplicate that lease write inside the spawned relay.
+            heartbeat.tick().await;
+            loop {
+                let next = tokio::select! {
+                    next = upstream_stream.next() => next,
+                    _ = heartbeat.tick() => {
+                        match session_flow::heartbeat_direct_inference_run(&state, &managed_run).await {
+                            Ok(true) => continue,
+                            Ok(false) => {
+                                let _ = tx.send(Err(Status::failed_precondition(
+                                    "managed run is already terminal",
+                                ))).await;
+                                return;
+                            }
+                            Err(error) => {
+                                warn!(%error, run_id = %managed_run.run_id, "gRPC direct stream liveness heartbeat failed");
+                                let _ = tx.send(Err(Status::unavailable(
+                                    "session-core liveness heartbeat failed",
+                                ))).await;
+                                return;
+                            }
+                        }
+                    }
+                };
+                let Some(next) = next else {
+                    break;
+                };
+                match next {
                     Ok(InferChunk {
                         request_id: chunk_request_id,
                         delta,
@@ -694,41 +890,110 @@ impl ModelGateway for GatewayService {
                         } else {
                             model_used
                         };
-                        tx.send(Ok(InvokeChunk {
+                        let chunk = InvokeChunk {
                             request_id: rid,
                             delta,
                             done,
                             model_used: mu,
                             input_tokens,
                             output_tokens,
-                        }))
-                        .await
+                        };
+                        if chunk.done {
+                            // A terminal chunk is not externally observable
+                            // until assistant persistence and the immutable
+                            // Session Core receipt have both succeeded.
+                            terminal_chunk = Some(chunk);
+                            break;
+                        }
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            return;
+                        }
                     }
                     Err(status) => {
                         warn!(%status, "inference stream error");
-                        tx.send(Err(Status::internal(format!(
-                            "inference stream error: {}",
-                            status.message()
-                        ))))
-                        .await
+                        let terminal = session_flow::terminalize_direct_inference_run_with_token(
+                            &state,
+                            &managed_run,
+                            session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                            &session_bearer,
+                        )
+                        .await;
+                        let error = match terminal {
+                            Ok(()) => Status::internal(format!(
+                                "inference stream error: {}",
+                                status.message()
+                            )),
+                            Err(error) => Status::unavailable(format!(
+                                "session-core terminalization failed: {error}"
+                            )),
+                        };
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
+                }
+            }
+
+            let Some(terminal_chunk) = terminal_chunk else {
+                let terminal = session_flow::terminalize_direct_inference_run_with_token(
+                    &state,
+                    &managed_run,
+                    session_flow::DirectInferenceTerminal::Failed("inference_failed"),
+                    &session_bearer,
+                )
+                .await;
+                let error = match terminal {
+                    Ok(()) => Status::internal("inference stream ended without a terminal chunk"),
+                    Err(error) => {
+                        Status::unavailable(format!("session-core terminalization failed: {error}"))
                     }
                 };
-                if send_result.is_err() {
+                let _ = tx.send(Err(error)).await;
+                return;
+            };
+
+            if !cache_zdr {
+                if let Err(error) = session_flow::append_assistant_message_with_token(
+                    &state,
+                    &managed_run.thread_id,
+                    &assistant_output,
+                    &session_bearer,
+                )
+                .await
+                {
+                    let terminal = session_flow::terminalize_direct_inference_run_with_token(
+                        &state,
+                        &managed_run,
+                        session_flow::DirectInferenceTerminal::Failed("assistant_persist_failed"),
+                        &session_bearer,
+                    )
+                    .await;
+                    let result = match terminal {
+                        Ok(()) => Status::internal(format!(
+                            "session-core append assistant failed: {error}"
+                        )),
+                        Err(terminal_error) => Status::unavailable(format!(
+                            "session-core terminalization failed: {terminal_error}"
+                        )),
+                    };
+                    let _ = tx.send(Err(result)).await;
                     return;
                 }
             }
 
-            if !cache_zdr {
-                if let Err(error) = session_flow::append_assistant_message_with_optional_token(
-                    &state,
-                    &thread_id,
-                    &assistant_output,
-                    session_bearer.as_deref(),
-                )
-                .await
-                {
-                    warn!(%error, %run_id, %thread_id, "failed to persist streamed assistant message");
-                }
+            if let Err(error) = session_flow::terminalize_direct_inference_run_with_token(
+                &state,
+                &managed_run,
+                session_flow::DirectInferenceTerminal::Completed,
+                &session_bearer,
+            )
+            .await
+            {
+                let _ = tx
+                    .send(Err(Status::unavailable(format!(
+                        "session-core terminalization failed: {error}"
+                    ))))
+                    .await;
+                return;
             }
 
             // Store the fully-assembled streamed response for future cache hits.
@@ -743,6 +1008,8 @@ impl ModelGateway for GatewayService {
                     )
                     .await;
             }
+
+            let _ = tx.send(Ok(terminal_chunk)).await;
         });
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
@@ -803,9 +1070,7 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<SendMessageResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
         require_explicit_zdr_contract(&identity, "send_message")?;
-        tools::handle_send_message(&self.state, request.into_inner())
-            .await
-            .map(Response::new)
+        tools::handle_send_message(&self.state, request.into_inner()).map(Response::new)
     }
 
     async fn synthetic_output(
@@ -829,8 +1094,8 @@ impl ModelGateway for GatewayService {
         request: Request<EnterPlanModeRequest>,
     ) -> Result<Response<EnterPlanModeResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Write)?;
-        let _session_bearer = identity.session_bearer()?;
         let req = request.into_inner();
+        require_durable_run_owner(&self.state, &identity, &req.run_id).await?;
         let run_id = req.run_id.clone();
         let org_id = req.org_id.clone();
         let resp =
@@ -863,8 +1128,8 @@ impl ModelGateway for GatewayService {
         request: Request<ExitPlanModeRequest>,
     ) -> Result<Response<ExitPlanModeResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Write)?;
-        let _session_bearer = identity.session_bearer()?;
         let req = request.into_inner();
+        require_durable_run_owner(&self.state, &identity, &req.run_id).await?;
         let run_id = req.run_id.clone();
         let org_id = req.org_id.clone();
         let resp =
@@ -985,7 +1250,6 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<ApproveApprovalResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Approval)?;
         let session_bearer = identity.session_bearer()?;
-        let execution_bearer = identity.execution_bearer()?;
         let actor = identity
             .user_id()
             .ok_or_else(|| Status::permission_denied("a verified user must decide an approval"))?;
@@ -1000,8 +1264,32 @@ impl ModelGateway for GatewayService {
                 true,
                 req.decided_by.clone(),
                 req.comment.clone(),
-            )
-            .map_err(approvals::resolve_err_to_status)?;
+            );
+        let preview = match preview {
+            Ok(preview) => preview,
+            Err(approvals::ResolveError::NotFound) => {
+                approvals::read_through_approval_for_owner_authenticated(
+                    &self.state.approvals,
+                    &mut self.state.orchestration_client.clone(),
+                    &req.approval_id,
+                    &req.org_id,
+                    session_bearer,
+                    actor,
+                )
+                .await?;
+                self.state
+                    .approvals
+                    .preview_resolution_for_owner_with_transition(
+                        &req.approval_id,
+                        &req.org_id,
+                        true,
+                        req.decided_by.clone(),
+                        req.comment.clone(),
+                    )
+                    .map_err(approvals::resolve_err_to_status)?
+            }
+            Err(error) => return Err(approvals::resolve_err_to_status(error)),
+        };
         approvals::require_fresh_approval_delivery(preview.transitioned)?;
         if preview.transitioned {
             approvals::persist_approval_decision_authenticated(
@@ -1023,17 +1311,11 @@ impl ModelGateway for GatewayService {
             .approval
             .as_ref()
             .ok_or_else(|| Status::data_loss("resolved approval is missing"))?;
-        // Close the human-in-the-loop loop with independently verified
-        // execution ingress and session delegation credentials. Resume
-        // failures stay observable instead of silently stranding a
-        // durably-granted approval in AwaitingApproval.
-        approvals::resume_run_if_approved(
-            &mut self.state.execution_client.clone(),
-            approval,
-            execution_bearer,
-            session_bearer,
-        )
-        .await?;
+        // The grant is durable, but Gateway must not turn it into a generic
+        // `ResumeRun` call. There is no immutable continuation descriptor or
+        // service-only receipt protocol yet, so this deliberately surfaces an
+        // unavailable continuation rather than claiming the agent restarted.
+        approvals::quarantine_granted_approval_continuation(approval)?;
         Ok(Response::new(outcome.response))
     }
 
@@ -1048,17 +1330,38 @@ impl ModelGateway for GatewayService {
             .ok_or_else(|| Status::permission_denied("a verified user must decide an approval"))?;
         let mut req = request.into_inner();
         req.decided_by = actor.to_owned();
-        let preview = self
-            .state
-            .approvals
-            .preview_resolution_for_owner(
-                &req.approval_id,
-                &req.org_id,
-                false,
-                req.decided_by.clone(),
-                req.comment.clone(),
-            )
-            .map_err(approvals::resolve_err_to_status)?;
+        let preview = self.state.approvals.preview_resolution_for_owner(
+            &req.approval_id,
+            &req.org_id,
+            false,
+            req.decided_by.clone(),
+            req.comment.clone(),
+        );
+        let preview = match preview {
+            Ok(preview) => preview,
+            Err(approvals::ResolveError::NotFound) => {
+                approvals::read_through_approval_for_owner_authenticated(
+                    &self.state.approvals,
+                    &mut self.state.orchestration_client.clone(),
+                    &req.approval_id,
+                    &req.org_id,
+                    session_bearer,
+                    actor,
+                )
+                .await?;
+                self.state
+                    .approvals
+                    .preview_resolution_for_owner(
+                        &req.approval_id,
+                        &req.org_id,
+                        false,
+                        req.decided_by.clone(),
+                        req.comment.clone(),
+                    )
+                    .map_err(approvals::resolve_err_to_status)?
+            }
+            Err(error) => return Err(approvals::resolve_err_to_status(error)),
+        };
         approvals::persist_approval_decision_authenticated(
             &mut self.state.orchestration_client.clone(),
             &preview,
@@ -1098,14 +1401,16 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<RecordTrajectoryRequest>,
     ) -> Result<Response<RecordTrajectoryResponse>, Status> {
-        authorize_rpc(&request, RpcAccess::Write)?;
-        trajectory::handle_record_trajectory(
-            &self.state.trajectories,
-            &*self.state.publisher,
-            request.into_inner(),
-        )
-        .await
-        .map(Response::new)
+        let identity = authorize_rpc(&request, RpcAccess::Write)?;
+        let req = request.into_inner();
+        let run_id = req
+            .trajectory
+            .as_ref()
+            .map_or("", |trajectory| trajectory.run_id.as_str());
+        require_durable_run_owner(&self.state, &identity, run_id).await?;
+        trajectory::handle_record_trajectory(&self.state.trajectories, &*self.state.publisher, req)
+            .await
+            .map(Response::new)
     }
 
     async fn list_trajectories(
@@ -1726,22 +2031,39 @@ fn safe_char_boundary(s: &str, max: usize) -> usize {
 /// # Errors
 /// Returns an error when authentication bootstrap or the server fails.
 pub async fn serve(state: AppState) -> anyhow::Result<()> {
+    serve_with_readiness(state, crate::readiness::GrpcReadiness::new()).await
+}
+
+/// Start the authenticated gRPC listener and update the shared HTTP readiness
+/// gate only after the socket bind succeeds.
+///
+/// # Errors
+///
+/// Returns an error when authentication bootstrap fails, the listener cannot
+/// bind, or the authenticated gRPC server fails while serving.
+pub async fn serve_with_readiness(
+    state: AppState,
+    readiness: crate::readiness::GrpcReadiness,
+) -> anyhow::Result<()> {
     let verifier = grpc_auth::JwtVerifier::from_env().await?;
-    let addr = "0.0.0.0:9090".parse()?;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:9090").await?;
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
         .set_serving::<ModelGatewayServer<GatewayService>>()
         .await;
+    readiness.mark_bound();
     info!("authenticated gRPC listening on :9090");
 
-    tonic::transport::Server::builder()
+    let result = tonic::transport::Server::builder()
         .add_service(health_service)
         .add_service(ModelGatewayServer::with_interceptor(
             GatewayService { state },
             verifier,
         ))
-        .serve(addr)
-        .await?;
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+        .await;
+    readiness.mark_unbound();
+    result?;
 
     Ok(())
 }
@@ -1753,35 +2075,50 @@ mod tests {
     use mp_contracts::model_plane::v1::{
         inference_core_client::InferenceCoreClient,
         inference_core_server::{InferenceCore, InferenceCoreServer},
+        managed_run_lifecycle_client::ManagedRunLifecycleClient,
+        managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
+        run_service_client::RunServiceClient,
+        run_service_server::{RunService, RunServiceServer},
         session_core_client::SessionCoreClient,
         session_core_server::{SessionCore, SessionCoreServer},
         AnalyzeDocumentRequest, AnalyzeDocumentResponse, AnalyzeImageRequest, AnalyzeImageResponse,
         AnalyzeLanguageRequest, AnalyzeLanguageResponse, AppendMessageRequest,
         AppendMessageResponse, BatchTranslateTextRequest, BatchTranslateTextResponse,
-        CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse,
-        CreateEmbeddingRequest, CreateEmbeddingResponse, CreateRealtimeSessionRequest,
-        CreateRealtimeSessionResponse, CreateThreadRequest, CreateThreadResponse,
-        CreateVideoGenerationJobRequest, CreateVideoGenerationJobResponse,
+        CancelRunRequest, CancelRunResponse, CompactNowRequest, CompactNowResponse,
+        CompleteStepRequest, CompleteStepResponse, CreateEmbeddingRequest, CreateEmbeddingResponse,
+        CreateRealtimeSessionRequest, CreateRealtimeSessionResponse, CreateThreadRequest,
+        CreateThreadResponse, CreateVideoGenerationJobRequest, CreateVideoGenerationJobResponse,
         DetectTextLanguageRequest, DetectTextLanguageResponse, Event, ExtractImageTextRequest,
         ExtractImageTextResponse, FinalizeToolActionRequest, FinalizeToolActionResponse,
         GenerateImageRequest, GenerateImageResponse, GeneratedImage, GetContextAssemblyRequest,
         GetContextAssemblyResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse,
-        InferChunk, InferResponse, LanguageAnalysisResult, ListModelsRequest, ListModelsResponse,
-        ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListTranslationLanguagesRequest,
-        ListTranslationLanguagesResponse, ModelInfo, ReplayThreadRequest, ReserveToolActionRequest,
-        ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SpeechVoiceInfo,
+        HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, InferChunk, InferResponse,
+        LanguageAnalysisResult, ListModelsRequest, ListModelsResponse, ListRunsRequest,
+        ListRunsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse,
+        ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ManagedRunSource,
+        ModelInfo, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
+        ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
+        ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail, SaveCheckpointRequest,
+        SaveCheckpointResponse, SpeechVoiceInfo, StartManagedRunRequest, StartManagedRunResponse,
         StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
         StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
-        TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest,
-        TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
+        TerminalOutcome, Trajectory, TranscribeSpeechRequest, TranscribeSpeechResponse,
+        TranslateTextRequest, TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
     };
     use mp_events::publisher::InMemoryPublisher;
-    use std::{pin::Pin, sync::Arc};
-    use tokio::net::TcpListener;
+    use std::{
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use tokio::{net::TcpListener, sync::OnceCell};
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{
         transport::{Endpoint, Server},
         Response,
+    };
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
     };
 
     type MockInferStream = Pin<Box<dyn futures::Stream<Item = Result<InferChunk, Status>> + Send>>;
@@ -2406,6 +2743,169 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct ManagedLifecycleHandles {
+        starts: Arc<Mutex<Vec<StartManagedRunRequest>>>,
+        terminal_outcomes: Arc<Mutex<Vec<(String, RecordTerminalOutcomeRequest)>>>,
+    }
+
+    #[derive(Clone)]
+    struct MockManagedRunLifecycle {
+        handles: ManagedLifecycleHandles,
+    }
+
+    fn managed_source(source: i32) -> Result<ManagedRunSource, Status> {
+        let source = ManagedRunSource::try_from(source)
+            .map_err(|_| Status::invalid_argument("invalid managed terminal source"))?;
+        if source == ManagedRunSource::Unspecified {
+            return Err(Status::invalid_argument(
+                "managed terminal source is required",
+            ));
+        }
+        Ok(source)
+    }
+
+    fn managed_terminal_step(source: ManagedRunSource) -> &'static str {
+        match source {
+            ManagedRunSource::GatewayDirect => "model-gateway-direct-inference-final",
+            ManagedRunSource::ExecutionAgent => "execution-core-agent-final",
+            ManagedRunSource::ExecutionBrowser => "execution-core-browser-final",
+            ManagedRunSource::GatewayAgentDispatchRejected => {
+                "model-gateway-agent-dispatch-rejected"
+            }
+            ManagedRunSource::GatewayBrowser => "model-gateway-browser-agent-final",
+            ManagedRunSource::Unspecified => "",
+        }
+    }
+
+    fn authorization<T>(request: &Request<T>) -> String {
+        request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tonic::async_trait]
+    impl ManagedRunLifecycle for MockManagedRunLifecycle {
+        async fn start_managed_run(
+            &self,
+            request: Request<StartManagedRunRequest>,
+        ) -> Result<Response<StartManagedRunResponse>, Status> {
+            let request = request.into_inner();
+            let source = managed_source(request.terminal_source)?;
+            let thread_id = if request.thread_id.is_empty() {
+                "metadata-only-thread".to_owned()
+            } else {
+                request.thread_id.clone()
+            };
+            self.handles.starts.lock().unwrap().push(request);
+            Ok(Response::new(StartManagedRunResponse {
+                run_id: format!("managed-run-for-{thread_id}"),
+                created_at: None,
+                terminal_step_id: managed_terminal_step(source).to_owned(),
+                already_started: false,
+                thread_id,
+            }))
+        }
+
+        async fn record_terminal_outcome(
+            &self,
+            request: Request<RecordTerminalOutcomeRequest>,
+        ) -> Result<Response<RecordTerminalOutcomeResponse>, Status> {
+            let authorization = authorization(&request);
+            let request = request.into_inner();
+            let source = managed_source(request.source)?;
+            self.handles
+                .terminal_outcomes
+                .lock()
+                .unwrap()
+                .push((authorization.clone(), request.clone()));
+            if authorization != "Bearer gateway-terminalizer-token" {
+                return Err(Status::unauthenticated(
+                    "managed terminal receipt requires the scoped service credential",
+                ));
+            }
+            Ok(Response::new(RecordTerminalOutcomeResponse {
+                run_id: request.run_id,
+                source: source as i32,
+                terminal_step_id: managed_terminal_step(source).to_owned(),
+                step_index: 1,
+                receipt_id: "grpc-managed-receipt".to_owned(),
+                applied_at: None,
+                already_applied: false,
+                reconciliation_required: false,
+            }))
+        }
+
+        async fn heartbeat_managed_run(
+            &self,
+            request: Request<HeartbeatManagedRunRequest>,
+        ) -> Result<Response<HeartbeatManagedRunResponse>, Status> {
+            if authorization(&request) != "Bearer gateway-terminalizer-token" {
+                return Err(Status::unauthenticated(
+                    "managed heartbeat requires the scoped service credential",
+                ));
+            }
+            let _ = managed_source(request.into_inner().source)?;
+            Ok(Response::new(HeartbeatManagedRunResponse {
+                renewed_until: None,
+                already_terminal: false,
+            }))
+        }
+    }
+
+    /// The only durable run owned by the verified test identity. This mock
+    /// deliberately derives the result from the Session Core request, rather
+    /// than trusting a gateway-side cache or request field.
+    struct MockRunService;
+
+    #[tonic::async_trait]
+    impl RunService for MockRunService {
+        async fn get_run(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetRunRequest>,
+        ) -> Result<Response<RunDetail>, Status> {
+            Err(Status::unimplemented("get_run not needed in test"))
+        }
+
+        async fn list_runs(
+            &self,
+            _: Request<ListRunsRequest>,
+        ) -> Result<Response<ListRunsResponse>, Status> {
+            Err(Status::unimplemented("list_runs not needed in test"))
+        }
+
+        async fn cancel_run(
+            &self,
+            _: Request<CancelRunRequest>,
+        ) -> Result<Response<CancelRunResponse>, Status> {
+            Err(Status::unimplemented("cancel_run not needed in test"))
+        }
+
+        async fn resolve_run_owner(
+            &self,
+            request: Request<ResolveRunOwnerRequest>,
+        ) -> Result<Response<ResolveRunOwnerResponse>, Status> {
+            let bearer = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if bearer != Some("Bearer test-session-bearer") {
+                return Err(Status::unauthenticated(
+                    "verified session credential required",
+                ));
+            }
+            let request = request.into_inner();
+            Ok(Response::new(ResolveRunOwnerResponse {
+                authorized: request.run_id == "run-owned"
+                    && request.org_id == "org_test"
+                    && request.user_id == "user_test",
+            }))
+        }
+    }
+
     async fn spawn_inference_client<S: InferenceCore>(
         service: S,
     ) -> InferenceCoreClient<tonic::transport::Channel> {
@@ -2450,7 +2950,79 @@ mod tests {
         SessionCoreClient::new(channel)
     }
 
+    async fn spawn_managed_lifecycle_client(
+        service: MockManagedRunLifecycle,
+    ) -> ManagedRunLifecycleClient<tonic::transport::Channel> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind managed lifecycle");
+        let addr = listener.local_addr().expect("managed lifecycle addr");
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(ManagedRunLifecycleServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("managed lifecycle endpoint")
+            .connect()
+            .await
+            .expect("connect managed lifecycle");
+        ManagedRunLifecycleClient::new(channel)
+    }
+
+    async fn terminal_auth_core_url() -> String {
+        static AUTH_CORE: OnceCell<MockServer> = OnceCell::const_new();
+        let auth_core = AUTH_CORE
+            .get_or_init(|| async {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/api/session-core/internal-token"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "token": "gateway-terminalizer-token",
+                        "expiresInSeconds": 300,
+                        "audience": "session-core"
+                    })))
+                    .mount(&server)
+                    .await;
+                server
+            })
+            .await;
+        auth_core.uri()
+    }
+
+    async fn spawn_run_client<S: RunService>(
+        service: S,
+    ) -> RunServiceClient<tonic::transport::Channel> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind runs");
+        let addr = listener.local_addr().expect("runs addr");
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(RunServiceServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("runs endpoint")
+            .connect()
+            .await
+            .expect("connect runs");
+        RunServiceClient::new(channel)
+    }
+
     async fn test_service<S>(inference_service: S) -> (GatewayService, Arc<DynPublisher>)
+    where
+        S: InferenceCore,
+    {
+        let (service, publisher, _) = test_service_with_lifecycle(inference_service).await;
+        (service, publisher)
+    }
+
+    async fn test_service_with_lifecycle<S>(
+        inference_service: S,
+    ) -> (GatewayService, Arc<DynPublisher>, ManagedLifecycleHandles)
     where
         S: InferenceCore,
     {
@@ -2459,8 +3031,58 @@ mod tests {
         state.publisher = publisher.clone();
         state.inference_client = spawn_inference_client(inference_service).await;
         state.session_client = spawn_session_client(MockSessionCore).await;
+        let handles = ManagedLifecycleHandles::default();
+        state.managed_run_client = spawn_managed_lifecycle_client(MockManagedRunLifecycle {
+            handles: handles.clone(),
+        })
+        .await;
+        state
+            .configure_managed_terminalization(
+                &terminal_auth_core_url().await,
+                "model-gateway",
+                "test-model-gateway-service-credential",
+            )
+            .expect("configure scoped terminalization credential");
 
+        (GatewayService { state }, publisher, handles)
+    }
+
+    async fn test_run_ownership_service() -> (GatewayService, Arc<DynPublisher>) {
+        let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+        let mut state = AppState::new();
+        state.publisher = publisher.clone();
+        state.session_client = spawn_session_client(MockSessionCore).await;
+        state.run_client = spawn_run_client(MockRunService).await;
         (GatewayService { state }, publisher)
+    }
+
+    fn assert_direct_managed_terminal(
+        handles: &ManagedLifecycleHandles,
+        outcome: TerminalOutcome,
+        failure_code: &str,
+    ) {
+        let starts = handles.starts.lock().unwrap();
+        assert_eq!(
+            starts.len(),
+            1,
+            "Gateway must use exactly one managed start"
+        );
+        assert_eq!(
+            starts[0].terminal_source,
+            ManagedRunSource::GatewayDirect as i32,
+            "Gateway direct inference must bind the direct terminal owner at start"
+        );
+        let thread_id = starts[0].thread_id.clone();
+        drop(starts);
+
+        let receipts = handles.terminal_outcomes.lock().unwrap();
+        assert_eq!(receipts.len(), 1, "Gateway must submit exactly one receipt");
+        let (authorization, receipt) = &receipts[0];
+        assert_eq!(authorization, "Bearer gateway-terminalizer-token");
+        assert_eq!(receipt.run_id, format!("managed-run-for-{thread_id}"));
+        assert_eq!(receipt.source, ManagedRunSource::GatewayDirect as i32);
+        assert_eq!(receipt.outcome, outcome as i32);
+        assert_eq!(receipt.failure_code, failure_code);
     }
 
     fn make_request(content: &str) -> InvokeRequest {
@@ -2485,14 +3107,225 @@ mod tests {
     }
 
     fn authenticated<T>(value: T) -> Request<T> {
+        authenticated_as(value, "org_test", "user_test")
+    }
+
+    fn authenticated_as<T>(value: T, org_id: &str, user_id: &str) -> Request<T> {
         let mut request = Request::new(value);
         request.extensions_mut().insert(
-            crate::grpc_auth::VerifiedIdentity::user_with_downstream_for_test(
-                "org_test",
-                "user_test",
-            ),
+            crate::grpc_auth::VerifiedIdentity::user_with_downstream_for_test(org_id, user_id),
         );
         request
+    }
+
+    fn enter_plan_request(run_id: &str) -> EnterPlanModeRequest {
+        EnterPlanModeRequest {
+            request_id: "request-enter".to_owned(),
+            org_id: "org_test".to_owned(),
+            run_id: run_id.to_owned(),
+            session_id: "session-test".to_owned(),
+            rationale: "review first".to_owned(),
+            ttl_seconds: 60,
+        }
+    }
+
+    fn exit_plan_request(run_id: &str) -> ExitPlanModeRequest {
+        ExitPlanModeRequest {
+            request_id: "request-exit".to_owned(),
+            org_id: "org_test".to_owned(),
+            run_id: run_id.to_owned(),
+            session_id: "session-test".to_owned(),
+        }
+    }
+
+    fn record_trajectory_request(run_id: &str) -> RecordTrajectoryRequest {
+        RecordTrajectoryRequest {
+            request_id: "request-trajectory".to_owned(),
+            trajectory: Some(Trajectory {
+                trajectory_id: String::new(),
+                org_id: "org_test".to_owned(),
+                run_id: run_id.to_owned(),
+                task_pattern: "security-regression".to_owned(),
+                goal: "prove authorization".to_owned(),
+                planned_actions: Vec::new(),
+                executed_actions: Vec::new(),
+                outcome: "success".to_owned(),
+                duration_sec: 1.0,
+                skills_used: Vec::new(),
+                cost_usd: 0.0,
+                model: "test".to_owned(),
+                created_at_unix: 0,
+            }),
+        }
+    }
+
+    async fn assert_no_run_scoped_side_effects(
+        service: &GatewayService,
+        publisher: &DynPublisher,
+        run_id: &str,
+    ) {
+        assert!(
+            !service.state.plan_mode.is_plan_mode("org_test", run_id).0,
+            "an unauthorized run id must not alter plan-mode state"
+        );
+        let stored = trajectory::handle_list_trajectories(
+            &service.state.trajectories,
+            ListTrajectoriesRequest {
+                request_id: "request-list".to_owned(),
+                org_id: "org_test".to_owned(),
+                outcome_filter: String::new(),
+                pattern_filter: String::new(),
+                since_unix: 0,
+                limit: 10,
+            },
+        )
+        .await
+        .expect("local trajectory inspection");
+        assert!(
+            stored.trajectories.is_empty(),
+            "an unauthorized run id must not enter the trajectory store"
+        );
+        assert!(
+            publisher.drain().is_empty(),
+            "an unauthorized run id must not publish a run event"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_user_run_id_cannot_mutate_or_publish_plan_or_trajectory_state() {
+        let (service, publisher) = test_run_ownership_service().await;
+        let attacker = "user-other";
+        let run_id = "run-other-user";
+
+        for error in [
+            service
+                .enter_plan_mode(authenticated_as(
+                    enter_plan_request(run_id),
+                    "org_test",
+                    attacker,
+                ))
+                .await
+                .expect_err("a different user must not enter plan mode for this run"),
+            service
+                .exit_plan_mode(authenticated_as(
+                    exit_plan_request(run_id),
+                    "org_test",
+                    attacker,
+                ))
+                .await
+                .expect_err("a different user must not exit plan mode for this run"),
+            service
+                .record_trajectory(authenticated_as(
+                    record_trajectory_request(run_id),
+                    "org_test",
+                    attacker,
+                ))
+                .await
+                .expect_err("a different user must not record this run trajectory"),
+        ] {
+            assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        }
+
+        assert_no_run_scoped_side_effects(&service, &publisher, run_id).await;
+    }
+
+    #[tokio::test]
+    async fn wrong_org_run_id_cannot_mutate_or_publish_plan_or_trajectory_state() {
+        let (service, publisher) = test_run_ownership_service().await;
+        // The request still names the caller's authenticated org. The foreign
+        // run id is what must be checked against Session Core's durable owner.
+        let run_id = "run-other-org";
+
+        for error in [
+            service
+                .enter_plan_mode(authenticated(enter_plan_request(run_id)))
+                .await
+                .expect_err("a different org's run must not enter plan mode"),
+            service
+                .exit_plan_mode(authenticated(exit_plan_request(run_id)))
+                .await
+                .expect_err("a different org's run must not exit plan mode"),
+            service
+                .record_trajectory(authenticated(record_trajectory_request(run_id)))
+                .await
+                .expect_err("a different org's run must not record a trajectory"),
+        ] {
+            assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        }
+
+        assert_no_run_scoped_side_effects(&service, &publisher, run_id).await;
+    }
+
+    #[tokio::test]
+    async fn durable_run_owner_can_mutate_and_publish_plan_and_trajectory_state() {
+        let (service, publisher) = test_run_ownership_service().await;
+
+        service
+            .enter_plan_mode(authenticated(enter_plan_request("run-owned")))
+            .await
+            .expect("durable owner may enter plan mode");
+        assert!(
+            service
+                .state
+                .plan_mode
+                .is_plan_mode("org_test", "run-owned")
+                .0
+        );
+
+        let trajectory = service
+            .record_trajectory(authenticated(record_trajectory_request("run-owned")))
+            .await
+            .expect("durable owner may record a trajectory")
+            .into_inner();
+        assert!(trajectory.published);
+
+        let exited = service
+            .exit_plan_mode(authenticated(exit_plan_request("run-owned")))
+            .await
+            .expect("durable owner may exit plan mode")
+            .into_inner();
+        assert!(exited.was_active);
+        assert!(
+            !service
+                .state
+                .plan_mode
+                .is_plan_mode("org_test", "run-owned")
+                .0
+        );
+
+        let events = publisher.drain();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .all(|(subject, _)| subject == "mp.v1.run.run-owned.event"));
+    }
+
+    #[tokio::test]
+    async fn authenticated_send_message_is_quarantined_before_publish() {
+        let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+        let mut state = AppState::new();
+        state.publisher = publisher.clone();
+        let service = GatewayService { state };
+
+        for subject in ["agents.worker-1", "org.org_test.events", "notify.user_test"] {
+            let error = service
+                .send_message(authenticated(SendMessageRequest {
+                    request_id: "request-test".to_owned(),
+                    org_id: "org_test".to_owned(),
+                    subject: subject.to_owned(),
+                    payload_json: r#"{\"message\":\"must not publish\"}"#.to_owned(),
+                    idempotency_key: "idempotency-test".to_owned(),
+                }))
+                .await
+                .expect_err("authenticated SendMessage must be quarantined");
+
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+
+        assert!(
+            publisher.drain().is_empty(),
+            "the public SendMessage RPC must not publish to an ambient subject"
+        );
     }
 
     #[tokio::test]
@@ -2536,7 +3369,7 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_returns_inference_response_and_emits_events() {
-        let (service, publisher) = test_service(MockInferenceOk).await;
+        let (service, publisher, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
 
         let response = service
             .invoke(authenticated(make_request("hello")))
@@ -2554,13 +3387,37 @@ mod tests {
         assert!(drained
             .iter()
             .any(|(subject, _)| subject.starts_with("mp.v1.usage.")));
+        assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Completed, "");
+    }
+
+    #[tokio::test]
+    async fn invoke_uses_an_opaque_scoped_idempotency_key_for_its_managed_start() {
+        let (service, _, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
+        let mut request = make_request("hello");
+        request.request_id = "request-123".to_owned();
+        request.idempotency_key = "retry-key-123".to_owned();
+
+        service
+            .invoke(authenticated(request))
+            .await
+            .expect("invoke with a stable retry key");
+
+        let starts = lifecycle.starts.lock().unwrap();
+        assert_eq!(starts.len(), 1);
+        assert!(starts[0].start_key.starts_with("msk-v1-"));
+        assert_ne!(starts[0].start_key, "retry-key-123");
+        assert!(
+            !starts[0].start_key.contains("retry-key-123"),
+            "a durable start key must never echo public client retry data"
+        );
     }
 
     #[tokio::test]
     async fn zdr_invoke_suppresses_gateway_events_and_durable_session_side_effects() {
-        let (service, publisher) = test_service(MockInferenceOk).await;
+        let (service, publisher, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
         let mut request = make_request("ephemeral prompt");
         request.zdr = true;
+        request.idempotency_key = "private-customer-invoice-891".to_owned();
 
         let response = service
             .invoke(authenticated(request))
@@ -2570,11 +3427,24 @@ mod tests {
 
         assert_eq!(response.content, "hello");
         assert!(publisher.drain().is_empty(), "ZDR must publish no events");
+        let starts = lifecycle.starts.lock().unwrap();
+        assert_eq!(
+            starts.len(),
+            1,
+            "ZDR still has one metadata-only managed run"
+        );
+        assert!(starts[0].goal.is_empty());
+        assert!(starts[0].agent_id.is_empty());
+        assert!(starts[0].start_key.starts_with("msk-v1-"));
+        assert!(
+            !starts[0].start_key.contains("private-customer-invoice-891"),
+            "raw ZDR idempotency text must not cross the durable StartManagedRun boundary"
+        );
     }
 
     #[tokio::test]
     async fn invoke_returns_internal_when_inference_unavailable() {
-        let (service, publisher) = test_service(MockInferenceDown).await;
+        let (service, publisher, lifecycle) = test_service_with_lifecycle(MockInferenceDown).await;
 
         let error = service
             .invoke(authenticated(make_request("hello")))
@@ -2589,11 +3459,12 @@ mod tests {
         assert!(!drained
             .iter()
             .any(|(subject, _)| subject.starts_with("mp.v1.usage.")));
+        assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Failed, "provider_unavailable");
     }
 
     #[tokio::test]
     async fn invoke_stream_forwards_chunks_and_done() {
-        let (service, _) = test_service(MockInferenceOk).await;
+        let (service, _, lifecycle) = test_service_with_lifecycle(MockInferenceOk).await;
 
         let response = service
             .invoke_stream(authenticated(make_request("hello")))
@@ -2611,17 +3482,19 @@ mod tests {
         assert!(last.done);
         assert_eq!(last.input_tokens, 2);
         assert_eq!(last.output_tokens, 3);
+        assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Completed, "");
     }
 
     #[tokio::test]
     async fn invoke_stream_returns_internal_when_inference_unavailable() {
-        let (service, _) = test_service(MockInferenceDown).await;
+        let (service, _, lifecycle) = test_service_with_lifecycle(MockInferenceDown).await;
 
         let error = service
             .invoke_stream(authenticated(make_request("hello")))
             .await
             .expect_err("invoke_stream should fail");
         assert_eq!(error.code(), tonic::Code::Internal);
+        assert_direct_managed_terminal(&lifecycle, TerminalOutcome::Failed, "provider_unavailable");
     }
 
     #[tokio::test]

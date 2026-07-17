@@ -10623,6 +10623,64 @@ pub mod orchestration_core_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn claim_approval_deliveries(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ClaimApprovalDeliveriesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ClaimApprovalDeliveriesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "ClaimApprovalDeliveries",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn acknowledge_approval_delivery(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AcknowledgeApprovalDeliveryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AcknowledgeApprovalDeliveryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "AcknowledgeApprovalDelivery",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn get_subagent_lineage(
             &mut self,
             request: impl tonic::IntoRequest<super::GetSubagentLineageRequest>,
@@ -10823,6 +10881,20 @@ pub mod orchestration_core_service_server {
             request: tonic::Request<super::DecideApprovalRequest>,
         ) -> std::result::Result<
             tonic::Response<super::DecideApprovalResponse>,
+            tonic::Status,
+        >;
+        async fn claim_approval_deliveries(
+            &self,
+            request: tonic::Request<super::ClaimApprovalDeliveriesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ClaimApprovalDeliveriesResponse>,
+            tonic::Status,
+        >;
+        async fn acknowledge_approval_delivery(
+            &self,
+            request: tonic::Request<super::AcknowledgeApprovalDeliveryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AcknowledgeApprovalDeliveryResponse>,
             tonic::Status,
         >;
         async fn get_subagent_lineage(
@@ -11451,6 +11523,113 @@ pub mod orchestration_core_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = DecideApprovalSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries" => {
+                    #[allow(non_camel_case_types)]
+                    struct ClaimApprovalDeliveriesSvc<T: OrchestrationCoreService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<super::ClaimApprovalDeliveriesRequest>
+                    for ClaimApprovalDeliveriesSvc<T> {
+                        type Response = super::ClaimApprovalDeliveriesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::ClaimApprovalDeliveriesRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::claim_approval_deliveries(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ClaimApprovalDeliveriesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery" => {
+                    #[allow(non_camel_case_types)]
+                    struct AcknowledgeApprovalDeliverySvc<T: OrchestrationCoreService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<
+                        super::AcknowledgeApprovalDeliveryRequest,
+                    > for AcknowledgeApprovalDeliverySvc<T> {
+                        type Response = super::AcknowledgeApprovalDeliveryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::AcknowledgeApprovalDeliveryRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::acknowledge_approval_delivery(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AcknowledgeApprovalDeliverySvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

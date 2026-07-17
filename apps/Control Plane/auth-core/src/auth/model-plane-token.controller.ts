@@ -46,9 +46,11 @@ import { DirectNatsService } from '../nats/direct-nats.service';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import { ConvexTokenService } from './convex-token.service';
+import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
   type AuthorizedPlaneServicePrincipal,
+  loadPlaneServicePrincipalRegistry,
   ServicePrincipalConfigurationError,
 } from './plane-service-principal';
 import {
@@ -161,13 +163,25 @@ export class ModelPlaneTokenController {
     // array — the gateway rejects admin actions with 403.
     const scopes = modelGatewayScopesForRole(sessionContext.role);
 
-    const bundle = this.convexTokenService.issueModelPlaneToken({
-      userId: session.user.id,
-      orgId: sessionContext.orgId,
-      zdr: true,
-      email: session.user.email ?? undefined,
-      scopes: scopes.length > 0 ? scopes : undefined,
-    });
+    let bundle;
+    try {
+      bundle = this.convexTokenService.issueModelPlaneToken({
+        userId: session.user.id,
+        orgId: sessionContext.orgId,
+        email: session.user.email ?? undefined,
+        scopes: scopes.length > 0 ? scopes : undefined,
+      });
+    } catch (error) {
+      if (error instanceof InteractiveRetentionPolicyConfigurationError) {
+        this.logger.error(
+          'Interactive retention policy unavailable; refusing Model token issuance',
+        );
+        throw new ServiceUnavailableException(
+          'Interactive retention policy is unavailable',
+        );
+      }
+      throw error;
+    }
 
     return {
       ...bundle,
@@ -190,14 +204,23 @@ export class ModelPlaneTokenController {
     @NestHeaders('x-service-id') serviceId: string | undefined,
     @NestHeaders('x-service-api-key') credential: string | undefined,
     @Body() body: ModelPlaneInternalTokenBody,
+    @NestHeaders('x-zdr') requestedZdr?: string,
   ) {
+    if (
+      requestedZdr !== undefined ||
+      Object.prototype.hasOwnProperty.call(body, 'zdr')
+    ) {
+      throw new BadRequestException(
+        'Retention posture is selected by deployment policy',
+      );
+    }
     const orgId = (body.orgId ?? '').trim();
     const scopes = Array.isArray(body.scopes) ? body.scopes : [];
     const reason = (body.reason ?? '').trim();
     let principal: AuthorizedPlaneServicePrincipal;
     try {
       principal = authorizePlaneServicePrincipal(
-        process.env.PLANE_SERVICE_PRINCIPALS_JSON ?? '',
+        loadPlaneServicePrincipalRegistry(),
         {
           serviceId: serviceId ?? '',
           credential: credential ?? '',
@@ -221,11 +244,14 @@ export class ModelPlaneTokenController {
     const response = this.convexTokenService.issueModelPlaneToken({
       userId: principal.subject,
       orgId: principal.orgId,
-      zdr: true,
       scopes: principal.scopes,
       principalType: 'service',
       serviceId: principal.serviceId,
       reason: principal.reason,
+      retentionPosture: {
+        zdr: principal.zdr,
+        authority: 'service-principal-policy',
+      },
     });
     const event = 'model_service_token_issued';
     let audited = false;
@@ -251,7 +277,7 @@ export class ModelPlaneTokenController {
             audience: 'model-gateway',
             scopes: principal.scopes,
             reason: principal.reason,
-            zdr: true,
+            zdr: principal.zdr,
           },
         },
       );

@@ -435,7 +435,11 @@ type ResumeRunRequest struct {
 	// Optional checkpoint to resume from (empty = latest).
 	CheckpointId string `protobuf:"bytes,2,opt,name=checkpoint_id,json=checkpointId,proto3" json:"checkpoint_id,omitempty"`
 	// Tenant identifier.
-	OrgId         string `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	OrgId string `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Durable granted approval authorizing an AwaitingApproval -> Running
+	// transition. Empty is valid only for a user-paused run; it can never
+	// resume an approval gate.
+	ApprovalId    string `protobuf:"bytes,4,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -487,6 +491,13 @@ func (x *ResumeRunRequest) GetCheckpointId() string {
 func (x *ResumeRunRequest) GetOrgId() string {
 	if x != nil {
 		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResumeRunRequest) GetApprovalId() string {
+	if x != nil {
+		return x.ApprovalId
 	}
 	return ""
 }
@@ -685,11 +696,13 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x04 \x01(\tR\x05error\x121\n" +
-	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\"e\n" +
+	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\"\x86\x01\n" +
 	"\x10ResumeRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n" +
 	"\rcheckpoint_id\x18\x02 \x01(\tR\fcheckpointId\x12\x15\n" +
-	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"L\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x1f\n" +
+	"\vapproval_id\x18\x04 \x01(\tR\n" +
+	"approvalId\"L\n" +
 	"\x11ResumeRunResponse\x12\x18\n" +
 	"\aresumed\x18\x01 \x01(\bR\aresumed\x12\x1d\n" +
 	"\n" +

@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use sqlx::PgPool;
 
-use crate::chunker::{chunk_text, ChunkConfig};
+use crate::chunker::{chunk_text, Chunk, ChunkConfig};
 use crate::fingerprint::{content_hash, stable_chunk_id};
 use crate::normalizer::normalize;
 
@@ -22,7 +24,18 @@ pub struct BuildResult {
     pub document_id: String,
     #[allow(dead_code)] // surfaced via Debug + future API responses
     pub chunks_created: usize,
+    // The full durable set for this (re)build, in chunk order — reused and
+    // newly-embedded alike. Surfaced via Debug + future API responses; the
+    // stream drives embedding off `pending_knowledge_ids` instead.
+    #[allow(dead_code)]
     pub knowledge_ids: Vec<String>,
+    // Subset of `knowledge_ids` that this build actually (re)inserted as
+    // 'pending' — the chunks the embedding-engine must embed. Chunks whose
+    // content is byte-identical to a prior 'done' unit are reused (their vector
+    // is already live in Qdrant under the identical knowledge_id) and are
+    // omitted here, so the stream never re-publishes them for embedding. On a
+    // first build this equals `knowledge_ids`; on a no-op re-crawl it is empty.
+    pub pending_knowledge_ids: Vec<String>,
     // Knowledge IDs that existed before this (re)build but no longer do —
     // their vectors must be purged from Qdrant to avoid stale retrieval hits
     // after a content update. Empty on first build.
@@ -63,6 +76,45 @@ fn chunk_identity(document_id: &str, chunk_index: usize, text: &str) -> (String,
     (hash, kid)
 }
 
+/// A chunk's durable identity plus whether its embedding can be reused.
+struct ChunkPlan {
+    hash: String,
+    kid: String,
+    /// True when `kid` is already present as an `embedding_status = 'done'`
+    /// unit — its vector is live in Qdrant under this exact id, so the chunk
+    /// needs no re-insert and no re-embed.
+    reused: bool,
+}
+
+/// Decide, in chunk order, which chunks can reuse an existing embedding.
+///
+/// A chunk is reused only when its content-derived `knowledge_id`
+/// (`document_id` + `chunk_index` + `content_hash`) exactly matches a prior
+/// `'done'` unit. That equality is what makes reuse correct: the embedding
+/// vector lives solely in Qdrant keyed by `knowledge_id`, and the
+/// embedding-engine marks a unit `'done'` only after that vector is upserted —
+/// so an identical id guarantees the right vector is already retrievable.
+///
+/// Reuse is deliberately exact-identity only. A near-duplicate (footer/date
+/// churn, whitespace) produces a different `content_hash`, hence a different
+/// `knowledge_id`, and the reusable vector is keyed by the *old* id. Carrying
+/// it forward would either mark a new id `'done'` with no vector under it
+/// (silently unretrievable) or pin the stale old id and text — both break
+/// correctness, and re-keying the Qdrant point belongs to the embedding-engine
+/// across the plane boundary, not here. Exact reuse already spares every
+/// unchanged chunk, which on a typical re-crawl is all but the one holding the
+/// churned line.
+fn plan_chunks(document_id: &str, chunks: &[Chunk], prior_done: &HashSet<String>) -> Vec<ChunkPlan> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let (hash, kid) = chunk_identity(document_id, chunk.index, &chunk.text);
+            let reused = prior_done.contains(&kid);
+            ChunkPlan { hash, kid, reused }
+        })
+        .collect()
+}
+
 pub async fn process_document(
     pool: &PgPool,
     event: &DocumentEvent,
@@ -97,6 +149,7 @@ pub async fn process_document(
             document_id: event.document_id.clone(),
             chunks_created: 0,
             knowledge_ids: vec![],
+            pending_knowledge_ids: vec![],
             orphaned_knowledge_ids: vec![],
         });
     };
@@ -107,6 +160,7 @@ pub async fn process_document(
             document_id: event.document_id.clone(),
             chunks_created: 0,
             knowledge_ids: vec![],
+            pending_knowledge_ids: vec![],
             orphaned_knowledge_ids: vec![],
         });
     }
@@ -114,21 +168,31 @@ pub async fn process_document(
     let normalized = normalize(&content);
     let chunks = chunk_text(&normalized, chunk_config);
 
-    // Capture old chunk IDs up front so an update that produces zero chunks
-    // (e.g. content cleared) still purges the prior vectors.
-    let old_kids: Vec<(String, i32, String)> = sqlx::query_as(
-        "SELECT knowledge_id, chunk_index, content_hash FROM knowledge_units WHERE document_id = $1 AND org_id = $2 FOR UPDATE",
+    // Capture the prior knowledge units up front so an update that produces zero
+    // chunks (e.g. content cleared) still purges the prior vectors, and so we can
+    // reuse embeddings for chunks that are unchanged on re-crawl. We read
+    // `embedding_status` because only a 'done' unit has a committed Qdrant vector
+    // to reuse (the embedding-engine marks 'done' only after the upsert).
+    let old_units: Vec<(String, i32, String, String)> = sqlx::query_as(
+        "SELECT knowledge_id, chunk_index, content_hash, embedding_status FROM knowledge_units WHERE document_id = $1 AND org_id = $2 FOR UPDATE",
     )
     .bind(&event.document_id)
     .bind(&event.org_id)
     .fetch_all(&mut *tx)
     .await
     .unwrap_or_default();
-    let old_kid_ids: Vec<String> = old_kids.iter().map(|(kid, _, _)| kid.clone()).collect();
+    let old_kid_ids: Vec<String> = old_units.iter().map(|(kid, _, _, _)| kid.clone()).collect();
+    // Prior chunks whose vector is already live in Qdrant, keyed by their exact
+    // (content-derived) knowledge_id. Only these are reuse candidates.
+    let prior_done: HashSet<String> = old_units
+        .iter()
+        .filter(|(_, _, _, status)| status == "done")
+        .map(|(kid, _, _, _)| kid.clone())
+        .collect();
 
     if chunks.is_empty() {
         tracing::warn!(document_id = %event.document_id, "no chunks produced");
-        if !old_kids.is_empty() {
+        if !old_units.is_empty() {
             crate::outbox::enqueue_intent(
                 &mut tx,
                 &event.org_id,
@@ -150,36 +214,55 @@ pub async fn process_document(
             document_id: event.document_id.clone(),
             chunks_created: 0,
             knowledge_ids: vec![],
+            pending_knowledge_ids: vec![],
             // Every prior chunk is now orphaned (document has no content).
             orphaned_knowledge_ids: old_kid_ids,
         });
     }
 
-    let reindex = !old_kids.is_empty();
+    let reindex = !old_units.is_empty();
 
-    sqlx::query("DELETE FROM knowledge_units WHERE document_id = $1 AND org_id = $2")
-        .bind(&event.document_id)
-        .bind(&event.org_id)
-        .execute(&mut *tx)
-        .await?;
+    // Plan every chunk's identity in memory (chunk_identity is pure), marking
+    // which ones can reuse an existing embedding. See `plan_chunks` for why
+    // reuse is exact-identity only.
+    let plans = plan_chunks(&event.document_id, &chunks, &prior_done);
+    let reused_kids: Vec<String> = plans
+        .iter()
+        .filter(|plan| plan.reused)
+        .map(|plan| plan.kid.clone())
+        .collect();
+
+    // Delete only the prior rows we are NOT reusing (changed, removed, or
+    // never-embedded chunks). Reused 'done' rows stay put, so their Qdrant
+    // vector and embedded_at timestamp are preserved untouched. When nothing is
+    // reused, `<> ALL('{}')` is TRUE for every row, reproducing the original
+    // delete-all-then-reinsert behavior exactly.
+    sqlx::query(
+        "DELETE FROM knowledge_units WHERE document_id = $1 AND org_id = $2 AND knowledge_id <> ALL($3::text[])",
+    )
+    .bind(&event.document_id)
+    .bind(&event.org_id)
+    .bind(&reused_kids)
+    .execute(&mut *tx)
+    .await?;
 
     let mut knowledge_ids = Vec::with_capacity(chunks.len());
+    // The chunks the embedding-engine must embed — reused chunks are omitted so
+    // the stream never re-publishes an already-embedded unit.
+    let mut pending_knowledge_ids = Vec::new();
 
-    for chunk in &chunks {
-        // knowledge_id is a pure function of (document_id, chunk_index,
-        // content_hash); no database state is consulted here. Two per-chunk
-        // SELECTs used to run at this point — an existence COUNT(*) on
-        // knowledge_id, and a near-duplicate ("Phase 5 cost graft") lookup for a
-        // prior 'done' unit at the same (document_id, chunk_index). Both were
-        // unreachable at runtime: the unconditional
-        // `DELETE FROM knowledge_units WHERE document_id = $1 AND org_id = $2`
-        // above runs in THIS transaction, so each query could only observe the
-        // post-delete state — the COUNT was always 0, and the 'done' lookup
-        // always returned no rows (rows re-inserted below are 'pending'). Every
-        // chunk therefore always fell through to the INSERT. Computing the
-        // identity in-memory preserves that outcome exactly while removing two
-        // round-trips per chunk.
-        let (hash, kid) = chunk_identity(&event.document_id, chunk.index, &chunk.text);
+    for (chunk, plan) in chunks.iter().zip(plans.iter()) {
+        if plan.reused {
+            // Row already exists and is 'done'; its vector is live in Qdrant
+            // under this identical id. Nothing to write or embed.
+            tracing::debug!(
+                document_id = %event.document_id,
+                chunk_index = chunk.index,
+                "unchanged chunk; reusing existing embedding (skip re-embed)"
+            );
+            knowledge_ids.push(plan.kid.clone());
+            continue;
+        }
 
         let metadata = serde_json::json!({
             "title": event.title,
@@ -197,22 +280,23 @@ pub async fn process_document(
             ON CONFLICT (knowledge_id) DO NOTHING
             "#,
         )
-        .bind(&kid)
+        .bind(&plan.kid)
         .bind(&event.document_id)
         .bind(&event.org_id)
         .bind(chunk.index as i32)
         .bind(&chunk.text)
-        .bind(&hash)
+        .bind(&plan.hash)
         .bind(&metadata)
         .execute(&mut *tx)
         .await?;
 
-        knowledge_ids.push(kid);
+        knowledge_ids.push(plan.kid.clone());
+        pending_knowledge_ids.push(plan.kid.clone());
     }
 
     // Persist chunk lineage on reindex
     if reindex {
-        for (old_kid, old_idx, old_hash) in &old_kids {
+        for (old_kid, old_idx, old_hash, _status) in &old_units {
             let new_kid = knowledge_ids
                 .get(*old_idx as usize)
                 .unwrap_or(&knowledge_ids[0]);
@@ -235,20 +319,29 @@ pub async fn process_document(
         }
         tracing::info!(
             document_id = %event.document_id,
-            old_chunks = old_kids.len(),
+            old_chunks = old_units.len(),
             new_chunks = knowledge_ids.len(),
             "chunk lineage recorded"
         );
     }
 
-    // Update document status to processing
-    sqlx::query(
-        "UPDATE documents SET status = 'processing' WHERE document_id = $1 AND org_id = $2",
-    )
-    .bind(&event.document_id)
-    .bind(&event.org_id)
-    .execute(&mut *tx)
-    .await?;
+    // Move the document to 'processing' while its pending chunks await
+    // embedding. If every chunk was reused there is nothing to embed, so the
+    // embedding-engine (triggered per pending chunk) never runs for this event —
+    // mark the doc 'indexed' here since all its vectors are already live in
+    // Qdrant. In the partial case the embedding-engine flips it to 'indexed'
+    // once the pending batch lands, because its reused peers are already 'done'.
+    let doc_status = if pending_knowledge_ids.is_empty() {
+        "indexed"
+    } else {
+        "processing"
+    };
+    sqlx::query("UPDATE documents SET status = $3 WHERE document_id = $1 AND org_id = $2")
+        .bind(&event.document_id)
+        .bind(&event.org_id)
+        .bind(doc_status)
+        .execute(&mut *tx)
+        .await?;
 
     tracing::info!(
         document_id = %event.document_id,
@@ -275,6 +368,7 @@ pub async fn process_document(
         document_id: event.document_id.clone(),
         chunks_created: chunks.len(),
         knowledge_ids,
+        pending_knowledge_ids,
         orphaned_knowledge_ids,
     })
 }
@@ -284,10 +378,19 @@ pub async fn process_document(
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_document_is_indexable, chunk_identity, orphaned_ids, process_document,
-        DocumentEvent,
+        canonical_document_is_indexable, chunk_identity, orphaned_ids, plan_chunks,
+        process_document, DocumentEvent,
     };
-    use crate::chunker::ChunkConfig;
+    use crate::chunker::{Chunk, ChunkConfig};
+    use std::collections::HashSet;
+
+    fn chunk(index: usize, text: &str) -> Chunk {
+        Chunk {
+            index,
+            text: text.to_string(),
+            estimated_tokens: text.len() / 4 + 1,
+        }
+    }
 
     #[test]
     fn canonical_document_gate_fails_closed_for_deleted_restricted_and_unknown_rows() {
@@ -367,6 +470,181 @@ mod tests {
         assert_eq!(counts, (3, 0));
     }
 
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
+    async fn re_crawl_reuses_unchanged_embeddings_and_re_embeds_only_changed_chunks() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL must point to disposable PostgreSQL");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("disposable postgres");
+        sqlx::raw_sql(
+            r#"
+            DROP TABLE IF EXISTS chunk_lineage, index_deletion_outbox, knowledge_units, documents;
+            CREATE TABLE documents (
+              document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, content TEXT NOT NULL,
+              deleted_at TIMESTAMPTZ, zdr_classification TEXT NOT NULL, status TEXT
+            );
+            CREATE TABLE knowledge_units (
+              knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL,
+              chunk_index INTEGER NOT NULL, text TEXT NOT NULL,
+              embedding_status TEXT NOT NULL DEFAULT 'pending', content_hash TEXT,
+              chunk_version TEXT NOT NULL DEFAULT '1', metadata JSONB NOT NULL DEFAULT '{}',
+              embedding_model TEXT, embedded_at TIMESTAMPTZ,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE TABLE index_deletion_outbox (
+              outbox_id BIGSERIAL PRIMARY KEY, org_id TEXT NOT NULL, document_id TEXT NOT NULL,
+              knowledge_ids JSONB NOT NULL, user_id TEXT, idempotency_key TEXT UNIQUE NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE TABLE chunk_lineage (
+              id BIGSERIAL PRIMARY KEY, document_id TEXT NOT NULL, old_knowledge_id TEXT NOT NULL,
+              new_knowledge_id TEXT NOT NULL, old_chunk_index INTEGER, old_content_hash TEXT, reason TEXT
+            );
+            INSERT INTO documents VALUES
+              ('doc-reuse','org-reuse',E'alpha\n\nbeta',NULL,'internal','pending');
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("disposable reuse schema");
+
+        // Two paragraphs, tiny budget → exactly two chunks: "alpha" (0), "beta" (1).
+        let cfg = ChunkConfig {
+            chunk_size: 2,
+            chunk_overlap: 0,
+        };
+        let event = |key: &str| DocumentEvent {
+            document_id: "doc-reuse".into(),
+            org_id: "org-reuse".into(),
+            title: "Reuse".into(),
+            source: "fixture".into(),
+            doc_type: "text".into(),
+            user_id: Some("fixture-user".into()),
+            idempotency_key: key.into(),
+            zdr: false,
+        };
+
+        // ── Build 1: first ingest — every chunk is new and must be embedded. ──
+        let r1 = process_document(&pool, &event("reuse-build-1"), &cfg)
+            .await
+            .expect("first build");
+        assert_eq!(r1.chunks_created, 2);
+        assert_eq!(r1.knowledge_ids.len(), 2);
+        assert_eq!(
+            r1.pending_knowledge_ids, r1.knowledge_ids,
+            "first build must embed every chunk"
+        );
+        assert!(r1.orphaned_knowledge_ids.is_empty());
+        let alpha_kid = r1.knowledge_ids[0].clone();
+        let beta_kid = r1.knowledge_ids[1].clone();
+
+        // Simulate the embedding-engine finishing: vectors upserted, rows 'done'.
+        sqlx::query("UPDATE knowledge_units SET embedding_status = 'done', embedded_at = NOW(), embedding_model = 'test-embed'")
+            .execute(&pool)
+            .await
+            .expect("mark done");
+        let embedded_at = |kid: String| {
+            let pool = pool.clone();
+            async move {
+                let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+                    "SELECT embedding_status, embedded_at::text, embedding_model FROM knowledge_units WHERE knowledge_id = $1",
+                )
+                .bind(&kid)
+                .fetch_one(&pool)
+                .await
+                .expect("row present");
+                row
+            }
+        };
+        let alpha_done_before = embedded_at(alpha_kid.clone()).await;
+        let beta_done_before = embedded_at(beta_kid.clone()).await;
+        assert_eq!(alpha_done_before.0, "done");
+        assert!(alpha_done_before.1.is_some());
+
+        // ── Build 2: identical re-crawl — every chunk is reused, none embedded. ──
+        let r2 = process_document(&pool, &event("reuse-build-2"), &cfg)
+            .await
+            .expect("no-op re-crawl");
+        assert_eq!(
+            r2.knowledge_ids,
+            vec![alpha_kid.clone(), beta_kid.clone()],
+            "unchanged chunks keep their exact ids"
+        );
+        assert!(
+            r2.pending_knowledge_ids.is_empty(),
+            "an unchanged re-crawl must embed nothing"
+        );
+        assert!(r2.orphaned_knowledge_ids.is_empty());
+        // Rows are untouched: same 'done' status, same embedded_at, same model.
+        assert_eq!(embedded_at(alpha_kid.clone()).await, alpha_done_before);
+        assert_eq!(embedded_at(beta_kid.clone()).await, beta_done_before);
+        let doc_status: (Option<String>,) =
+            sqlx::query_as("SELECT status FROM documents WHERE document_id = 'doc-reuse'")
+                .fetch_one(&pool)
+                .await
+                .expect("doc row");
+        assert_eq!(
+            doc_status.0.as_deref(),
+            Some("indexed"),
+            "a fully-reused doc is indexed immediately (embedding-engine never runs)"
+        );
+
+        // ── Build 3: chunk 0 changes; chunk 1 ("beta") is unchanged. ──
+        sqlx::query("UPDATE documents SET content = E'ALPHA\n\nbeta' WHERE document_id = 'doc-reuse'")
+            .execute(&pool)
+            .await
+            .expect("edit content");
+        let r3 = process_document(&pool, &event("reuse-build-3"), &cfg)
+            .await
+            .expect("partial re-crawl");
+        assert_eq!(r3.knowledge_ids.len(), 2);
+        // "beta" keeps its id and is reused; the changed chunk gets a fresh id.
+        assert_eq!(r3.knowledge_ids[1], beta_kid, "unchanged neighbor is reused");
+        let alpha2_kid = r3.knowledge_ids[0].clone();
+        assert_ne!(alpha2_kid, alpha_kid, "changed chunk gets a new id");
+        assert_eq!(
+            r3.pending_knowledge_ids,
+            vec![alpha2_kid.clone()],
+            "only the changed chunk is (re)embedded"
+        );
+        assert_eq!(
+            r3.orphaned_knowledge_ids,
+            vec![alpha_kid.clone()],
+            "the superseded chunk id is orphaned for Qdrant purge"
+        );
+        // Unchanged neighbor's embedding is fully preserved.
+        assert_eq!(embedded_at(beta_kid.clone()).await, beta_done_before);
+        // The changed chunk is back to 'pending' awaiting a fresh embedding.
+        let alpha2 = embedded_at(alpha2_kid.clone()).await;
+        assert_eq!(alpha2.0, "pending");
+        assert!(alpha2.1.is_none(), "a pending chunk has no embedded_at");
+        // The old chunk-0 row is gone; exactly the two current chunks remain.
+        let (rows, orphan_outbox): (i64, i64) = sqlx::query_as(
+            "SELECT
+               (SELECT COUNT(*) FROM knowledge_units WHERE document_id = 'doc-reuse'),
+               (SELECT COUNT(*) FROM index_deletion_outbox WHERE document_id = 'doc-reuse')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("counts");
+        assert_eq!(rows, 2, "only the two current chunks persist");
+        assert_eq!(orphan_outbox, 1, "one orphan-deletion intent was enqueued");
+        let doc_status_after: (Option<String>,) =
+            sqlx::query_as("SELECT status FROM documents WHERE document_id = 'doc-reuse'")
+                .fetch_one(&pool)
+                .await
+                .expect("doc row");
+        assert_eq!(
+            doc_status_after.0.as_deref(),
+            Some("processing"),
+            "a doc with a pending chunk stays 'processing' until the embed lands"
+        );
+    }
+
     #[test]
     fn orphaned_ids_returns_removed_chunks() {
         let old = vec!["a".to_string(), "b".to_string(), "c".to_string()];
@@ -417,5 +695,54 @@ mod tests {
         let (h_diff, k_diff) = chunk_identity("doc-1", 0, "different content");
         assert_ne!(h1, h_diff);
         assert_ne!(k1, k_diff);
+    }
+
+    #[test]
+    fn plan_chunks_reuses_only_unchanged_chunks_with_a_prior_done_vector() {
+        // Chunk 0 was already embedded ('done'); chunk 1 is brand new.
+        let (_, kid0) = chunk_identity("doc-x", 0, "alpha");
+        let prior_done: HashSet<String> = [kid0.clone()].into_iter().collect();
+
+        let plans = plan_chunks("doc-x", &[chunk(0, "alpha"), chunk(1, "beta")], &prior_done);
+
+        // Unchanged, already-embedded chunk → reuse the exact same id, no embed.
+        assert!(plans[0].reused, "unchanged 'done' chunk must be reused");
+        assert_eq!(plans[0].kid, kid0);
+        // No prior vector for chunk 1 → must be (re)embedded.
+        assert!(!plans[1].reused, "chunk with no prior 'done' row must re-embed");
+    }
+
+    #[test]
+    fn plan_chunks_re_embeds_on_content_change_or_index_shift() {
+        // A prior 'done' vector exists for "alpha" at chunk_index 0.
+        let (_, kid_idx0) = chunk_identity("doc-x", 0, "alpha");
+        let prior_done: HashSet<String> = [kid_idx0].into_iter().collect();
+
+        // Same text, new position: the id embeds chunk_index, so the id differs
+        // and the reusable Qdrant vector is keyed by the old id → must re-embed.
+        let moved = plan_chunks("doc-x", &[chunk(1, "alpha")], &prior_done);
+        assert!(
+            !moved[0].reused,
+            "same text at a new index gets a new id — must re-embed"
+        );
+
+        // Same position, changed text: new content_hash → new id → must re-embed.
+        let changed = plan_chunks("doc-x", &[chunk(0, "alpha edited")], &prior_done);
+        assert!(
+            !changed[0].reused,
+            "changed content yields a new id — must re-embed"
+        );
+    }
+
+    #[test]
+    fn plan_chunks_ignores_prior_units_that_are_not_done() {
+        // The prior unit exists but was never successfully embedded (empty set of
+        // 'done' ids), so its vector cannot be reused even if the text matches.
+        let prior_done: HashSet<String> = HashSet::new();
+        let plans = plan_chunks("doc-x", &[chunk(0, "alpha")], &prior_done);
+        assert!(
+            !plans[0].reused,
+            "a chunk with no prior 'done' unit must be embedded"
+        );
     }
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
+	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
@@ -33,6 +34,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+const natsInboxPrefix = "_INBOX.CAPABILITY_CORE_RUNTIME"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -101,6 +104,25 @@ func main() {
 	}
 
 	pol := policy.New(reg).WithScopeResolver(scopeStore)
+
+	// Letta's /v1/tools/search searches tool definitions, not memories. When
+	// explicitly configured it is only a discovery ranker; the server
+	// intersects results with the tenant-scoped durable catalog and execution
+	// still performs its own authoritative capability-policy check.
+	lettaConfig, err := lettatools.ConfigFromLookup(os.Getenv)
+	if err != nil {
+		slog.Error("Letta tool search configuration invalid", "error", err)
+		os.Exit(1)
+	}
+	var lettaToolSearcher *lettatools.Client
+	if lettaConfig.Enabled {
+		lettaToolSearcher, err = lettatools.New(lettaConfig)
+		if err != nil {
+			slog.Error("Letta tool search configuration invalid", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("Letta tool-definition ranking enabled")
+	}
 
 	// Dial session-core + inference-core ONCE (guarded on their addrs; lazy grpc
 	// clients). Shared by the /commands delegation (/models → inference
@@ -221,6 +243,9 @@ func main() {
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsReg, pol).WithStore(capStore)
+	if lettaToolSearcher != nil {
+		capSrv.WithLettaToolSearcher(lettaToolSearcher)
+	}
 	capserver.Register(grpcServer, capSrv)
 
 	go func() {
@@ -237,7 +262,7 @@ func main() {
 }
 
 func natsAuthOptions() []nats.Option {
-	options := []nats.Option{nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME")}
+	options := []nats.Option{nats.CustomInboxPrefix(natsInboxPrefix)}
 	user := strings.TrimSpace(os.Getenv("NATS_USER"))
 	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
 	if user != "" || password != "" {

@@ -99,6 +99,41 @@ impl InferenceTokenClient {
         service_id: &str,
         service_api_key: &str,
     ) -> anyhow::Result<Self> {
+        Self::build(
+            token_url,
+            expected_issuer,
+            service_id,
+            service_api_key,
+            false,
+        )
+    }
+
+    /// Standalone startup may bind without Auth Core's registered principal.
+    /// The client remains unusable until a real credential is supplied, so a
+    /// content request still fails closed rather than making an unauthenticated
+    /// inference call.
+    pub(super) fn new_allow_unconfigured(
+        token_url: &str,
+        expected_issuer: &str,
+        service_id: &str,
+        service_api_key: &str,
+    ) -> anyhow::Result<Self> {
+        Self::build(
+            token_url,
+            expected_issuer,
+            service_id,
+            service_api_key,
+            true,
+        )
+    }
+
+    fn build(
+        token_url: &str,
+        expected_issuer: &str,
+        service_id: &str,
+        service_api_key: &str,
+        allow_unconfigured: bool,
+    ) -> anyhow::Result<Self> {
         let token_url = Url::parse(token_url.trim())
             .context("MODEL_PLANE_INFERENCE_TOKEN_URL must be an absolute HTTP(S) URL")?;
         anyhow::ensure!(
@@ -118,7 +153,8 @@ impl InferenceTokenClient {
             "MODEL_PLANE_INFERENCE_SERVICE_ID is invalid"
         );
         anyhow::ensure!(
-            service_api_key.len() >= 16 && service_api_key == service_api_key.trim(),
+            allow_unconfigured
+                || (service_api_key.len() >= 16 && service_api_key == service_api_key.trim()),
             "MODEL_PLANE_INFERENCE_SERVICE_API_KEY is missing or invalid"
         );
 
@@ -139,6 +175,10 @@ impl InferenceTokenClient {
 
     pub(super) async fn mint(&self, org_id: &str) -> anyhow::Result<InferenceBearer> {
         anyhow::ensure!(valid_org_id(org_id), "inference tenant is invalid");
+        anyhow::ensure!(
+            self.service_api_key.len() >= 16,
+            "inference service principal credential is unavailable"
+        );
 
         let response = self
             .http
@@ -262,4 +302,21 @@ fn valid_org_id(value: &str) -> bool {
             .is_some_and(|value| value.is_ascii_alphanumeric())
         && chars
             .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | ':' | '-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InferenceTokenClient;
+
+    #[test]
+    fn standalone_constructor_allows_bind_but_keeps_inference_unconfigured() {
+        let client = InferenceTokenClient::new_allow_unconfigured(
+            "http://auth-core:3011/api/inference-core/internal-token",
+            "http://auth-core:3011/api/convex-auth",
+            "graph-index",
+            "",
+        )
+        .expect("standalone startup may bind without the external principal");
+        assert!(client.service_api_key.is_empty());
+    }
 }

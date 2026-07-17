@@ -1,6 +1,6 @@
 # Data Plane v2 — Secure-MVP Status
 
-Last verified: 2026-07-15
+Last verified: 2026-07-16
 
 Verdict: **secure-MVP candidate in current source; not yet production-ready**.
 The final disposable build passed the real Auth/User/Control browser journey,
@@ -21,6 +21,82 @@ Quickwit, MinIO, NATS, and Dragonfly, with monotonic no-write evidence for NATS
 and Dragonfly. It does not by itself exclude a transient insert-then-delete in
 the other four stores, so strict per-store mutation telemetry remains a release
 evidence gap. Enterprise readiness has not started.
+
+## 2026-07-16 Compose/rebuild verification
+
+The production GDPR contract requires an explicit `NATS_SHARED_URL` for the
+enabled durable consumer; the Compose standalone overlay can leave it empty
+without guessing a Control broker hostname. The embedding worker's Model Plane path requires
+its dedicated Auth Core service-principal credential, mints an org-bound
+`aud=inference-core` / `inference:invoke` bearer, and sends only
+`Authorization: Bearer` metadata. The missing workspace `jsonwebtoken`
+dependency and two test-only compile/runtime defects were fixed with focused
+regressions.
+
+Evidence dated 2026-07-16:
+
+- `cargo test --workspace` passed; all four Go service modules' `go test ./...`
+  passed; embedding-engine's focused suite passed **29 tests**; workspace
+  fmt/check and strict targeted embedding clippy passed.
+- `COMPOSE_ANSI=never bash tests/e2e/run-isolated-mvp.sh` rebuilt every Data
+  image, reached a healthy disposable stack, passed **31 methods / 124 gRPC
+  shapes**, **28/28 HTTP assertions**, and the six-store restrictive-ZDR
+  final-state comparison. The random project, network, volumes, containers,
+  images, and generated keys were removed by scoped cleanup.
+- Compose security, provenance, isolated-harness, broker/GDPR, gRPC, browser,
+  real-authority, and multi-store contracts all passed.
+
+This remains source/isolated evidence. The connected posture intentionally
+fails closed until operators provision deployment event keys, the Control
+shared GDPR broker password, and the dedicated embedding service credential.
+The local `.env` records the non-secret Control broker URL/user and sandbox
+event-key paths only; `make cross-plane-env` rejects connected startup while
+deployment-owned values are absent. The
+isolated provider uses deterministic embeddings; a rebuilt sandbox hop to the
+real Model Plane `inference-core` is still required before claiming deployed
+cross-plane readiness. Shared images and production ACLs were not changed.
+
+## 2026-07-16 independent-startup and credential-boundary verification
+
+Data Plane now has three explicit startup postures:
+
+- `make standalone-up` uses the private local cross-plane network and pauses
+  only signed event consumers plus the Control-owned GDPR durable subscriber.
+  Authenticated routes remain strict; missing Auth/User/Control/Model
+  authorities fail closed, and grant-only documents remain hidden.
+- `make cross-plane-up` applies `docker-compose.cross-plane.yml` and attaches
+  running services to the pre-provisioned `inter-plane-bus` network. It never
+  creates or guesses a shared production network.
+- `make up` keeps the production defaults. With
+  `GDPR_DURABLE_CONSUMER_REQUIRED=1` or `USER_CORE_GRANTS_REQUIRED=1`, missing
+  Control-owned credentials terminate the affected service rather than
+  broadening visibility or silently disabling erasure handling.
+
+The graph index no longer fetches Auth Core JWKS during process startup; it
+uses the deployment-configured, read-only public verification key mount and
+still verifies issuer, audience,
+signature, time, identity, and tenant on every protected request. Go JWKS,
+Control policy, User Core, and Model Plane clients remain lazy runtime edges.
+
+Evidence: `go test ./...` passed for all four Go services; `cargo test
+--workspace`, `cargo fmt --all -- --check`, `bash
+tests/scripts/compose-security-contract-test.sh`, `docker compose config --quiet`
+for both overlays, and `git diff --check` all passed on 2026-07-16. No
+deployment-owned broker password, Auth Core service-principal key, or
+production event key was generated or copied. Those values must be injected by
+Control/Auth/Model deployment owners; local synthetic values belong only in the
+ignored isolated harness.
+
+The preflight also rejects event-key paths under `.secrets/event-keys/`, so a
+connected rollout cannot accidentally reuse local sandbox signing material.
+
+The rebuilt local standalone stack was then started with the new images. All
+15 long-running Data services reached healthy state, including graph-index and
+embedding-engine with missing external inference credentials; their content
+paths remain unavailable until a registered service principal is supplied.
+Documents reached `/readyz` healthy with the GDPR subscriber paused by the
+explicit standalone overlay. This is local runtime evidence, not a shared
+deployment claim.
 
 ## Evidence vocabulary
 
@@ -46,8 +122,8 @@ Unless stated otherwise, current claims are implemented/tested only. No producti
 | G. Cache bypass and signed ZDR propagation | **Source + isolated pass; production policy pending** | Auth, Frontend, Model, Ingestion, Documents, Retrieval, and signed events use monotonic restrictive posture; cache/trace/embedding/semantic/event persistence is bypassed or rejected. Production organization retention policy and deployed proof remain pending. |
 | H. Auxiliary visibility/grants | **Tested, runtime pending** | Retrieval auxiliary visibility tests use the canonical contract. Control v2 read delegation binds caller, user, tenant, operation, resource type/ID, reason, nonce, request digest, and restrictive ZDR, and now also requires an independently verified matching user bearer. Grant reads are uncached so revocation does not depend on a misrouted event bus. Grant mutation/listing remains denied until resource-owner authorization is defined. |
 | I. Schema/runtime reconciliation | **Tested, deployment pending** | Wiki migration integration passes; retrieval trace migration applies twice and exposes its actor column/index in disposable PostgreSQL. |
-| J. Compose hardening | **Tested** | Base Compose resolves only with explicit required inputs; the security contract passes; app services remain private/loopback-bound and verifier containers receive public keys only. The isolated profile uses unique projects/networks/volumes and refuses shared targets. |
-| K. Builds/tests/live matrix | **Isolated pass; shared rollout pending** | Real-authority browser 2/2, Gateway 288/288, SPA 68 files/364 tests, Data HTTP/gRPC/ZDR matrices, Retrieval full/focused suites, typecheck/build, fmt/clippy, and Go build/test gates pass. Shared-image replacement and safe post-deploy verification remain pending. |
+| J. Compose hardening | **Tested; deployment provisioning pending** | Base Compose uses a private local network; the explicit cross-plane overlay attaches only to a pre-provisioned shared network. The standalone overlay pauses cross-plane consumers without weakening auth/ZDR. App services remain private/loopback-bound and verifier containers receive public keys only. Production still requires Control-owned GDPR broker credentials, event keys, and registered Model/Auth service principals. |
+| K. Builds/tests/live matrix | **Isolated pass; shared rollout pending** | Real-authority browser 2/2, Gateway 288/288, SPA 68 files/364 tests, Data HTTP/gRPC/ZDR matrices, Retrieval full/focused suites, typecheck/build, fmt/clippy, and Go build/test gates pass. Shared-image replacement, real Model Plane embedding-hop proof, and safe post-deploy verification remain pending. |
 | L. Accurate evidence docs | **Pass for current checkpoint** | Current sections distinguish source, isolated runtime, shared deployment, and unresolved telemetry/coverage. Older checkpoint notes are retained as history and explicitly superseded. |
 
 ## Service state
@@ -60,7 +136,7 @@ Unless stated otherwise, current claims are implemented/tested only. No producti
 | data-quality-go | Strict JWT/JWKS and `data:quality:admin` route scope; durable tenant-scoped eval store | HTTP enabled; pending and expired-running evals are recovered by an atomic multi-replica-safe loop | Disposable-PostgreSQL recovery rerun and rebuilt-image matrix |
 | data-orchestrator-go | Strict JWT/JWKS and operation scopes; durable tenant-scoped job lifecycle | Reads enabled; production mutations return 503 before persistence while no signed resumable worker exists; unsigned cost consumer disabled | Implement signed durable worker/callback identity before enabling mutations |
 | quickwit-adapter-rs | Strict admin JWT; durable tenant-default jobs, approval, leases, checkpoints, audit, rate/concurrency bounds | Preview/job lifecycle enabled in source; destructive clear and unsigned consumers disabled | Rebuilt runtime matrix and trustworthy Quickwit task completion before clear |
-| embedding-engine-rs | ZDR egress guards; signed document/wiki consumption and signed downstream progression | Signed broker delivery matrix and isolated startup pass; legacy unsigned modes disabled | Shared broker ACL rollout and post-deploy progression proof |
+| embedding-engine-rs | ZDR egress guards; signed document/wiki consumption; dedicated Auth Core inference bearer with exact audience/scope | 29 focused tests, strict clippy, corrected image build, signed broker delivery matrix, and isolated startup pass; legacy unsigned modes disabled | Real Model Plane `inference-core` hop in a provisioned sandbox, shared broker ACL rollout, and post-deploy progression proof |
 | index-engine-rs | No external API; signed document consumption and transactional deletion outbox | Signed broker delivery matrix and isolated startup pass; legacy unsigned consumer disabled | Shared broker ACL rollout and database-backed outbox coverage |
 | wiki-store-go | Strict HTTP/gRPC JWT and operation scopes; atomic signed acknowledged event outbox | HTTP/gRPC auth, migration, ZDR mutation guard, and signed broker delivery pass in isolation | Shared rollout and database-backed outbox coverage |
 | retrieval-eval-py | No active implementation | Not deployed | Define or remove from MVP runtime scope |

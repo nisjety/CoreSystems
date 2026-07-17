@@ -67,7 +67,7 @@ func TestGrantAccessIsPinnedToVerifiedOrganizationAndUser(t *testing.T) {
 	store := grant.NewStore()
 	owner := testServerFor(store, authctx.Principal{OrganizationID: "org1", ActorID: "user1", PrincipalType: "user"})
 	acquired, err := owner.AcquireGrant(context.Background(), &AcquireGrantRequest{
-		OrgId: "org1", SessionKey: "session1", Mode: "cloud",
+		OrgId: "org1", SessionKey: "session1", Mode: "cloud", AllowedDomains: []string{"example.com"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestGrantAccessIsPinnedToVerifiedOrganizationAndUser(t *testing.T) {
 
 func TestAcquireGrantRejectsCallerSuppliedWrongOrganization(t *testing.T) {
 	_, err := newTestServer().AcquireGrant(context.Background(), &AcquireGrantRequest{
-		OrgId: "org2", SessionKey: "session1", Mode: "cloud",
+		OrgId: "org2", SessionKey: "session1", Mode: "cloud", AllowedDomains: []string{"example.com"},
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("code = %v, want PermissionDenied", status.Code(err))
@@ -124,6 +124,9 @@ func TestAcquireGrant_Success(t *testing.T) {
 		OrgId:      "org1",
 		SessionKey: "session1",
 		Mode:       "cloud",
+		AllowedDomains: []string{
+			"example.com",
+		},
 	}
 	resp, err := srv.AcquireGrant(context.Background(), req)
 	if err != nil {
@@ -158,6 +161,9 @@ func TestRevokeGrant_Success(t *testing.T) {
 		OrgId:      "org1",
 		SessionKey: "session1",
 		Mode:       "cloud",
+		AllowedDomains: []string{
+			"example.com",
+		},
 	})
 	if err != nil {
 		t.Fatalf("AcquireGrant: %v", err)
@@ -186,7 +192,7 @@ func TestAcquireGrant_ValidatesRequiredFields(t *testing.T) {
 	}{
 		{name: "missing session_key", req: &AcquireGrantRequest{OrgId: "org1", Mode: "cloud"}},
 		{name: "missing org_id", req: &AcquireGrantRequest{SessionKey: "session1", Mode: "cloud"}},
-		{name: "invalid mode", req: &AcquireGrantRequest{SessionKey: "session1", OrgId: "org1", Mode: "desktop"}},
+		{name: "invalid mode", req: &AcquireGrantRequest{SessionKey: "session1", OrgId: "org1", Mode: "desktop", AllowedDomains: []string{"example.com"}}},
 	}
 
 	for _, tc := range tests {
@@ -206,6 +212,9 @@ func TestValidateGrant_Success(t *testing.T) {
 		OrgId:      "org1",
 		SessionKey: "session1",
 		Mode:       "cloud",
+		AllowedDomains: []string{
+			"example.com",
+		},
 	})
 	if err != nil {
 		t.Fatalf("AcquireGrant: %v", err)
@@ -228,6 +237,9 @@ func TestValidateGrant_RevokedReturnsFailedPrecondition(t *testing.T) {
 		OrgId:      "org1",
 		SessionKey: "session1",
 		Mode:       "cloud",
+		AllowedDomains: []string{
+			"example.com",
+		},
 	})
 	if err != nil {
 		t.Fatalf("AcquireGrant: %v", err)
@@ -264,6 +276,9 @@ func TestAcquireGrant_TransportRoundTrip(t *testing.T) {
 		SessionKey: "session-transport",
 		Mode:       "cloud",
 		OrgId:      "org1",
+		AllowedDomains: []string{
+			"example.com",
+		},
 	})
 	if err != nil {
 		t.Fatalf("AcquireGrant transport: unexpected error: %v", err)
@@ -278,4 +293,62 @@ func TestAcquireGrant_TransportRoundTrip(t *testing.T) {
 	if resp.GetExpiresAt() == nil || resp.GetExpiresAt().AsTime().Before(time.Now()) {
 		t.Fatalf("expected future expires_at, got %v", resp.GetExpiresAt())
 	}
+}
+
+func TestAcquireGrantRejectsEmptyDomainPolicy(t *testing.T) {
+	_, err := newTestServer().AcquireGrant(context.Background(), &AcquireGrantRequest{
+		OrgId: "org1", SessionKey: "session1", Mode: "cloud",
+	})
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument (empty policy must never mean unrestricted)", got)
+	}
+}
+
+func TestValidateGrantReturnsBrokerOwnedNormalizedDomainPolicy(t *testing.T) {
+	srv := newTestServer()
+	acquired, err := srv.AcquireGrant(context.Background(), &AcquireGrantRequest{
+		OrgId: "org1", SessionKey: "session1", Mode: "cloud",
+		AllowedDomains: []string{
+			"  EXAMPLE.com  ",
+			"api.example.com",
+			"example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AcquireGrant: %v", err)
+	}
+	if got, want := acquired.GetAllowedDomains(), []string{"api.example.com", "example.com"}; !equalStrings(got, want) {
+		t.Fatalf("acquired policy = %#v, want %#v", got, want)
+	}
+
+	validated, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()})
+	if err != nil {
+		t.Fatalf("ValidateGrant: %v", err)
+	}
+	if got, want := validated.GetAllowedDomains(), []string{"api.example.com", "example.com"}; !equalStrings(got, want) {
+		t.Fatalf("validated policy = %#v, want %#v", got, want)
+	}
+
+	// The response is a copy. A caller cannot mutate the persisted policy
+	// returned to a later execution validation.
+	validated.AllowedDomains[0] = "attacker.example"
+	again, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()})
+	if err != nil {
+		t.Fatalf("ValidateGrant after mutation: %v", err)
+	}
+	if got, want := again.GetAllowedDomains(), []string{"api.example.com", "example.com"}; !equalStrings(got, want) {
+		t.Fatalf("persisted policy mutated = %#v, want %#v", got, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }

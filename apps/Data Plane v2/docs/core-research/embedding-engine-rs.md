@@ -5,6 +5,30 @@ Re-verified: 2026-07-10 (live Docker + source re-read; supersedes the 2026-06-07
 
 Scope: `apps/Data Plane v2/services/embedding-engine-rs`
 
+## 2026-07-16 Compose/rebuild re-verification
+
+The Model Plane embedding path now uses a dedicated Auth Core service-principal
+credential. `InferenceTokenClient` validates the token endpoint, issuer,
+audience, exact `inference:invoke` scope, organization binding, restrictive ZDR
+claim, and bounded lifetime; the gRPC client sends only `Authorization: Bearer`
+metadata. The legacy shared `INTERNAL_API_KEY`/`x-api-key` path is not wired.
+The missing `jsonwebtoken` workspace dependency and two test-only defects were
+fixed. The focused crate suite passed **29 tests**, strict targeted clippy and
+workspace formatting passed, and the corrected image built in the disposable
+MVP stack.
+
+The fresh isolated MVP rebuild reached healthy state and passed the signed
+broker, HTTP/gRPC authorization, and six-store restrictive-ZDR matrices. The
+isolated provider intentionally uses deterministic embeddings, so a provisioned
+sandbox call through the real Model Plane `inference-core` remains deployment
+evidence. Shared broker ACLs and production credentials were not changed.
+
+The explicit local standalone overlay permits the process to bind without a
+registered inference principal; the first embedding request fails closed until
+`MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY` is provisioned by Auth Core.
+The rebuilt standalone stack reached healthy state for embedding-engine. This
+is a local startup property, not a credential or Model Plane readiness claim.
+
 ## 2026-07-15 final isolated acceptance delta
 
 The final rebuilt service reached healthy state, participated in the supported

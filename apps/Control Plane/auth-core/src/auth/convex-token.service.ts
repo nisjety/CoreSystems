@@ -8,6 +8,7 @@ import {
   type KeyObject,
 } from 'crypto';
 import { readFileSync } from 'fs';
+import { currentInteractiveRetentionPosture } from './interactive-retention-policy';
 
 type ConvexJwtClaims = {
   externalAuthId: string;
@@ -42,13 +43,12 @@ type ConvexTokenBundle = {
 type ModelPlaneJwtClaims = {
   userId: string;
   orgId: string;
-  /** Secure-MVP fallback until Control owns an authoritative org ZDR policy. */
-  zdr: true;
   email?: string;
   scopes?: readonly string[];
   principalType?: 'user' | 'service';
   serviceId?: string;
   reason?: string;
+  retentionPosture?: ServiceRetentionPosture;
 };
 
 type ModelPlaneTokenBundle = {
@@ -107,6 +107,34 @@ export type PlaneAudience =
 export type AuthCoreAudience = 'model-gateway' | PlaneAudience;
 export type InteractivePlaneAudience = Exclude<PlaneAudience, 'control-policy'>;
 
+type ServiceRetentionPosture = {
+  zdr: boolean;
+  authority: 'service-principal-policy';
+};
+
+type RetentionAwareClaims = {
+  orgId: string;
+  retentionPosture?: ServiceRetentionPosture;
+};
+
+/**
+ * Retention posture is issuer-owned. Interactive users resolve through the
+ * exact Control-Plane organization policy; service tokens retain their
+ * separately bounded per-audience registry policy. No caller field can select
+ * a non-ZDR posture.
+ */
+function issuedTokenZdr(
+  principalType: 'user' | 'service',
+  claims: RetentionAwareClaims,
+): boolean {
+  if (principalType === 'user') {
+    return currentInteractiveRetentionPosture(claims.orgId).zdr;
+  }
+  return claims.retentionPosture?.authority === 'service-principal-policy'
+    ? claims.retentionPosture.zdr
+    : true;
+}
+
 type PlaneJwtClaims = {
   userId: string;
   orgId: string;
@@ -115,10 +143,7 @@ type PlaneJwtClaims = {
   principalType?: 'user' | 'service';
   serviceId?: string;
   reason?: string;
-  retentionPosture?: {
-    zdr: boolean;
-    authority: 'service-principal-policy';
-  };
+  retentionPosture?: ServiceRetentionPosture;
 };
 
 type PlaneTokenBundle = {
@@ -404,6 +429,7 @@ export class ConvexTokenService {
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
     }
+    const zdr = issuedTokenZdr(principalType, claims);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.modelPlaneIssuer,
@@ -424,11 +450,9 @@ export class ConvexTokenService {
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
-      // Control Plane has no authoritative org-level ZDR policy source yet, so
-      // the secure MVP posture is fail-closed: every cross-plane token carries
-      // ZDR and callers cannot downgrade it. A non-ZDR provider must not become
-      // reachable by weakening an issuer claim.
-      zdr: true,
+      // Interactive posture comes from Auth Core's exact organization policy;
+      // service posture comes only from the bounded service-principal registry.
+      zdr,
     };
 
     const encodedHeader = this.encodeSegment({
@@ -488,11 +512,7 @@ export class ConvexTokenService {
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
     }
-    const zdr =
-      principalType === 'service' &&
-      claims.retentionPosture?.authority === 'service-principal-policy'
-        ? claims.retentionPosture.zdr
-        : true;
+    const zdr = issuedTokenZdr(principalType, claims);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -510,9 +530,8 @@ export class ConvexTokenService {
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
-      // Interactive and ordinary service tokens remain restrictive. A
-      // non-ZDR token can only arrive through the service-principal controller's
-      // deployment-owned persistent-data policy and its durable audit barrier.
+      // Interactive posture comes from Auth Core's exact organization policy;
+      // service posture comes only from the bounded service-principal registry.
       zdr,
     };
 

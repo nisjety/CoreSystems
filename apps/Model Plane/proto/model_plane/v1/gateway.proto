@@ -49,9 +49,9 @@ service ModelGateway {
   // webhooks. Routes through the same security envelope as Fetch.
   rpc RemoteTrigger(RemoteTriggerRequest) returns (RemoteTriggerResponse);
 
-  // SendMessage — publish a typed message envelope onto NATS. Replaces
-  // the v2 send_message tool. Subject namespaces are enforced server-
-  // side so agents can't publish to arbitrary subjects.
+  // SendMessage — backwards-compatible quarantined legacy RPC. Every call
+  // fails with FAILED_PRECONDITION and cannot publish to NATS. Free-form
+  // agent-selected subjects bypass capability policy and approval enforcement.
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
 
   // SyntheticOutput — test/debug tool that echoes a fixed payload back
@@ -62,9 +62,10 @@ service ModelGateway {
   // ===== Wave 10b — plan mode + team coordination =====
 
   // EnterPlanMode — switch a run into plan-collect mode. While in plan
-  // mode, write-class tools (file_edit, file_write, bash, remote_trigger,
-  // send_message) are gated by the approval queue; read-class tools
-  // (fetch, web_search, extract_structured) flow normally.
+  // mode, write-class tools (file_edit, file_write, bash, remote_trigger)
+  // are gated by the approval queue; read-class tools (fetch, web_search,
+  // extract_structured) flow normally. SendMessage is independently
+  // quarantined and always fails closed.
   rpc EnterPlanMode(EnterPlanModeRequest) returns (EnterPlanModeResponse);
 
   // ExitPlanMode — leave plan mode. Pending actions in the plan are
@@ -563,24 +564,23 @@ message RemoteTriggerResponse {
   string final_url = 5;
 }
 
-// SendMessageRequest — publish a JSON-encoded payload to a NATS
-// subject. Subject prefixes are enforced server-side: only
-// `agents.>`, `org.>`, and `notify.>` are allowed for now.
+// SendMessageRequest — legacy request retained for wire compatibility.
+// It is quarantined and cannot cause a NATS publish.
 message SendMessageRequest {
   string request_id = 1;
   string org_id = 2;
   string subject = 3;
   // JSON-encoded payload. Empty string → no payload.
   string payload_json = 4;
-  // Idempotency key — repeat publishes with the same key within
-  // 5 minutes are dropped.
+  // Retained for wire compatibility; it is not processed while the RPC is
+  // quarantined.
   string idempotency_key = 5;
 }
 
 message SendMessageResponse {
   string request_id = 1;
-  // Set to false if the publish was dropped because the idempotency
-  // key was already seen; true otherwise.
+  // Reserved for backwards compatibility. Quarantined calls return an error
+  // instead of a successful response.
   bool published = 2;
 }
 

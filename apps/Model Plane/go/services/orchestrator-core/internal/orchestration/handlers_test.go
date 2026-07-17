@@ -31,6 +31,8 @@ type stubClient struct {
 	getApprovalResp              *mpv1.GetApprovalResponse
 	createApprovalResp           *mpv1.CreateApprovalResponse
 	decideApprovalResp           *mpv1.DecideApprovalResponse
+	claimApprovalDeliveriesResp  *mpv1.ClaimApprovalDeliveriesResponse
+	ackApprovalDeliveryResp      *mpv1.AcknowledgeApprovalDeliveryResponse
 	getSubagentLineageResp       *mpv1.GetSubagentLineageResponse
 	attachSubagentResp           *mpv1.AttachSubagentResponse
 }
@@ -82,6 +84,14 @@ func (s *stubClient) CreateApproval(ctx context.Context, in *mpv1.CreateApproval
 func (s *stubClient) DecideApproval(ctx context.Context, in *mpv1.DecideApprovalRequest, opts ...grpc.CallOption) (*mpv1.DecideApprovalResponse, error) {
 	s.lastReq = in
 	return s.decideApprovalResp, s.err
+}
+func (s *stubClient) ClaimApprovalDeliveries(ctx context.Context, in *mpv1.ClaimApprovalDeliveriesRequest, opts ...grpc.CallOption) (*mpv1.ClaimApprovalDeliveriesResponse, error) {
+	s.lastReq = in
+	return s.claimApprovalDeliveriesResp, s.err
+}
+func (s *stubClient) AcknowledgeApprovalDelivery(ctx context.Context, in *mpv1.AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*mpv1.AcknowledgeApprovalDeliveryResponse, error) {
+	s.lastReq = in
+	return s.ackApprovalDeliveryResp, s.err
 }
 func (s *stubClient) GetSubagentLineage(ctx context.Context, in *mpv1.GetSubagentLineageRequest, opts ...grpc.CallOption) (*mpv1.GetSubagentLineageResponse, error) {
 	s.lastReq = in

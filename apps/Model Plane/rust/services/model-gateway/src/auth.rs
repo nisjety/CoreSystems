@@ -171,6 +171,27 @@ impl VerifiedExecutionBearer {
     }
 }
 
+/// Independently verified `aud=browser-broker` user bearer. It is accepted
+/// only from `x-browser-authorization`, bound to the ingress user and tenant,
+/// and used exclusively to resolve a broker-issued browser grant.
+#[derive(Clone)]
+pub struct VerifiedBrowserBearer(Arc<str>);
+
+impl VerifiedBrowserBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
 /// Independently verified, user-bound bearer for capability-core. A Model
 /// Plane token is never reused across audiences.
 #[derive(Clone)]
@@ -183,6 +204,11 @@ impl VerifiedCapabilityBearer {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
     }
 }
 
@@ -268,8 +294,30 @@ impl fmt::Debug for VerifiedExecutionBearer {
     }
 }
 
+impl fmt::Debug for VerifiedBrowserBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedBrowserBearer([REDACTED])")
+    }
+}
+
 #[axum::async_trait]
 impl<S> FromRequestParts<S> for VerifiedExecutionBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedBrowserBearer
 where
     S: Send + Sync,
 {
@@ -706,6 +754,21 @@ async fn verify_delegated_execution_bearer(
     .map(|token| token.map(|token| VerifiedExecutionBearer::new(&token)))
 }
 
+async fn verify_delegated_browser_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedBrowserBearer>, StatusCode> {
+    verify_delegated_user_bearer(
+        headers,
+        "x-browser-authorization",
+        "BROWSER_BROKER_AUTH_AUDIENCE",
+        "browser-broker",
+        model_claims,
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedBrowserBearer::new(&token)))
+}
+
 async fn verify_delegated_user_bearer(
     headers: &HeaderMap,
     header_name: &'static str,
@@ -837,6 +900,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         let session_bearer = verify_delegated_session_bearer(req.headers(), &claims).await?;
         let inference_bearer = verify_delegated_inference_bearer(req.headers(), &claims).await?;
         let execution_bearer = verify_delegated_execution_bearer(req.headers(), &claims).await?;
+        let browser_bearer = verify_delegated_browser_bearer(req.headers(), &claims).await?;
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
@@ -857,6 +921,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         }
         if let Some(execution_bearer) = execution_bearer {
             req.extensions_mut().insert(execution_bearer);
+        }
+        if let Some(browser_bearer) = browser_bearer {
+            req.extensions_mut().insert(browser_bearer);
         }
         return Ok(next.run(req).await);
     }
@@ -938,6 +1005,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         session_bearer,
         inference_bearer,
         execution_bearer,
+        browser_bearer,
     ) = match principal_kind {
         PrincipalKind::User => (
             verify_delegated_data_plane_bearer(req.headers(), &token_data.claims).await?,
@@ -946,6 +1014,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
             verify_delegated_session_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_inference_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_execution_bearer(req.headers(), &token_data.claims).await?,
+            verify_delegated_browser_bearer(req.headers(), &token_data.claims).await?,
         ),
         PrincipalKind::Service => {
             if req.headers().contains_key("x-data-plane-authorization")
@@ -953,6 +1022,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
                 || req.headers().contains_key("x-cost-authorization")
                 || req.headers().contains_key("x-session-authorization")
                 || req.headers().contains_key("x-execution-authorization")
+                || req.headers().contains_key("x-browser-authorization")
             {
                 warn!("service principal can delegate only its matching inference credential");
                 return Err(StatusCode::FORBIDDEN);
@@ -960,7 +1030,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
             let inference_bearer =
                 verify_delegated_service_inference_bearer(req.headers(), &token_data.claims)
                     .await?;
-            (None, None, None, None, inference_bearer, None)
+            (None, None, None, None, inference_bearer, None, None)
         }
     };
     req.extensions_mut().insert(token_data.claims);
@@ -983,6 +1053,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
     }
     if let Some(execution_bearer) = execution_bearer {
         req.extensions_mut().insert(execution_bearer);
+    }
+    if let Some(browser_bearer) = browser_bearer {
+        req.extensions_mut().insert(browser_bearer);
     }
     Ok(next.run(req).await)
 }
@@ -1088,6 +1161,7 @@ mod tests {
         std::env::remove_var("SESSION_CORE_AUTH_AUDIENCE");
         std::env::remove_var("INFERENCE_CORE_AUTH_AUDIENCE");
         std::env::remove_var("EXECUTION_CORE_AUTH_AUDIENCE");
+        std::env::remove_var("BROWSER_BROKER_AUTH_AUDIENCE");
         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
         std::env::remove_var("ALLOW_INSECURE_DEV_DEFAULTS");
     }
@@ -1421,6 +1495,14 @@ mod tests {
         assert!(!debug.contains(bearer.as_str()));
     }
 
+    #[test]
+    fn verified_browser_bearer_debug_output_never_exposes_the_token() {
+        let bearer = VerifiedBrowserBearer::for_test("sensitive-browser-token-value");
+        let debug = format!("{bearer:?}");
+        assert_eq!(debug, "VerifiedBrowserBearer([REDACTED])");
+        assert!(!debug.contains(bearer.as_str()));
+    }
+
     #[tokio::test]
     #[serial]
     async fn delegated_inference_bearer_requires_exact_audience_and_matching_identity() {
@@ -1503,6 +1585,84 @@ mod tests {
                         "x-inference-authorization",
                         format!("Bearer {wrong_identity}"),
                     )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_browser_bearer_requires_exact_audience_and_matching_identity() {
+        async fn echo_browser_bearer(bearer: VerifiedBrowserBearer) -> String {
+            bearer.as_str().to_owned()
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-browser-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("BROWSER_BROKER_AUTH_AUDIENCE", "browser-broker");
+
+        let model_token = sign_jwt(&base_claims(), kid);
+        let mut browser_claims = base_claims();
+        browser_claims.aud = Some("browser-broker".into());
+        let browser_token = sign_jwt(&browser_claims, kid);
+
+        let response = Router::new()
+            .route("/", get(echo_browser_bearer))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-browser-authorization", format!("Bearer {browser_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let wrong_audience = sign_jwt(&base_claims(), kid);
+        let response = Router::new()
+            .route("/", get(echo_browser_bearer))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header(
+                        "x-browser-authorization",
+                        format!("Bearer {wrong_audience}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut other_tenant = browser_claims;
+        other_tenant.org_id = "org-other".into();
+        let other_tenant = sign_jwt(&other_tenant, kid);
+        let response = Router::new()
+            .route("/", get(echo_browser_bearer))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-browser-authorization", format!("Bearer {other_tenant}"))
                     .body(Body::empty())
                     .unwrap(),
             )

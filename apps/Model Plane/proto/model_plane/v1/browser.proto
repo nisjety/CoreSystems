@@ -31,6 +31,11 @@ message AcquireGrantRequest {
 
   // Tenant identifier.
   string org_id = 3;
+
+  // Broker-owned navigation policy. An empty policy is never an unrestricted
+  // browser grant: issuance rejects it. Values are normalized and persisted by
+  // the broker, then returned by ValidateGrant for downstream enforcement.
+  repeated string allowed_domains = 4;
 }
 
 message AcquireGrantResponse {
@@ -42,6 +47,9 @@ message AcquireGrantResponse {
 
   // Grant expiry time.
   google.protobuf.Timestamp expires_at = 3;
+
+  // Canonical broker-owned navigation policy for this grant.
+  repeated string allowed_domains = 4;
 }
 
 message RevokeGrantRequest {
@@ -78,4 +86,8 @@ message ValidateGrantResponse {
 
   // Grant expiry time.
   google.protobuf.Timestamp expires_at = 3;
+
+  // Canonical broker-owned navigation policy. Consumers must reject an empty
+  // policy and must not substitute caller-supplied domains.
+  repeated string allowed_domains = 4;
 }

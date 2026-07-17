@@ -974,7 +974,9 @@ mod resolution_tests {
     async fn velion_mode_resolves_to_concrete_model_through_the_chain() {
         // Provider registered as azure-openai (serves non-claude models); intent
         // layer on, no budget client → Unknown posture. velion-budget + a trivial
-        // prompt → Budget/Simple → gpt-4o-mini reaches the provider.
+        // prompt → Budget/Simple → the current policy table's gpt-5-nano
+        // reaches the provider. This assertion must follow the versioned table
+        // rather than the older cheap-fallback constant.
         let seen = Arc::new(Mutex::new(None));
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
@@ -994,7 +996,7 @@ mod resolution_tests {
             ..Default::default()
         };
         chain.infer(&req).await.unwrap();
-        assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-5-nano"));
     }
 
     #[tokio::test]

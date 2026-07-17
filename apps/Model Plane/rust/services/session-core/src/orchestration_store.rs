@@ -262,10 +262,20 @@ pub async fn request_approval(
     Ok(row.map(|r| r.0))
 }
 
+/// Result of a durable approval decision transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalDecisionWrite {
+    pub updated: bool,
+    pub delivery_id: Option<String>,
+}
+
 /// Decide an approval (granted/denied/expired). Stamps `decided_at = now()`.
 /// The tenant predicate and requested-state compare-and-set are deliberately
 /// part of the write itself so a read/check/write race cannot cross tenants or
-/// overwrite an already-recorded operator decision.
+/// overwrite an already-recorded operator decision. A successful transition
+/// to `granted` inserts its identifier-only delivery record in the same
+/// transaction. If that insert fails, dropping the uncommitted transaction
+/// rolls the approval update back.
 ///
 /// # Errors
 ///
@@ -278,14 +288,18 @@ pub async fn decide_approval(
     status: &str,
     decided_by: &str,
     decision_reason: &str,
-) -> Result<bool> {
+) -> Result<ApprovalDecisionWrite> {
     if org_id.trim().is_empty() {
         bail!("org_id is required");
     }
     if decided_by.trim().is_empty() {
         bail!("decided_by is required");
     }
+    if !matches!(status, "granted" | "denied" | "timed_out") {
+        bail!("unsupported approval decision status");
+    }
 
+    let mut transaction = pool.begin().await?;
     let updated = sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_SQL)
         .bind(id)
         .bind(org_id)
@@ -293,9 +307,37 @@ pub async fn decide_approval(
         .bind(decided_by)
         .bind(decision_reason)
         .bind(user_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-    Ok(updated.is_some())
+    let updated = updated.is_some();
+
+    let delivery_id = if status == "granted" && updated {
+        let delivery_id = format!("approval_delivery_{}", mp_ids::new_ulid());
+        let inserted = sqlx::query_as::<_, (String,)>(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL)
+            .bind(&delivery_id)
+            .bind(id)
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        Some(inserted.0)
+    } else if status == "granted" {
+        sqlx::query_as::<_, (String,)>(GET_APPROVAL_DELIVERY_SQL)
+            .bind(id)
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .map(|row| row.0)
+    } else {
+        None
+    };
+
+    transaction.commit().await?;
+    Ok(ApprovalDecisionWrite {
+        updated,
+        delivery_id,
+    })
 }
 
 const DECIDE_APPROVAL_SQL: &str =
@@ -303,6 +345,19 @@ const DECIDE_APPROVAL_SQL: &str =
      decided_at = now() WHERE id = $1 AND org_id = $2 AND status = 'requested' \
      AND ($6::text IS NULL OR user_id = $6) \
      RETURNING id";
+
+const INSERT_APPROVAL_DELIVERY_OUTBOX_SQL: &str = "INSERT INTO approval_delivery_outbox \
+         (delivery_id, approval_id, run_id, org_id, user_id) \
+     SELECT $1, id, run_id, org_id, user_id FROM approvals \
+     WHERE id = $2 AND org_id = $3 AND status = 'granted' \
+       AND ($4::text IS NULL OR user_id = $4) \
+     RETURNING delivery_id";
+
+const GET_APPROVAL_DELIVERY_SQL: &str = "SELECT approval_delivery_outbox.delivery_id \
+     FROM approval_delivery_outbox \
+     JOIN approvals ON approvals.id = approval_delivery_outbox.approval_id \
+     WHERE approvals.id = $1 AND approvals.org_id = $2 \
+       AND ($3::text IS NULL OR approvals.user_id = $3)";
 
 /// List approvals for a run.
 ///
@@ -800,6 +855,54 @@ mod tests {
     fn approval_idempotency_is_user_scoped() {
         let migration = include_str!("../migrations/0011_identity_scoping.sql");
         assert!(migration.contains("ON approvals (org_id, user_id, idempotency_key)"));
+    }
+
+    #[test]
+    fn approval_delivery_outbox_is_one_per_approval_and_content_free() {
+        let migration = include_str!("../migrations/0014_approval_delivery_outbox.sql");
+        assert!(migration.contains("approval_id TEXT NOT NULL UNIQUE"));
+        assert!(
+            !migration.contains("'delivered'"),
+            "outbox must not represent a completed continuation before a receipt exists"
+        );
+        assert!(
+            !migration.contains("delivered_at"),
+            "outbox must not imply a completed continuation before a receipt exists"
+        );
+        assert!(migration.contains("run_id TEXT NOT NULL"));
+        assert!(migration.contains("org_id TEXT NOT NULL"));
+        assert!(migration.contains("user_id TEXT NOT NULL"));
+        for forbidden in ["payload", "prompt", "reason", "content", "metadata"] {
+            assert!(
+                !migration.contains(forbidden),
+                "approval delivery outbox must not persist {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_delivery_outbox_has_a_leased_claim_contract() {
+        let migration = include_str!("../migrations/0014_approval_delivery_outbox.sql");
+        for required in [
+            "lease_owner TEXT",
+            "lease_token_hash TEXT",
+            "lease_expires_at TIMESTAMPTZ",
+            "last_failure_code TEXT",
+        ] {
+            assert!(
+                migration.contains(required),
+                "approval delivery outbox must define {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn granted_decision_outbox_insert_is_scoped_and_has_no_conflict_bypass() {
+        assert!(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL.contains("status = 'granted'"));
+        assert!(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL.contains("id = $2 AND org_id = $3"));
+        assert!(!INSERT_APPROVAL_DELIVERY_OUTBOX_SQL.contains("ON CONFLICT"));
+        assert!(GET_APPROVAL_DELIVERY_SQL.contains("approvals.org_id = $2"));
+        assert!(GET_APPROVAL_DELIVERY_SQL.contains("user_id = $3"));
     }
 
     #[tokio::test]

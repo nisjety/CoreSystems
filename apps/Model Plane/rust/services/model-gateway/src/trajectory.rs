@@ -1,10 +1,10 @@
 //! Wave 10f — trajectory recording + Atropos-format export.
 //!
 //! In-memory ring-buffer of completed-run trajectories keyed by
-//! `trajectory_id`. Each `RecordTrajectory` call also publishes the
-//! trajectory onto `agents.trajectory.recorded` so external pipelines
-//! (a separate Atropos exporter, an analytics aggregator) can stream
-//! them without coupling to the gateway.
+//! `trajectory_id`. Each `RecordTrajectory` call also publishes a
+//! `TRAJECTORY_RECORDED` envelope onto that run's fixed `mp.v1.run.*.event`
+//! subject so external pipelines (a separate Atropos exporter, an analytics
+//! aggregator) can stream them without coupling to the gateway.
 //!
 //! Why in-memory instead of postgres (v2 used a Postgres table):
 //!   - Trajectories are large; persisting every run blocks the hot
@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use dashmap::DashMap;
-use mp_events::publisher::EventPublisher;
+use mp_events::{publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use tokio::sync::RwLock;
 use tonic::Status;
@@ -192,7 +192,7 @@ pub async fn handle_record_trajectory<P: EventPublisher>(
         zdr: false,
     };
     let was_published = match publisher
-        .publish("agents.trajectory.recorded", &envelope)
+        .publish(&subjects::run_event_subject(&stored.run_id), &envelope)
         .await
     {
         Ok(()) => true,
@@ -324,6 +324,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp_events::publisher::InMemoryPublisher;
 
     fn make_trajectory(org: &str, run: &str, outcome: &str) -> Trajectory {
         Trajectory {
@@ -409,5 +410,28 @@ mod tests {
         let (exp, _) = s.export("o", 150, 0).await;
         assert_eq!(exp.len(), 1);
         assert_eq!(exp[0].run_id, "r2");
+    }
+
+    #[tokio::test]
+    async fn record_trajectory_uses_the_fixed_run_event_subject() {
+        let store = TrajectoryStore::new();
+        let publisher = InMemoryPublisher::new();
+
+        let response = handle_record_trajectory(
+            &store,
+            &publisher,
+            RecordTrajectoryRequest {
+                request_id: "request-trajectory".to_owned(),
+                trajectory: Some(make_trajectory("org-1", "run-1", "success")),
+            },
+        )
+        .await
+        .expect("record trajectory");
+
+        assert!(response.published);
+        let events = publisher.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "mp.v1.run.run-1.event");
+        assert_eq!(events[0].1.event_type, "TRAJECTORY_RECORDED");
     }
 }

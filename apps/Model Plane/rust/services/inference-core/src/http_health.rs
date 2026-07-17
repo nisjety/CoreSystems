@@ -13,13 +13,14 @@ use axum::{
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Extension, Json, Router,
 };
 use tracing::info;
 
 use crate::auth::JwtVerifier;
 use crate::provider::policy_client::PolicyClient;
 use crate::provider::routing_policy::RoutingPolicy;
+use crate::readiness::GrpcReadiness;
 
 /// Shared state for the routing-policy admin routes.
 #[derive(Clone)]
@@ -38,7 +39,7 @@ pub struct PolicyState {
 /// # Errors
 ///
 /// Returns an error if the server fails to bind or serve.
-pub async fn serve(state: PolicyState) -> anyhow::Result<()> {
+pub async fn serve(state: PolicyState, grpc_readiness: GrpcReadiness) -> anyhow::Result<()> {
     let policy_routes = Router::new()
         .route(
             "/internal/v1/router-policy",
@@ -50,7 +51,8 @@ pub async fn serve(state: PolicyState) -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
-        .merge(policy_routes);
+        .merge(policy_routes)
+        .layer(Extension(grpc_readiness));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8082").await?;
     info!("HTTP health listening on :8082");
@@ -62,8 +64,12 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz() -> &'static str {
-    "ok"
+async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response {
+    if grpc_readiness.is_bound() {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "grpc listener not bound").into_response()
+    }
 }
 
 async fn metrics_handler() -> impl IntoResponse {
@@ -155,4 +161,23 @@ fn auth_error(status: StatusCode, message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::readiness::GrpcReadiness;
+    use axum::Extension;
+
+    #[tokio::test]
+    async fn readyz_fails_until_grpc_listener_is_bound() {
+        let readiness = GrpcReadiness::new();
+
+        let before_bind = readyz(Extension(readiness.clone())).await.into_response();
+        assert_eq!(before_bind.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        readiness.mark_bound();
+        let after_bind = readyz(Extension(readiness)).await.into_response();
+        assert_eq!(after_bind.status(), StatusCode::OK);
+    }
 }

@@ -19,6 +19,7 @@ tracing-subscriber.workspace = true
 sqlx.workspace = true
 qdrant-client.workspace = true
 reqwest.workspace = true
+jsonwebtoken.workspace = true
 chrono.workspace = true
 axum.workspace = true
 tonic.workspace = true

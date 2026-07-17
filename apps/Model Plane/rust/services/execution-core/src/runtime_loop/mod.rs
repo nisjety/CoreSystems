@@ -123,9 +123,80 @@ impl StepOutcome {
             compaction_triggered: false,
         }
     }
+
+    fn permission_denied_with_reason(reason: String) -> Self {
+        Self {
+            status: "permission_denied".to_owned(),
+            output: String::new(),
+            error: reason,
+            compaction_triggered: false,
+        }
+    }
+
+    fn timed_out(reason: String) -> Self {
+        Self {
+            status: "timed_out".to_owned(),
+            output: String::new(),
+            error: reason,
+            compaction_triggered: false,
+        }
+    }
+
+    fn resource_exhausted(reason: String) -> Self {
+        Self {
+            status: "resource_exhausted".to_owned(),
+            output: String::new(),
+            error: reason,
+            compaction_triggered: false,
+        }
+    }
+
+    fn cancelled(reason: String) -> Self {
+        Self {
+            status: "cancelled".to_owned(),
+            output: String::new(),
+            error: reason,
+            compaction_triggered: false,
+        }
+    }
+
+    fn aborted(reason: String) -> Self {
+        Self {
+            status: "aborted".to_owned(),
+            output: String::new(),
+            error: reason,
+            compaction_triggered: false,
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Map the browser loop's structured lifecycle result before generic tool
+/// handling sees it. In particular, only an explicit completed result may
+/// become `StepOutcome::completed`; abort/denial/timeout never fall through to
+/// the historical `error: None` success path.
+fn browser_execution_to_step_outcome(execution: tool_bridge::BrowserAgentExecution) -> StepOutcome {
+    match execution {
+        tool_bridge::BrowserAgentExecution::Completed { output } => StepOutcome::completed(output),
+        tool_bridge::BrowserAgentExecution::Failed { reason } => StepOutcome::failed(&reason),
+        tool_bridge::BrowserAgentExecution::PermissionDenied { reason } => {
+            StepOutcome::permission_denied_with_reason(reason)
+        }
+        tool_bridge::BrowserAgentExecution::TimedOut { reason } => StepOutcome::timed_out(reason),
+        tool_bridge::BrowserAgentExecution::ResourceExhausted { reason } => {
+            StepOutcome::resource_exhausted(reason)
+        }
+        tool_bridge::BrowserAgentExecution::Cancelled { reason } => StepOutcome::cancelled(reason),
+        tool_bridge::BrowserAgentExecution::Aborted { reason } => StepOutcome::aborted(reason),
+        tool_bridge::BrowserAgentExecution::AwaitingApproval => StepOutcome::awaiting_approval(),
+    }
+}
+
+/// Execute a step without a browser dispatch capability. This compatibility
+/// entry point deliberately cannot launch `browser_agent`; only the gRPC
+/// boundary may call `execute_step_with_browser_grant` after BrowserBroker
+/// revalidation. Existing internal callers therefore fail closed rather than
+/// treating a model-authored grant id as authority.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
     tool_name: &str,
     tool_input: &str,
@@ -142,7 +213,67 @@ pub async fn execute_step(
     data_plane_bearer: Option<&str>,
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
 ) -> StepOutcome {
+    execute_step_with_browser_grant(
+        tool_name,
+        tool_input,
+        permission_mode,
+        hook_context,
+        org_id,
+        user_id,
+        run_id,
+        step_id,
+        session_channel,
+        browser_event_sink,
+        state,
+        zdr,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        None,
+    )
+    .await
+}
+
+/// Execute a step with a broker-validated browser dispatch capability. This
+/// is intentionally crate-visible so a direct agent/runtime call cannot forge
+/// the capability from JSON.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) async fn execute_step_with_browser_grant(
+    tool_name: &str,
+    tool_input: &str,
+    permission_mode: &str,
+    hook_context: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    session_channel: Option<Channel>,
+    browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
+    zdr: bool,
+    data_plane_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
+) -> StepOutcome {
+    match capability_policy.evaluate(tool_name, run_id, org_id).await {
+        Ok(crate::capability_policy::CapabilityDecision::Allow) => {}
+        Ok(crate::capability_policy::CapabilityDecision::Ask) => {
+            return StepOutcome::awaiting_approval();
+        }
+        Ok(crate::capability_policy::CapabilityDecision::Deny) => {
+            return StepOutcome::permission_denied();
+        }
+        Err(error) => {
+            tracing::warn!(code = ?error.code(), "tool dispatch blocked because capability policy is unavailable");
+            return StepOutcome::failed("capability policy unavailable");
+        }
+    }
+
     // PreToolUse hook policy runs BEFORE the permission engine: a rule may deny
     // the call outright or escalate it to human approval (HITL). Allow defers to
     // the permission gate below.
@@ -165,9 +296,30 @@ pub async fn execute_step(
         PermissionDecision::Allow => {}
     }
 
-    let subagent_note = subagent::maybe_spawn(tool_name)
+    let subagent_spawn = subagent::maybe_spawn(tool_name);
+    let subagent_note = subagent_spawn
+        .as_ref()
         .map(|entry| format!(" [{}]", entry.summary))
         .unwrap_or_default();
+
+    // Browser-agent returns a structured lifecycle result, not a generic tool
+    // string. Do this before the `ToolExecution` branch so aborted, denied,
+    // and timed-out loops cannot accidentally become `completed` when their
+    // old bridge representation had no `error` value.
+    if tool_name == BROWSER_AGENT_TOOL {
+        return browser_execution_to_step_outcome(
+            tool_bridge::execute_browser_agent(
+                tool_input,
+                org_id,
+                zdr,
+                browser_event_sink,
+                state,
+                inference_bearer,
+                browser_grant,
+            )
+            .await,
+        );
+    }
 
     // G1: the `shell` tool runs a REAL sandboxed process (executor primitive);
     // every other tool keeps the deterministic tool_bridge path. The permission
@@ -175,16 +327,6 @@ pub async fn execute_step(
     // the same approval/deny policy.
     let exec = if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
-    } else if tool_name == BROWSER_AGENT_TOOL {
-        tool_bridge::execute_browser_agent(
-            tool_input,
-            org_id,
-            zdr,
-            browser_event_sink,
-            state,
-            inference_bearer,
-        )
-        .await
     } else if tool_name == WEB_SEARCH_TOOL {
         execute_web_search(tool_input, org_id).await
     } else if tool_name == WEB_FETCH_TOOL {
@@ -237,6 +379,11 @@ pub async fn execute_step(
         .await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
         execute_mcp(tool_name, tool_input, org_id, user_id).await
+    } else if subagent_spawn.is_some() {
+        tool_bridge::ToolExecution {
+            output: "subagent spawned".to_owned(),
+            error: None,
+        }
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };
@@ -339,7 +486,7 @@ async fn execute_web_search(tool_input: &str, org_id: &str) -> tool_bridge::Tool
     let client = match crate::web_tools::WebToolsClient::from_env() {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return tool_error("web_search unavailable: QUARRY_EDGE_URL not configured".to_owned())
+            return tool_error("web_search unavailable: QUARRY_EDGE_URL not configured".to_owned());
         }
         Err(error) => return tool_error(format!("web_search unavailable: {error}")),
     };
@@ -400,7 +547,7 @@ async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolE
     let client = match crate::web_tools::WebToolsClient::from_env() {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return tool_error("web_fetch unavailable: QUARRY_EDGE_URL not configured".to_owned())
+            return tool_error("web_fetch unavailable: QUARRY_EDGE_URL not configured".to_owned());
         }
         Err(error) => return tool_error(format!("web_fetch unavailable: {error}")),
     };
@@ -413,7 +560,61 @@ async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolE
     }
 }
 
-/// `knowledge_search` tool — input JSON `{"query": String, "top_k"?: i32}`.
+#[derive(Debug, PartialEq, Eq)]
+enum KnowledgeRoute {
+    Hybrid,
+}
+
+impl KnowledgeRoute {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct KnowledgeInput {
+    query: String,
+    #[serde(default)]
+    top_k: Option<i32>,
+    #[serde(default)]
+    route: Option<String>,
+}
+
+/// Parse and validate the model-authored retrieval input before any network
+/// operation. The current Data Plane gRPC contract exposes only its
+/// server-managed hybrid/vector pipeline; graph, structured/SQL, MCP and
+/// caller-selected vector-only routing need additive owner-plane contracts.
+fn parse_knowledge_input(tool_input: &str) -> Result<KnowledgeInputValidated, String> {
+    let raw: KnowledgeInput = serde_json::from_str(tool_input)
+        .map_err(|error| format!("invalid knowledge_search input: {error}"))?;
+    let query = raw.query.trim();
+    if query.is_empty() {
+        return Err("knowledge_search query must be non-empty".to_owned());
+    }
+    let route = raw.route.as_deref().unwrap_or("hybrid").trim();
+    if route != "hybrid" {
+        return Err(format!(
+            "knowledge_search route '{route}' is not configured; only the server-managed hybrid route is available"
+        ));
+    }
+    Ok(KnowledgeInputValidated {
+        query: query.to_owned(),
+        top_k: raw.top_k.unwrap_or(5).clamp(1, 20),
+        route: KnowledgeRoute::Hybrid,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct KnowledgeInputValidated {
+    query: String,
+    top_k: i32,
+    route: KnowledgeRoute,
+}
+
+/// `knowledge_search` tool — input JSON
+/// `{"query": String, "top_k"?: i32, "route"?: "hybrid"}`.
 /// Retrieves the org's own ingested knowledge (RAG) via Data Plane v2. `org_id`
 /// comes from the run context (verified), never the model's input, so a tool
 /// call cannot cross tenant boundaries. Read-only (no approval gate).
@@ -424,23 +625,17 @@ async fn execute_knowledge_search(
     zdr: bool,
     data_plane_bearer: Option<&str>,
 ) -> tool_bridge::ToolExecution {
-    #[derive(serde::Deserialize)]
-    struct KnowledgeInput {
-        query: String,
-        #[serde(default)]
-        top_k: Option<i32>,
-    }
-    let input: KnowledgeInput = match serde_json::from_str(tool_input) {
+    let input = match parse_knowledge_input(tool_input) {
         Ok(i) => i,
-        Err(e) => return tool_error(format!("invalid knowledge_search input: {e}")),
+        Err(e) => return tool_error(e),
     };
     if org_id.trim().is_empty() {
         return tool_error("knowledge_search requires a run org_id (tenant scope)".to_owned());
     }
     let Some(client) = crate::knowledge_tools::KnowledgeClient::from_env() else {
-        return tool_error(
-            "knowledge_search unavailable: DATAPLANE_RETRIEVAL_URL not configured".to_owned(),
-        );
+        return tool_error(crate::knowledge_tools::format_degraded_error(
+            "knowledge_search unavailable: DATAPLANE_RETRIEVAL_URL not configured",
+        ));
     };
     let Some(data_plane_bearer) = data_plane_bearer.filter(|value| !value.trim().is_empty()) else {
         return tool_error(
@@ -454,7 +649,7 @@ async fn execute_knowledge_search(
             org_id,
             user_id,
             &input.query,
-            input.top_k.unwrap_or(5),
+            input.top_k,
             zdr,
             data_plane_bearer,
         )
@@ -464,7 +659,43 @@ async fn execute_knowledge_search(
             output,
             error: None,
         },
-        Err(e) => tool_error(e),
+        Err(e) => tool_error(crate::knowledge_tools::format_degraded_error(&e)),
+    }
+}
+
+#[cfg(test)]
+mod knowledge_route_tests {
+    use super::*;
+
+    #[test]
+    fn supported_retrieval_route_is_server_managed_hybrid() {
+        let input = parse_knowledge_input(r#"{"query":"quarterly revenue","route":"hybrid"}"#)
+            .expect("hybrid route is supported");
+        assert_eq!(input.query, "quarterly revenue");
+        assert_eq!(input.route, KnowledgeRoute::Hybrid);
+    }
+
+    #[test]
+    fn omitted_route_remains_backward_compatible() {
+        let input = parse_knowledge_input(r#"{"query":"quarterly revenue"}"#)
+            .expect("legacy input remains valid");
+        assert_eq!(input.route, KnowledgeRoute::Hybrid);
+    }
+
+    #[test]
+    fn unsupported_retrieval_routes_fail_explicitly() {
+        for route in ["graph", "structured", "sql", "mcp", "vector"] {
+            let input = format!(r#"{{"query":"q","route":"{route}"}}"#);
+            let error = parse_knowledge_input(&input).expect_err("route must fail closed");
+            assert!(error.contains(route));
+            assert!(error.contains("not configured"));
+        }
+    }
+
+    #[test]
+    fn blank_query_is_rejected_before_retrieval() {
+        let error = parse_knowledge_input(r#"{"query":"  "}"#).expect_err("blank query rejected");
+        assert!(error.contains("non-empty"));
     }
 }
 
@@ -998,12 +1229,68 @@ fn tool_error(message: String) -> tool_bridge::ToolExecution {
 mod tests {
     use super::*;
 
+    struct FixedCapabilityPolicy(crate::capability_policy::CapabilityDecision);
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for FixedCapabilityPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(self.0)
+        }
+    }
+
+    fn allow_policy() -> FixedCapabilityPolicy {
+        FixedCapabilityPolicy(crate::capability_policy::CapabilityDecision::Allow)
+    }
+
+    #[tokio::test]
+    async fn capability_deny_and_ask_are_enforced_before_dispatch() {
+        for (decision, expected) in [
+            (
+                crate::capability_policy::CapabilityDecision::Deny,
+                "permission_denied",
+            ),
+            (
+                crate::capability_policy::CapabilityDecision::Ask,
+                "awaiting_approval",
+            ),
+        ] {
+            let policy = FixedCapabilityPolicy(decision);
+            let out = execute_step(
+                "echo",
+                "must-not-dispatch",
+                "auto",
+                "",
+                "org_test",
+                "user_test",
+                "run_test",
+                "step_test",
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                &policy,
+            )
+            .await;
+            assert_eq!(out.status, expected);
+            assert!(!out.output.contains("must-not-dispatch"));
+        }
+    }
+
     // "auto" mode -> Allow (even for the risky "shell" tool). The executor runs
     // as passthrough when bwrap is absent, so these exercise the real
     // dispatch->executor path cross-platform.
 
     #[tokio::test]
     async fn shell_tool_runs_a_real_process() {
+        let policy = allow_policy();
         let out = execute_step(
             "shell",
             r#"{"program":"echo","args":["hi-there"]}"#,
@@ -1020,6 +1307,7 @@ mod tests {
             None,
             None,
             None,
+            &policy,
         )
         .await;
         assert_eq!(out.status, "completed", "outcome: {out:?}");
@@ -1028,6 +1316,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_tool_invalid_json_fails() {
+        let policy = allow_policy();
         let out = execute_step(
             "shell",
             "not json",
@@ -1044,6 +1333,7 @@ mod tests {
             None,
             None,
             None,
+            &policy,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -1051,6 +1341,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_tool_nonzero_exit_fails() {
+        let policy = allow_policy();
         let out = execute_step(
             "shell",
             r#"{"program":"sh","args":["-c","exit 2"]}"#,
@@ -1067,6 +1358,7 @@ mod tests {
             None,
             None,
             None,
+            &policy,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -1074,6 +1366,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_shell_tool_still_uses_the_deterministic_bridge() {
+        let policy = allow_policy();
         let out = execute_step(
             "echo",
             "hello-bridge",
@@ -1090,6 +1383,7 @@ mod tests {
             None,
             None,
             None,
+            &policy,
         )
         .await;
         assert_eq!(out.status, "completed");
@@ -1097,7 +1391,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_browser_dispatch_fails_closed_without_broker_capability() {
+        let policy = allow_policy();
+        let out = execute_step(
+            BROWSER_AGENT_TOOL,
+            r#"{"grant_id":"forged-grant","allowed_domains":["evil.example"]}"#,
+            "auto",
+            "",
+            "org_test",
+            "user_test",
+            "run_test",
+            "step_test",
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &policy,
+        )
+        .await;
+        assert_eq!(out.status, "failed");
+        assert!(out.error.contains("broker-validated grant"));
+    }
+
+    #[test]
+    fn browser_non_success_outcomes_are_never_coerced_to_completed() {
+        for (execution, expected_status) in [
+            (
+                tool_bridge::BrowserAgentExecution::Cancelled {
+                    reason: "cancelled by user".to_owned(),
+                },
+                "cancelled",
+            ),
+            (
+                tool_bridge::BrowserAgentExecution::PermissionDenied {
+                    reason: "browser action denied".to_owned(),
+                },
+                "permission_denied",
+            ),
+            (
+                tool_bridge::BrowserAgentExecution::TimedOut {
+                    reason: "browser action approval timed out".to_owned(),
+                },
+                "timed_out",
+            ),
+            (
+                tool_bridge::BrowserAgentExecution::ResourceExhausted {
+                    reason: "max_steps exceeded".to_owned(),
+                },
+                "resource_exhausted",
+            ),
+            (
+                tool_bridge::BrowserAgentExecution::Failed {
+                    reason: "browser failed".to_owned(),
+                },
+                "failed",
+            ),
+        ] {
+            let outcome = browser_execution_to_step_outcome(execution);
+            assert_eq!(outcome.status, expected_status, "outcome: {outcome:?}");
+            assert_ne!(outcome.status, "completed", "outcome: {outcome:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn deny_mode_blocks_shell_before_execution() {
+        let policy = allow_policy();
         let out = execute_step(
             "shell",
             r#"{"program":"echo","args":["x"]}"#,
@@ -1114,6 +1475,7 @@ mod tests {
             None,
             None,
             None,
+            &policy,
         )
         .await;
         assert_eq!(out.status, "permission_denied");

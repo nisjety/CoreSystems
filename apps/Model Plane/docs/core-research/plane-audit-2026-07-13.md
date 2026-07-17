@@ -1,5 +1,9 @@
 # Model Plane Production-Readiness Audit — 2026-07-13
 
+> **Historical evidence.** The current audit is
+> `plane-audit-2026-07-16.md`. The 2026-07-13 runtime described below no longer
+> exists locally and must not be treated as current live state.
+
 Scope: `/Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane`
 
 Timezone: Europe/Oslo (CEST). Source baseline: branch `main`, commit

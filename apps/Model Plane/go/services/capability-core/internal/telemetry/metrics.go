@@ -18,6 +18,10 @@ var (
 	// PolicyDecisionsTotal counts policy evaluation outcomes, labelled by
 	// decision ("allow"|"deny") and risk level.
 	PolicyDecisionsTotal metric.Int64Counter
+
+	// CapabilityRankingTotal counts capability-discovery ranking sources and
+	// stable fallback reasons. It never records user query text or tool names.
+	CapabilityRankingTotal metric.Int64Counter
 )
 
 func init() {
@@ -31,5 +35,10 @@ func init() {
 	PolicyDecisionsTotal, _ = meter.Int64Counter(
 		"capability_core_policy_decisions_total",
 		metric.WithDescription("Total policy decisions emitted by capability-core, labelled by decision and risk level."),
+	)
+
+	CapabilityRankingTotal, _ = meter.Int64Counter(
+		"capability_core_discovery_ranking_total",
+		metric.WithDescription("Capability discovery ranking outcomes labelled by source and safe reason code."),
 	)
 }

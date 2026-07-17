@@ -29,9 +29,13 @@ type AcquireGrantRequest struct {
 	// Preferred mode: "local" or "cloud".
 	Mode string `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`
 	// Tenant identifier.
-	OrgId         string `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OrgId string `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Broker-owned navigation policy. An empty policy is never an unrestricted
+	// browser grant: issuance rejects it. Values are normalized and persisted by
+	// the broker, then returned by ValidateGrant for downstream enforcement.
+	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *AcquireGrantRequest) Reset() {
@@ -85,6 +89,13 @@ func (x *AcquireGrantRequest) GetOrgId() string {
 	return ""
 }
 
+func (x *AcquireGrantRequest) GetAllowedDomains() []string {
+	if x != nil {
+		return x.AllowedDomains
+	}
+	return nil
+}
+
 type AcquireGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Grant identifier (ULID).
@@ -92,9 +103,11 @@ type AcquireGrantResponse struct {
 	// Browser endpoint (CDP URL or local ws).
 	Endpoint string `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
 	// Grant expiry time.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// Canonical broker-owned navigation policy for this grant.
+	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *AcquireGrantResponse) Reset() {
@@ -144,6 +157,13 @@ func (x *AcquireGrantResponse) GetEndpoint() string {
 func (x *AcquireGrantResponse) GetExpiresAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *AcquireGrantResponse) GetAllowedDomains() []string {
+	if x != nil {
+		return x.AllowedDomains
 	}
 	return nil
 }
@@ -380,9 +400,12 @@ type ValidateGrantResponse struct {
 	// True if grant is active and unexpired.
 	Active bool `protobuf:"varint,2,opt,name=active,proto3" json:"active,omitempty"`
 	// Grant expiry time.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// Canonical broker-owned navigation policy. Consumers must reject an empty
+	// policy and must not substitute caller-supplied domains.
+	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ValidateGrantResponse) Reset() {
@@ -436,21 +459,30 @@ func (x *ValidateGrantResponse) GetExpiresAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *ValidateGrantResponse) GetAllowedDomains() []string {
+	if x != nil {
+		return x.AllowedDomains
+	}
+	return nil
+}
+
 var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"a\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8a\x01\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x15\n" +
-	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x88\x01\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12'\n" +
+	"\x0fallowed_domains\x18\x04 \x03(\tR\x0eallowedDomains\"\xb1\x01\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
 	"\n" +
-	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"G\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12'\n" +
+	"\x0fallowed_domains\x18\x04 \x03(\tR\x0eallowedDomains\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -460,12 +492,13 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x85\x01\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xae\x01\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
 	"\n" +
-	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt2\xf7\x02\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12'\n" +
+	"\x0fallowed_domains\x18\x04 \x03(\tR\x0eallowedDomains2\xf7\x02\n" +
 	"\rBrowserBroker\x12Y\n" +
 	"\fAcquireGrant\x12#.model_plane.v1.AcquireGrantRequest\x1a$.model_plane.v1.AcquireGrantResponse\x12V\n" +
 	"\vRevokeGrant\x12\".model_plane.v1.RevokeGrantRequest\x1a#.model_plane.v1.RevokeGrantResponse\x12\\\n" +

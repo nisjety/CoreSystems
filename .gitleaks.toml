@@ -38,4 +38,11 @@ paths = [
 # *contains* one of these words is still caught only if it is dominated by it.
 regexes = [
   '''(?i)\b(your[-_ ]?(api[-_ ]?)?(key|token|secret|password)|change[-_ ]?me|placeholder|replace[-_ ]?me|example[-_ ]?(key|token|secret)?|dummy|sample|redacted|todo|tbd|<[a-z0-9_ -]+>|\$\{[^}]+\}|xxxxx+|token[-_ ]?here|secret[-_ ]?here)\b''',
+  # Test-only fixtures & env-var NAME references (not secret values), all in
+  # *_test.go: NATS auth table tests reference the env-var identifier they read
+  # (SCREAMING_SNAKE, never a real value); unit tests use placeholder creds.
+  '''\b[A-Z][A-Z0-9]*(_[A-Z0-9]+)*_(PASSWORD|SECRET|TOKEN|KEY)\b''',
+  '''\bscoped-(password|token|secret|key)\b''',
+  '''\b(secret-value|legacy-token)\b''',
+  '''secret\\r\\ninjected''',
 ]

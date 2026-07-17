@@ -8,7 +8,8 @@
 //!   4. Evaluates stop criteria and budget/step limits.
 //!   5. Repeats until completion, failure, or abort.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -31,6 +32,42 @@ pub enum PlanStatus {
     /// for another non-planner reason. Distinct from `Failed` — an abort is
     /// user/operator-initiated, not an execution error.
     Aborted,
+}
+
+/// Why a browser plan stopped without completing its goal.
+///
+/// This stays structured through the tool bridge and runtime boundary. A plain
+/// `PlanStatus::Aborted` is not sufficient: a user cancellation, a denied
+/// approval, and an approval timeout must never be reclassified as a
+/// successful tool result merely because they all stop the same loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserAbortReason {
+    Cancelled,
+    ApprovalDenied,
+    ApprovalTimedOut,
+    /// A future/operator abort that has no more specific semantic reason.
+    /// Consumers must still treat this as non-successful.
+    Other,
+}
+
+/// A hard execution budget reached by the browser agent.
+///
+/// Resource exhaustion is not a user-visible task completion. It is carried
+/// separately from a planner stop criterion so dispatch can expose the exact
+/// non-success terminal outcome without parsing a human-readable summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserResourceLimit {
+    MaxSteps,
+    Runtime,
+}
+
+impl BrowserResourceLimit {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::MaxSteps => "max_steps exceeded",
+            Self::Runtime => "max_runtime_s exceeded",
+        }
+    }
 }
 
 impl PlanStatus {
@@ -233,14 +270,14 @@ impl AgentPlan {
         }
     }
 
-    pub fn check_limits(&self) -> Option<&'static str> {
+    pub fn check_limits(&self) -> Option<BrowserResourceLimit> {
         if self.config.max_steps > 0 && self.current_step >= self.config.max_steps {
-            return Some("max_steps exceeded");
+            return Some(BrowserResourceLimit::MaxSteps);
         }
         if self.config.max_runtime_s > 0 {
             let elapsed = i32::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i32::MAX);
             if elapsed >= self.config.max_runtime_s {
-                return Some("max_runtime_s exceeded");
+                return Some(BrowserResourceLimit::Runtime);
             }
         }
         None
@@ -248,7 +285,9 @@ impl AgentPlan {
 
     pub fn is_domain_allowed(&self, url: &str) -> bool {
         if self.config.allowed_domains.is_empty() {
-            return true;
+            // A missing policy must never fall through to unrestricted browser
+            // navigation. Broker-issued grants always carry a non-empty policy.
+            return false;
         }
         let Some(host) = extract_host(url) else {
             return false;
@@ -270,14 +309,107 @@ impl AgentPlan {
     }
 }
 
+/// Validate the immutable browser plan before any Quarry lease is acquired.
+/// Browser grants are only safe when they carry an explicit canonical domain
+/// policy; a caller cannot obtain an "allow all" plan by omitting the list.
+pub(crate) fn validate_plan_config(config: &PlanConfig) -> Result<(), String> {
+    if config.grant_id.trim().is_empty() {
+        return Err("browser grant_id is required".to_owned());
+    }
+    let canonical = canonicalize_allowed_domains(&config.allowed_domains)?;
+    if canonical != config.allowed_domains {
+        return Err("browser allowed_domains must be canonical broker policy".to_owned());
+    }
+    if let Some(start_url) = config
+        .start_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
+        let plan = AgentPlan::new(config.clone());
+        if !plan.is_domain_allowed(start_url) {
+            return Err("browser start_url is outside the broker domain policy".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Canonicalize a broker-supplied domain policy. This independently validates
+/// the gRPC response at the execution boundary: a malformed or empty response
+/// cannot turn into unrestricted navigation if a broker or proxy is miswired.
+pub(crate) fn canonicalize_allowed_domains(domains: &[String]) -> Result<Vec<String>, String> {
+    const MAX_ALLOWED_DOMAINS: usize = 32;
+    if domains.is_empty() || domains.len() > MAX_ALLOWED_DOMAINS {
+        return Err("browser allowed_domains must be a non-empty bounded policy".to_owned());
+    }
+
+    let mut canonical = BTreeSet::new();
+    for raw in domains {
+        let domain = raw.trim().to_ascii_lowercase();
+        if !is_canonical_domain(&domain) {
+            return Err("browser allowed_domains contains an invalid hostname".to_owned());
+        }
+        canonical.insert(domain);
+    }
+    if canonical.is_empty() {
+        return Err("browser allowed_domains must be a non-empty bounded policy".to_owned());
+    }
+    Ok(canonical.into_iter().collect())
+}
+
+fn is_canonical_domain(domain: &str) -> bool {
+    if domain.is_empty()
+        || domain.len() > 253
+        || domain.parse::<IpAddr>().is_ok()
+        || !domain.contains('.')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+    {
+        return false;
+    }
+
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
 /// Result of a single planning step.
 pub enum PlanStepResult {
     Action(BrowserAction),
     Completed(String),
     WaitingApproval,
     Failed(String),
-    /// The run was cancelled by the user mid-loop (Phase 2 B5).
-    Aborted(String),
+    /// A max-steps or runtime budget stopped the loop. This is distinct from
+    /// the planner's successful `Completed` result.
+    ResourceExhausted {
+        reason: String,
+        limit: BrowserResourceLimit,
+    },
+    /// A terminal non-success state. The reason is structured so its meaning
+    /// survives the async tool bridge/runtime handoff.
+    Aborted {
+        reason: String,
+        abort_reason: BrowserAbortReason,
+    },
+}
+
+/// Structured result from a browser-agent loop.
+///
+/// `summary` is operator/model context only; consumers must use
+/// `abort_reason` or `resource_limit`, rather than parsing this text, to
+/// determine lifecycle behavior.
+#[derive(Debug, Clone)]
+pub struct BrowserAgentLoopResult {
+    pub status: PlanStatus,
+    pub observations: Vec<BrowserObservation>,
+    pub summary: String,
+    pub abort_reason: Option<BrowserAbortReason>,
+    pub resource_limit: Option<BrowserResourceLimit>,
 }
 
 /// Extract the host portion of a URL without bringing in a full URL parser.
@@ -285,7 +417,10 @@ pub enum PlanStepResult {
 /// result. Returns `None` for inputs that lack a `://` separator or where
 /// the host segment is empty.
 fn extract_host(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://")?.1;
+    let (scheme, after_scheme) = url.split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
     // Drop userinfo if present.
     let after_userinfo = match after_scheme.split_once('@') {
         Some((_, rest)) => rest,
@@ -334,9 +469,12 @@ pub fn plan_next_action(
         return PlanStepResult::Failed("plan is in terminal state".to_owned());
     }
 
-    if let Some(reason) = plan.check_limits() {
-        plan.status = PlanStatus::Completed;
-        return PlanStepResult::Completed(reason.to_owned());
+    if let Some(limit) = plan.check_limits() {
+        plan.status = PlanStatus::Failed;
+        return PlanStepResult::ResourceExhausted {
+            reason: limit.reason().to_owned(),
+            limit,
+        };
     }
 
     if let Some(obs) = last_observation {
@@ -436,9 +574,21 @@ pub async fn run_browser_agent_loop(
     planner: Option<&crate::llm_planner::LlmPlanner>,
     sink: Option<&dyn BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
-) -> (PlanStatus, Vec<BrowserObservation>, String) {
+) -> BrowserAgentLoopResult {
     let mut plan = AgentPlan::new(config);
     info!(plan_id = %plan.config.plan_id, "browser-agent loop started");
+
+    if let Err(error) = validate_plan_config(&plan.config) {
+        plan.status = PlanStatus::Failed;
+        warn!(plan_id = %plan.config.plan_id, %error, "browser-agent policy rejected before Quarry launch");
+        return BrowserAgentLoopResult {
+            status: plan.status,
+            observations: plan.observations,
+            summary: error,
+            abort_reason: None,
+            resource_limit: None,
+        };
+    }
 
     let Some(client) = client else {
         plan.status = PlanStatus::Failed;
@@ -446,7 +596,13 @@ pub async fn run_browser_agent_loop(
             "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL"
                 .to_owned();
         warn!(plan_id = %plan.config.plan_id, "{summary}");
-        return (plan.status, plan.observations, summary);
+        return BrowserAgentLoopResult {
+            status: plan.status,
+            observations: plan.observations,
+            summary,
+            abort_reason: None,
+            resource_limit: None,
+        };
     };
 
     let constraints = crate::quarry_agent::AgentConstraints {
@@ -470,6 +626,7 @@ pub async fn run_browser_agent_loop(
             &constraints,
             zdr,
             plan.config.profile_id.clone(),
+            &plan.config.grant_id,
         )
         .await
     {
@@ -477,15 +634,19 @@ pub async fn run_browser_agent_loop(
         Err(e) => {
             plan.status = PlanStatus::Failed;
             warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent start_run failed");
-            return (
-                plan.status,
-                plan.observations,
-                format!("browser-agent start_run failed: {e}"),
-            );
+            return BrowserAgentLoopResult {
+                status: plan.status,
+                observations: plan.observations,
+                summary: format!("browser-agent start_run failed: {e}"),
+                abort_reason: None,
+                resource_limit: None,
+            };
         }
     };
 
     let mut pending: Option<BrowserObservation> = None;
+    let mut abort_reason = None;
+    let mut resource_limit = None;
     let summary = loop {
         let last = pending.take();
         let result = decide_next_action(&mut plan, last.as_ref(), planner, state, sink).await;
@@ -519,6 +680,7 @@ pub async fn run_browser_agent_loop(
                         wire_action,
                         &constraints,
                         zdr,
+                        &plan.config.grant_id,
                     )
                     .await
                 {
@@ -540,11 +702,18 @@ pub async fn run_browser_agent_loop(
                     }
                 }
             }
-            // `Completed`/`Aborted` share a body today (both simply end the
-            // loop with their reason string) but are intentionally distinct
-            // variants — `plan.status` already diverged (Completed/Aborted)
-            // before reaching here, and callers may branch on it later.
-            PlanStepResult::Completed(reason) | PlanStepResult::Aborted(reason) => break reason,
+            PlanStepResult::Completed(reason) => break reason,
+            PlanStepResult::ResourceExhausted { reason, limit } => {
+                resource_limit = Some(limit);
+                break reason;
+            }
+            PlanStepResult::Aborted {
+                reason,
+                abort_reason: reason_kind,
+            } => {
+                abort_reason = Some(reason_kind);
+                break reason;
+            }
             PlanStepResult::WaitingApproval => break "paused for approval".to_owned(),
             PlanStepResult::Failed(error) => break error,
         }
@@ -557,7 +726,13 @@ pub async fn run_browser_agent_loop(
 
     info!(plan_id = %plan.config.plan_id, status = plan.status.as_str(), "browser-agent loop finished");
     let observations = plan.observations.clone();
-    (plan.status, observations, summary)
+    BrowserAgentLoopResult {
+        status: plan.status,
+        observations,
+        summary,
+        abort_reason,
+        resource_limit,
+    }
 }
 
 /// Polling interval while a run is paused (Phase 2 B5). Shortened under test
@@ -657,15 +832,17 @@ async fn gate_persistent_cookie_use(
         ApprovalOutcome::Granted => None,
         ApprovalOutcome::Denied(reason) => {
             plan.status = PlanStatus::Aborted;
-            Some(PlanStepResult::Aborted(format!(
-                "persistent cookie use denied: {reason}"
-            )))
+            Some(PlanStepResult::Aborted {
+                reason: format!("persistent cookie use denied: {reason}"),
+                abort_reason: BrowserAbortReason::ApprovalDenied,
+            })
         }
         ApprovalOutcome::TimedOut => {
             plan.status = PlanStatus::Aborted;
-            Some(PlanStepResult::Aborted(
-                "persistent cookie use approval timed out".to_owned(),
-            ))
+            Some(PlanStepResult::Aborted {
+                reason: "persistent cookie use approval timed out".to_owned(),
+                abort_reason: BrowserAbortReason::ApprovalTimedOut,
+            })
         }
     }
 }
@@ -699,11 +876,17 @@ async fn gate_risky_action(
         ApprovalOutcome::Granted => PlanStepResult::Action(action),
         ApprovalOutcome::Denied(reason) => {
             plan.status = PlanStatus::Aborted;
-            PlanStepResult::Aborted(format!("browser action denied: {reason}"))
+            PlanStepResult::Aborted {
+                reason: format!("browser action denied: {reason}"),
+                abort_reason: BrowserAbortReason::ApprovalDenied,
+            }
         }
         ApprovalOutcome::TimedOut => {
             plan.status = PlanStatus::Aborted;
-            PlanStepResult::Aborted("browser action approval timed out".to_owned())
+            PlanStepResult::Aborted {
+                reason: "browser action approval timed out".to_owned(),
+                abort_reason: BrowserAbortReason::ApprovalTimedOut,
+            }
         }
     }
 }
@@ -727,7 +910,7 @@ async fn request_approval(
 }
 
 /// Poll `state` for a user-initiated cancel or pause (Phase 2 B5) and block
-/// accordingly. Returns `Some(PlanStepResult::Aborted(..))` when the run was
+/// accordingly. Returns `Some(PlanStepResult::Aborted { .. })` when the run was
 /// cancelled (whether immediately or while paused); returns `None` once the
 /// run is (or becomes) `Running`, so the caller proceeds to the planner gate.
 ///
@@ -750,7 +933,10 @@ async fn wait_out_pause_or_cancel(
         match state.get_or_create(&plan.config.run_id).status {
             crate::state::RunStatus::Cancelled => {
                 plan.status = PlanStatus::Aborted;
-                return Some(PlanStepResult::Aborted("cancelled by user".to_owned()));
+                return Some(PlanStepResult::Aborted {
+                    reason: "cancelled by user".to_owned(),
+                    abort_reason: BrowserAbortReason::Cancelled,
+                });
             }
             crate::state::RunStatus::Paused => {
                 if !announced_paused {
@@ -900,18 +1086,40 @@ mod tests {
     }
 
     #[test]
-    fn max_steps_stops_loop() {
+    fn max_steps_exhausts_the_plan_without_reporting_completion() {
         let mut config = test_config();
         config.max_steps = 1;
         let mut plan = AgentPlan::new(config);
         plan.current_step = 1;
         let result = plan_next_action(&mut plan, None);
         match result {
-            PlanStepResult::Completed(reason) => {
+            PlanStepResult::ResourceExhausted { reason, limit } => {
                 assert!(reason.contains("max_steps"));
+                assert_eq!(limit, BrowserResourceLimit::MaxSteps);
             }
-            _ => panic!("expected Completed"),
+            _ => panic!("expected resource exhaustion"),
         }
+        assert_eq!(plan.status, PlanStatus::Failed);
+    }
+
+    #[test]
+    fn max_runtime_exhausts_the_plan_without_reporting_completion() {
+        let mut config = test_config();
+        config.max_runtime_s = 1;
+        let mut plan = AgentPlan::new(config);
+        plan.started_at = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("a one-second monotonic offset is representable in this test");
+
+        let result = plan_next_action(&mut plan, None);
+        match result {
+            PlanStepResult::ResourceExhausted { reason, limit } => {
+                assert!(reason.contains("max_runtime_s"));
+                assert_eq!(limit, BrowserResourceLimit::Runtime);
+            }
+            _ => panic!("expected resource exhaustion"),
+        }
+        assert_eq!(plan.status, PlanStatus::Failed);
     }
 
     #[test]
@@ -981,11 +1189,41 @@ mod tests {
     }
 
     #[test]
-    fn empty_allowlist_permits_all() {
+    fn empty_allowlist_blocks_every_navigation() {
         let mut config = test_config();
         config.allowed_domains = vec![];
         let plan = AgentPlan::new(config);
-        assert!(plan.is_domain_allowed("https://anything.com"));
+        assert!(!plan.is_domain_allowed("https://anything.com"));
+    }
+
+    #[test]
+    fn plan_config_rejects_empty_or_untrusted_navigation_policy_before_launch() {
+        let mut empty_policy = test_config();
+        empty_policy.allowed_domains.clear();
+        assert!(validate_plan_config(&empty_policy)
+            .expect_err("an empty policy must not mean unrestricted browser access")
+            .contains("non-empty"));
+
+        let mut arbitrary_start = test_config();
+        arbitrary_start.start_url = Some("https://evil.example/steal".to_owned());
+        assert!(validate_plan_config(&arbitrary_start)
+            .expect_err("a caller-selected URL outside the broker policy must fail")
+            .contains("outside"));
+    }
+
+    #[test]
+    fn canonical_domain_policy_rejects_urls_ips_and_wildcards() {
+        for domains in [
+            vec!["https://example.com".to_owned()],
+            vec!["*.example.com".to_owned()],
+            vec!["127.0.0.1".to_owned()],
+            vec!["localhost".to_owned()],
+        ] {
+            assert!(
+                canonicalize_allowed_domains(&domains).is_err(),
+                "{domains:?}"
+            );
+        }
     }
 
     #[test]
@@ -1103,7 +1341,13 @@ mod tests {
         let mut plan = AgentPlan::new(test_config());
         let result = wait_out_pause_or_cancel(&mut plan, Some(&store), None).await;
         match result {
-            Some(PlanStepResult::Aborted(reason)) => assert_eq!(reason, "cancelled by user"),
+            Some(PlanStepResult::Aborted {
+                reason,
+                abort_reason,
+            }) => {
+                assert_eq!(reason, "cancelled by user");
+                assert_eq!(abort_reason, BrowserAbortReason::Cancelled);
+            }
             other => panic!(
                 "expected Aborted, got a different result: {}",
                 other.is_some()
@@ -1154,7 +1398,13 @@ mod tests {
         let result = wait_out_pause_or_cancel(&mut plan, Some(&store), Some(&sink)).await;
         canceller.await.expect("canceller task");
 
-        assert!(matches!(result, Some(PlanStepResult::Aborted(_))));
+        assert!(matches!(
+            result,
+            Some(PlanStepResult::Aborted {
+                abort_reason: BrowserAbortReason::Cancelled,
+                ..
+            })
+        ));
         assert_eq!(plan.status, PlanStatus::Aborted);
         assert_eq!(sink.paused.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Cancelled from Paused, never flipped through Running — no resume announced.
@@ -1269,7 +1519,13 @@ mod tests {
         let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Denied("no".to_owned())]);
 
         let result = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
-        assert!(matches!(result, Some(PlanStepResult::Aborted(_))));
+        assert!(matches!(
+            result,
+            Some(PlanStepResult::Aborted {
+                abort_reason: BrowserAbortReason::ApprovalDenied,
+                ..
+            })
+        ));
         assert_eq!(plan.status, PlanStatus::Aborted);
     }
 
@@ -1302,7 +1558,13 @@ mod tests {
 
         let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
         match result {
-            PlanStepResult::Aborted(reason) => assert!(reason.contains("denied")),
+            PlanStepResult::Aborted {
+                reason,
+                abort_reason,
+            } => {
+                assert!(reason.contains("denied"));
+                assert_eq!(abort_reason, BrowserAbortReason::ApprovalDenied);
+            }
             _ => panic!("expected Aborted"),
         }
         assert_eq!(plan.status, PlanStatus::Aborted);
@@ -1317,7 +1579,13 @@ mod tests {
 
         let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
         match result {
-            PlanStepResult::Aborted(reason) => assert!(reason.contains("timed out")),
+            PlanStepResult::Aborted {
+                reason,
+                abort_reason,
+            } => {
+                assert!(reason.contains("timed out"));
+                assert_eq!(abort_reason, BrowserAbortReason::ApprovalTimedOut);
+            }
             _ => panic!("expected Aborted"),
         }
         assert_eq!(plan.status, PlanStatus::Aborted);
@@ -1345,7 +1613,13 @@ mod tests {
 
         let result = decide_next_action(&mut plan, None, None, None, None).await;
         match result {
-            PlanStepResult::Aborted(reason) => assert!(reason.contains("no approval sink")),
+            PlanStepResult::Aborted {
+                reason,
+                abort_reason,
+            } => {
+                assert!(reason.contains("no approval sink"));
+                assert_eq!(abort_reason, BrowserAbortReason::ApprovalDenied);
+            }
             _ => panic!("expected Aborted (fail closed)"),
         }
         assert_eq!(plan.status, PlanStatus::Aborted);

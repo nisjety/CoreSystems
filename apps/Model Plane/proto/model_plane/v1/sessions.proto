@@ -77,6 +77,23 @@ service SessionCore {
   rpc SetRunMode(SetRunModeRequest) returns (SetRunModeResponse);
 }
 
+// ManagedRunLifecycle owns the additive, durable terminalization protocol for
+// runs whose producers can lose a terminal RPC response. It intentionally
+// lives beside, rather than inside, SessionCore so legacy SessionCore clients
+// and mocks remain source-compatible.
+service ManagedRunLifecycle {
+  // Start a run and its single terminalization obligation atomically.
+  rpc StartManagedRun(StartManagedRunRequest) returns (StartManagedRunResponse);
+
+  // Record one immutable, metadata-only terminal outcome from an authenticated
+  // workload identity. The response is a durable terminal receipt.
+  rpc RecordTerminalOutcome(RecordTerminalOutcomeRequest) returns (RecordTerminalOutcomeResponse);
+
+  // Renew the server-owned recovery deadline while an accepted producer is
+  // still working. This request cannot carry content or choose a deadline.
+  rpc HeartbeatManagedRun(HeartbeatManagedRunRequest) returns (HeartbeatManagedRunResponse);
+}
+
 // --- CreateThread ---
 
 message CreateThreadRequest {
@@ -151,6 +168,106 @@ message StartRunResponse {
 
   // Creation timestamp.
   google.protobuf.Timestamp created_at = 2;
+}
+
+// --- Managed run terminalization ---
+
+// The producer that is allowed to submit a run's terminal outcome. The server
+// chooses the terminal step identifier from this source; callers never supply
+// arbitrary step identifiers.
+enum ManagedRunSource {
+  MANAGED_RUN_SOURCE_UNSPECIFIED = 0;
+  // Gateway-owned direct inference, including unary Invoke and streaming SSE.
+  MANAGED_RUN_SOURCE_GATEWAY_DIRECT = 1;
+  // Execution Core owns a governed multi-step agent loop.
+  MANAGED_RUN_SOURCE_EXECUTION_AGENT = 2;
+  // Execution Core owns a standalone governed browser run.
+  MANAGED_RUN_SOURCE_EXECUTION_BROWSER = 3;
+  // Gateway may use this only for a confirmed pre-dispatch rejection of an
+  // execution-agent run; it can never claim an accepted agent completion.
+  MANAGED_RUN_SOURCE_GATEWAY_AGENT_DISPATCH_REJECTED = 4;
+  // Gateway owns the current standalone browser terminal projection only after
+  // it receives a confirmed Execution Core response. This is distinct from a
+  // future Execution Core-owned browser terminalizer.
+  MANAGED_RUN_SOURCE_GATEWAY_BROWSER = 5;
+}
+
+// The only producer-supplied terminal outcomes. A lost producer is represented
+// internally as an observable reconciliation-required failure, never success.
+enum TerminalOutcome {
+  TERMINAL_OUTCOME_UNSPECIFIED = 0;
+  TERMINAL_OUTCOME_COMPLETED = 1;
+  TERMINAL_OUTCOME_FAILED = 2;
+}
+
+// Starts a run and its durable terminalization obligation in one transaction.
+// This is additive; StartRun keeps its existing behavior for legacy clients.
+message StartManagedRunRequest {
+  // Required for ordinary durable runs. A ZDR-authorized caller leaves this
+  // empty and Session Core creates a fresh metadata-only thread atomically.
+  string thread_id = 1;
+  string parent_run_id = 2;
+  string agent_id = 3;
+  string goal = 4;
+  string mode = 5;
+  // Caller-provided identity fields are verified and pinned by Session Core.
+  string org_id = 6;
+  string user_id = 7;
+  // Opaque client operation key. Reuse exactly on an ambiguous start response.
+  // It must not be derived from prompt or tool content.
+  string start_key = 8;
+  // The server validates this source and stores the matching canonical step.
+  ManagedRunSource terminal_source = 9;
+}
+
+message StartManagedRunResponse {
+  string run_id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  // Server-selected canonical terminal step for the configured source.
+  string terminal_step_id = 3;
+  // True only when an exact retry returned the original managed run.
+  bool already_started = 4;
+  // The durable thread selected for this run. For a ZDR-managed run this is a
+  // server-created metadata-only thread; no prompt or message is persisted.
+  string thread_id = 5;
+}
+
+// Records an immutable, metadata-only terminal outcome. There are deliberately
+// no output, error-detail, principal, tenant, tool, prompt, or metadata fields.
+message RecordTerminalOutcomeRequest {
+  string run_id = 1;
+  ManagedRunSource source = 2;
+  TerminalOutcome outcome = 3;
+  // Required only for FAILED and restricted server-side to a fixed allowlist.
+  string failure_code = 4;
+}
+
+// A durable terminal receipt. Clients must not expose a terminal result until
+// this response (or an idempotent replay of it) has been received.
+message RecordTerminalOutcomeResponse {
+  string run_id = 1;
+  ManagedRunSource source = 2;
+  string terminal_step_id = 3;
+  uint32 step_index = 4;
+  // Stable Session Core terminal event/receipt identifier.
+  string receipt_id = 5;
+  google.protobuf.Timestamp applied_at = 6;
+  bool already_applied = 7;
+  // True only when recovery recorded the fixed unknown-outcome failure.
+  bool reconciliation_required = 8;
+}
+
+// Renews a managed run's server-owned liveness deadline. No caller can set a
+// deadline or attach payload content.
+message HeartbeatManagedRunRequest {
+  string run_id = 1;
+  ManagedRunSource source = 2;
+}
+
+message HeartbeatManagedRunResponse {
+  google.protobuf.Timestamp renewed_until = 1;
+  // True when the run is already terminal; the heartbeat made no mutation.
+  bool already_terminal = 2;
 }
 
 // --- CompleteStep ---

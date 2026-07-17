@@ -589,19 +589,6 @@ impl LettaMemoryAdapter {
         }
     }
 
-    pub(crate) async fn search(
-        &self,
-        org_id: &str,
-        thread_id: &str,
-        query: &str,
-        topic_filter: &[String],
-        limit: u32,
-    ) -> Vec<MemoryEntry> {
-        self.search_detailed(org_id, thread_id, query, topic_filter, limit)
-            .await
-            .entries
-    }
-
     pub(crate) async fn search_detailed(
         &self,
         org_id: &str,
@@ -671,6 +658,19 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn mount_read_token(auth: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/api/letta-bridge/internal-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "letta-read-token",
+                "expiresInSeconds": 300,
+                "audience": "letta-bridge"
+            })))
+            .expect(1)
+            .mount(auth)
+            .await;
+    }
 
     #[test]
     fn configured_memory_requires_dedicated_service_principal_settings() {
@@ -824,6 +824,77 @@ mod tests {
             LettaHealthSnapshot {
                 ready: false,
                 status: "DEGRADED_LETTA_AUTH_UNAVAILABLE",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_failure_is_degraded_not_an_empty_success() {
+        let auth = MockServer::start().await;
+        mount_read_token(&auth).await;
+        let unavailable =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("reserve local endpoint");
+        let endpoint = format!(
+            "http://{}",
+            unavailable.local_addr().expect("local address")
+        );
+        drop(unavailable);
+
+        let adapter = LettaMemoryAdapter::new_for_test(
+            &endpoint,
+            &auth.uri(),
+            "session-core",
+            "session-core-test-credential",
+        );
+        let outcome = adapter
+            .search_detailed("org-a", "thread-a", "query", &[], 5)
+            .await;
+
+        assert!(outcome.entries.is_empty());
+        assert_eq!(
+            outcome.degradation_reason,
+            Some("DEGRADED_LETTA_UNAVAILABLE")
+        );
+        assert_eq!(
+            adapter.health_snapshot(),
+            LettaHealthSnapshot {
+                ready: false,
+                status: "DEGRADED_LETTA_UNAVAILABLE",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_is_degraded_not_an_empty_success() {
+        let auth = MockServer::start().await;
+        mount_read_token(&auth).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalled endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local address"));
+        let stalled = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept client");
+            std::future::pending::<()>().await;
+        });
+
+        let adapter = LettaMemoryAdapter::new_for_test(
+            &endpoint,
+            &auth.uri(),
+            "session-core",
+            "session-core-test-credential",
+        );
+        let outcome = adapter
+            .search_detailed("org-a", "thread-a", "query", &[], 5)
+            .await;
+        stalled.abort();
+
+        assert!(outcome.entries.is_empty());
+        assert_eq!(outcome.degradation_reason, Some("DEGRADED_LETTA_TIMEOUT"));
+        assert_eq!(
+            adapter.health_snapshot(),
+            LettaHealthSnapshot {
+                ready: false,
+                status: "DEGRADED_LETTA_TIMEOUT",
             }
         );
     }

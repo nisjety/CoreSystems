@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/browser.proto.
  */
 export const file_model_plane_v1_browser: GenFile = /*@__PURE__*/
-  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSJIChNBY3F1aXJlR3JhbnRSZXF1ZXN0EhMKC3Nlc3Npb25fa2V5GAEgASgJEgwKBG1vZGUYAiABKAkSDgoGb3JnX2lkGAMgASgJImoKFEFjcXVpcmVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIjYKElJldm9rZUdyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoTUmV2b2tlR3JhbnRSZXNwb25zZRIPCgdyZXZva2VkGAEgASgIIhYKFEJyb3dzZXJIZWFsdGhSZXF1ZXN0IicKFUJyb3dzZXJIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkiKAoUVmFsaWRhdGVHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkiaQoVVmFsaWRhdGVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEg4KBmFjdGl2ZRgCIAEoCBIuCgpleHBpcmVzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcDL3AgoNQnJvd3NlckJyb2tlchJZCgxBY3F1aXJlR3JhbnQSIy5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuQWNxdWlyZUdyYW50UmVzcG9uc2USVgoLUmV2b2tlR3JhbnQSIi5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlc3BvbnNlElwKDVZhbGlkYXRlR3JhbnQSJC5tb2RlbF9wbGFuZS52MS5WYWxpZGF0ZUdyYW50UmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXNwb25zZRJVCgZIZWFsdGgSJC5tb2RlbF9wbGFuZS52MS5Ccm93c2VySGVhbHRoUmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJIZWFsdGhSZXNwb25zZUK0AQoSY29tLm1vZGVsX3BsYW5lLnYxQgxCcm93c2VyUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSJhChNBY3F1aXJlR3JhbnRSZXF1ZXN0EhMKC3Nlc3Npb25fa2V5GAEgASgJEgwKBG1vZGUYAiABKAkSDgoGb3JnX2lkGAMgASgJEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCSKDAQoUQWNxdWlyZUdyYW50UmVzcG9uc2USEAoIZ3JhbnRfaWQYASABKAkSEAoIZW5kcG9pbnQYAiABKAkSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJIjYKElJldm9rZUdyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoTUmV2b2tlR3JhbnRSZXNwb25zZRIPCgdyZXZva2VkGAEgASgIIhYKFEJyb3dzZXJIZWFsdGhSZXF1ZXN0IicKFUJyb3dzZXJIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkiKAoUVmFsaWRhdGVHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkiggEKFVZhbGlkYXRlR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIOCgZhY3RpdmUYAiABKAgSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJMvcCCg1Ccm93c2VyQnJva2VyElkKDEFjcXVpcmVHcmFudBIjLm1vZGVsX3BsYW5lLnYxLkFjcXVpcmVHcmFudFJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXNwb25zZRJWCgtSZXZva2VHcmFudBIiLm1vZGVsX3BsYW5lLnYxLlJldm9rZUdyYW50UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLlJldm9rZUdyYW50UmVzcG9uc2USXAoNVmFsaWRhdGVHcmFudBIkLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXF1ZXN0GiUubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVHcmFudFJlc3BvbnNlElUKBkhlYWx0aBIkLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJIZWFsdGhSZXF1ZXN0GiUubW9kZWxfcGxhbmUudjEuQnJvd3NlckhlYWx0aFJlc3BvbnNlQrQBChJjb20ubW9kZWxfcGxhbmUudjFCDEJyb3dzZXJQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.AcquireGrantRequest
@@ -38,6 +38,15 @@ export type AcquireGrantRequest = Message<"model_plane.v1.AcquireGrantRequest"> 
    * @generated from field: string org_id = 3;
    */
   orgId: string;
+
+  /**
+   * Broker-owned navigation policy. An empty policy is never an unrestricted
+   * browser grant: issuance rejects it. Values are normalized and persisted by
+   * the broker, then returned by ValidateGrant for downstream enforcement.
+   *
+   * @generated from field: repeated string allowed_domains = 4;
+   */
+  allowedDomains: string[];
 };
 
 /**
@@ -71,6 +80,13 @@ export type AcquireGrantResponse = Message<"model_plane.v1.AcquireGrantResponse"
    * @generated from field: google.protobuf.Timestamp expires_at = 3;
    */
   expiresAt?: Timestamp | undefined;
+
+  /**
+   * Canonical broker-owned navigation policy for this grant.
+   *
+   * @generated from field: repeated string allowed_domains = 4;
+   */
+  allowedDomains: string[];
 };
 
 /**
@@ -200,6 +216,14 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
    * @generated from field: google.protobuf.Timestamp expires_at = 3;
    */
   expiresAt?: Timestamp | undefined;
+
+  /**
+   * Canonical broker-owned navigation policy. Consumers must reject an empty
+   * policy and must not substitute caller-supplied domains.
+   *
+   * @generated from field: repeated string allowed_domains = 4;
+   */
+  allowedDomains: string[];
 };
 
 /**

@@ -57,7 +57,7 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
    - Replaced fabricated workspace state with Auth-owned organization list/switch and membership list/invite/remove/role-change flows pinned to the live active membership.
    - Fixed default Nexi checkout selection and `charged`/`reserved` activation handling without exercising a live payment.
    - Normalized Audit Core's live row schema in the shared SPA client.
-   - Restored fail-closed mandatory ZDR for Model and delegated audience tokens; the full Auth suite now passes.
+   - Restored fail-closed mandatory ZDR for interactive Model and delegated audience tokens. Non-ZDR service issuance is limited to exact deployment-owned service/audience retention policy, rejects caller-selected posture, and returns only after durable audit PubAck; the full Auth suite passes.
    - Scoped locally sticky onboarding completion to the same user and organization; invitation acceptance now selects the accepted org and bypasses stale Better Auth cookie-cache state.
    - Made gateway/release-nginx access logs path-only, normalized invitation IDs embedded in paths, and scrubbed reset tokens from browser history.
    - Required canonical HTTPS public origins in production, derived checkout return URLs server-side, pinned executable/redirect origins, disabled unsupported Hyperswitch for the MVP, and bounded/sanitized Nexi confirmation.

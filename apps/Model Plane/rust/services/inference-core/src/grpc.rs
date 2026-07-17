@@ -155,6 +155,18 @@ impl InferenceService {
     }
 }
 
+fn reject_unattested_zdr_modality(
+    principal: &AuthenticatedPrincipal,
+    operation: &'static str,
+) -> Result<(), Status> {
+    if principal.effective_zdr(false) {
+        return Err(Status::failed_precondition(format!(
+            "ZDR {operation} is unavailable because no provider deployment is independently attested"
+        )));
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl InferenceCore for InferenceService {
     async fn infer(
@@ -353,7 +365,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::SynthesizeSpeechRequest>,
     ) -> Result<Response<pb::SynthesizeSpeechResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "speech synthesis")?;
         let req = request.into_inner();
         if req.text.trim().is_empty() {
             return Err(Status::invalid_argument("text is required"));
@@ -394,7 +407,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::TranscribeSpeechRequest>,
     ) -> Result<Response<pb::TranscribeSpeechResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "speech transcription")?;
         let req = request.into_inner();
         if req.audio.is_empty() {
             return Err(Status::invalid_argument("audio is required"));
@@ -457,7 +471,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::TranslateTextRequest>,
     ) -> Result<Response<pb::TranslateTextResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "translation")?;
         let req = request.into_inner();
         validate_translate_text(&req.text)?;
         validate_target_language(&req.target_language)?;
@@ -489,7 +504,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::BatchTranslateTextRequest>,
     ) -> Result<Response<pb::BatchTranslateTextResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "translation")?;
         let req = request.into_inner();
         validate_target_language(&req.target_language)?;
         if req.items.is_empty() {
@@ -548,7 +564,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::DetectTextLanguageRequest>,
     ) -> Result<Response<pb::DetectTextLanguageResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "language detection")?;
         let req = request.into_inner();
         if req.text.trim().is_empty() {
             return Err(Status::invalid_argument("text is required"));
@@ -614,7 +631,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::GenerateImageRequest>,
     ) -> Result<Response<pb::GenerateImageResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "image generation")?;
         let req = request.into_inner();
         validate_image_prompt(&req.prompt)?;
         if req.n > MAX_GENERATED_IMAGES {
@@ -657,7 +675,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::AnalyzeImageRequest>,
     ) -> Result<Response<pb::AnalyzeImageResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "image analysis")?;
         let req = request.into_inner();
         validate_image_prompt(&req.prompt)?;
         validate_image_input(&req.image_url, req.image_data.len())?;
@@ -691,7 +710,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::ExtractImageTextRequest>,
     ) -> Result<Response<pb::ExtractImageTextResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "image text extraction")?;
         let req = request.into_inner();
         validate_image_input(&req.image_url, req.image_data.len())?;
 
@@ -723,7 +743,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::AnalyzeDocumentRequest>,
     ) -> Result<Response<pb::AnalyzeDocumentResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "document analysis")?;
         let req = request.into_inner();
         validate_document_input(&req.document_url, req.document_data.len())?;
 
@@ -760,7 +781,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::AnalyzeLanguageRequest>,
     ) -> Result<Response<pb::AnalyzeLanguageResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "language analysis")?;
         let req = request.into_inner();
         validate_language_texts(&req.texts)?;
         let operation =
@@ -812,7 +834,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::CreateRealtimeSessionRequest>,
     ) -> Result<Response<pb::CreateRealtimeSessionResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "realtime session")?;
         let req = request.into_inner();
         validate_realtime_session(&req)?;
 
@@ -847,7 +870,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::CreateVideoGenerationJobRequest>,
     ) -> Result<Response<pb::CreateVideoGenerationJobResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "video generation")?;
         let req = request.into_inner();
         validate_video_generation(&req)?;
 
@@ -880,7 +904,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::GetVideoGenerationJobRequest>,
     ) -> Result<Response<pb::GetVideoGenerationJobResponse>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "video status")?;
         let req = request.into_inner();
         if req.job_id.trim().is_empty() {
             return Err(Status::invalid_argument("job_id is required"));
@@ -914,7 +939,8 @@ impl InferenceCore for InferenceService {
         &self,
         request: Request<pb::StreamVideoGenerationContentRequest>,
     ) -> Result<Response<Self::StreamVideoGenerationContentStream>, Status> {
-        self.authorize(&request).await?;
+        let principal = self.authorize(&request).await?;
+        reject_unattested_zdr_modality(&principal, "video content")?;
         let req = request.into_inner();
         if req.generation_id.trim().is_empty() {
             return Err(Status::invalid_argument("generation_id is required"));
@@ -1029,7 +1055,23 @@ pub const GRPC_HEALTH_SERVICE_NAME: &str = "model_plane.v1.InferenceCore";
 /// # Errors
 /// Returns an error if the server address cannot be parsed or served.
 pub async fn serve_with_providers(chains: ProviderChains, auth: JwtVerifier) -> anyhow::Result<()> {
-    let addr = "0.0.0.0:9092".parse()?;
+    serve_with_providers_and_readiness(chains, auth, crate::readiness::GrpcReadiness::new()).await
+}
+
+/// Start the authenticated gRPC server and mark the HTTP readiness gate ready
+/// only after the listener owns its socket.
+///
+/// # Errors
+///
+/// Returns an error when the listener address cannot be parsed, its socket
+/// cannot be bound, or the authenticated gRPC server fails while serving.
+pub async fn serve_with_providers_and_readiness(
+    chains: ProviderChains,
+    auth: JwtVerifier,
+    readiness: crate::readiness::GrpcReadiness,
+) -> anyhow::Result<()> {
+    let addr: std::net::SocketAddr = "0.0.0.0:9092".parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     let ProviderChains {
         chain,
         speech,
@@ -1057,16 +1099,19 @@ pub async fn serve_with_providers(chains: ProviderChains, auth: JwtVerifier) -> 
         .set_serving::<InferenceCoreServer<InferenceService>>()
         .await;
 
+    readiness.mark_bound();
     info!(
         address = %addr,
         health_service = GRPC_HEALTH_SERVICE_NAME,
         "authenticated gRPC listening"
     );
-    tonic::transport::Server::builder()
+    let result = tonic::transport::Server::builder()
         .add_service(health_service)
         .add_service(grpc_service)
-        .serve(addr)
-        .await?;
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+        .await;
+    readiness.mark_unbound();
+    result?;
     Ok(())
 }
 
@@ -1262,5 +1307,29 @@ mod tests {
         assert!(!pb::InferRequest::default().is_catalog());
         assert!(!pb::CreateEmbeddingRequest::default().is_catalog());
         assert!(!pb::CreateRealtimeSessionRequest::default().is_catalog());
+    }
+
+    #[test]
+    fn issuer_zdr_blocks_every_unattested_modality_before_provider_dispatch() {
+        let principal = AuthenticatedPrincipal::for_test("org-zdr", Some("user-zdr"), true);
+        for operation in [
+            "speech synthesis",
+            "speech transcription",
+            "translation",
+            "language detection",
+            "image generation",
+            "image analysis",
+            "image text extraction",
+            "document analysis",
+            "language analysis",
+            "realtime session",
+            "video generation",
+            "video status",
+            "video content",
+        ] {
+            let error = reject_unattested_zdr_modality(&principal, operation)
+                .expect_err("an unattested modality must make zero provider calls under ZDR");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{operation}");
+        }
     }
 }

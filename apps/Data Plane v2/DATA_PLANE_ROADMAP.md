@@ -1,6 +1,6 @@
 # Data Plane v2 — Secure-MVP Roadmap
 
-Updated: 2026-07-15. Read `DATA_PLANE_STATUS.md` first.
+Updated: 2026-07-16. Read `DATA_PLANE_STATUS.md` first.
 
 Only the secure MVP is active. The enterprise phase remains explicitly unopened until criteria A–L are all proven on rebuilt, deployed images.
 
@@ -11,6 +11,32 @@ that says Docker was unavailable or those final isolated reruns were pending is
 retained as chronology and superseded by this checkpoint. Remaining work is
 production provisioning/rotation/deployment, strict mutation telemetry for four
 stores, database-backed security coverage, and safe post-deploy verification.
+
+2026-07-16 rebuild delta: the production Compose GDPR broker URL is explicit
+and fail-closed (standalone leaves the subscriber paused), and embedding-engine's Model Plane path requires a dedicated
+Auth-Core-issued `aud=inference-core` / `inference:invoke` bearer rather than a
+shared API key. The missing embedding workspace dependency and test-only runtime
+defects were fixed. A fresh isolated rebuild passed all images, **31/124 gRPC**,
+**28/28 HTTP**, and the six-store restrictive-ZDR final-state matrix. The real
+Model Plane inference hop and production broker/secret rollout remain deployment
+evidence, not source blockers.
+
+2026-07-16 startup decoupling delta: Data Plane's default network is now
+private and local, `docker-compose.standalone.yml` provides an explicit
+non-production boot posture, and `docker-compose.cross-plane.yml` attaches to
+the pre-provisioned shared network only when Control/User/Model are available.
+Graph JWT verification uses a mounted public key instead of a synchronous JWKS
+fetch, so the process can bind while Auth Core is offline; protected requests
+still fail closed. The `.env` cannot be completed with deployment-owned GDPR
+broker credentials, event keys, or Model/Auth service-principal keys from this
+plane; those remain Control/Auth/Model secret-manager rollout blockers.
+
+The rebuilt standalone stack was started locally on 2026-07-16 and all 15
+long-running Data services reported healthy. Graph and embedding bind without
+an inference principal in this explicit posture but reject inference work until
+the registered credential is present. Documents `/readyz` is healthy with its
+Control-owned GDPR consumer paused; connected startup remains a separate
+post-provisioning step.
 
 ## Completed source remediations
 
@@ -69,6 +95,11 @@ stores, database-backed security coverage, and safe post-deploy verification.
      source changes; the isolated checkpoint images carry both labels, but the
      final Documents signed-ZDR/source-object patches still require a rebuild. The unchanged
      shared deployment requires a controlled rebuild/inspection.
+   - Data services can boot independently with `make standalone-up`; the
+     connected `make cross-plane-up` target is the only path that attaches the
+     pre-provisioned shared network. Standalone mode pauses cross-plane event
+     consumers and keeps authorization fail-closed; it is not a production
+     bypass.
 
 7. **Post-review containment**
    - Static Control service credentials cannot derive delegated self identity from `X-User-Id` or call tenant-selected authz/grant routes.

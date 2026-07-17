@@ -5,6 +5,24 @@ Auditor pass: Phase 4 (Model Plane), evidence-graded.
 
 Scope: `apps/Model Plane/go/services/letta-bridge`
 
+## 2026-07-16 delta
+
+Model Plane letta-bridge is running in Docker, reports healthy at `/healthz`,
+and had zero restarts in the 2026-07-16 read-only inspection. Semantic readiness
+correctly fails closed: `/readyz` returns HTTP 503 with
+`DEGRADED_SEMANTIC_UNVERIFIED`. Missing/malformed gRPC credentials are denied.
+There is no successful semantic-provider query or authenticated live memory
+round-trip, so this is an explicit degraded deployment, not working semantic
+recall. Capability Core's optional Letta
+`POST /v1/tools/search` integration is separate: it ranks tool definitions and
+does not call this memory bridge, search passages, or restore semantic memory.
+Source gives default Session Core context assembly a bounded observable degraded
+outcome: verified empty, entries, or `DEGRADED_LETTA_*` for RPC/timeout failure,
+with content-free metrics and warnings. Compose uses `/healthz` for bridge
+liveness while `/readyz` remains semantic capability. The backend degraded
+state is deployed and observable, but user-visible Frontend degraded-state
+evidence is still absent.
+
 ## 2026-07-13 secure-MVP correction
 
 The 2026-07-11 runtime evidence below remains valid for the still-running image: agent-memory semantic search returns an error, while the old `/readyz` incorrectly reports ready. No container was rebuilt during the 2026-07-13 pass.
@@ -30,7 +48,8 @@ when the adapter is enabled; token refusal or bridge failure remains a logged
 degraded result rather than fabricated recall. The bridge authorization test
 also proves a scoped `service:session-core` principal can search/index only its
 signed organization. Rust focused tests and the complete Letta Go suite/vet
-pass in source, but this caller path is not deployed or live-probed. Auth Core's
+pass in source. The current dirty-tree services are deployed locally, but a
+positive authenticated Session-to-Letta round-trip is not live-proven. Auth Core's
 service-principal registry, a real provider-side semantic repair, legacy
 retention provenance, end-to-end ZDR
 gating, and a live authenticated index/search probe are still required. The

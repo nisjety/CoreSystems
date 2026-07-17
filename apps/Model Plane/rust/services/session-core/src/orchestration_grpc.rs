@@ -495,6 +495,25 @@ fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<
     Ok(())
 }
 
+/// Approval delivery is an internal service-to-service capability, never a
+/// user-facing approval read/write shortcut. The worker identity is derived
+/// from the verified JWT and the tenant is pinned before any outbox query.
+#[allow(clippy::result_large_err)]
+fn authorize_approval_delivery_worker(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+) -> Result<String, Status> {
+    validate_approval_org(org_id)?;
+    authorize_operation(caller, "approval:deliver")?;
+    if !caller.is_service() {
+        return Err(Status::permission_denied(
+            "service identity required for approval delivery",
+        ));
+    }
+    caller.authorize_org(org_id)?;
+    Ok(caller.principal_id().to_owned())
+}
+
 pub(crate) fn todo_state_from_str(s: &str) -> i32 {
     match s {
         "pending" => proto::TodoState::Pending as i32,
@@ -853,13 +872,14 @@ fn broadcast_event(
 
 /// Emit approval decision events only for the request that won the durable
 /// requested-state compare-and-set. Exact or concurrent replays observe the
-/// committed row but must not mint fresh event ids or resume notifications.
+/// committed row but must not mint fresh event ids. A grant is queued in the
+/// durable delivery outbox; only a future execution delivery acknowledgement
+/// may emit `RunResumedAfterApproval`.
 fn broadcast_approval_decision_events(
     tx: &broadcast::Sender<proto::OrchestrationEvent>,
     replay: &ReplayBuffer,
     approval: &store::ApprovalRow,
     decision: i32,
-    new_status: &str,
     transition_applied: bool,
 ) {
     if !transition_applied {
@@ -883,23 +903,6 @@ fn broadcast_approval_decision_events(
             )),
         },
     );
-
-    if new_status == "granted" {
-        broadcast_event(
-            tx,
-            replay,
-            proto::OrchestrationEvent {
-                event_id: String::new(),
-                at: Some(now_ts()),
-                event: Some(orchestration_event::Event::RunResumedAfterApproval(
-                    orchestration_event::RunResumedAfterApproval {
-                        run_id: approval.run_id.clone(),
-                        approval_id: approval.id.clone(),
-                    },
-                )),
-            },
-        );
-    }
 }
 
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
@@ -1426,7 +1429,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 ));
             }
 
-            let updated = store::decide_approval(
+            let decision_write = store::decide_approval(
                 &self.pool,
                 &req.approval_id,
                 &req.org_id,
@@ -1437,6 +1440,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+            let updated = decision_write.updated;
 
             let after = store::get_approval_for_org(
                 &self.pool,
@@ -1461,6 +1465,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     None => return Err(Status::not_found("approval not found")),
                 }
             }
+            if new_status == "granted" && decision_write.delivery_id.is_none() {
+                return Err(Status::unavailable(
+                    "approval is granted but durable delivery state is unavailable",
+                ));
+            }
             let after = after.ok_or_else(|| Status::internal("approval vanished after update"))?;
             let approval = approval_from_row(&after);
 
@@ -1469,7 +1478,6 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.replay,
                 &after,
                 req.decision,
-                new_status,
                 updated,
             );
 
@@ -1479,6 +1487,133 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("decide_approval", started, result.is_ok());
+        result
+    }
+
+    async fn claim_approval_deliveries(
+        &self,
+        request: Request<proto::ClaimApprovalDeliveriesRequest>,
+    ) -> Result<Response<proto::ClaimApprovalDeliveriesResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ClaimApprovalDeliveriesResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            let worker_id = authorize_approval_delivery_worker(&caller, &req.org_id)?;
+            let deliveries = crate::approval_delivery::claim_due_deliveries(
+                &self.pool,
+                &req.org_id,
+                &worker_id,
+                req.max_deliveries,
+            )
+            .await
+            .map_err(|error| {
+                warn!(error = %error, "approval delivery claim unavailable");
+                Status::internal("approval delivery claim unavailable")
+            })?;
+            metrics::counter!("mp_session_approval_delivery_claimed_total")
+                .increment(u64::try_from(deliveries.len()).unwrap_or(u64::MAX));
+            let deliveries = deliveries
+                .into_iter()
+                .map(|delivery| proto::ApprovalDelivery {
+                    delivery_id: delivery.delivery_id,
+                    approval_id: delivery.approval_id,
+                    run_id: delivery.run_id,
+                    org_id: delivery.org_id,
+                    user_id: delivery.user_id,
+                    lease_token: delivery.lease_token,
+                    attempt: delivery.attempt,
+                    lease_expires_at: Some(ts(delivery.lease_expires_at)),
+                })
+                .collect();
+            Ok(Response::new(proto::ClaimApprovalDeliveriesResponse {
+                deliveries,
+            }))
+        }
+        .await;
+        record_metrics("claim_approval_deliveries", started, result.is_ok());
+        result
+    }
+
+    async fn acknowledge_approval_delivery(
+        &self,
+        request: Request<proto::AcknowledgeApprovalDeliveryRequest>,
+    ) -> Result<Response<proto::AcknowledgeApprovalDeliveryResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::AcknowledgeApprovalDeliveryResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            let worker_id = authorize_approval_delivery_worker(&caller, &req.org_id)?;
+            let acknowledgement =
+                match proto::ApprovalDeliveryAcknowledgement::try_from(req.acknowledgement) {
+                    Ok(proto::ApprovalDeliveryAcknowledgement::Retry) => {
+                        crate::approval_delivery::DeliveryAcknowledgement::Retry
+                    }
+                    Ok(proto::ApprovalDeliveryAcknowledgement::Terminal) => {
+                        crate::approval_delivery::DeliveryAcknowledgement::Terminal
+                    }
+                    Ok(proto::ApprovalDeliveryAcknowledgement::Unspecified) | Err(_) => {
+                        return Err(Status::invalid_argument(
+                            "approval delivery acknowledgement must be retry or terminal",
+                        ));
+                    }
+                };
+            crate::approval_delivery::validate_acknowledgement_input(
+                &req.delivery_id,
+                &req.lease_token,
+            )
+            .map_err(|_| Status::invalid_argument("invalid approval delivery lease"))?;
+            crate::approval_delivery::validate_failure_code(&req.failure_code)
+                .map_err(|_| Status::invalid_argument("invalid approval delivery failure code"))?;
+            let acknowledged = crate::approval_delivery::acknowledge_delivery(
+                &self.pool,
+                &req.org_id,
+                &worker_id,
+                &req.delivery_id,
+                &req.lease_token,
+                acknowledgement,
+                &req.failure_code,
+            )
+            .await
+            .map_err(|error| {
+                warn!(error = %error, "approval delivery acknowledgement unavailable");
+                Status::internal("approval delivery acknowledgement unavailable")
+            })?;
+
+            let response = match acknowledged {
+                Some(acknowledged) => proto::AcknowledgeApprovalDeliveryResponse {
+                    acknowledged: true,
+                    terminal: acknowledged.terminal,
+                    attempt: acknowledged.attempt,
+                    next_attempt_at: acknowledged.next_attempt_at.map(ts),
+                },
+                // Do not distinguish a stale/mismatched lease from an exact
+                // retry. Both must be idempotent no-ops and must reveal no
+                // additional outbox state.
+                None => proto::AcknowledgeApprovalDeliveryResponse {
+                    acknowledged: false,
+                    terminal: false,
+                    attempt: 0,
+                    next_attempt_at: None,
+                },
+            };
+            let acknowledgement_state = if response.acknowledged {
+                if response.terminal {
+                    "terminal"
+                } else {
+                    "retry"
+                }
+            } else {
+                "noop"
+            };
+            metrics::counter!(
+                "mp_session_approval_delivery_acknowledgements_total",
+                "outcome" => acknowledgement_state,
+            )
+            .increment(1);
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("acknowledge_approval_delivery", started, result.is_ok());
         result
     }
 
@@ -1773,6 +1908,39 @@ mod tests {
     }
 
     #[test]
+    fn approval_delivery_is_service_only_tenant_scoped_and_zdr_fail_closed() {
+        let worker =
+            crate::auth::VerifiedIdentity::service_for_test("org-1", &["approval:deliver"], false);
+        assert_eq!(
+            authorize_approval_delivery_worker(&worker, "org-1").expect("same tenant worker"),
+            "service:session-core"
+        );
+        assert_eq!(
+            authorize_approval_delivery_worker(&worker, "org-2")
+                .expect_err("cross-tenant worker must fail")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let user = crate::auth::VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert_eq!(
+            authorize_approval_delivery_worker(&user, "org-1")
+                .expect_err("interactive user must not claim outbox work")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let zdr_worker =
+            crate::auth::VerifiedIdentity::service_for_test("org-1", &["approval:deliver"], true);
+        assert_eq!(
+            authorize_approval_delivery_worker(&zdr_worker, "org-1")
+                .expect_err("ZDR principal must not operate durable approval delivery")
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    #[test]
     fn exact_approval_decision_retry_is_idempotent_but_conflicts_are_not() {
         let row = store::ApprovalRow {
             id: "approval-1".to_owned(),
@@ -1829,7 +1997,6 @@ mod tests {
             &replay,
             &row,
             proto::ApprovalState::Granted as i32,
-            "granted",
             true,
         );
         assert!(matches!(
@@ -1837,8 +2004,8 @@ mod tests {
             Some(orchestration_event::Event::ApprovalStateChanged(_))
         ));
         assert!(matches!(
-            events_rx.try_recv().expect("run-resumed event").event,
-            Some(orchestration_event::Event::RunResumedAfterApproval(_))
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
         ));
 
         broadcast_approval_decision_events(
@@ -1846,7 +2013,6 @@ mod tests {
             &replay,
             &row,
             proto::ApprovalState::Granted as i32,
-            "granted",
             false,
         );
         assert!(matches!(
@@ -1855,8 +2021,8 @@ mod tests {
         ));
         assert_eq!(
             replay.replay_after("run-1", "").await.len(),
-            2,
-            "replayed decisions must not add state-change or resume events"
+            1,
+            "a grant is not a delivered execution continuation"
         );
     }
 
@@ -2117,9 +2283,9 @@ mod tests {
         };
         assert_eq!(event_run_id(&attach), Some("run_p"));
 
-        // A granted decision emits RunResumedAfterApproval, which must be
-        // run-scoped so it lands in the per-run replay buffer (SSE resume
-        // cursor) — the inverse of the RunPausedForApproval pause event.
+        // If a future verified continuation emits RunResumedAfterApproval, it
+        // remains run-scoped so it lands in the per-run replay buffer (SSE
+        // resume cursor). A grant alone must never create this event.
         let resumed = proto::OrchestrationEvent {
             event_id: String::new(),
             at: None,

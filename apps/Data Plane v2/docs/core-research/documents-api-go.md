@@ -270,3 +270,17 @@ independently verify that proof. Outbox retries use a stable `Nats-Msg-Id`.
 measures 95.5%. The 2026-07-15 checkpoint and final source-only ZDR result above
 supersede the former Docker-blocked image statement; the latest image/runtime,
 broker/outbox, and shared deployment proof remain pending.
+# 2026-07-16 independent-startup addendum
+
+Documents can be started in the explicit `docker-compose.standalone.yml`
+posture while Control/User Core are offline. In that posture the
+Control-owned GDPR durable consumer is disabled and User Core grant resolution
+is unavailable; grant-only documents remain hidden and the production defaults
+still require both authorities. `make cross-plane-up` later attaches the
+pre-provisioned `inter-plane-bus` and restores the required durable contract.
+
+`NATS_SHARED_URL`, `DOCUMENTS_GDPR_NATS_PASSWORD`, and the User Core service
+token are deployment-owned values. This plane does not generate or copy them;
+the base `.env` therefore leaves them for Control/Auth secret-manager
+provisioning. The standalone overlay is local-only and does not relax JWT,
+issuer, audience, tenant, owner, or ZDR enforcement.

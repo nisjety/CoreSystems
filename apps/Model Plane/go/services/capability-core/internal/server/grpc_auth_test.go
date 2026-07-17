@@ -24,6 +24,7 @@ type grpcAuthClaims struct {
 	ServiceID     string   `json:"service_id"`
 	PrincipalType string   `json:"principal_type"`
 	Scopes        []string `json:"scopes"`
+	ZDR           *bool    `json:"zdr,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -32,6 +33,14 @@ func grpcAuthFixture(t *testing.T) (*authctx.Verifier, string) {
 }
 
 func grpcAuthFixtureForOrg(t *testing.T, orgID string) (*authctx.Verifier, string) {
+	return grpcAuthFixtureForOrgAndRetention(t, orgID, nil)
+}
+
+func grpcAuthFixtureForOrgAndRetention(t *testing.T, orgID string, zdr *bool) (*authctx.Verifier, string) {
+	return grpcAuthFixtureForOrgScopesAndRetention(t, orgID, []string{authz.ReadScope}, zdr)
+}
+
+func grpcAuthFixtureForOrgScopesAndRetention(t *testing.T, orgID string, scopes []string, zdr *bool) (*authctx.Verifier, string) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -50,7 +59,7 @@ func grpcAuthFixtureForOrg(t *testing.T, orgID string) (*authctx.Verifier, strin
 	}
 	now := time.Now()
 	claims := grpcAuthClaims{
-		OrgID: orgID, ServiceID: "execution-core", PrincipalType: "service", Scopes: []string{authz.ReadScope},
+		OrgID: orgID, ServiceID: "execution-core", PrincipalType: "service", Scopes: scopes, ZDR: zdr,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer: "https://auth.example.test", Subject: "execution-core", Audience: jwt.ClaimStrings{"capability-core"},
 			IssuedAt: jwt.NewNumericDate(now.Add(-time.Minute)), NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
@@ -64,9 +73,57 @@ func grpcAuthFixtureForOrg(t *testing.T, orgID string) (*authctx.Verifier, strin
 	return verifier, raw
 }
 
+func TestCapabilityGRPCPromotionRequiresExplicitNonZDRPosture(t *testing.T) {
+	falseValue := false
+	trueValue := true
+	cases := []struct {
+		name     string
+		zdr      *bool
+		wantCode codes.Code
+	}{
+		{name: "verified non-ZDR service", zdr: &falseValue, wantCode: codes.OK},
+		{name: "issuer ZDR service", zdr: &trueValue, wantCode: codes.PermissionDenied},
+		{name: "missing retention posture", zdr: nil, wantCode: codes.PermissionDenied},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			verifier, raw := grpcAuthFixtureForOrgScopesAndRetention(t, "triodelab", []string{authz.GlobalWriteScope}, tt.zdr)
+			interceptor := verifier.UnaryServerInterceptor(authz.AuthorizeGRPC)
+			calls := 0
+			_, err := interceptor(
+				metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+					"authorization", "Bearer "+raw,
+					// An untrusted metadata value must not weaken the signed posture.
+					"x-zdr", "false",
+				)),
+				&mpv1.PromoteSkillRequest{},
+				&grpc.UnaryServerInfo{FullMethod: mpv1.CapabilityCore_PromoteSkill_FullMethodName},
+				func(context.Context, any) (any, error) {
+					calls++
+					return &mpv1.PromoteSkillResponse{}, nil
+				},
+			)
+			if status.Code(err) != tt.wantCode {
+				t.Fatalf("status = %v, want %v", status.Code(err), tt.wantCode)
+			}
+			if tt.wantCode == codes.OK && calls != 1 {
+				t.Fatalf("allowed promotion handler calls = %d, want 1", calls)
+			}
+			if tt.wantCode != codes.OK && calls != 0 {
+				t.Fatalf("denied promotion reached handler %d times", calls)
+			}
+		})
+	}
+}
+
 func verifiedGRPCContext(t *testing.T, orgID string) context.Context {
+	return verifiedGRPCContextWithRetention(t, orgID, nil)
+}
+
+func verifiedGRPCContextWithRetention(t *testing.T, orgID string, zdr *bool) context.Context {
 	t.Helper()
-	verifier, raw := grpcAuthFixtureForOrg(t, orgID)
+	verifier, raw := grpcAuthFixtureForOrgAndRetention(t, orgID, zdr)
 	interceptor := verifier.UnaryServerInterceptor(nil)
 	incoming := metadata.NewIncomingContext(
 		context.Background(),

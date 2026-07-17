@@ -1,16 +1,34 @@
 import { createHash, timingSafeEqual } from 'crypto';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  type Stats,
+} from 'node:fs';
+import { isAbsolute, normalize } from 'node:path';
 
 type ServicePrincipalConfig = {
   credential: string;
   audiences: readonly string[];
   orgIds: readonly string[];
   allowAnyOrg?: boolean;
-  allowPersistentData?: boolean;
   scopes: readonly string[];
   scopesByAudience?: Readonly<Record<string, readonly string[]>>;
+  retentionByAudience?: Readonly<Record<string, 'zdr' | 'persistent'>>;
 };
 
 type ServicePrincipalRegistry = Record<string, ServicePrincipalConfig>;
+
+type ServicePrincipalEnvironment = Readonly<{
+  NODE_ENV?: string;
+  PLANE_SERVICE_PRINCIPALS_FILE?: string;
+  PLANE_SERVICE_PRINCIPALS_JSON?: string;
+}>;
+
+const maximumRegistryBytes = 1024 * 1024;
 
 export type PlaneServicePrincipalRequest = {
   serviceId: string;
@@ -19,7 +37,6 @@ export type PlaneServicePrincipalRequest = {
   orgId: string;
   requestedScopes: readonly string[];
   reason: string;
-  zdr?: boolean;
 };
 
 export type AuthorizedPlaneServicePrincipal = {
@@ -33,6 +50,127 @@ export type AuthorizedPlaneServicePrincipal = {
 
 export class ServicePrincipalConfigurationError extends Error {}
 export class ServicePrincipalAuthorizationError extends Error {}
+
+function privateRegistryFile(stats: Stats): boolean {
+  const currentUserId =
+    typeof process.getuid === 'function' ? process.getuid() : stats.uid;
+  return (
+    stats.isFile() &&
+    stats.uid === currentUserId &&
+    (stats.mode & 0o400) === 0o400 &&
+    (stats.mode & 0o077) === 0
+  );
+}
+
+function readPrivateRegistryFile(file: string): string {
+  if (
+    !file ||
+    file !== file.trim() ||
+    !isAbsolute(file) ||
+    normalize(file) !== file
+  ) {
+    throw new ServicePrincipalConfigurationError(
+      'PLANE_SERVICE_PRINCIPALS_FILE must be a normalized absolute path',
+    );
+  }
+
+  let descriptor: number | undefined;
+  try {
+    const pathStats = lstatSync(file);
+    if (pathStats.isSymbolicLink() || !privateRegistryFile(pathStats)) {
+      throw new ServicePrincipalConfigurationError(
+        'PLANE_SERVICE_PRINCIPALS_FILE must be a private regular file',
+      );
+    }
+    if (pathStats.size > maximumRegistryBytes) {
+      throw new ServicePrincipalConfigurationError(
+        'PLANE_SERVICE_PRINCIPALS_FILE is too large',
+      );
+    }
+
+    descriptor = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const openedStats = fstatSync(descriptor);
+    if (
+      openedStats.dev !== pathStats.dev ||
+      openedStats.ino !== pathStats.ino ||
+      !privateRegistryFile(openedStats)
+    ) {
+      throw new ServicePrincipalConfigurationError(
+        'PLANE_SERVICE_PRINCIPALS_FILE changed while opening',
+      );
+    }
+
+    const contents = Buffer.alloc(maximumRegistryBytes + 1);
+    let offset = 0;
+    while (offset < contents.length) {
+      const bytesRead = readSync(
+        descriptor,
+        contents,
+        offset,
+        contents.length - offset,
+        null,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > maximumRegistryBytes) {
+      throw new ServicePrincipalConfigurationError(
+        'PLANE_SERVICE_PRINCIPALS_FILE is too large',
+      );
+    }
+    return contents.subarray(0, offset).toString('utf8');
+  } catch (error) {
+    if (error instanceof ServicePrincipalConfigurationError) throw error;
+    throw new ServicePrincipalConfigurationError(
+      'PLANE_SERVICE_PRINCIPALS_FILE could not be read safely',
+    );
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+/**
+ * Resolves the deployment-owned registry from exactly one source. Production
+ * Compose mounts a private file; direct JSON remains available for tests and
+ * the local development stack only.
+ */
+export function loadPlaneServicePrincipalRegistry(
+  environment: ServicePrincipalEnvironment = process.env as ServicePrincipalEnvironment,
+): string {
+  const rawRegistry = environment.PLANE_SERVICE_PRINCIPALS_JSON ?? '';
+  const registryFile = environment.PLANE_SERVICE_PRINCIPALS_FILE ?? '';
+  const hasRawRegistry = rawRegistry.trim().length > 0;
+  const hasRegistryFile = registryFile.trim().length > 0;
+  const runtime = environment.NODE_ENV?.trim().toLowerCase() ?? '';
+
+  if (hasRawRegistry && hasRegistryFile) {
+    throw new ServicePrincipalConfigurationError(
+      'PLANE_SERVICE_PRINCIPALS_JSON and PLANE_SERVICE_PRINCIPALS_FILE are both configured',
+    );
+  }
+  if (hasRegistryFile) {
+    const fileRegistry = readPrivateRegistryFile(registryFile);
+    if (runtime !== 'development' && runtime !== 'test') {
+      const parsed = parseRegistry(fileRegistry);
+      if (
+        Object.values(parsed).some(
+          (principal) => principal.allowAnyOrg === true,
+        )
+      ) {
+        throw new ServicePrincipalConfigurationError(
+          'Production service principals require fixed organization allowlists',
+        );
+      }
+    }
+    return fileRegistry;
+  }
+  if (hasRawRegistry && runtime !== 'development' && runtime !== 'test') {
+    throw new ServicePrincipalConfigurationError(
+      'PLANE_SERVICE_PRINCIPALS_FILE is required outside development',
+    );
+  }
+  return rawRegistry;
+}
 
 function nonEmptyStrings(value: unknown): value is readonly string[] {
   return (
@@ -81,6 +219,34 @@ function validAudienceScopeMap(
   );
 }
 
+function validAudienceRetentionMap(
+  config: Partial<ServicePrincipalConfig>,
+): boolean {
+  if (config.retentionByAudience === undefined) {
+    return true;
+  }
+  if (
+    !config.retentionByAudience ||
+    typeof config.retentionByAudience !== 'object' ||
+    Array.isArray(config.retentionByAudience) ||
+    !nonEmptyStrings(config.audiences)
+  ) {
+    return false;
+  }
+
+  const entries = Object.entries(config.retentionByAudience);
+  const audiences = new Set(config.audiences);
+  return (
+    entries.length === audiences.size &&
+    entries.every(
+      ([audience, posture]) =>
+        audiences.has(audience) &&
+        (posture === 'zdr' || posture === 'persistent'),
+    ) &&
+    [...audiences].every((audience) => audience in config.retentionByAudience!)
+  );
+}
+
 function parseRegistry(raw: string): ServicePrincipalRegistry {
   if (!raw.trim()) {
     throw new ServicePrincipalConfigurationError(
@@ -122,13 +288,11 @@ function parseRegistry(raw: string): ServicePrincipalRegistry {
       (config.allowAnyOrg !== true && !nonEmptyStrings(config.orgIds)) ||
       (config.allowAnyOrg !== undefined &&
         typeof config.allowAnyOrg !== 'boolean') ||
-      (config.allowPersistentData !== undefined &&
-        typeof config.allowPersistentData !== 'boolean') ||
-      (config.allowPersistentData === true &&
-        !config.audiences?.includes('data-plane')) ||
+      Object.prototype.hasOwnProperty.call(config, 'allowPersistentData') ||
       !Array.isArray(config.orgIds) ||
       !nonEmptyStrings(config.scopes) ||
-      !validAudienceScopeMap(config)
+      !validAudienceScopeMap(config) ||
+      !validAudienceRetentionMap(config)
     ) {
       throw new ServicePrincipalConfigurationError(
         'PLANE_SERVICE_PRINCIPALS_JSON contains an invalid principal policy',
@@ -162,11 +326,12 @@ export function authorizePlaneServicePrincipal(
   const orgId = request.orgId.trim();
   const reason = request.reason.trim();
   const requestedScopes = normalizedUnique(request.requestedScopes);
-  const requestedZdr = request.zdr ?? true;
   const principal = registry[serviceId];
   const allowedScopes = principal?.scopesByAudience
     ? principal.scopesByAudience[request.audience]
     : principal?.scopes;
+  const retentionPosture =
+    principal?.retentionByAudience?.[request.audience] ?? 'zdr';
 
   if (
     !principal ||
@@ -178,8 +343,6 @@ export function authorizePlaneServicePrincipal(
     requestedScopes.length === 0 ||
     !allowedScopes ||
     requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||
-    typeof requestedZdr !== 'boolean' ||
-    (requestedZdr === false && principal.allowPersistentData !== true) ||
     reason.length < 3 ||
     reason.length > 500
   ) {
@@ -194,6 +357,6 @@ export function authorizePlaneServicePrincipal(
     orgId,
     scopes: requestedScopes,
     reason,
-    zdr: requestedZdr,
+    zdr: retentionPosture === 'zdr',
   };
 }

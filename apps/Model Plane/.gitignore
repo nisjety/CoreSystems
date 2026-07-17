@@ -36,3 +36,4 @@ build/
 *.log
 .env
 .env.local
+.release-artifacts/

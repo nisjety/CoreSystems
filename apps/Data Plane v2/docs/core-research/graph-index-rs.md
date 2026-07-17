@@ -226,3 +226,16 @@ Non-generated file count from the tree at that time: about `12`.
 ### Original assessment (no longer sufficient — see live verification above)
 
 The original pass reported "no explicit code stubs or backup files were found in the active service tree" and closed with "the main risk is documentation drift around how much graph ambition is already runtime reality." That assessment did not include a live authentication/authorization probe and materially understated the service's actual risk profile. The 2026-07-10 live verification above supersedes it for anything related to trust boundaries; the architectural/structural notes (runtime shape, API map, duplicates) remain accurate and have been folded into the updated sections above.
+# 2026-07-16 independent-startup addendum
+
+Graph no longer performs a synchronous Auth Core JWKS fetch during process
+startup in Compose. It loads the read-only Auth Core public verification key
+mounted at `/app/keys/convex-auth.pub`; protected HTTP/gRPC requests still
+require a verified RS256 bearer with the configured issuer, audience, time,
+identity, and tenant claims. Model Plane inference remains a lazy, scoped
+runtime call and fails closed while that authority is offline.
+
+The base Data Plane network is local. Use `make standalone-up` for a disposable
+local boot and `make cross-plane-up` only after the deployment-owned shared
+network and service principals are provisioned. No production credential or
+customer graph was copied into this evidence.

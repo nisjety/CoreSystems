@@ -22,16 +22,33 @@ use std::time::{Duration, Instant};
 
 use mp_slo::{defaults, harness};
 
+use execution_core::capability_policy::{CapabilityDecision, CapabilityPolicy};
 use execution_core::runtime_loop;
 use execution_core::scrub;
 
 type BoxedErr = Box<dyn std::error::Error + Send + Sync>;
 
+struct AllowPolicy;
+
+#[tonic::async_trait]
+impl CapabilityPolicy for AllowPolicy {
+    async fn evaluate(
+        &self,
+        _tool_name: &str,
+        _run_id: &str,
+        _org_id: &str,
+    ) -> Result<CapabilityDecision, tonic::Status> {
+        Ok(CapabilityDecision::Allow)
+    }
+}
+
+static ALLOW_POLICY: AllowPolicy = AllowPolicy;
+
 /// Minimal permission mode + hook context combo that steers the runtime loop
 /// through its Allow → `tool_bridge` path without external dependencies.
 async fn bench_step() -> runtime_loop::StepOutcome {
     runtime_loop::execute_step(
-        "noop", // unrecognized tool name → tool_bridge returns a default stub output
+        "echo", // deterministic in-process bridge path
         "payload",
         "permissive",
         "",   // empty hook context → not blocked
@@ -46,6 +63,7 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         None,
         None,
         None,
+        &ALLOW_POLICY,
     )
     .await
 }

@@ -4,6 +4,28 @@ Generated: 2026-07-11 (supersedes 2026-06-09)
 
 Scope: `apps/Model Plane/go/services/capability-core`
 
+## 2026-07-16 delta
+
+Model Plane Capability Core is running in Docker, reports healthy, and had zero
+restarts in the 2026-07-16 read-only inspection. Missing/malformed credentials
+are rejected. A valid, organization-bound Execution Core credential reaches
+policy, while the wrong organization is denied. All 27 enabled registry rows
+currently resolve unavailable because no trusted health attestation exists; a
+real retrieval capability was denied with machine-readable
+`health_not_attested`. No tool health was fabricated. Policy returns first-class
+`ask` only for healthy approval-required capabilities, and Execution Core
+invokes policy before every dispatch.
+Migration `0008` binds known dispatch names while leaving all seeded entries
+unavailable with `health_not_attested`. A separate
+global-only health-attestation scope/path may update only the global capability
+row, while ordinary tenant health reporters remain tenant-bound. No reporter is
+configured or attested and no live proof exists, so tools remain unavailable.
+Optional Letta `POST /v1/tools/search` ranks tool definitions only, never policy
+authority, and can reorder only an exact tenant-scoped local intersection. Its
+source tests pass, but external Letta tool search is not configured or live-
+proven. It is disabled for ZDR/unspecified retention. Cross-mode catalog proof
+remains blocked.
+
 ## 2026-07-13 secure-MVP correction
 
 The running image was not rebuilt, so the live unauthenticated and misleading-readiness evidence below remains an **open production finding**. Source has since been hardened:
@@ -43,9 +65,10 @@ fail closed.
 
 **Deployment state:** PARTIAL IN SOURCE ONLY. Auth Core, Model Gateway, and
 frontend source mint/forward a separate `aud=capability-core` token for migrated
-proxy paths. Availability is enforced by Capability Core policy but is not yet
-an unavoidable Model Gateway/model-offer/Execution Core dispatch authority; a
-scoped global health reporter and complete release-database migration proof are
+proxy paths. Availability is enforced by Capability Core policy **and is an
+unavoidable Execution Core dispatch gate**. The source has a global-only health
+attestation authority, but the required dedicated reporter, its attestation,
+release-database migration proof, cross-mode offer proof, and live matrices are
 absent. Registry DNS validation must be repeated and pinned by the execution
 client. JWKS refresh is startup-only. Do not deploy until authority consumers,
 callers, migrations, and live matrices pass.

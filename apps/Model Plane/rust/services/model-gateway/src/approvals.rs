@@ -27,12 +27,11 @@ use tonic::{Request, Status};
 use tracing::{info, warn};
 
 use mp_contracts::model_plane::v1::{
-    execution_core_client::ExecutionCoreClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient, Approval, ApprovalKind,
     ApprovalState, ApproveApprovalRequest, ApproveApprovalResponse, CreateApprovalRequest,
     DecideApprovalRequest, DenyApprovalRequest, DenyApprovalResponse, GatewayApproval,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, OrgPendingApprovalsRequest,
-    RequestApprovalRequest, RequestApprovalResponse, ResumeRunRequest,
+    GetApprovalRequest, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    OrgPendingApprovalsRequest, RequestApprovalRequest, RequestApprovalResponse,
 };
 use tonic::transport::Channel;
 
@@ -41,9 +40,9 @@ use tonic::transport::Channel;
 //
 // The in-memory ApprovalStore above is a run-loop latency cache; session-core's
 // OrchestrationCoreService is the system of record. These map the gateway's
-// approval to the durable RPCs and persist best-effort — the in-memory store
-// stays authoritative for the response, so a backend hiccup never blocks the
-// approval gate. The gateway's own approval_id is passed as
+// approval to the durable RPCs before committing the local cache. A backend
+// hiccup therefore blocks the approval gate rather than creating an
+// in-memory-only authority record. The gateway's own approval_id is passed as
 // `client_approval_id` so the durable record shares the id and a later
 // DecideApproval can target it.
 // ---------------------------------------------------------------------------
@@ -251,78 +250,29 @@ fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<Request<T>
     Ok(request)
 }
 
-fn authenticated_execution_request<T>(
-    value: T,
-    execution_bearer: &str,
-    session_bearer: &str,
-) -> Result<Request<T>, Status> {
-    let mut request = authenticated_session_request(value, execution_bearer)?;
-    request.metadata_mut().insert(
-        "x-session-authorization",
-        format!("Bearer {session_bearer}")
-            .parse()
-            .map_err(|_| Status::internal("verified session credential is not forwardable"))?,
-    );
-    Ok(request)
-}
-
-#[allow(clippy::result_large_err)]
-fn require_execution_resume_acknowledgement(resumed: bool) -> Result<(), Status> {
-    if resumed {
-        Ok(())
-    } else {
-        Err(Status::unavailable(
-            "execution-core did not acknowledge approval resume",
-        ))
-    }
-}
-
-/// Authenticated resume of the gated run once an approval is **granted**.
-///
-/// The gateway is the approval decision point but does not drive the execution
-/// loop, so it signals execution-core directly to flip the run from
-/// `AwaitingApproval` back to `Running`. session-core separately broadcasts
-/// `RunResumedAfterApproval` for SSE consumers. Denials/timeouts never resume.
-/// A resume transport/authentication failure remains observable to the caller;
-/// an approval is never reported as fully applied while the run silently stays
-/// gated.
+/// A durable approval grant is authority to *consider* the exact paused work,
+/// not authority for Gateway to invoke generic `ResumeRun`. The current outbox
+/// intentionally contains identifiers only; it cannot reconstruct the exited
+/// agent loop or direct-step request, and Execution Core has no service-only
+/// continuation receipt endpoint. Keep this boundary explicit until a
+/// descriptor-backed dispatcher exists.
 ///
 /// # Errors
-/// Returns an authentication, metadata, transport, or execution status when
-/// the authenticated redispatch cannot be completed.
-pub async fn resume_run_if_approved(
-    client: &mut ExecutionCoreClient<Channel>,
-    approval: &GatewayApproval,
-    execution_bearer: &str,
-    session_bearer: &str,
-) -> Result<(), Status> {
+/// Returns `unavailable` for a granted approval, after the durable decision
+/// has been accepted, so callers cannot report a state-only resume as work.
+#[allow(clippy::result_large_err)]
+pub fn quarantine_granted_approval_continuation(approval: &GatewayApproval) -> Result<(), Status> {
     if approval.status != STATUS_APPROVED {
         return Ok(());
     }
-    let response = client
-        .resume_run(authenticated_execution_request(
-            ResumeRunRequest {
-                run_id: approval.run_id.clone(),
-                checkpoint_id: String::new(),
-                org_id: approval.org_id.clone(),
-            },
-            execution_bearer,
-            session_bearer,
-        )?)
-        .await
-        .map_err(|error| {
-            warn!(%error, approval_id = %approval.approval_id, run_id = %approval.run_id, "authenticated resume_run after approval failed");
-            error
-        })?
-        .into_inner();
-    require_execution_resume_acknowledgement(response.resumed)?;
-    info!(
+    warn!(
         approval_id = %approval.approval_id,
         run_id = %approval.run_id,
-        resumed = response.resumed,
-        "approval granted → authenticated execution-core resume_run"
+        "approval grant accepted; durable continuation remains quarantined"
     );
-    Ok(())
+    Err(Status::unavailable(
+        "approval grant recorded; durable continuation delivery is not available",
+    ))
 }
 
 const STATUS_PENDING: &str = "pending";
@@ -900,6 +850,81 @@ pub async fn handle_deny_approval<P: EventPublisher>(
     })
 }
 
+fn cache_durable_approval_for_owner(
+    store: &ApprovalStore,
+    durable: &Approval,
+    expected_approval_id: &str,
+    expected_org_id: &str,
+    owner_user_id: &str,
+) -> Result<GatewayApproval, Status> {
+    if owner_user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a verified user must own an approval decision",
+        ));
+    }
+    if durable.id != expected_approval_id || durable.org_id != expected_org_id {
+        return Err(Status::data_loss(
+            "durable approval response did not match the authenticated scope",
+        ));
+    }
+
+    let approval = gateway_approval_from_proto(durable);
+    store.insert_existing_for_owner(approval.clone(), owner_user_id);
+    if !store.owner_matches(&approval.approval_id, owner_user_id) {
+        return Err(Status::not_found("approval not found"));
+    }
+    Ok(approval)
+}
+
+/// Hydrate one approval into a fresh replica's owner-bound cache through an
+/// authenticated, tenant-scoped Session Core read. Unlike the pending-list
+/// cache fallback, decision paths fail explicitly when durable state is
+/// unavailable because they must not turn stale local state into authority.
+pub(crate) async fn read_through_approval_for_owner_authenticated(
+    store: &ApprovalStore,
+    client: &mut OrchestrationCoreServiceClient<Channel>,
+    approval_id: &str,
+    org_id: &str,
+    bearer: &str,
+    owner_user_id: &str,
+) -> Result<GatewayApproval, Status> {
+    if approval_id.trim().is_empty() {
+        return Err(Status::invalid_argument("approval_id is required"));
+    }
+    if org_id.trim().is_empty() {
+        return Err(Status::invalid_argument("org_id is required"));
+    }
+    if bearer.trim().is_empty() {
+        return Err(Status::unauthenticated(
+            "verified session credential is required",
+        ));
+    }
+    if owner_user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a verified user must own an approval decision",
+        ));
+    }
+
+    let response = client
+        .get_approval(authenticated_session_request(
+            GetApprovalRequest {
+                approval_id: approval_id.to_owned(),
+                org_id: org_id.to_owned(),
+            },
+            bearer,
+        )?)
+        .await
+        .map_err(|error| {
+            warn!(%error, approval_id, org_id, "durable approval read-through failed");
+            error
+        })?
+        .into_inner();
+    let durable = response
+        .approval
+        .ok_or_else(|| Status::not_found("approval not found"))?;
+    cache_durable_approval_for_owner(store, &durable, approval_id, org_id, owner_user_id)
+}
+
 /// Lists pending approvals for an org, optionally scoped to a run.
 ///
 /// Merges the warm in-memory cache with a fresh durable read-through from
@@ -1456,36 +1481,24 @@ mod tests {
     }
 
     #[test]
-    fn resume_request_uses_execution_ingress_and_separate_session_delegation() {
-        let request = authenticated_execution_request(
-            ResumeRunRequest::default(),
-            "execution-core-token",
-            "session-core-token",
-        )
-        .expect("verified credentials must be forwardable");
+    fn granted_approval_continuation_is_quarantined_without_a_descriptor() {
+        let approval = GatewayApproval {
+            approval_id: "appr_1".to_owned(),
+            org_id: "org_1".to_owned(),
+            run_id: "run_1".to_owned(),
+            status: STATUS_APPROVED.to_owned(),
+            ..Default::default()
+        };
 
-        assert_eq!(
-            request
-                .metadata()
-                .get("authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer execution-core-token")
-        );
-        assert_eq!(
-            request
-                .metadata()
-                .get("x-session-authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer session-core-token")
-        );
-    }
-
-    #[test]
-    fn execution_resume_false_acknowledgement_fails_closed() {
-        let error = require_execution_resume_acknowledgement(false)
-            .expect_err("execution-core false acknowledgement must fail");
+        let error = quarantine_granted_approval_continuation(&approval)
+            .expect_err("a grant alone cannot authorize generic ResumeRun");
         assert_eq!(error.code(), tonic::Code::Unavailable);
-        assert!(require_execution_resume_acknowledgement(true).is_ok());
+
+        let denied = GatewayApproval {
+            status: STATUS_DENIED.to_owned(),
+            ..approval
+        };
+        assert!(quarantine_granted_approval_continuation(&denied).is_ok());
     }
 
     // ---------------------------------------------------------------------
@@ -1732,6 +1745,63 @@ mod tests {
             )
             .expect_err("same-org non-owner must not decide");
         assert!(matches!(error, ResolveError::NotFound));
+    }
+
+    #[test]
+    fn fresh_replica_durable_approval_is_owner_bound_before_decision() {
+        let store = ApprovalStore::new();
+        let durable = durable_pending("appr-durable", "org1", "run1");
+
+        let cached =
+            cache_durable_approval_for_owner(&store, &durable, "appr-durable", "org1", "user-a")
+                .expect("authenticated durable approval should hydrate a fresh replica");
+
+        assert_eq!(cached.approval_id, "appr-durable");
+        assert!(store
+            .preview_resolution_for_owner(
+                "appr-durable",
+                "org1",
+                true,
+                "user-a".into(),
+                String::new(),
+            )
+            .is_ok());
+        assert!(matches!(
+            store.preview_resolution_for_owner(
+                "appr-durable",
+                "org1",
+                true,
+                "user-b".into(),
+                String::new(),
+            ),
+            Err(ResolveError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn durable_read_through_rejects_mismatched_scope_without_cache_side_effect() {
+        let store = ApprovalStore::new();
+        let durable = durable_pending("appr-durable", "org-other", "run1");
+
+        let error =
+            cache_durable_approval_for_owner(&store, &durable, "appr-durable", "org1", "user-a")
+                .expect_err("a mismatched durable tenant must fail closed");
+
+        assert_eq!(error.code(), tonic::Code::DataLoss);
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn durable_read_through_requires_verified_owner_before_cache_side_effect() {
+        let store = ApprovalStore::new();
+        let durable = durable_pending("appr-durable", "org1", "run1");
+
+        let error =
+            cache_durable_approval_for_owner(&store, &durable, "appr-durable", "org1", "   ")
+                .expect_err("an unbound durable response must not enter the cache");
+
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(store.len(), 0);
     }
 
     #[tokio::test]

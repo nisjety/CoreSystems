@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
@@ -75,7 +77,13 @@ func capabilityWireView(row *registry.CapabilityRow) map[string]any {
 
 type availabilityStoreBackend interface {
 	GetForOrg(context.Context, string, string) (*registry.CapabilityRow, error)
+	GetGlobal(context.Context, string) (*registry.CapabilityRow, error)
 	AttestAvailabilityForOrg(context.Context, string, string, string, registry.AvailabilityUpdate) (bool, error)
+	AttestAvailabilityGlobal(context.Context, string, string, registry.AvailabilityUpdate) (bool, error)
+}
+
+func mayAttestGlobalCapability(principal authctx.Principal) bool {
+	return principal.PrincipalType == "service" && principal.HasScope(authz.GlobalHealthWriteScope)
 }
 
 func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request *http.Request) {
@@ -101,9 +109,17 @@ func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request 
 		return
 	}
 
+	principal, principalPresent := authctx.PrincipalFromContext(request.Context())
 	organizationID := verifiedOrganizationID(request)
-	row, err := h.availabilityStore.GetForOrg(request.Context(), strings.TrimSpace(input.ID), organizationID)
-	if err != nil || row.OrgID != organizationID {
+	globalAuthority := principalPresent && mayAttestGlobalCapability(principal)
+	var row *registry.CapabilityRow
+	var err error
+	if globalAuthority {
+		row, err = h.availabilityStore.GetGlobal(request.Context(), strings.TrimSpace(input.ID))
+	} else {
+		row, err = h.availabilityStore.GetForOrg(request.Context(), strings.TrimSpace(input.ID), organizationID)
+	}
+	if err != nil || row == nil || (!globalAuthority && row.OrgID != organizationID) || (globalAuthority && row.OrgID != "global") {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -115,7 +131,7 @@ func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request 
 		return
 	}
 	actor := verifiedActorID(request)
-	updated, err := h.availabilityStore.AttestAvailabilityForOrg(request.Context(), row.ID, organizationID, actor, registry.AvailabilityUpdate{
+	update := registry.AvailabilityUpdate{
 		State:           string(normalized.State),
 		ExpectedVersion: row.Version,
 		ReasonCode:      normalized.ReasonCode,
@@ -123,7 +139,13 @@ func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request 
 		ExecutionMode:   normalized.ExecutionMode,
 		CostClass:       normalized.CostClass,
 		HealthCheckedAt: normalized.checkedAt,
-	})
+	}
+	var updated bool
+	if globalAuthority {
+		updated, err = h.availabilityStore.AttestAvailabilityGlobal(request.Context(), row.ID, actor, update)
+	} else {
+		updated, err = h.availabilityStore.AttestAvailabilityForOrg(request.Context(), row.ID, organizationID, actor, update)
+	}
 	if err != nil {
 		jsonErr(w, "availability update failed", http.StatusInternalServerError)
 		return

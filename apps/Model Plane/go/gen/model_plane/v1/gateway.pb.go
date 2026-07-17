@@ -1882,9 +1882,8 @@ func (x *RemoteTriggerResponse) GetFinalUrl() string {
 	return ""
 }
 
-// SendMessageRequest — publish a JSON-encoded payload to a NATS
-// subject. Subject prefixes are enforced server-side: only
-// `agents.>`, `org.>`, and `notify.>` are allowed for now.
+// SendMessageRequest — legacy request retained for wire compatibility.
+// It is quarantined and cannot cause a NATS publish.
 type SendMessageRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -1892,8 +1891,8 @@ type SendMessageRequest struct {
 	Subject   string                 `protobuf:"bytes,3,opt,name=subject,proto3" json:"subject,omitempty"`
 	// JSON-encoded payload. Empty string → no payload.
 	PayloadJson string `protobuf:"bytes,4,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
-	// Idempotency key — repeat publishes with the same key within
-	// 5 minutes are dropped.
+	// Retained for wire compatibility; it is not processed while the RPC is
+	// quarantined.
 	IdempotencyKey string `protobuf:"bytes,5,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -1967,8 +1966,8 @@ func (x *SendMessageRequest) GetIdempotencyKey() string {
 type SendMessageResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	// Set to false if the publish was dropped because the idempotency
-	// key was already seen; true otherwise.
+	// Reserved for backwards compatibility. Quarantined calls return an error
+	// instead of a successful response.
 	Published     bool `protobuf:"varint,2,opt,name=published,proto3" json:"published,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

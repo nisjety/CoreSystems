@@ -3,6 +3,23 @@
 Generated: 2026-07-11 (supersedes the 2026-06-09 pass)
 Scope: `apps/Model Plane/rust/services/inference-core`
 
+## 2026-07-16 delta
+
+At 2026-07-16 20:05 CEST, the local integration container is healthy with
+restart count zero, HTTP `/readyz` is 200, and additive gRPC `:9092` is
+loopback-reachable. Unauthenticated calls reject. A valid Data retrieval-engine
+service token reached `Infer`; its signed ZDR claim overrode request
+`zdr=false`, both configured providers were skipped, zero provider attempts
+occurred, and the RPC failed closed with `FailedPrecondition`. No paid provider
+call was made. Interactive callers remain all-ZDR and no provider deployment is
+independently verified as ZDR-capable, so provider work correctly remains
+unavailable. Signed ZDR posture is preserved from authenticated identity, and
+each unattested provider modality—unary/streaming inference, embeddings,
+speech, translation, vision, document, language, realtime, and video—fails
+before provider I/O. The live proof establishes safe denial, not provider,
+fallback, cost-attribution, or usable-chat readiness; the dirty-tree image is
+not an immutable release candidate.
+
 ## 2026-07-13 compatibility/security correction
 
 The running image now differs from both the historical deployment described below and the current source: live HTTP health is green but `:9092` refuses connections. Chat, multimodal inference, and Data Plane query embedding are therefore unavailable through this required contract.
@@ -11,7 +28,16 @@ Current source restores the complete additive 20-RPC gRPC service without removi
 
 Verification: 124 library tests plus 7 cache and 8 fallback integration tests passed; format and strict clippy passed. Authentication code measured 86.77% line coverage. The inherited gRPC implementation measured only 11.50% because most RPCs lack a provider-chain service harness; that gap is explicit and blocks a coverage-complete readiness claim.
 
-**Deployment state:** SOURCE RESTORED, LIVE BROKEN, CUTOVER BLOCKED. Every caller needs a valid `aud=inference-core` bearer. The inference budget client separately needs `aud=cost-core`; the inference bearer must not be reused. Provider fallback now skips any route whose exact deployment has not been explicitly confirmed for ZDR and returns failed-precondition before network I/O when no compliant route exists. `AZURE_OPENAI_ZDR_CONFIRMED` defaults false; region alone never promotes a deployment. Non-infer/embed modality protos still lack ZDR fields. Do not rebuild or deploy until caller, policy-store, contract, live-negative, and rollback gates pass.
+**Deployment state:** SOURCE RESTORED, LIVE ABSENT, CUTOVER BLOCKED. Every
+caller needs a valid `aud=inference-core` bearer. The inference budget client
+separately needs `aud=cost-core`; the inference bearer must not be reused.
+Provider fallback skips any route whose exact deployment has not been explicitly
+confirmed for ZDR and returns failed-precondition before network I/O when no
+compliant route exists. `AZURE_OPENAI_ZDR_CONFIRMED` defaults false; region
+alone never promotes a deployment. The modality handlers now enforce the signed
+posture even where legacy request protos do not carry a ZDR field. Do not
+rebuild or deploy until caller, policy-store, contract, live-negative, and
+rollback gates pass.
 
 Auditor note: every finding is graded `[live-curl]` (host curl to a published port), `[source-only]` (read from disk), or `[inspect]` (`docker ps`/`docker inspect` — config/state, not exec). Docker's containerd content store is corrupted this pass: `docker exec`/`build`/`logs` fail fleet-wide, so no in-container verification was possible.
 
@@ -72,7 +98,14 @@ Routing policy is durable + hot-swappable: seeded from `RoutingPolicy::default` 
 ## ZDR / EU residency (cross-plane rule)
 
 - Embedding path enforces **EU residency deny-by-default**, in two places: (1) startup fail-loud `assert!` that refuses to boot a non-EU Azure embedding deployment unless `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING=1`; (2) request-time gate in `create_embedding` that rejects a non-EU region *before any network call* → `ProviderError::ResidencyViolation` → gRPC `FAILED_PRECONDITION`. Deployed region is `swedencentral` (EU) so the gate passes. Tested (reaches-provider vs rejected-before-network). `[source-only]`
-- `zdr` is monotonic from the verified issuer on `InferRequest` and `EmbedRequest`. Unary, streaming, and embedding fallback skip unverified deployments before provider I/O. Direct OpenAI and Anthropic remain false; Azure OpenAI is false unless `AZURE_OPENAI_ZDR_CONFIRMED=true` is deliberately set from independent contractual evidence. The EU-region gate is separate and does not imply ZDR. Cache tests prove ZDR requests neither read nor write the prompt cache. Non-infer/embed modality contracts and downstream session/tool/trace persistence still prevent an end-to-end ZDR claim. `[source-test]`
+- `zdr` is monotonic from the verified issuer. Unary, streaming, embeddings, and
+  every other modality reject unattested deployments before provider I/O. Direct
+  OpenAI and Anthropic remain false; Azure OpenAI is false unless
+  `AZURE_OPENAI_ZDR_CONFIRMED=true` is deliberately set from independent
+  contractual evidence. The EU-region gate is separate and does not imply ZDR.
+  Cache tests prove ZDR requests neither read nor write the prompt cache.
+  Downstream session/tool/trace persistence and missing provider proof still
+  prevent an end-to-end ZDR claim. `[source-test]`
 
 ## The gRPC surface the running binary serves
 

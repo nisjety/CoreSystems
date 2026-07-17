@@ -8,6 +8,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{future::Future, time::Duration};
 use tracing::{info, warn};
 
+mod approval_delivery;
 mod audit_publisher;
 mod auth;
 mod compaction;
@@ -25,6 +26,7 @@ mod orchestration_store;
 mod routing_policy_grpc;
 mod run_service_grpc;
 mod store;
+mod terminalization;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -87,6 +89,14 @@ async fn main() -> Result<()> {
             async move { dreaming::run(pool, letta).await }
         },
     ));
+    let terminalization_pool = pool.clone();
+    let terminalization_handle = tokio::spawn(supervise_background(
+        "session-core managed-run terminalization recovery",
+        move || {
+            let pool = terminalization_pool.clone();
+            async move { terminalization::run_recovery_worker(pool).await }
+        },
+    ));
 
     let shutdown = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -103,6 +113,7 @@ async fn main() -> Result<()> {
         result = orchestration_nats_handle => result??,
         result = compaction_handle => result??,
         result = dreaming_handle => result??,
+        result = terminalization_handle => result??,
         () = shutdown => {},
     }
 

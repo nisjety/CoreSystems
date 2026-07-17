@@ -28,7 +28,29 @@ describe('Control Plane deployment contract', () => {
     expect(authService).not.toContain('INTERNAL_SERVICE_SECRET:');
   });
 
+  it('mints every Model and plane token with the canonical Auth issuer', () => {
+    const compose = readFileSync(
+      resolve(process.cwd(), '..', 'docker-compose.yml'),
+      'utf8',
+    );
+    const authService = compose.match(
+      /\n {2}auth-core:\n[\s\S]*?\n {2}user-core:\n/,
+    )?.[0];
+
+    expect(authService).toBeDefined();
+    expect(authService).toContain(
+      'MODEL_PLANE_AUTH_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}',
+    );
+    expect(authService).toContain(
+      'PLANE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}',
+    );
+  });
+
   it('removes development Auth env/key mounts from the production render contract', () => {
+    const compose = readFileSync(
+      resolve(process.cwd(), '..', 'docker-compose.yml'),
+      'utf8',
+    );
     const production = readFileSync(
       resolve(process.cwd(), '..', 'docker-compose.production.yml'),
       'utf8',
@@ -38,8 +60,13 @@ describe('Control Plane deployment contract', () => {
     )?.[0];
 
     expect(authService).toBeDefined();
+    expect(compose).toContain('NODE_ENV: development');
     expect(authService).toContain('env_file: !reset []');
     expect(authService).toContain('AUTH_GRPC_SERVICE_CREDENTIALS_FILE:');
+    expect(authService).toContain('PLANE_SERVICE_PRINCIPALS_JSON: !reset null');
+    expect(authService).toContain(
+      'PLANE_SERVICE_PRINCIPALS_FILE: /run/secrets/plane_service_principals',
+    );
     expect(authService).toContain('CONVEX_AUTH_PRIVATE_KEY_FILE:');
     expect(authService).toContain('CONVEX_AUTH_PUBLIC_KEY_FILE:');
     expect(authService).toContain('BEARER_TOKEN_ENABLED: "true"');
@@ -50,8 +77,21 @@ describe('Control Plane deployment contract', () => {
     expect(authService).toContain('volumes: !override');
     expect(authService).not.toContain('./auth-core/keys:/app/keys');
     expect(production).toContain('auth_grpc_service_credentials:');
+    expect(production).toContain('plane_service_principals:');
     expect(production).toContain('auth_convex_private_key:');
     expect(production).toContain('auth_convex_public_key:');
+
+    const entrypoint = readFileSync(
+      resolve(process.cwd(), 'docker-entrypoint.sh'),
+      'utf8',
+    );
+    expect(entrypoint).toContain('PLANE_SERVICE_PRINCIPALS_FILE');
+    expect(entrypoint).toContain('chown root:appgroup /run/control-secrets');
+    expect(entrypoint).not.toContain(
+      'chown appuser:appgroup /run/control-secrets',
+    );
+    expect(entrypoint).toContain('[ -L "$target" ]');
+    expect(entrypoint).toContain('mv -f -- "$staged" "$target"');
   });
 
   it('pins User production verification to the same required Auth key and issuer', () => {

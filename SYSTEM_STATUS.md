@@ -1,7 +1,26 @@
 # CoreSystem — System Status & Achievements
 
-> **⚠️ Superseded in part by [SYSTEM_PRODUCTION_READINESS_2026-07-13.md](SYSTEM_PRODUCTION_READINESS_2026-07-13.md) (2026-07-13).**
-> A read-only production-readiness pass on 2026-07-13 found the Model Plane deploy landmine **has detonated for `model-gateway` and `inference-core`**: their HTTP health is green while required gRPC `:9090`/`:9092` refuse connections, so general inference/chat and Data-Plane query embedding are down. `execution-core` still serves authenticated gRPC. Current source restores additive authenticated contracts, exact target-audience issuance/callers, terminal-safe approval replay, and the ordinary invoke graph, but it is not deployed and has no immutable rollback artifact. Release blockers still include approval outbox/cache recovery, durable browser ownership, background callers, unavoidable capability dispatch authority, release-database migrations, and a verified ZDR-eligible provider route. See the Model Plane 2026-07-13 [status](apps/Model%20Plane/MODEL_PLANE_STATUS.md), [audit](apps/Model%20Plane/docs/core-research/plane-audit-2026-07-13.md), [safe-rebuild decision](apps/Model%20Plane/docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md), and [MVP/enterprise-next roadmap](apps/Model%20Plane/MODEL_PLANE_ROADMAP.md). The rest of this document is historical context.
+> **Model Plane correction — 2026-07-16:** the user-authorized local Docker
+> integration rollout now has all 21 Model containers running, with all 19
+> health-checked containers healthy. Gateway, inference, and execution gRPC are
+> live and authenticated on loopback; Control Auth uses the canonical issuer,
+> and Data retrieval/graph/wiki are reachable on the shared bus. This is not a
+> production release: the eleven app images are unsigned dirty-tree builds,
+> there is no accepted candidate/rollback artifact, capabilities remain
+> `health_not_attested`, Letta is explicitly semantic-degraded, approval
+> continuation is quarantined, all-ZDR has no eligible provider, and dynamic
+> `allowAnyOrg` workload token exchanges still lack a separately verified
+> tenant proof. Production source now rejects that dynamic shape and supports a
+> private file-backed, fixed-tenant Control principal registry, but it has not
+> replaced the running runtime-only development registry. Artifact-v3 release
+> contracts now also fail closed on unsafe secret/evidence files, unsigned
+> configuration drift, placeholder Auth/ZDR/rollback evidence, and self/same-
+> payload rollback; no signed candidate or rollback was produced. Use the
+> current Model Plane [status](apps/Model%20Plane/MODEL_PLANE_STATUS.md),
+> [audit](apps/Model%20Plane/docs/core-research/plane-audit-2026-07-16.md),
+> [safe-rebuild decision](apps/Model%20Plane/docs/core-research/grpc-safe-rebuild-decision-2026-07-16.md),
+> and [roadmap](apps/Model%20Plane/MODEL_PLANE_ROADMAP.md). The older sections
+> below are retained as history.
 
 > **Application Plane correction — 2026-07-13:** the fleet-wide Docker/content-store
 > and `application-postgres` corruption narrative retained below is not true of the
@@ -23,7 +42,7 @@
 A full pyramid audit ran Control → Data → Ingestion → Model → Application → Frontend/velionv3, each with parallel live-verification + source review, per-service `docs/core-research/*.md` rewrites, and a dated `plane-audit-2026-07-11.md` + `*_STATUS.md` + `*_ROADMAP.md` per plane.
 
 **The user's two headline questions, answered:**
-- **"Chat can't reach its tools (shipping, etc.)"** — the Model Plane tool loop is REAL and non-mocked. Plain chat is intentionally tool-free; explicit selected tools, Browse, Plan, and Agent Run Console are different modes owned by Frontend presentation policy. The current universal blocker is the absent live inference gRPC listener. Catalog semantics still diverge and need one machine-readable capability contract; this is not accurately described as an accidental composer omission.
+- **"Chat can't reach its tools (shipping, etc.)"** — the Model Plane tool loop is real and non-mocked. Plain chat is intentionally tool-free; explicit selected tools, Browse, Plan, and Agent Run Console are different modes owned by Frontend presentation policy. Inference gRPC is now live locally, but all currently enabled capabilities derive unavailable until a trusted reporter attests dependency health. Frontend still owns intentional ordinary-chat tool UX.
 - **"Add the Visma MCP via the UI and it did nothing"** — no Velion Visma runtime integration exists. The lone live record is malformed (`stdio` + HTTPS + empty allowlist), discovers nothing, and the MCP bridge is not deployed. Current source rejects that shape and quarantines unowned legacy records, but a real outcome still requires a separately deployable Visma MCP server, secret-reference/auth onboarding, exact allowlist, health/discovery, and end-to-end invocation. The operator's Codex/Claude connector is a separate system.
 
 **Fixes landed in source this audit** (verified via build/test; most NOT yet deployed — Docker rebuild gated):
@@ -35,10 +54,14 @@ A full pyramid audit ran Control → Data → Ingestion → Model → Applicatio
 **The dominant operational blocker:** Docker's **containerd content store is corrupted** (blob I/O errors) — it breaks `docker exec`, image rebuild, and `docker logs` fleet-wide, and has now **corrupted the `application-postgres` data volume** (SQLSTATE 58030), so every DB-backed Application service (Inbox, notifications, insights, social, leads) returns 500 on real reads despite healthy `/health`. Their code is correct; they recover once the volume is restored. An operator-approved Docker maintenance window (restart + clean rebuilds + volume restore) is what lets essentially every source fix above go live. **Almost nothing from Phases 2–6 can be deployed until that maintenance runs.**
 
 **Top open items across planes** (see each plane's `*_ROADMAP.md`):
-1. CRITICAL live incident — Model Plane gateway/inference gRPC listeners are already absent while health is green. Additive authenticated source restoration is not deployment authorization; **do not rebuild/cut over** until all callers, contracts, readiness, immutable artifacts, and rollback gates pass.
+1. CRITICAL release gate — Model Plane gRPC is restored in the local integration stack, but the dirty-tree images are not an immutable production candidate or rollback target. Do not promote until caller compatibility, signed artifacts, managed runtime config, verified tenant delegation for dynamic workload tokens, and rollback gates pass.
 2. HIGH — new velionv3 `onboarding/graph-preview` cross-tenant IDOR (client query-param `org_id`).
-3. HIGH — capability states diverge across plain chat, selected tools, Browse, Plan, gateway, capability-core, and execution; live session approval RPCs permit HITL bypass. Inline MCP bypass is fixed in source only.
-4. HIGH — live cost-core has no inbound auth (IDOR); convex-core `onOrganizationMemberRemoved` is called-but-undefined. The prior “session compaction 100% failing” claim is withdrawn: current metrics show 479 successes, 0 observed errors, and 24 checkpoints.
+3. HIGH — capability semantics are not yet proven consistent across plain chat,
+   selected tools, Browse, Plan, gateway, capability-core, and execution. Live
+   authorization negatives and mandatory execution policy now fail closed, but
+   no health-attested allow path or safe exact-effect approval continuation is
+   enabled. Inline MCP bypass is fixed in source only.
+4. HIGH — Model cost-core now rejects unauthenticated and forged-scope reads in live local probes; a legitimate valid scoped live read remains outstanding. The prior “session compaction 100% failing” claim is withdrawn: current historical metrics showed 479 successes and 0 observed errors, but a current release-shaped compaction proof is still required.
 5. MEDIUM — information-core relays fabricated traffic metrics as real; residual fabricated settings rows in velionv3.
 
 Everything below the line is retained as prior/historical context. The dated plane audits under `apps/*/docs/core-research/plane-audit-2026-07-11.md` (Data Plane: `-07-10`) plus each plane's `*_STATUS.md`/`*_ROADMAP.md` are the current source of truth.

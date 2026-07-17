@@ -1,0 +1,11 @@
+name: ${DATA_PLANE_COMPOSE_PROJECT:-data-plane-v2}
+
+# Production/shared-plane attachment. This file is intentionally explicit:
+# the base Compose file uses a private local network so Data Plane can boot
+# without Control, User, or Model Plane containers. Apply this overlay only
+# after the deployment-owned `inter-plane-bus` exists and has been reviewed.
+
+networks:
+  inter-plane-bus:
+    external: true
+    name: ${INTER_PLANE_BUS_NETWORK:-inter-plane-bus}

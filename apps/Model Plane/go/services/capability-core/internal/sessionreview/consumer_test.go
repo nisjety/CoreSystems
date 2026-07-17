@@ -54,6 +54,12 @@ func envBytes(t *testing.T, eventType, resourceRef, org, payload string) []byte 
 	return b
 }
 
+func TestRunCompletedSubjectIsLimitedToCanonicalRunEvents(t *testing.T) {
+	if RunCompletedSubject != "mp.v1.run.*.event" {
+		t.Fatalf("run-completed subscription = %q, want canonical run-event subject only", RunCompletedSubject)
+	}
+}
+
 // The whole trigger path from a RUN_COMPLETED envelope to a persisted skill,
 // faking only the session-core and inference-core boundaries.
 func TestHandleRunCompleted_EndToEnd(t *testing.T) {

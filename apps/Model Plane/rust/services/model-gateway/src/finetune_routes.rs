@@ -229,6 +229,7 @@ pub(crate) async fn publish_finetune_event(
     job_id: &str,
     event_type: &str,
     payload: Value,
+    zdr: bool,
 ) {
     let subject = mp_events::subjects::finetune_event_subject(org_id, event_type);
     let event_id = mp_ids::new_ulid();
@@ -245,7 +246,7 @@ pub(crate) async fn publish_finetune_event(
         user_id: user_id.to_owned(),
         resource_ref: format!("finetune:{job_id}"),
         payload,
-        zdr: false,
+        zdr,
     };
     if let Err(e) = publisher.publish(&subject, &envelope).await {
         warn!(error = %e, subject = %subject, "finetune event publish failed");
@@ -280,6 +281,32 @@ fn require_admin(claims: &Claims) -> Result<(), HttpJsonError> {
             })),
         ))
     }
+}
+
+/// Fine-tune operations either persist lifecycle state, publish a lifecycle
+/// event, or invoke an external provider. The issuer-verified ZDR posture is
+/// therefore authoritative and cannot be weakened by an HTTP body, multipart
+/// field, header, or admin scope.
+fn require_non_zdr_finetune_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
+    if !claims.effective_zdr(false) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({
+            "error": {
+                "code": "zdr_durable_mutation_forbidden",
+                "message": "Zero Data Retention credentials cannot create, change, or deploy fine-tune state"
+            }
+        })),
+    ))
+}
+
+/// A detail read may return the already scoped cached row under ZDR, but it
+/// must not refresh from Azure because a refresh writes provider metadata back
+/// to Session Core.
+const fn should_refresh_job_from_provider(claims: &Claims, needs_refresh: bool) -> bool {
+    needs_refresh && !claims.effective_zdr(false)
 }
 
 /// Pure predicate over the env-var value. Lifted from `require_feature_enabled`
@@ -526,6 +553,9 @@ pub async fn create_job(
     Extension(claims): Extension<Claims>,
     Json(body): Json<CreateJobBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // This must precede feature/admin/body/budget work: ZDR callers may not
+    // trigger Azure, Session Core persistence, or a lifecycle event.
+    require_non_zdr_finetune_mutation(&claims)?;
     require_feature_enabled()?;
     require_admin(&claims)?;
 
@@ -625,6 +655,7 @@ async fn announce_created(
         &resp.job_id,
         mp_events::subjects::FINETUNE_EVENT_CREATED,
         payload,
+        claims.effective_zdr(false),
     )
     .await;
 }
@@ -708,7 +739,10 @@ pub async fn get_job(
     let needs_refresh =
         matches!(current.status.as_str(), "queued" | "running") && !current.azure_job_id.is_empty();
 
-    if let (true, Some(azure)) = (needs_refresh, state.azure_finetune.as_ref()) {
+    if let (true, Some(azure)) = (
+        should_refresh_job_from_provider(&claims, needs_refresh),
+        state.azure_finetune.as_ref(),
+    ) {
         match azure.get_finetune_job(&current.azure_job_id).await {
             Ok(azure_job) => {
                 let local_status = map_azure_status_to_local(&azure_job.status);
@@ -760,6 +794,8 @@ pub async fn cancel_job(
     Extension(claims): Extension<Claims>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Reject before the state read, Azure cancel, durable update, or event.
+    require_non_zdr_finetune_mutation(&claims)?;
     require_feature_enabled()?;
     require_admin(&claims)?;
 
@@ -844,6 +880,7 @@ pub async fn cancel_job(
             "status": resp.status,
             "azure_job_id": resp.azure_job_id,
         }),
+        claims.effective_zdr(false),
     )
     .await;
 
@@ -895,6 +932,9 @@ pub async fn deploy_job(
     Path(job_id): Path<String>,
     Json(body): Json<DeployJobBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Reject before any Session Core read, Azure management call, durable
+    // deployment state change, or lifecycle event.
+    require_non_zdr_finetune_mutation(&claims)?;
     require_feature_enabled()?;
     require_admin(&claims)?;
 
@@ -1011,6 +1051,7 @@ pub async fn deploy_job(
             "deployment_tier": tier.as_str(),
             "fine_tuned_model": resp.fine_tuned_model,
         }),
+        claims.effective_zdr(false),
     )
     .await;
 
@@ -1131,6 +1172,9 @@ pub async fn create_job_multipart(
     Extension(claims): Extension<Claims>,
     multipart: Multipart,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Reject before parsing the upload so a ZDR request never reaches Azure,
+    // budget/session persistence, or event publication.
+    require_non_zdr_finetune_mutation(&claims)?;
     require_feature_enabled()?;
     require_admin(&claims)?;
 
@@ -1362,6 +1406,73 @@ mod tests {
         let c = claims_with_scopes(&[]);
         let err = require_admin(&c).unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn issuer_zdr_blocks_every_durable_finetune_mutation_and_remote_refresh() {
+        let mut claims = claims_with_scopes(&[ADMIN_SCOPE]);
+        claims.zdr = true;
+
+        let error = require_non_zdr_finetune_mutation(&claims)
+            .expect_err("issuer-ZDR admin must not create, upload, cancel, or deploy fine-tunes");
+        assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            !should_refresh_job_from_provider(&claims, true),
+            "ZDR reads may return the scoped cached row but must not call Azure or persist a refresh"
+        );
+
+        claims.zdr = false;
+        assert!(require_non_zdr_finetune_mutation(&claims).is_ok());
+        assert!(should_refresh_job_from_provider(&claims, true));
+    }
+
+    #[tokio::test]
+    async fn issuer_zdr_finetune_handlers_return_before_provider_persistence_or_events() {
+        let state = AppState::new();
+        let publisher = state.publisher.clone();
+        let mut claims = claims_with_scopes(&[ADMIN_SCOPE]);
+        claims.zdr = true;
+
+        let create = create_job(
+            State(state.clone()),
+            Extension(claims.clone()),
+            Json(CreateJobBody {
+                agent_id: "agent-a".to_owned(),
+                base_model: "gpt-4o-mini".to_owned(),
+                hyperparameters: None,
+                training_example_count: 1,
+                estimated_cost_usd: 0.01,
+                training_jsonl: Some(
+                    "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}".to_owned(),
+                ),
+                suffix: None,
+            }),
+        )
+        .await;
+        let cancel = cancel_job(
+            State(state.clone()),
+            Extension(claims.clone()),
+            Path("job-a".to_owned()),
+        )
+        .await;
+        let deploy = deploy_job(
+            State(state),
+            Extension(claims),
+            Path("job-a".to_owned()),
+            Json(DeployJobBody {
+                tier: Some("production".to_owned()),
+            }),
+        )
+        .await;
+
+        for result in [create, cancel, deploy] {
+            let error = result.expect_err("issuer-ZDR durable fine-tune route must fail locally");
+            assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
+        }
+        assert!(
+            publisher.drain().is_empty(),
+            "issuer-ZDR fine-tune request published a durable lifecycle event"
+        );
     }
 
     #[test]

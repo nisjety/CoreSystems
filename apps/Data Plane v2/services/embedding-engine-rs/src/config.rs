@@ -14,8 +14,16 @@ pub struct Config {
     pub model_plane_embedding_provider: String,
     #[serde(default = "default_model_plane_embedding_timeout_ms")]
     pub model_plane_embedding_timeout_ms: u64,
+    /// Auth Core service-token endpoint used to mint an audience-bound
+    /// inference-core bearer for each tenant-scoped embedding batch.
+    #[serde(default = "default_model_plane_inference_token_url")]
+    pub model_plane_inference_token_url: String,
+    #[serde(default = "default_model_plane_inference_token_issuer")]
+    pub model_plane_inference_token_issuer: String,
+    #[serde(default = "default_model_plane_inference_service_id")]
+    pub model_plane_inference_service_id: String,
     #[serde(default)]
-    pub internal_api_key: Option<String>,
+    pub model_plane_inference_service_api_key: String,
 
     #[serde(default)]
     pub azure_openai_api_key: String,
@@ -89,6 +97,15 @@ fn default_model_plane_embedding_provider() -> String {
 }
 fn default_model_plane_embedding_timeout_ms() -> u64 {
     30_000
+}
+fn default_model_plane_inference_token_url() -> String {
+    "http://auth-core:3011/api/inference-core/internal-token".into()
+}
+fn default_model_plane_inference_token_issuer() -> String {
+    "http://localhost:3011/api/convex-auth".into()
+}
+fn default_model_plane_inference_service_id() -> String {
+    "embedding-engine".into()
 }
 fn default_dim() -> u64 {
     3072

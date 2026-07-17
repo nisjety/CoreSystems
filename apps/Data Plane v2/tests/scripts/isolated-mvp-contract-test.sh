@@ -5,10 +5,16 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 harness="$root/tests/e2e/run-isolated-mvp.sh"
 override="$root/tests/e2e/isolated/docker-compose.yml"
 mock="$root/tests/e2e/isolated/authority-mock.mjs"
+embedding_manifest="$root/services/embedding-engine-rs/Cargo.toml"
 
-for file in "$harness" "$override" "$mock"; do
+for file in "$harness" "$override" "$mock" "$embedding_manifest"; do
   [ -f "$file" ] || { echo "FAIL: missing isolated fixture $file" >&2; exit 1; }
 done
+
+# Embedding's Model Plane token verifier is part of the production binary; keep
+# its direct JWT dependency declared so the container build cannot regress to a
+# source-only success that fails at Docker compile time.
+rg -Fq 'jsonwebtoken.workspace = true' "$embedding_manifest"
 
 rg -Fq 'dpv2-mvp-e2e-' "$harness"
 if rg -Fq 'ISOLATED_E2E_SUFFIX' "$harness"; then
@@ -29,6 +35,7 @@ rg -Fq '[ "$bus_network" != "inter-plane-bus" ]' "$harness"
 rg -Fq 'down --volumes --remove-orphans' "$harness"
 rg -Fq 'DPV2_COMPOSE_PROJECT="$project"' "$harness"
 rg -Fq 'export DATAPLANE_NATS_TOKEN=' "$harness"
+rg -Fq 'export NATS_SHARED_URL=' "$harness"
 rg -Fq 'export DATAPLANE_DRAGONFLY_PASSWORD=' "$harness"
 if rg -Fq 'allocate_loopback_port' "$harness"; then
   echo "FAIL: isolated harness races for unnecessary host-published ports" >&2

@@ -152,6 +152,11 @@ message ResumeRunRequest {
 
   // Tenant identifier.
   string org_id = 3;
+
+  // Durable granted approval authorizing an AwaitingApproval -> Running
+  // transition. Empty is valid only for a user-paused run; it can never
+  // resume an approval gate.
+  string approval_id = 4;
 }
 
 // ResumeRunResponse — acknowledgement that the run has been resumed.

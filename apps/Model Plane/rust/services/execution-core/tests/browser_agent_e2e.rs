@@ -59,22 +59,23 @@ async fn browser_agent_drives_real_quarry_loop() {
         start_url: Some("https://example.com".to_owned()),
     };
 
-    let (status, observations, summary) =
-        run_browser_agent_loop(config, Some(&client), planner.as_ref(), None, None).await;
+    let result = run_browser_agent_loop(config, Some(&client), planner.as_ref(), None, None).await;
 
     eprintln!(
-        "E2E result: status={} observations={} summary={summary}",
-        status.as_str(),
-        observations.len()
+        "E2E result: status={} observations={} summary={}",
+        result.status.as_str(),
+        result.observations.len(),
+        result.summary
     );
 
     assert_ne!(
-        status,
+        result.status,
         PlanStatus::Failed,
-        "browser-agent loop failed: {summary}"
+        "browser-agent loop failed: {}",
+        result.summary
     );
     assert!(
-        !observations.is_empty(),
+        !result.observations.is_empty(),
         "expected at least one observation from the real Quarry browser"
     );
 }

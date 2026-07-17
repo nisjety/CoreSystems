@@ -29,3 +29,33 @@ func TestTenantScopeAndRiskMigrationFailsClosedForLegacyRows(t *testing.T) {
 		}
 	}
 }
+
+func TestExecutionDispatchCapabilitiesStartUnavailableUntilHealthAttested(t *testing.T) {
+	t.Parallel()
+
+	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0008_execution_dispatch_capabilities.up.sql"))
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"'cap.command.shell'",
+		"'cap.agent.spawn'",
+		"'cap.retrieval.query'",
+		"'cap.tool.shipping.book'",
+		"'cap.tool.provider.execute'",
+		"'global'",
+		"ARRAY['global']",
+		"'unavailable'",
+		"'health_not_attested'",
+		"'unavailable'",
+		"health_checked_at",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "availability_state = 'available'") {
+		t.Fatal("migration must not fabricate a live health attestation")
+	}
+}

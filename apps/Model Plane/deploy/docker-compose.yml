@@ -38,9 +38,12 @@ services:
     image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
     command: ["-c", "/etc/nats/nats.conf"]
     environment:
-      MODEL_NATS_RUNTIME_PASSWORD: "\"${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}\""
       MODEL_GATEWAY_NATS_PASSWORD: "\"${MODEL_GATEWAY_NATS_PASSWORD:?MODEL_GATEWAY_NATS_PASSWORD is required}\""
+      MODEL_COST_CORE_NATS_PASSWORD: "\"${MODEL_COST_CORE_NATS_PASSWORD:?MODEL_COST_CORE_NATS_PASSWORD is required}\""
       MODEL_SESSION_CORE_NATS_PASSWORD: "\"${MODEL_SESSION_CORE_NATS_PASSWORD:?MODEL_SESSION_CORE_NATS_PASSWORD is required}\""
+      MODEL_CAPABILITY_CORE_NATS_PASSWORD: "\"${MODEL_CAPABILITY_CORE_NATS_PASSWORD:?MODEL_CAPABILITY_CORE_NATS_PASSWORD is required}\""
+      MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD: "\"${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}\""
+      MODEL_TOOL_COMPLETION_NATS_PASSWORD: "\"${MODEL_TOOL_COMPLETION_NATS_PASSWORD:?MODEL_TOOL_COMPLETION_NATS_PASSWORD is required}\""
       APPLICATION_CONVEX_MODEL_NATS_PASSWORD: "\"${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD is required}\""
       APPLICATION_INSIGHT_MODEL_NATS_PASSWORD: "\"${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD is required}\""
       AUDIT_MODEL_NATS_PASSWORD: "\"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}\""
@@ -165,6 +168,7 @@ services:
       args: *build-metadata
     ports:
       - "127.0.0.1:8080:8080"   # HTTP
+      - "127.0.0.1:9090:9090"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
       # This service also joins inter-plane-bus, where the generic `nats`
@@ -172,6 +176,9 @@ services:
       NATS_URL: nats://model-nats:4222
       NATS_USER: model-gateway-runtime
       NATS_PASSWORD: ${MODEL_GATEWAY_NATS_PASSWORD:?MODEL_GATEWAY_NATS_PASSWORD is required}
+      # Release profile is v1-only. Re-enable a legacy bridge only through a
+      # separately reviewed migration profile with a matching scoped principal.
+      MP_COMPAT_MODE: v1_only
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
       # Empty by default = "Velion Auto": inference-core resolves an unpinned
@@ -192,6 +199,9 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       MODEL_GATEWAY_SERVICE_ID: ${MODEL_GATEWAY_SERVICE_ID:-model-gateway}
       MODEL_GATEWAY_SERVICE_API_KEY: ${MODEL_GATEWAY_SERVICE_API_KEY:?MODEL_GATEWAY_SERVICE_API_KEY is required}
+      # Mandatory keyed-MAC material for opaque durable StartManagedRun keys.
+      # It is an independent managed secret, never a user credential.
+      MODEL_GATEWAY_MANAGED_START_KEY_SECRET: ${MODEL_GATEWAY_MANAGED_START_KEY_SECRET:?MODEL_GATEWAY_MANAGED_START_KEY_SECRET is required}
       # Wave 7 — fine-tuning kill switch + budget guard (off by default in
       # production-style profile; dev override flips FINETUNE_ENABLED=1).
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
@@ -216,6 +226,7 @@ services:
       EXECUTION_CORE_ADDR: http://model-plane-execution-core-1:9093
       SANDBOX_MANAGER_ADDR: http://model-plane-sandbox-manager-1:9094
       BROWSER_BROKER_ADDR: http://model-plane-browser-broker-1:9095
+      BROWSER_BROKER_AUTH_AUDIENCE: ${BROWSER_BROKER_AUTH_AUDIENCE:-browser-broker}
       MEMORY_SERVICE_URL: http://model-plane-session-core-1:9091
       # Legacy env name retained for older gateway builds; memory authority is
       # session-core, which syncs to Letta through LETTA_MEMORY_ADDR below.
@@ -313,7 +324,7 @@ services:
       dragonfly:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
       interval: 10s
       retries: 3
 
@@ -367,6 +378,7 @@ services:
       args: *build-metadata
     ports:
       - "127.0.0.1:18082:8082"  # HTTP health — host 18082 avoids collision with Ingestion Plane quarry-edge (host 8082)
+      - "127.0.0.1:9092:9092"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
@@ -383,9 +395,6 @@ services:
       AZURE_OPENAI_STT_DEPLOYMENT: ${AZURE_OPENAI_STT_DEPLOYMENT:-gpt-4o-mini-transcribe}
       INFERENCE_ROUTING_SERVICE_API_KEY: ${INFERENCE_ROUTING_SERVICE_API_KEY:-}
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
-      NATS_URL: nats://model-nats:4222
-      NATS_USER: model-runtime
-      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
@@ -493,7 +502,7 @@ services:
       nats:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8082/readyz"]
       interval: 10s
       retries: 3
 
@@ -515,6 +524,7 @@ services:
       args: *build-metadata
     ports:
       - "127.0.0.1:18083:8083"  # HTTP health — host 18083 avoids collision with the RentNå Expo dev server (host 8083)
+      - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
       # Autonomous tool-using runs route through Azure's model-router deployment,
@@ -523,9 +533,6 @@ services:
       # honor the caller's requested model. Plain chat is unaffected.
       EXECUTION_AGENT_MODEL: ${EXECUTION_AGENT_MODEL:-model-router}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
-      NATS_URL: nats://model-nats:4222
-      NATS_USER: model-runtime
-      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
       MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
@@ -545,6 +552,9 @@ services:
       # Documented primary for the agent run driver (RunAgent) Infer round.
       INFERENCE_CORE_URL: http://inference-core:9092
       CAPABILITY_CORE_ADDR: http://capability-core:9097
+      # Browser grants are revalidated immediately before browser_agent
+      # dispatch. This private service endpoint is never a host-published API.
+      BROWSER_BROKER_ADDR: http://browser-broker:9095
       # Quarry-v2 edge (Ingestion Plane) — backs the real web_search / web_fetch
       # agentic tools and the browser-agent loop.
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
@@ -619,8 +629,8 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       NATS_URL: nats://nats:4222
-      NATS_USER: model-runtime
-      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
+      NATS_USER: orchestrator-core-runtime
+      NATS_PASSWORD: ${MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD:?MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD is required}
       SESSION_CORE_ADDR: session-core:9091
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
@@ -629,6 +639,7 @@ services:
       EXECUTION_CORE_ADDR: execution-core:9093
       CAPABILITY_CORE_ADDR: capability-core:9097
       ENABLE_COMPAT_ADAPTER: "false"
+      MP_COMPAT_MODE: v1_only
     depends_on:
       temporal:
         condition: service_healthy
@@ -653,12 +664,22 @@ services:
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
       NATS_URL: nats://nats:4222
-      NATS_USER: model-runtime
-      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
+      NATS_USER: capability-core-runtime
+      NATS_PASSWORD: ${MODEL_CAPABILITY_CORE_NATS_PASSWORD:?MODEL_CAPABILITY_CORE_NATS_PASSWORD is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
       APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
+      # Optional Letta tool-definition ranking. This is not memory/passages
+      # search and never expands the durable tenant-scoped capability catalog.
+      LETTA_TOOL_SEARCH_ENABLED: ${LETTA_TOOL_SEARCH_ENABLED:-false}
+      LETTA_TOOL_SEARCH_URL: ${LETTA_TOOL_SEARCH_URL:-}
+      LETTA_API_KEY: ${LETTA_API_KEY:-}
+      LETTA_TOOL_SEARCH_MODE: ${LETTA_TOOL_SEARCH_MODE:-hybrid}
+      LETTA_TOOL_SEARCH_TIMEOUT: ${LETTA_TOOL_SEARCH_TIMEOUT:-2s}
+      LETTA_TOOL_SEARCH_LIMIT: ${LETTA_TOOL_SEARCH_LIMIT:-50}
+      LETTA_TOOL_SEARCH_MAX_RESPONSE_BYTES: ${LETTA_TOOL_SEARCH_MAX_RESPONSE_BYTES:-262144}
+      LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK: ${LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK:-false}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
     depends_on:
@@ -742,7 +763,10 @@ services:
       agent-memory-server:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8088/readyz"]
+      # Liveness must not depend on a first semantic query. `/readyz` remains
+      # the semantic-capability signal and must be verified separately by a
+      # release smoke test after an authenticated search.
+      test: ["CMD", "curl", "-f", "http://localhost:8088/healthz"]
       interval: 10s
       retries: 3
 
@@ -818,8 +842,8 @@ services:
       # private to the default Model network. This avoids generated container
       # names and prevents accidental resolution to another plane's NATS.
       NATS_URL: nats://model-nats:4222
-      NATS_USER: model-runtime
-      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
+      NATS_USER: cost-core-runtime
+      NATS_PASSWORD: ${MODEL_COST_CORE_NATS_PASSWORD:?MODEL_COST_CORE_NATS_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: cost-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
@@ -858,9 +882,6 @@ services:
       - "127.0.0.1:9100:9100"   # standard gRPC health only
     environment:
       LOG_LEVEL: info
-      NATS_URL: nats://nats:4222
-      NATS_USER: model-runtime
-      NATS_PASSWORD: ${MODEL_NATS_RUNTIME_PASSWORD:?MODEL_NATS_RUNTIME_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: bridge-core
       SESSION_CORE_ADDR: session-core:9091

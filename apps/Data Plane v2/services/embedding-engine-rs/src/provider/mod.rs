@@ -9,7 +9,9 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+mod inference_auth;
 pub mod visual;
+use inference_auth::InferenceTokenClient;
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 500;
@@ -43,7 +45,7 @@ struct ModelPlaneEmbeddingClient {
     /// the EU residency gate deny-by-default. Empty = no preference.
     region: String,
     timeout: Duration,
-    internal_api_key: Option<String>,
+    inference_token_client: InferenceTokenClient,
 }
 
 #[derive(Clone)]
@@ -79,7 +81,10 @@ impl EmbeddingProvider {
                 &cfg.model_plane_embedding_provider,
                 &cfg.embedding_region,
                 cfg.model_plane_embedding_timeout_ms,
-                cfg.internal_api_key.clone(),
+                &cfg.model_plane_inference_token_url,
+                &cfg.model_plane_inference_token_issuer,
+                &cfg.model_plane_inference_service_id,
+                &cfg.model_plane_inference_service_api_key,
             ),
             "azure_openai" => Self::azure_openai(
                 &cfg.azure_openai_endpoint,
@@ -92,15 +97,34 @@ impl EmbeddingProvider {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // endpoint + bounded service-token contract
     pub fn model_plane(
         grpc_url: &str,
         model: &str,
         provider: &str,
         region: &str,
         timeout_ms: u64,
-        internal_api_key: Option<String>,
+        inference_token_url: &str,
+        inference_token_issuer: &str,
+        inference_service_id: &str,
+        inference_service_api_key: &str,
     ) -> anyhow::Result<Self> {
         let timeout = Duration::from_millis(timeout_ms.max(1));
+        let inference_token_client = if standalone_startup() {
+            InferenceTokenClient::new_allow_unconfigured(
+                inference_token_url,
+                inference_token_issuer,
+                inference_service_id,
+                inference_service_api_key,
+            )?
+        } else {
+            InferenceTokenClient::new(
+                inference_token_url,
+                inference_token_issuer,
+                inference_service_id,
+                inference_service_api_key,
+            )?
+        };
         let channel = Endpoint::from_shared(grpc_url.to_string())
             .with_context(|| format!("invalid MODEL_PLANE_AI_CORE_GRPC_URL `{grpc_url}`"))?
             .connect_timeout(timeout)
@@ -113,7 +137,7 @@ impl EmbeddingProvider {
                 provider: provider.to_string(),
                 region: region.trim().to_string(),
                 timeout,
-                internal_api_key: internal_api_key.filter(|key| !key.is_empty()),
+                inference_token_client,
             })),
         })
     }
@@ -169,6 +193,13 @@ impl EmbeddingProvider {
     }
 }
 
+fn standalone_startup() -> bool {
+    std::env::var("APP_ENV")
+        .ok()
+        .map(|value| value.trim().eq_ignore_ascii_case("standalone"))
+        .unwrap_or(false)
+}
+
 impl ModelPlaneEmbeddingClient {
     async fn embed_batch(
         &self,
@@ -176,9 +207,10 @@ impl ModelPlaneEmbeddingClient {
         texts: &[String],
         zdr: bool,
     ) -> anyhow::Result<Vec<Vec<f32>>> {
+        let bearer = self.inference_token_client.mint(org_id).await?;
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
-            vectors.push(self.embed_one(org_id, text, zdr).await?);
+            vectors.push(self.embed_one(org_id, text, zdr, bearer.as_str()).await?);
         }
         Ok(vectors)
     }
@@ -206,7 +238,13 @@ impl ModelPlaneEmbeddingClient {
         }
     }
 
-    async fn embed_one(&self, org_id: &str, text: &str, zdr: bool) -> anyhow::Result<Vec<f32>> {
+    async fn embed_one(
+        &self,
+        org_id: &str,
+        text: &str,
+        zdr: bool,
+        bearer: &str,
+    ) -> anyhow::Result<Vec<f32>> {
         let mut last_err = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -217,12 +255,7 @@ impl ModelPlaneEmbeddingClient {
             }
 
             let request = self.build_request(org_id, text, zdr);
-            let mut request = tonic::Request::new(request);
-            if let Some(key) = self.internal_api_key.as_deref() {
-                request
-                    .metadata_mut()
-                    .insert("x-api-key", MetadataValue::try_from(key)?);
-            }
+            let request = Self::authenticated_request(request, bearer)?;
 
             let mut client = self.client.clone();
             match tokio::time::timeout(self.timeout, client.create_embedding(request)).await {
@@ -250,6 +283,18 @@ impl ModelPlaneEmbeddingClient {
         }
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("model-plane embed retries exhausted")))
+    }
+
+    fn authenticated_request<T>(message: T, bearer: &str) -> anyhow::Result<tonic::Request<T>> {
+        anyhow::ensure!(
+            !bearer.is_empty() && !bearer.chars().any(char::is_whitespace),
+            "inference bearer is missing or malformed"
+        );
+        let mut request = tonic::Request::new(message);
+        let metadata = MetadataValue::try_from(format!("Bearer {bearer}"))
+            .context("inference bearer metadata is invalid")?;
+        request.metadata_mut().insert("authorization", metadata);
+        Ok(request)
     }
 }
 
@@ -352,6 +397,30 @@ mod tests {
         assert_eq!(normalize_provider("azure-openai"), "azure_openai");
     }
 
+    #[test]
+    fn model_plane_requires_scoped_service_token_configuration() {
+        let error = match EmbeddingProvider::model_plane(
+            "http://inference-core:9092",
+            "text-embedding-3-large",
+            "azure_openai",
+            "swedencentral",
+            30_000,
+            "http://auth-core:3011/api/inference-core/internal-token",
+            "http://auth-core:3011/api/convex-auth",
+            "embedding-engine",
+            "",
+        ) {
+            Ok(_) => panic!("embedding must fail closed without a service credential"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("MODEL_PLANE_INFERENCE_SERVICE_API_KEY"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn model_plane_provider_selects_model_plane_backend() {
         let provider = EmbeddingProvider::model_plane(
@@ -360,7 +429,10 @@ mod tests {
             "azure_openai",
             "swedencentral",
             30_000,
-            None,
+            "http://auth-core:3011/api/inference-core/internal-token",
+            "http://auth-core:3011/api/convex-auth",
+            "embedding-engine",
+            "service-key-for-embedding-tests",
         )
         .expect("model-plane provider");
         assert_eq!(provider.provider_name(), "model_plane");
@@ -435,7 +507,10 @@ mod tests {
             "azure_openai",
             "swedencentral",
             30_000,
-            None,
+            "http://auth-core:3011/api/inference-core/internal-token",
+            "http://auth-core:3011/api/convex-auth",
+            "embedding-engine",
+            "service-key-for-embedding-tests",
         )
         .expect("model-plane provider");
         let EmbeddingBackend::ModelPlane(inner) = &provider.inner else {
@@ -454,5 +529,44 @@ mod tests {
             "swedencentral",
             "residency region must propagate onto the wire request"
         );
+    }
+
+    #[tokio::test]
+    async fn model_plane_request_requires_and_sets_bearer_auth() {
+        let provider = EmbeddingProvider::model_plane(
+            "http://inference-core:9092",
+            "text-embedding-3-large",
+            "azure_openai",
+            "swedencentral",
+            30_000,
+            "http://auth-core:3011/api/inference-core/internal-token",
+            "http://auth-core:3011/api/convex-auth",
+            "embedding-engine",
+            "service-key-for-embedding-tests",
+        )
+        .expect("model-plane provider");
+        let EmbeddingBackend::ModelPlane(inner) = &provider.inner else {
+            panic!("expected a model-plane backend");
+        };
+
+        let request = ModelPlaneEmbeddingClient::authenticated_request(
+            inner.build_request("org-1", "hi", false),
+            "verified-inference-token",
+        )
+        .expect("verified bearer should be accepted");
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer verified-inference-token")
+        );
+
+        let error = ModelPlaneEmbeddingClient::authenticated_request(
+            inner.build_request("org-1", "hi", false),
+            "",
+        )
+        .expect_err("missing bearer must fail closed");
+        assert!(error.to_string().contains("inference bearer"));
     }
 }

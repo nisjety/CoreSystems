@@ -301,7 +301,6 @@ describe('ConvexTokenService production key and principal posture', () => {
       service.issueModelPlaneToken({
         userId: 'service:model-worker',
         orgId: 'org-a',
-        zdr: true,
         principalType: 'service',
       }),
     ).toThrow(/ambiguous/i);
@@ -309,7 +308,6 @@ describe('ConvexTokenService production key and principal posture', () => {
       service.issueModelPlaneToken({
         userId: 'user-a',
         orgId: 'org-a',
-        zdr: true,
         principalType: 'user',
         serviceId: 'model-worker',
       }),
@@ -390,7 +388,6 @@ describe('ConvexTokenService production key and principal posture', () => {
     const bundle = service.issueModelPlaneToken({
       userId: 'service:model-worker',
       orgId: 'org-a',
-      zdr: true,
       scopes: ['runs:submit'],
       principalType: 'service',
       serviceId: 'model-worker',
@@ -408,7 +405,7 @@ describe('ConvexTokenService production key and principal posture', () => {
     expect(payload).not.toHaveProperty('user_id');
   });
 
-  it('signs mandatory ZDR into user and service Model tokens and ignores downgrade input', () => {
+  it('keeps Model users ZDR and accepts non-ZDR Model services only through the policy marker', () => {
     process.env.NODE_ENV = 'test';
     for (const name of keyEnvNames) delete process.env[name];
     const service = new ConvexTokenService();
@@ -424,15 +421,53 @@ describe('ConvexTokenService production key and principal posture', () => {
       principalType: 'service',
       serviceId: 'model-worker',
       reason: 'scheduled evaluation',
-      zdr: false,
+      retentionPosture: {
+        zdr: false,
+        authority: 'service-principal-policy',
+      },
     } as unknown as Parameters<ConvexTokenService['issueModelPlaneToken']>[0];
     const serviceBundle = service.issueModelPlaneToken(serviceClaims);
 
-    for (const bundle of [userBundle, serviceBundle]) {
-      const payload = JSON.parse(
-        Buffer.from(bundle.token.split('.')[1], 'base64url').toString('utf8'),
+    const userPayload = JSON.parse(
+      Buffer.from(userBundle.token.split('.')[1], 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+    const servicePayload = JSON.parse(
+      Buffer.from(serviceBundle.token.split('.')[1], 'base64url').toString(
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(userPayload.zdr).toBe(true);
+    expect(servicePayload.zdr).toBe(false);
+  });
+
+  it('uses an exact Control-Plane organization policy for interactive persistence', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    process.env.AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON = JSON.stringify({
+      version: 1,
+      organizations: {
+        'org-approved': {
+          posture: 'persistent',
+          policyEvidenceSha256:
+            'a3b6c4a80f6bf3442d360bfb5e2aee5d1de7b28fd2049c1cad5a6d79e3b84fe3',
+        },
+      },
+    });
+    const service = new ConvexTokenService();
+    const approved = service.issuePlaneToken('inference-core', {
+      userId: 'user-a',
+      orgId: 'org-approved',
+    });
+    const unlisted = service.issuePlaneToken('inference-core', {
+      userId: 'user-b',
+      orgId: 'org-unlisted',
+    });
+
+    const decodePayload = (token: string) =>
+      JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
       ) as Record<string, unknown>;
-      expect(payload.zdr).toBe(true);
-    }
+    expect(decodePayload(approved.token).zdr).toBe(false);
+    expect(decodePayload(unlisted.token).zdr).toBe(true);
   });
 });

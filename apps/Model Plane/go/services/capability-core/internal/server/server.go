@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
+	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
@@ -17,6 +19,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -29,6 +32,11 @@ type Server struct {
 	modelReg *registry.ModelsRegistry
 	policy   *policy.Engine
 	store    capabilityStore // optional: enables score-ranked List
+	toolRank toolDefinitionSearcher
+}
+
+type toolDefinitionSearcher interface {
+	Search(context.Context, string, int) ([]lettatools.Match, error)
 }
 
 type capabilityStore interface {
@@ -88,19 +96,29 @@ func (s *Server) WithStore(store *registry.CapabilitiesStore) *Server {
 	return s
 }
 
+// WithLettaToolSearcher attaches optional, non-authoritative semantic ranking
+// for tool definitions. The searcher can only reorder/intersect rows already
+// returned by the tenant-scoped durable store; it is never consulted by
+// EvaluatePolicy or execution dispatch.
+func (s *Server) WithLettaToolSearcher(searcher toolDefinitionSearcher) *Server {
+	s.toolRank = searcher
+	return s
+}
+
 // ListCapabilities returns a filtered, paginated list of capabilities. When a
 // durable store is attached it returns results ranked by composite score
 // (descending) so the agentic loop sees the healthiest/safest capabilities
 // first; otherwise it falls back to the in-memory registry's kind/name order.
 func (s *Server) ListCapabilities(ctx context.Context, req *mpv1.ListCapabilitiesRequest) (*mpv1.ListCapabilitiesResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ListCapabilities")))
-	orgID, err := verifiedOrganizationID(ctx)
+	principal, err := verifiedPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if s.store != nil {
-		return s.listRanked(ctx, req, orgID)
+		return s.listRanked(ctx, req, principal)
 	}
+	orgID := principal.OrganizationID
 	items, hasMore := s.registry.ListForOrg(orgID, req.KindFilter, req.Query, req.AfterId, req.Limit)
 	details := make([]*mpv1.CapabilityDetail, 0, len(items))
 	for _, c := range items {
@@ -121,28 +139,27 @@ func (s *Server) ListCapabilities(ctx context.Context, req *mpv1.ListCapabilitie
 // listRanked serves ListCapabilities from the durable store, ordered by
 // descending composite score. The text query filters by name/description; the
 // kind filter narrows by kind; AfterId is an id cursor over the ranked order.
-func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesRequest, orgID string) (*mpv1.ListCapabilitiesResponse, error) {
+func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesRequest, principal authctx.Principal) (*mpv1.ListCapabilitiesResponse, error) {
 	limit := int(req.Limit)
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	// Pull a generous tenant-filtered window (including global entries).
 	// Over-fetch so the query filter + cursor can still fill a page.
-	scored, err := s.store.RankedList(ctx, orgID, req.KindFilter, nil, limit*4+200)
+	scored, err := s.store.RankedList(ctx, principal.OrganizationID, req.KindFilter, nil, limit*4+200)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 
-	q := strings.ToLower(strings.TrimSpace(req.Query))
-	filtered := make([]*registry.CapabilityRow, 0, len(scored))
+	q := strings.TrimSpace(req.Query)
+	localRows := make([]*registry.CapabilityRow, 0, len(scored))
 	for _, sc := range scored {
-		if q != "" &&
-			!strings.Contains(strings.ToLower(sc.Row.Name), q) &&
-			!strings.Contains(strings.ToLower(sc.Row.Description), q) {
-			continue
+		if sc.Row != nil {
+			localRows = append(localRows, sc.Row)
 		}
-		filtered = append(filtered, sc.Row)
 	}
+	filtered, source, reason := s.rankLocalCapabilities(ctx, principal, q, localRows)
+	recordCapabilityRanking(ctx, source, reason)
 
 	start := 0
 	if req.AfterId != "" {
@@ -169,6 +186,166 @@ func (s *Server) listRanked(ctx context.Context, req *mpv1.ListCapabilitiesReque
 		details = append(details, rowToDetail(r))
 	}
 	return &mpv1.ListCapabilitiesResponse{Capabilities: details, HasMore: hasMore}, nil
+}
+
+func (s *Server) rankLocalCapabilities(
+	ctx context.Context,
+	principal authctx.Principal,
+	query string,
+	rows []*registry.CapabilityRow,
+) ([]*registry.CapabilityRow, string, string) {
+	local := localTextFilter(rows, query)
+	if query == "" {
+		return local, "local", "query_empty"
+	}
+	if s.toolRank == nil {
+		return local, "local", "external_not_configured"
+	}
+	// External calls require an explicit, cryptographically verified non-ZDR
+	// posture. Missing retention policy is not permission to disclose a query.
+	if !principal.RetentionPolicyPresent {
+		return local, "local", "retention_unspecified"
+	}
+	if principal.ZeroDataRetention {
+		return local, "local", "zdr_external_disabled"
+	}
+
+	searchLimit := len(rows)
+	if searchLimit < 1 {
+		return local, "local", "local_catalog_empty"
+	}
+	if searchLimit > 100 {
+		searchLimit = 100
+	}
+	matches, err := s.toolRank.Search(ctx, query, searchLimit)
+	if err != nil {
+		return local, "local", "external_unavailable"
+	}
+	ranked := exactLocalToolIntersection(rows, matches)
+	if len(ranked) == 0 {
+		return local, "local", "no_exact_intersection"
+	}
+
+	selected := make(map[string]struct{}, len(ranked))
+	result := make([]*registry.CapabilityRow, 0, len(ranked)+len(local))
+	for _, row := range ranked {
+		selected[row.ID] = struct{}{}
+		result = append(result, row)
+	}
+	// Preserve locally matching capabilities after the semantic intersection,
+	// so an external outage or incomplete Letta catalog cannot hide durable
+	// tenant-authorized entries.
+	for _, row := range local {
+		if _, exists := selected[row.ID]; !exists {
+			result = append(result, row)
+		}
+	}
+	return result, "letta_tool_intersection", "ranked_exact_intersection"
+}
+
+func localTextFilter(rows []*registry.CapabilityRow, query string) []*registry.CapabilityRow {
+	q := strings.ToLower(strings.TrimSpace(query))
+	filtered := make([]*registry.CapabilityRow, 0, len(rows))
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if q != "" &&
+			!strings.Contains(strings.ToLower(row.Name), q) &&
+			!strings.Contains(strings.ToLower(row.Description), q) {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
+}
+
+func exactLocalToolIntersection(rows []*registry.CapabilityRow, matches []lettatools.Match) []*registry.CapabilityRow {
+	const ambiguous = -1
+	byName := make(map[string]int)
+	for index, row := range rows {
+		for _, name := range trustedToolNames(row) {
+			if existing, present := byName[name]; present && existing != index {
+				byName[name] = ambiguous
+				continue
+			}
+			byName[name] = index
+		}
+	}
+	result := make([]*registry.CapabilityRow, 0, len(matches))
+	selected := make(map[int]struct{}, len(matches))
+	for _, match := range matches {
+		index, exists := byName[match.Name]
+		if !exists || index == ambiguous {
+			continue
+		}
+		if _, exists := selected[index]; exists {
+			continue
+		}
+		selected[index] = struct{}{}
+		result = append(result, rows[index])
+	}
+	return result
+}
+
+func trustedToolNames(row *registry.CapabilityRow) []string {
+	if row == nil || row.Kind != models.KindTool {
+		return nil
+	}
+	var config struct {
+		DispatchName string `json:"dispatch_name"`
+	}
+	if len(row.ConfigJSON) > 0 {
+		if json.Unmarshal(row.ConfigJSON, &config) != nil {
+			return nil
+		}
+		if strings.TrimSpace(config.DispatchName) != "" {
+			return exactDispatchNames(config.DispatchName)
+		}
+	}
+	if validExactToolName(row.Name) {
+		return []string{row.Name}
+	}
+	return nil
+}
+
+func exactDispatchNames(dispatch string) []string {
+	parts := strings.Split(dispatch, "/")
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if validExactToolName(part) {
+			names = append(names, part)
+		}
+	}
+	return names
+}
+
+func validExactToolName(name string) bool {
+	if name == "" || len(name) > 128 || strings.TrimSpace(name) != name {
+		return false
+	}
+	for _, character := range name {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '_' || character == '-' || character == '.' || character == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func recordCapabilityRanking(ctx context.Context, source, reason string) {
+	telemetry.CapabilityRankingTotal.Add(
+		ctx,
+		1,
+		metric.WithAttributes(attribute.String("source", source), attribute.String("reason", reason)),
+	)
+	_ = grpc.SetTrailer(ctx, metadata.Pairs(
+		"x-capability-ranking-source", source,
+		"x-capability-ranking-reason", reason,
+	))
 }
 
 // rowToDetail converts a durable CapabilityRow into a wire CapabilityDetail.
@@ -294,7 +471,10 @@ func capabilityPolicyBlockReason(capability *models.Capability, rolloutState str
 		return ""
 	}
 	if availability.State == models.AvailabilityApprovalRequired {
-		return "human_approval_required"
+		// Availability says this route is healthy but gated. Continue through
+		// scope/grant policy so the engine can return the first-class `ask`
+		// decision; treating it as unavailable would collapse HITL into deny.
+		return ""
 	}
 	if availability.ReasonCode != "" {
 		return availability.ReasonCode
@@ -366,11 +546,19 @@ func (s *Server) PromoteSkill(ctx context.Context, req *mpv1.PromoteSkillRequest
 }
 
 func verifiedOrganizationID(ctx context.Context) (string, error) {
-	principal, ok := authctx.PrincipalFromContext(ctx)
-	if !ok || strings.TrimSpace(principal.OrganizationID) == "" {
-		return "", status.Error(codes.Unauthenticated, "verified identity required")
+	principal, err := verifiedPrincipal(ctx)
+	if err != nil {
+		return "", err
 	}
 	return principal.OrganizationID, nil
+}
+
+func verifiedPrincipal(ctx context.Context) (authctx.Principal, error) {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok || strings.TrimSpace(principal.OrganizationID) == "" {
+		return authctx.Principal{}, status.Error(codes.Unauthenticated, "verified identity required")
+	}
+	return principal, nil
 }
 
 // Register wires the CapabilityCore service onto the provided gRPC server.

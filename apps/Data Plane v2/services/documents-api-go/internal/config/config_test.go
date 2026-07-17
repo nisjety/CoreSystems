@@ -35,3 +35,23 @@ func TestLoadRequiresScopedGDPRConsumerCredentialsInReleaseMode(t *testing.T) {
 		t.Fatalf("scoped GDPR config not loaded: %+v", cfg)
 	}
 }
+
+func TestLoadStandaloneCanBootWithoutControlPlaneAuthorities(t *testing.T) {
+	t.Setenv("EVENT_SIGNING_PRIVATE_KEY_PATH", "/run/event-keys/documents-events.pem")
+	t.Setenv("GDPR_DURABLE_CONSUMER_REQUIRED", "0")
+	t.Setenv("USER_CORE_GRANTS_REQUIRED", "0")
+	t.Setenv("NATS_SHARED_URL", "")
+	t.Setenv("NATS_SHARED_USER", "")
+	t.Setenv("NATS_SHARED_PASSWORD", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("standalone config rejected: %v", err)
+	}
+	if cfg.GDPRConsumerRequired {
+		t.Fatal("standalone config unexpectedly requires the Control-owned GDPR consumer")
+	}
+	if cfg.UserCoreGrantsRequired {
+		t.Fatal("standalone config unexpectedly requires User Core grants")
+	}
+}

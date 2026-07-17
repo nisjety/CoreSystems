@@ -19,6 +19,7 @@
 use mp_contracts::dataplane::retrieval_v2::{
     retrieval_service_client::RetrievalServiceClient, RetrieveRequest, RetrieveResponse,
 };
+use serde::Serialize;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
@@ -49,8 +50,8 @@ impl KnowledgeClient {
 
     /// `knowledge_search` — retrieve the top-k knowledge chunks for `query`
     /// within `org_id` (the run's verified tenant). Returns a ranked,
-    /// agent-readable list. An empty result set is a successful, informative
-    /// response (not an error).
+    /// machine-readable result envelope. An empty result set is a successful,
+    /// explicit `no_results` response (not a silent success or an error).
     pub async fn search(
         &self,
         org_id: &str,
@@ -104,37 +105,144 @@ fn build_request(
     Ok(request)
 }
 
-/// Format a `RetrieveResponse` into agent-readable text (pure; testable without
-/// a live Data Plane).
+#[derive(Serialize)]
+struct KnowledgeSearchEnvelope {
+    kind: &'static str,
+    selected_route: &'static str,
+    route_control: &'static str,
+    status: &'static str,
+    low_confidence: bool,
+    degraded: bool,
+    no_results: bool,
+    reason: &'static str,
+    query: String,
+    trace_id: String,
+    index_version: String,
+    result_count: usize,
+    results: Vec<KnowledgeSearchCandidate>,
+    /// Compatibility bridge for model prompts/tests that consumed the former
+    /// plain-text result. New callers should use the typed fields above.
+    summary: String,
+}
+
+#[derive(Serialize)]
+struct KnowledgeSearchCandidate {
+    rank: usize,
+    score: f32,
+    text: String,
+    document_id: String,
+}
+
+/// Format a `RetrieveResponse` into a machine-readable JSON envelope (pure;
+/// testable without a live Data Plane). `selected_route=hybrid` means the
+/// existing Data Plane `Retrieve` contract; dense/sparse weights remain
+/// server-managed because the current gRPC request has no caller route field.
 fn format_candidates(query: &str, response: &RetrieveResponse) -> String {
     use std::fmt::Write as _;
-    if response.candidates.is_empty() {
+    let no_results = response.candidates.is_empty();
+    let status = if no_results {
+        "no_results"
+    } else if response.low_confidence {
+        "low_confidence"
+    } else {
+        "ok"
+    };
+    let reason = if no_results {
+        "No results returned; reformulate the query with different terms before retrying."
+    } else if response.low_confidence {
+        "Results are low confidence; reformulate or broaden the query before relying on them."
+    } else {
+        ""
+    };
+    let summary = if no_results {
         let suffix = if response.low_confidence {
             " (low confidence)"
         } else {
             ""
         };
-        return format!("No knowledge found for \"{query}\"{suffix}.");
-    }
-    let mut out = format!(
-        "Knowledge results for \"{query}\" ({} chunk(s)):\n",
-        response.candidates.len()
-    );
-    for (i, c) in response.candidates.iter().enumerate() {
-        let text = truncate_chars(c.text.trim(), MAX_CHUNK_CHARS);
-        let _ = write!(
-            out,
-            "{}. [score {:.3}] {text}\n   (document {})\n",
-            i + 1,
-            c.final_score,
-            if c.document_id.is_empty() {
-                "?"
-            } else {
-                &c.document_id
-            }
+        format!("No knowledge found for \"{query}\"{suffix}.")
+    } else {
+        let mut summary = format!(
+            "Knowledge results for \"{query}\" ({} chunk(s)):\n",
+            response.candidates.len()
         );
-    }
-    out
+        for (i, c) in response.candidates.iter().enumerate() {
+            let text = truncate_chars(c.text.trim(), MAX_CHUNK_CHARS);
+            let _ = write!(
+                summary,
+                "{}. [score {:.3}] {text}\n   (document {})\n",
+                i + 1,
+                c.final_score,
+                if c.document_id.is_empty() {
+                    "?"
+                } else {
+                    &c.document_id
+                }
+            );
+        }
+        summary
+    };
+    let results = response
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| KnowledgeSearchCandidate {
+            rank: index + 1,
+            score: if candidate.final_score.is_finite() {
+                candidate.final_score
+            } else {
+                0.0
+            },
+            text: truncate_chars(candidate.text.trim(), MAX_CHUNK_CHARS),
+            document_id: if candidate.document_id.is_empty() {
+                "?".to_owned()
+            } else {
+                candidate.document_id.clone()
+            },
+        })
+        .collect();
+    serde_json::to_string(&KnowledgeSearchEnvelope {
+        kind: "knowledge_search_result",
+        selected_route: "hybrid",
+        route_control: "server_managed",
+        status,
+        low_confidence: response.low_confidence,
+        degraded: false,
+        no_results,
+        reason,
+        query: query.to_owned(),
+        trace_id: response.trace_id.clone(),
+        index_version: response.index_version.clone(),
+        result_count: response.candidates.len(),
+        results,
+        summary,
+    })
+    .expect("knowledge search envelope contains only finite serializable values")
+}
+
+/// Typed degraded-state error for dependency/configuration failures. It is
+/// carried in the tool error channel, so callers cannot mistake it for a valid
+/// empty corpus result while the next inference round can still parse it.
+pub(crate) fn format_degraded_error(reason: &str) -> String {
+    serde_json::json!({
+        "kind": "knowledge_search_result",
+        "selected_route": "hybrid",
+        "route_control": "server_managed",
+        "status": "degraded",
+        "low_confidence": false,
+        "degraded": true,
+        "no_results": false,
+        "reason": reason,
+        // Do not echo the model-authored query into an error that may be kept
+        // for operational diagnosis; this remains content-free under ZDR.
+        "query": "",
+        "trace_id": "",
+        "index_version": "",
+        "result_count": 0,
+        "results": [],
+        "summary": "Knowledge retrieval is unavailable; do not infer that the corpus is empty."
+    })
+    .to_string()
 }
 
 /// Char-boundary-safe truncation (never panics on multibyte input).
@@ -170,6 +278,15 @@ mod tests {
             ..Default::default()
         };
         let out = format_candidates("onboarding", &resp);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("knowledge result is machine readable JSON");
+        assert_eq!(parsed["selected_route"], "hybrid");
+        assert_eq!(parsed["route_control"], "server_managed");
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(parsed["low_confidence"], false);
+        assert_eq!(parsed["degraded"], false);
+        assert_eq!(parsed["no_results"], false);
+        assert_eq!(parsed["results"][0]["document_id"], "doc-1");
         assert!(out.contains("2 chunk(s)"));
         assert!(out.contains("1. [score 0.420] Velion onboarding flow."));
         assert!(out.contains("(document doc-1)"));
@@ -179,6 +296,13 @@ mod tests {
     #[test]
     fn empty_results_are_informative_not_error() {
         let out = format_candidates("zzz", &RetrieveResponse::default());
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON envelope");
+        assert_eq!(parsed["status"], "no_results");
+        assert_eq!(parsed["no_results"], true);
+        assert!(parsed["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("reformulate"));
         assert!(out.contains("No knowledge found"));
     }
 
@@ -188,7 +312,46 @@ mod tests {
             low_confidence: true,
             ..Default::default()
         };
-        assert!(format_candidates("q", &resp).contains("low confidence"));
+        let out = format_candidates("q", &resp);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON envelope");
+        assert_eq!(parsed["status"], "no_results");
+        assert_eq!(parsed["low_confidence"], true);
+        assert!(out.contains("low confidence"));
+    }
+
+    #[test]
+    fn candidates_preserve_low_confidence_as_a_distinct_machine_signal() {
+        let resp = RetrieveResponse {
+            candidates: vec![candidate("weak match", "doc-1", 0.05)],
+            low_confidence: true,
+            trace_id: "trace-1".to_owned(),
+            ..Default::default()
+        };
+
+        let out = format_candidates("ambiguous", &resp);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON envelope");
+        assert_eq!(parsed["status"], "low_confidence");
+        assert_eq!(parsed["low_confidence"], true);
+        assert_eq!(parsed["degraded"], false);
+        assert_eq!(parsed["trace_id"], "trace-1");
+        assert!(parsed["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("reformulate"));
+    }
+
+    #[test]
+    fn dependency_failure_is_degraded_not_no_results() {
+        let out = format_degraded_error("retrieval dependency unavailable");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON envelope");
+        assert_eq!(parsed["status"], "degraded");
+        assert_eq!(parsed["degraded"], true);
+        assert_eq!(parsed["no_results"], false);
+        assert_eq!(parsed["query"], "");
+        assert!(parsed["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("unavailable"));
     }
 
     #[test]

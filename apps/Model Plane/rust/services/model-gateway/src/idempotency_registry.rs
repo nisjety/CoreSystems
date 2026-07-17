@@ -15,7 +15,7 @@
 //! — promote the cache to session-core/Postgres for durable, cross-replica
 //! dedup later (same matrix-style note as `cancel_registry`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -26,6 +26,17 @@ const DONE_TTL: Duration = Duration::from_secs(600);
 /// (e.g. the original request's process died mid-flight). Keeps a crashed
 /// request from wedging its key forever.
 const PENDING_TTL: Duration = Duration::from_secs(120);
+/// Public client idempotency values are retained in-memory while in flight and
+/// as cache keys. Keep the accepted input bounded before it can allocate.
+const MAX_KEY_BYTES: usize = 256;
+/// A bounded number of fresh entries prevents unique public keys from growing
+/// the registry without limit. Together with the per-entry payload cap this
+/// holds completed response payloads to at most 64 MiB (plus small metadata)
+/// before admission fails closed. Expired entries are reclaimed first.
+const MAX_ENTRIES: usize = 1_024;
+/// A completed response is caller-derived/provider-derived data. Refuse to
+/// retain a large response for replay; the original request still succeeds.
+const MAX_CACHED_VALUE_BYTES: usize = 64 * 1024;
 
 /// The cacheable shape of a completed `/v1/invoke` response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,25 +60,64 @@ pub enum Claim {
     Cached(CachedInvoke),
     /// Another request currently holds this key (duplicate in-flight).
     InFlight,
+    /// The caller's public key is malformed/too large or the bounded registry
+    /// cannot safely admit another live entry. The request must not run
+    /// unprotected as a fallback.
+    Rejected(ClaimRejection),
+}
+
+/// Why an idempotency claim was deliberately rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimRejection {
+    InvalidKey,
+    CapacityExceeded,
+}
+
+#[derive(Clone, Copy)]
+struct RegistryLimits {
+    max_key_bytes: usize,
+    max_entries: usize,
+    max_cached_value_bytes: usize,
+}
+
+struct RegistryState {
+    inner: DashMap<String, Entry>,
+    /// Serializes admission, completion, and release so capacity remains a
+    /// strict bound rather than a best-effort race under concurrent requests.
+    admission: Mutex<()>,
+    limits: RegistryLimits,
 }
 
 /// Tracks in-flight + recently-completed invokes keyed by client idempotency key.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct IdempotencyRegistry {
-    inner: Arc<DashMap<String, Entry>>,
+    state: Arc<RegistryState>,
 }
 
 impl IdempotencyRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_limits(RegistryLimits {
+            max_key_bytes: MAX_KEY_BYTES,
+            max_entries: MAX_ENTRIES,
+            max_cached_value_bytes: MAX_CACHED_VALUE_BYTES,
+        })
     }
 
     /// Claim `key` for a new request. See [`Claim`] for the three outcomes.
     /// Expired `Done` entries and abandoned `Pending` claims are reclaimed.
     pub fn claim(&self, key: &str) -> Claim {
+        if key.trim().is_empty() || key.len() > self.state.limits.max_key_bytes {
+            return Claim::Rejected(ClaimRejection::InvalidKey);
+        }
         let now = Instant::now();
-        if let Some(entry) = self.inner.get(key) {
+        let _admission = self
+            .state
+            .admission
+            .lock()
+            .expect("idempotency registry admission lock poisoned");
+        self.purge_expired(now);
+        if let Some(entry) = self.state.inner.get(key) {
             match entry.value() {
                 Entry::Done { value, at } if now.duration_since(*at) < DONE_TTL => {
                     return Claim::Cached(value.clone());
@@ -79,10 +129,14 @@ impl IdempotencyRegistry {
                 _ => {}
             }
         }
-        self.inner
+        if self.state.inner.len() >= self.state.limits.max_entries {
+            return Claim::Rejected(ClaimRejection::CapacityExceeded);
+        }
+        self.state
+            .inner
             .insert(key.to_owned(), Entry::Pending { since: now });
         Claim::Proceed(CommitGuard {
-            inner: self.inner.clone(),
+            state: self.state.clone(),
             key: key.to_owned(),
             committed: false,
         })
@@ -91,7 +145,30 @@ impl IdempotencyRegistry {
     /// Number of currently-tracked keys (Pending + cached Done).
     #[must_use]
     pub fn tracked(&self) -> usize {
-        self.inner.len()
+        self.state.inner.len()
+    }
+
+    fn purge_expired(&self, now: Instant) {
+        self.state.inner.retain(|_, entry| match entry {
+            Entry::Done { at, .. } => now.duration_since(*at) < DONE_TTL,
+            Entry::Pending { since } => now.duration_since(*since) < PENDING_TTL,
+        });
+    }
+
+    fn with_limits(limits: RegistryLimits) -> Self {
+        Self {
+            state: Arc::new(RegistryState {
+                inner: DashMap::new(),
+                admission: Mutex::new(()),
+                limits,
+            }),
+        }
+    }
+}
+
+impl Default for IdempotencyRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -101,7 +178,7 @@ impl IdempotencyRegistry {
 /// `InFlight` until the pending TTL elapses. Holds an `Arc` clone of the map
 /// (not a borrow), so it is `'static` and can be held across `.await`.
 pub struct CommitGuard {
-    inner: Arc<DashMap<String, Entry>>,
+    state: Arc<RegistryState>,
     key: String,
     committed: bool,
 }
@@ -109,13 +186,26 @@ pub struct CommitGuard {
 impl CommitGuard {
     /// Cache the completed result under this key and release the claim.
     pub fn commit(mut self, value: CachedInvoke) {
-        self.inner.insert(
-            self.key.clone(),
-            Entry::Done {
-                value,
-                at: Instant::now(),
-            },
-        );
+        let _admission = self
+            .state
+            .admission
+            .lock()
+            .expect("idempotency registry admission lock poisoned");
+        if cached_value_bytes(&value) <= self.state.limits.max_cached_value_bytes {
+            self.state.inner.insert(
+                self.key.clone(),
+                Entry::Done {
+                    value,
+                    at: Instant::now(),
+                },
+            );
+        } else {
+            // Preserve the normal response but do not retain an oversized
+            // provider completion in the process heap for a later replay.
+            self.state
+                .inner
+                .remove_if(&self.key, |_, entry| matches!(entry, Entry::Pending { .. }));
+        }
         self.committed = true;
     }
 }
@@ -124,10 +214,24 @@ impl Drop for CommitGuard {
     fn drop(&mut self) {
         if !self.committed {
             // Only drop our own still-Pending claim; never clobber a sibling's Done.
-            self.inner
+            let _admission = self
+                .state
+                .admission
+                .lock()
+                .expect("idempotency registry admission lock poisoned");
+            self.state
+                .inner
                 .remove_if(&self.key, |_, e| matches!(e, Entry::Pending { .. }));
         }
     }
+}
+
+fn cached_value_bytes(value: &CachedInvoke) -> usize {
+    value
+        .request_id
+        .len()
+        .saturating_add(value.content.len())
+        .saturating_add(value.model_used.len())
 }
 
 #[cfg(test)]
@@ -197,5 +301,58 @@ mod tests {
             matches!(reg.claim("b"), Claim::Proceed(_)),
             "a different key is unaffected by another's cached result"
         );
+    }
+
+    #[test]
+    fn oversized_public_key_is_rejected_before_it_is_retained() {
+        let reg = IdempotencyRegistry::with_limits(RegistryLimits {
+            max_key_bytes: 4,
+            max_entries: 2,
+            max_cached_value_bytes: 64,
+        });
+        assert!(matches!(
+            reg.claim("abcde"),
+            Claim::Rejected(ClaimRejection::InvalidKey)
+        ));
+        assert_eq!(reg.tracked(), 0);
+    }
+
+    #[test]
+    fn capacity_is_bounded_and_fails_closed_without_evicting_live_claims() {
+        let reg = IdempotencyRegistry::with_limits(RegistryLimits {
+            max_key_bytes: 64,
+            max_entries: 2,
+            max_cached_value_bytes: 64,
+        });
+        let Claim::Proceed(first) = reg.claim("first") else {
+            panic!("first claim must proceed");
+        };
+        let Claim::Proceed(_second) = reg.claim("second") else {
+            panic!("second claim must proceed");
+        };
+        assert!(
+            matches!(
+                reg.claim("third"),
+                Claim::Rejected(ClaimRejection::CapacityExceeded)
+            ),
+            "a full registry must not silently run an unprotected duplicate"
+        );
+        drop(first);
+        assert!(matches!(reg.claim("third"), Claim::Proceed(_)));
+    }
+
+    #[test]
+    fn oversized_completion_is_not_retained_for_replay() {
+        let reg = IdempotencyRegistry::with_limits(RegistryLimits {
+            max_key_bytes: 64,
+            max_entries: 2,
+            max_cached_value_bytes: 8,
+        });
+        let Claim::Proceed(guard) = reg.claim("key") else {
+            panic!("first claim must proceed");
+        };
+        guard.commit(sample("request-too-large"));
+        assert_eq!(reg.tracked(), 0);
+        assert!(matches!(reg.claim("key"), Claim::Proceed(_)));
     }
 }

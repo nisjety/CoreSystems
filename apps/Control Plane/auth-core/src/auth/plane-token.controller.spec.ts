@@ -1,5 +1,5 @@
 import {
-  ForbiddenException,
+  BadRequestException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -15,6 +15,7 @@ jest.mock('./plane-token-membership', () => ({
 }));
 
 import { PlaneTokenController } from './plane-token.controller';
+import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
 
 describe('PlaneTokenController service issuance audit', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
@@ -34,7 +35,9 @@ describe('PlaneTokenController service issuance audit', () => {
         audiences: ['data-plane'],
         orgIds: ['org-a'],
         scopes: ['documents:write'],
-        allowPersistentData: true,
+        retentionByAudience: {
+          'data-plane': 'persistent',
+        },
       },
     });
   });
@@ -71,7 +74,6 @@ describe('PlaneTokenController service issuance audit', () => {
           orgId: 'org-a',
           scopes: ['documents:write'],
           reason: 'persist verified import',
-          zdr: false,
         },
       ),
     ).resolves.toEqual({ token: mintedToken });
@@ -194,10 +196,19 @@ describe('PlaneTokenController service issuance audit', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('distinguishes unavailable policy from an unauthorized persistence request', async () => {
+  it('distinguishes unavailable policy and rejects caller-selected retention', async () => {
+    const tokens = {
+      isKnownPlaneAudience: jest.fn().mockReturnValue(true),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
+    };
     const controller = new PlaneTokenController(
-      { isKnownPlaneAudience: jest.fn().mockReturnValue(true) } as never,
-      {} as never,
+      tokens as never,
+      {
+        publishAuditDurable: jest.fn().mockResolvedValue({
+          stream: 'VELION_CONTROL_OBSERVABILITY',
+          seq: 44,
+        }),
+      } as never,
     );
     process.env.PLANE_SERVICE_PRINCIPALS_JSON = '';
     await expect(
@@ -217,19 +228,41 @@ describe('PlaneTokenController service issuance audit', () => {
         scopes: ['documents:write'],
       },
     });
+    const callerDowngrade = {
+      orgId: 'org-a',
+      scopes: ['documents:write'],
+      reason: 'attempt persistence downgrade',
+      zdr: false,
+    };
     await expect(
       controller.issueInternalToken(
+        'data-plane',
+        'worker',
+        'test-only-worker-key',
+        callerDowngrade,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    const issueWithHeader = controller.issueInternalToken.bind(controller) as (
+      audience: string,
+      serviceId: string,
+      credential: string,
+      body: object,
+      zdrHeader?: string,
+    ) => Promise<unknown>;
+    await expect(
+      issueWithHeader(
         'data-plane',
         'worker',
         'test-only-worker-key',
         {
           orgId: 'org-a',
           scopes: ['documents:write'],
-          reason: 'attempt persistence downgrade',
-          zdr: false,
+          reason: 'attempt header persistence downgrade',
         },
+        'false',
       ),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
   });
 });
 
@@ -280,4 +313,26 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
       });
     },
   );
+
+  it('fails closed when the issuer-owned interactive retention policy is invalid', async () => {
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
+    const controller = new PlaneTokenController(
+      {
+        isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
+        issuePlaneToken: jest.fn().mockImplementation(() => {
+          throw new InteractiveRetentionPolicyConfigurationError(
+            'invalid policy',
+          );
+        }),
+      } as never,
+      {} as never,
+    );
+
+    await expect(
+      controller.getToken('inference-core', { headers: {} } as never),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
 });

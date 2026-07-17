@@ -97,7 +97,7 @@ func TestEngine_Evaluate(t *testing.T) {
 		}
 	})
 
-	t.Run("high-risk capability is denied with empty budget", func(t *testing.T) {
+	t.Run("high-risk capability requires durable approval with empty budget", func(t *testing.T) {
 		capability, err := reg.Get("cap.sandbox.exec", "")
 		if err != nil {
 			t.Fatal(err)
@@ -109,8 +109,8 @@ func TestEngine_Evaluate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if res.Decision != policy.DecisionDeny {
-			t.Errorf("Decision = %q, want %q", res.Decision, policy.DecisionDeny)
+		if res.Decision != policy.DecisionAsk {
+			t.Errorf("Decision = %q, want %q", res.Decision, policy.DecisionAsk)
 		}
 		if !strings.Contains(res.Reason, "high-risk and requires human approval") {
 			t.Errorf("Reason missing high-risk phrase: %q", res.Reason)

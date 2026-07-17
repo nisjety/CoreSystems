@@ -827,6 +827,7 @@ dependencies = [
  "event-envelope-rs",
  "futures",
  "image",
+ "jsonwebtoken",
  "nats-connection-rs",
  "prost",
  "qdrant-client",

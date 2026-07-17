@@ -58,16 +58,28 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, err
 	}
-	g, err := s.grants.Create(principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL, defaultGrantTTL)
+	allowedDomains, err := grant.NormalizeAllowedDomains(req.GetAllowedDomains())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "allowed_domains must contain bounded hostnames")
+	}
+	g, err := s.grants.Create(
+		principal.OrganizationID,
+		principal.ActorID,
+		req.GetSessionKey(),
+		scopeURL,
+		allowedDomains,
+		defaultGrantTTL,
+	)
 	if err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
 	}
 	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
 	return &AcquireGrantResponse{
-		GrantId:   g.ID,
-		Endpoint:  s.baseURL + "/grants/" + g.ID,
-		ExpiresAt: timestamppb.New(g.ExpiresAt),
+		GrantId:        g.ID,
+		Endpoint:       s.baseURL + "/grants/" + g.ID,
+		ExpiresAt:      timestamppb.New(g.ExpiresAt),
+		AllowedDomains: append([]string(nil), g.AllowedDomains...),
 	}, nil
 }
 
@@ -106,9 +118,10 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 	}
 	telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "ok")))
 	return &ValidateGrantResponse{
-		GrantId:   g.ID,
-		Active:    true,
-		ExpiresAt: timestamppb.New(g.ExpiresAt),
+		GrantId:        g.ID,
+		Active:         true,
+		ExpiresAt:      timestamppb.New(g.ExpiresAt),
+		AllowedDomains: append([]string(nil), g.AllowedDomains...),
 	}, nil
 }
 

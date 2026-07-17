@@ -16,7 +16,7 @@ import (
 
 // RunCompletedSubject is the NATS subject filter for run lifecycle events;
 // RUN_COMPLETED envelopes arrive here and ParseRunCompleted selects them.
-const RunCompletedSubject = "mp.v1.run.>"
+const RunCompletedSubject = "mp.v1.run.*.event"
 
 // reviewSessionClient is the session-core surface the learning review needs:
 // the transcript reader (ListConversation + ListAgentSkills, via the embedded

@@ -54,6 +54,18 @@ service OrchestrationCoreService {
   // Record a decision (granted, denied, or timed_out) on an approval.
   rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
 
+  // Claim due durable approval deliveries for an authenticated internal
+  // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
+  // is derived from its verified service credential, never from this request.
+  rpc ClaimApprovalDeliveries(ClaimApprovalDeliveriesRequest)
+      returns (ClaimApprovalDeliveriesResponse);
+
+  // Acknowledge a claimed delivery as retryable or terminal. There is no
+  // delivered outcome until Execution Core can present a durable, authenticated
+  // continuation receipt proving that the paused work actually restarted.
+  rpc AcknowledgeApprovalDelivery(AcknowledgeApprovalDeliveryRequest)
+      returns (AcknowledgeApprovalDeliveryResponse);
+
   // Fetch the subagent lineage for a thread.
   rpc GetSubagentLineage(GetSubagentLineageRequest) returns (GetSubagentLineageResponse);
 
@@ -581,6 +593,96 @@ message DecideApprovalResponse {
   Approval approval = 1;
 }
 
+// --- Approval delivery outbox ---
+
+// A leased identifier-only delivery record. This intentionally contains no
+// user prompt, tool arguments, provider response, or continuation data.
+message ApprovalDelivery {
+  // Stable identifier for this delivery attempt stream.
+  string delivery_id = 1;
+
+  // Durable granted approval authorizing the eventual continuation.
+  string approval_id = 2;
+
+  // Run bound to this approval.
+  string run_id = 3;
+
+  // Canonical tenant and run owner copied from the durable approval row.
+  string org_id = 4;
+  string user_id = 5;
+
+  // Opaque one-time lease capability. It is returned only to the claiming
+  // service and is retained in storage only as a hash.
+  string lease_token = 6;
+
+  // One-based claim attempt count, including this lease.
+  uint32 attempt = 7;
+
+  // Server-assigned expiration for the lease.
+  google.protobuf.Timestamp lease_expires_at = 8;
+}
+
+message ClaimApprovalDeliveriesRequest {
+  // Tenant to claim. It must exactly match the verified service identity.
+  string org_id = 1;
+
+  // Upper bound on returned claims. The server enforces a small fixed cap.
+  uint32 max_deliveries = 2;
+}
+
+message ClaimApprovalDeliveriesResponse {
+  // Claimed deliveries, each with an independent opaque lease token.
+  repeated ApprovalDelivery deliveries = 1;
+}
+
+enum ApprovalDeliveryAcknowledgement {
+  // Unknown acknowledgement; rejected.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED = 0;
+
+  // No durable execution proof was produced. Requeue with server-owned
+  // exponential backoff, or mark terminal when the bounded attempt limit is
+  // exhausted.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_RETRY = 1;
+
+  // The delivery cannot proceed safely. This never emits a run-resumed event.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL = 2;
+}
+
+message AcknowledgeApprovalDeliveryRequest {
+  // Tenant filter. It must exactly match the verified service identity.
+  string org_id = 1;
+
+  // Delivery being acknowledged.
+  string delivery_id = 2;
+
+  // Exact opaque lease capability returned by ClaimApprovalDeliveries.
+  string lease_token = 3;
+
+  // Retry or terminal. A successful execution acknowledgement is deliberately
+  // unavailable until a durable continuation receipt exists.
+  ApprovalDeliveryAcknowledgement acknowledgement = 4;
+
+  // A bounded allowlisted failure classification, not a free-form error.
+  string failure_code = 5;
+}
+
+message AcknowledgeApprovalDeliveryResponse {
+  // False when the lease was already settled, expired, or no longer matches.
+  // These cases are deliberately indistinguishable so the response discloses
+  // no additional outbox state.
+  bool acknowledged = 1;
+
+  // True when the outbox item is permanently terminal. It does not mean the
+  // associated run resumed.
+  bool terminal = 2;
+
+  // Total claims made for this delivery.
+  uint32 attempt = 3;
+
+  // Next eligible retry time. Empty for terminal entries or exact replays.
+  google.protobuf.Timestamp next_attempt_at = 4;
+}
+
 // --- GetSubagentLineage ---
 
 message GetSubagentLineageRequest {
@@ -805,10 +907,10 @@ message OrchestrationEvent {
   }
 
   // The pending browser-action approval above was decided (granted, denied,
-  // or timed out). The durable decision and the generic
-  // `ApprovalStateChanged`/`RunResumedAfterApproval` events are recorded by
-  // the existing `DecideApproval` RPC as usual; this is the browser-specific
-  // companion that carries the action back so the timeline can show
+  // or timed out). `DecideApproval` records the durable decision and the
+  // generic `ApprovalStateChanged` event. A later authenticated continuation
+  // dispatcher may emit `RunResumedAfterApproval` only after it can prove the
+  // exact paused work started; this companion lets the timeline show
   // "checkout on example.com — granted", not just an approval id.
   message BrowserActionDecided {
     string run_id = 1;

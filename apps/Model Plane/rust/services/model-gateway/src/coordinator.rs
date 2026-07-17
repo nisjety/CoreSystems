@@ -4,10 +4,10 @@
 //! access:
 //!
 //! 1. `PlanModeStore` — per-run flags with a TTL. When a run is in
-//!    plan mode, write-class tools (`file_edit`, bash, `remote_trigger`,
-//!    `send_message`) are expected to gate via `is_plan_mode` before
-//!    executing; read-class tools (Fetch, `WebSearch`, `ExtractStructured`)
-//!    flow normally.
+//!    plan mode, write-class tools (`file_edit`, bash, `remote_trigger`)
+//!    are expected to gate via `is_plan_mode` before executing; read-class
+//!    tools (Fetch, `WebSearch`, `ExtractStructured`) flow normally.
+//!    `SendMessage` is independently quarantined and always fails closed.
 //!
 //! 2. `TeamWorkerStore` — coordinator-mode sub-task tracker. A worker
 //!    is a (objective, context, `success_criteria`) triple with a state
@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use dashmap::DashMap;
-use mp_events::publisher::EventPublisher;
+use mp_events::{publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use tonic::Status;
 
@@ -168,7 +168,7 @@ pub async fn handle_enter_plan_mode<P: EventPublisher>(
         zdr: false,
     };
     if let Err(e) = publisher
-        .publish("agents.run.plan_mode.entered", &envelope)
+        .publish(&subjects::run_event_subject(&req.run_id), &envelope)
         .await
     {
         tracing::warn!(error = %e, "failed to publish RUN_PLAN_MODE_ENTERED");
@@ -215,7 +215,7 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
             zdr: false,
         };
         if let Err(e) = publisher
-            .publish("agents.run.plan_mode.exited", &envelope)
+            .publish(&subjects::run_event_subject(&req.run_id), &envelope)
             .await
         {
             tracing::warn!(error = %e, "failed to publish RUN_PLAN_MODE_EXITED");
@@ -463,6 +463,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp_events::publisher::InMemoryPublisher;
 
     #[test]
     fn plan_mode_enter_and_check() {
@@ -509,6 +510,48 @@ mod tests {
         let exp = s.enter("org-1", "run-1", String::new(), 999_999_999);
         // 999M secs → caps to MAX_PLAN_TTL_SECS=86_400.
         assert!(exp <= now_unix() + MAX_PLAN_TTL_SECS + 5);
+    }
+
+    #[tokio::test]
+    async fn plan_mode_lifecycle_events_use_the_fixed_run_event_subject() {
+        let store = PlanModeStore::new();
+        let publisher = InMemoryPublisher::new();
+
+        handle_enter_plan_mode(
+            &store,
+            &publisher,
+            EnterPlanModeRequest {
+                request_id: "request-enter".to_owned(),
+                org_id: "org-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                rationale: "review first".to_owned(),
+                ttl_seconds: 60,
+            },
+        )
+        .await
+        .expect("enter plan mode");
+        let entered = publisher.drain();
+        assert_eq!(entered.len(), 1);
+        assert_eq!(entered[0].0, "mp.v1.run.run-1.event");
+        assert_eq!(entered[0].1.event_type, "RUN_PLAN_MODE_ENTERED");
+
+        handle_exit_plan_mode(
+            &store,
+            &publisher,
+            ExitPlanModeRequest {
+                request_id: "request-exit".to_owned(),
+                org_id: "org-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                session_id: "session-1".to_owned(),
+            },
+        )
+        .await
+        .expect("exit plan mode");
+        let exited = publisher.drain();
+        assert_eq!(exited.len(), 1);
+        assert_eq!(exited[0].0, "mp.v1.run.run-1.event");
+        assert_eq!(exited[0].1.event_type, "RUN_PLAN_MODE_EXITED");
     }
 
     #[test]

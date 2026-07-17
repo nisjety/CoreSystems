@@ -1,275 +1,451 @@
 # Model Plane — Current Status
 
-Last verified: 2026-07-13 (Europe/Oslo). Baseline: branch `main`, commit
-`c3b0057e5e0f538e216bf228754f10849b90ce84`, with a large pre-existing dirty
-worktree. Runtime and worktree are different deployment states.
+Last source-state reconciliation: 2026-07-16 (Europe/Oslo). Source baseline:
+branch `main`, commit `ae3ee041e13d482b20e5883e79044e714bf3d216`, plus a large
+pre-existing dirty worktree. Broad source verification completed at 2026-07-16
+15:10 CEST; live Docker reconciliation completed at 20:05 CEST; the final
+release-tooling contract completed at 22:24 CEST. The running stack is evidence
+for this dirty source aggregate only, not a production-release authorization.
+
+Read the current evidence in
+`docs/core-research/plane-audit-2026-07-16.md` and the binding release decision
+in `docs/core-research/grpc-safe-rebuild-decision-2026-07-16.md`. The dated
+2026-07-11 and 2026-07-13 reports are retained as historical evidence, not
+current runtime claims.
 
 ## Verdict
 
-**The Model Plane is not production-ready as an MVP and is not ready for a
-general rebuild.** The highest-impact failure is already live: the rebuilt
-`model-gateway` and `inference-core` containers no longer serve their required
-gRPC APIs. Health endpoints remain green, so container health does not prove
-chat, inference, embeddings, tools, or MCP are operational.
+**The Model Plane is running as a local integration stack, but is not yet a
+production-ready MVP and is not enterprise-ready. Do not promote the current
+dirty-worktree deployment as the canonical production release.**
 
-Do not rebuild or deploy `model-gateway`, `inference-core`, or
-`execution-core` from this worktree until the compatibility gates in
-`docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md` pass and an
-immutable rollback artifact exists.
+At 2026-07-16 20:05 CEST, all 21 Model Plane Compose containers were running;
+all 19 containers with health checks were healthy, and OTEL Collector plus
+Temporal UI were running without health checks. Eleven application images were
+built from the dirty working tree and carry `working-tree` provenance. They are
+not signed, attested, or retained as an immutable release artifact. Gateway,
+inference, and execution expose authenticated gRPC compatibility listeners on
+loopback `:9090`, `:9092`, and `:9093`; the production overlay removes all host
+ports. This proves a functioning local integration deployment, not an accepted
+production candidate or rollback target.
 
-The source listeners and ordinary HTTP/SSE caller graph are additive again.
-Auth Core and Frontend source mint and forward separate exact-audience Model,
-inference, execution, session, capability, cost, and Data Plane credentials.
-Approval/browser flows now require the exact execution + session credentials,
-execution resume must return an affirmative acknowledgement, and Frontend
-browser records are bound to the validated user and organization. Session to
-Letta also uses an exact, bounded service credential and exposes degradation.
+The initial 17:52 CEST preflight failure is retained as historical evidence.
+The later user-authorized rollout supplied runtime-only scoped NATS credentials,
+repaired Control Auth service-principal issuance, attached Data retrieval,
+graph, and wiki to `inter-plane-bus`, and started the stack without deleting
+volumes or rebuilding Control/Data services. Those Model NATS credentials and
+the Control Auth principal registry are not yet durable managed release
+configuration. Quarry remains absent. Never replace scoped credentials with a
+shared token or copy operator connector credentials into Velion.
 
-That is still not a deployable release. Auth Core currently marks every
-interactive/delegated Model credential `zdr=true`, while durable session and
-Letta writes correctly reject ZDR and no provider deployment is independently
-confirmed for ZDR (`AZURE_OPENAI_ZDR_CONFIRMED` defaults false). The source
-therefore fails closed before ordinary durable chat/provider work. Capability
-availability is now fail-closed in Capability Core policy but is not yet an
-unavoidable Execution Core authority. Approval persistence and execution
-resume still lack a transactional outbox/reconciler, legacy session
-data has no trustworthy ZDR provenance, and migrations/integration tests have
-not run against a release Postgres. Keep these gates and resolve the policy and
-operational blockers before cutover.
+Source hardening has advanced materially, but it is not deployment evidence:
 
-## State classification
+- model-gateway and inference-core have additive gRPC listeners and `/readyz`
+  stays unready until the listener binds;
+- release-artifact format v3 snapshots release inputs and image archives under a
+  signed root manifest. Its generated configuration policy partitions every
+  Compose input as signed public, external secret, or artifact-owned; unknown
+  credential/image-shaped keys fail closed. Auth issuer/JWKS and any asserted
+  Azure ZDR route are independently signed and evidence-bound. External inputs
+  are securely snapshotted with bounded size and ownership/mode checks, and
+  Docker receives only a temporary 0600 secret snapshot. The artifact runner
+  accepts only fixed config validation or fixed no-build deployment, so an
+  unsigned trailing Compose overlay cannot replace signed images or commands.
+  No candidate or rollback artifact exists yet;
+- cost HTTP auth, tenant/user scope, and a least-privilege cost NATS consumer
+  are implemented and tested in source;
+- the ambient gateway `SendMessage` RPC is intentionally quarantined with
+  `FAILED_PRECONDITION` before any NATS publish; its broad NATS grants were
+  removed, and legitimate telemetry uses the bound per-run event subject;
+- approval grant persistence now creates one content-free delivery outbox row,
+  with owner-bound durable cache read-through and claim/lease/retry/terminal
+  delivery primitives. There is still no restartable continuation descriptor,
+  dispatcher, or successful execution receipt;
+- Session Core now has an additive managed-run lifecycle contract, migration,
+  metadata-only terminalization obligation, lease/recovery worker, and
+  service-scoped terminal/heartbeat calls. Gateway and Execution use that
+  contract rather than a terminal `CompleteStep` shortcut; this is source and
+  focused-test evidence only, not a migrated release database or live path;
+- gateway start keys are now keyed-MAC-derived opaque values rather than raw
+  caller idempotency keys, and its completed-response cache has fixed key,
+  entry, value, and retention bounds; and
+- browser execution now preserves terminal meaning in source: explicit success
+  alone completes a run; permission denial, approval/runtime timeout, and
+  resource exhaustion fail it; cancelled/aborted work uses Session Core
+  cancellation; and unsupported browser approval is rejected before dispatch;
+- capability policy is an unavoidable direct and agentic dispatch gate; deny,
+  ask, and policy outage stop before tool code. The new global-only health
+  attestation path is scoped separately from tenant reporters, but no reporter
+  is configured or attested, so seeded tools remain unavailable;
+- Letta `/v1/tools/search` is an optional non-authoritative ranking input for
+  locally authorized tool definitions only; it is disabled for ZDR callers and
+  is not semantic-memory search;
+- the agent can reformulate and backtrack across typed hybrid retrieval results,
+  suppresses exact repeated searches, and reports dependency degradation
+  distinctly from an empty corpus; and
+- signed retention posture is preserved through execution dispatch and cannot
+  be downgraded by a request. ZDR tool output is redacted from durable step
+  records, and every unattested inference modality fails before provider I/O.
 
-| Classification | Meaning |
+## Evidence states
+
+| State | Current meaning |
 |---|---|
-| **Verified live** | Reproduced against the running 2026-07-13 stack or its live database/metrics. |
-| **Verified source** | Confirmed from source and tests, but not deployed. |
-| **Blocked/unverified** | A required acceptance property has not been proved. |
+| **Source-verified** | Source and repeatable local tests pass; this alone is not deployment evidence. |
+| **Live-verified** | Local Docker health, authenticated listeners, selected authorization, dependency reachability, ZDR denial, and degraded-state probes reproduced on 2026-07-16; not immutable production evidence. |
+| **Blocked** | Required implementation, operator input, or live proof is absent. |
+| **Enterprise-next** | Deferred until every secure-MVP criterion passes. |
 
-## Verified live
+## Final source verification — 2026-07-16 15:10 CEST
 
-- `model-gateway` HTTP health on `:8080` is green, but its required gRPC
-  listener on `:9090` refuses connections.
-- `inference-core` HTTP health on `:18082` is green, but its required gRPC
-  listener on `:9092` refuses connections. Default chat/inference and the
-  retrieval query-embedding hop therefore fail.
-- `execution-core` still has an authenticated gRPC service internally, but
-  caller authentication/migration is incomplete; container port publication
-  is not proof of end-to-end tool execution.
-- The running images report unverified revision/build provenance. No immutable
-  pre-removal rollback artifact has been identified.
-- `cost-core` exposes live cost records without authentication. The audit read
-  43 entries spanning 4 organizations and 5 users, proving cross-tenant
-  disclosure rather than a theoretical route-only issue.
-- `session-core` compaction is currently succeeding: 479 successful runs, no
-  observed failures, and 24 checkpoints since process start with no duplicate
-  `(run_id, ordinal)` pairs. The earlier “100% failing” claim is withdrawn.
-  Retry/backoff, poison input, concurrency, idempotency under retries, and ZDR
-  behavior still need dedicated tests.
-- `session-core` gRPC is unauthenticated. An empty-organization pending-approval
-  request lists approvals across tenants, and an approval can be decided using
-  a caller-supplied actor. This is a critical HITL bypass adjacent to the real
-  guarded agentic path.
-- `capability-core` HTTP and gRPC surfaces accept unauthenticated access, and
-  tenant identity is accepted from request fields.
-- `letta-bridge` health is green while semantic search fails on its downstream
-  embedding request. It is not an operational memory-search service merely
-  because liveness passes.
-- The live `visma mcp` record is malformed (`stdio` transport with an HTTPS URL
-  and an empty allowlist). No MCP bridge container is deployed. Velion has no
-  live Visma runtime integration; the operator-side Codex/Claude connector is a
-  separate system and must not be reported as one.
-- The running stack is the base/development composition rather than a proven
-  production override. NATS and cache credentials are exposed through process
-  arguments/healthcheck configuration, the Model Plane NATS connection uses a
-  shared token without TLS, and an audit-time storage check found a near-full
-  host/Docker volume. No credentials were printed or rotated during this audit.
+The current dirty source aggregate passed these repeatable, non-deployment
+checks:
 
-## Verified source, not deployed
+- `cargo test -q -p model-gateway -p inference-core -p execution-core -p
+  session-core --all-targets`: Execution Core 225 library plus 17 integration
+  tests, Inference Core 127 library plus 15 integration tests, model-gateway
+  409 library plus 41 integration tests, and Session Core 119 library plus 17
+  integration tests passed. Six Session Core database-gated tests and one live
+  Quarry browser test remain intentionally ignored.
+- Rust formatting and the targeted `-D warnings` Clippy gate passed with its
+  documented legacy lint allowances. This is not a claim that raw strict
+  Clippy has no repository debt.
+- `go test ./...` and `go vet ./...` passed in capability-core, cost-core,
+  orchestrator-core, and browser-broker. The current focused Control Plane Auth
+  Core registry/controller/deployment suites pass 93/93; the changed principal
+  loader measures 91.96% statements and 91.58% lines.
+- Frontend v3 `next typegen`, typecheck, and production `pnpm build` passed.
+- Model Plane shell/release contract tests, `buf generate`, and scoped `git
+  diff --check` passed. `buf lint` still fails on pre-existing package/input
+  debt, and there is no usable non-empty breaking baseline.
 
-- A new shared Go verifier in `go/pkg/authctx` enforces RS256, issuer, audience,
-  token lifetime, unambiguous user/service identity, canonical tenant context,
-  and HTTP/gRPC negative cases. Its measured package coverage is **90.0%**.
-- `cost-core` source now protects product APIs, pins organization/user scope to
-  verified identity, restricts service operations with `cost:read` and
-  `cost:write`, scopes run lookup by organization, fails closed when budget
-  state is unavailable, requires durable Postgres unless an explicit ephemeral
-  development flag is set, and validates finite/bounded usage, attribution,
-  NATS subject/envelope/payload identity, and tenant-scoped idempotency. The
-  security-critical server and ledger packages measured **86.4%** and
-  **91.0%** coverage. The whole Go module measured **58.0%** because main
-  lifecycle/telemetry and Postgres integration require external infrastructure.
-- `model-gateway` source now forwards the verified bearer and user identity to
-  `cost-core`, and budget authority transport/auth/parse failures return 503
-  rather than allowing spend.
-- Model-gateway now uses separately verified session, inference, execution,
-  capability, cost, and Data Plane credentials. Its HTTP JWKS loader rejects
-  redirects and non-success responses, bounds connection/total time and body
-  size, and is warmed before listeners start. The final full package suite
-  passed **407** tests, including **21** authenticated invoke-chain, **3** secure
-  gRPC compatibility, and **5** signed-token orchestration HTTP tests.
-- Model-gateway MCP source now rejects stdio registrations, malformed
-  transport/URL hybrids, raw credentials, empty/prefix allowlists, caller-
-  supplied server IDs, private/loopback/link-local/internal HTTP destinations,
-  redirects, and oversized responses. DNS is re-resolved for discovery and
-  invocation. Discovery failure no longer fabricates callable open-schema
-  tools. Targeted tests pass. This is containment, not a deployed Visma
-  integration.
-- Legacy MCP records without explicit ownership now fail closed, and the direct
-  inline chat loop neither advertises nor dispatches `mcp__*` tools. MCP remains
-  available only for a future governed agentic bridge with durable approval.
-- Session approval storage now rejects blank actor/org identity, scopes list,
-  get, decision, and idempotency to the verified user within the organization,
-  and uses an atomic `requested`-state compare-and-set. Exact authenticated
-  decision retries are idempotent; only the durable CAS winner emits approval
-  and resume events, so exact/concurrent replay does not emit duplicates. The
-  CAS and process-local broadcast are not atomic, so a crash can still lose
-  delivery and requires an outbox/reconciler. The Session Core suite passes
-  **122** tests with zero failures and five database-gated cases ignored.
-  Global empty-organization boot rehydration is removed. Migration `0011` is
-  source-only and has not been exercised against release Postgres.
-- Model-gateway now prepares approval requests without cache or event side
-  effects, lets session-core validate run ownership and persist first, then
-  commits the acknowledged record to a bounded user-owned cache. Same-org
-  users cannot list or decide each other's cached approvals, including when
-  the durable read is unavailable. This closes cache poisoning/disclosure in
-  source. An already-granted retry whose execution delivery is unknown now
-  returns explicit gRPC `Unavailable` / HTTP 503 instead of false success and
-  does not request another resume. Execution Core atomically resumes only
-  `AwaitingApproval`/`Paused` runs; completed, cancelled, running, and unknown
-  runs are not reactivated. Decision/resume crash recovery still needs an
-  outbox/reconciler.
-- `capability-core` source now authenticates product HTTP/unary gRPC APIs,
-  derives tenant/actor from verified claims, scopes repositories, makes global
-  promotion service/scope-only, and has an additive availability contract with
-  server-time freshness, version CAS, safe public reasons, and health audit.
-  `EvaluatePolicy` now requires a canonical nonempty scope, uses a
-  tenant-bound durable capability/grant lookup, and denies disabled, stale,
-  unhealthy, quarantined, deprecated, and unknown-risk entries. Unknown legacy
-  risk values and ambiguous legacy grants are quarantined by source migration
-  `0007`; malformed revoked scopes are normalized before constraints and both a
-  fast regression test and an integration-gated PostgreSQL fixture cover the
-  failure mode. The migration has not run on release Postgres. For the MVP,
-  policy accepts only `global` and verified-tenant `org`; caller-supplied
-  `agent`, `run`, `thread`, `workspace`, and `user` scopes fail before lookup
-  until trusted server-derived identifiers exist. Execution Core does not yet
-  enforce this policy as an unavoidable dispatch gate. Availability
-  attestation updates/audits atomically, but general capability, rollout, and
-  scope mutations still ignore a separate audit-append failure; transaction/
-  outbox fault-injection remains a release gate.
-- Capability Core's HTTP memory API now pins private rows and every mutation to
-  the verified actor; same-org cross-user and legacy ownerless rows fail closed.
-  Resource-scoped writes are intentionally unavailable until Session Core can
-  authorize the referenced resource. Changed memory functions measured
-  **81.8–100%**; Capability Core packages measured policy **95.4%**, models
-  **93.6%**, server **85.2%**, registry **47.8%**, and
-  **55.4%** overall.
-- The capability MCP registry boundary now uses bounded strict JSON, disables
-  stdio, requires public HTTPS plus exact nonempty allowlists, rejects raw
-  credentials and malformed Visma-style hybrids, accepts only managed secret
-  references, quarantines invalid legacy rows, and never returns raw config.
-  Focused boundary coverage measured **84.49%**. Execution must still re-resolve
-  and pin DNS at connect time.
-- `letta-bridge` source now distinguishes liveness from structured semantic
-  readiness/degraded states, reports the same state through standard gRPC
-  health, authenticates memory RPCs, and tenant-pins access. Changed server
-  coverage measured **84.5%**. The provider-side semantic failure remains.
-- `inference-core` source restores the full additive gRPC contract with eager
-  RS256/JWKS verification, signed tenant/ZDR derivation, public standard health,
-  and no HTTP removal. Authentication code measured **86.77%** line coverage;
-  inherited RPC-method coverage remains **11.50%**, a documented gap.
-- Inference provider fallback now fails closed for ZDR unless the exact
-  deployment has an explicitly verified capability. Azure confirmation defaults
-  false and EU geography alone is not treated as retention evidence.
-  Routing-policy HTTP GET/PUT now requires exact `inference:policy:admin` in
-  source; the live endpoint remains open until a gated deployment.
-- Model-gateway unary/SSE source computes issuer-monotonic ZDR and applies it to
-  persistence and inference. SSE now performs the same fail-closed cost budget
-  gate before durable work.
-- Auth Core and Frontend v3 source now recognize and issue the exact bounded
-  audience/scope set for Model, Data, inference, execution, cost, session, and
-  capability services. Required issuance failure becomes an explicit 503; it
-  no longer silently drops the credential. Three focused Auth Core token/role
-  suites passed **40** tests and its production build passed; three focused Frontend
-  gateway tests passed. Frontend browser ownership tests pass **53/53**, the
-  full gateway passes **235/235**, and new ownership helpers measured **100%**
-  line coverage. The ownership store remains process-local and all paths still
-  require live proof.
-- Session memory search and upsert now bind user-scoped memory to the verified
-  thread owner, and the new uniqueness key includes owner so two users in one
-  organization cannot read or overwrite each other's memory. Source tests
-  pass; no migration/live database proof exists.
-- Session compaction now has deterministic IDs, bounded retry/backoff, ZDR and
-  poison exclusion, semantic-conflict isolation, and focused tests. Its query
-  still aggregates before the batch limit and manual/automatic ordinal writers
-  lack shared serialization; the database-gated concurrency/ZDR tests remain
-  ignored without a test Postgres.
+This production-MVP program does not require 100% coverage. The stated
+risk-based target is 80% measured coverage for changed security/business-
+critical modules, with any gap explicitly accepted by the release authority.
+The 2026-07-16 all-target `cargo llvm-cov` run reports 59.52% line coverage
+across the four Rust services. Changed lifecycle/security paths remain below 80%:
+target: execution browser agent 77.90%, execution runtime loop 65.43%,
+execution tool bridge 70.67%, gateway browser run 62.49%, gateway session flow
+64.53%, gateway SSE 56.43%, and Session Core approval delivery 35.32%.
+Capability Core's new global-health functions previously measured 100%
+(`GetGlobal`) and 90% (`AttestAvailabilityGlobal`). These gaps must be closed
+or explicitly accepted by the release authority before an artifact build.
 
-- During read-only process inspection, an audit command surfaced unrelated
-  third-party connector credentials that were already present in process
-  arguments. Their values are intentionally omitted and were not reused. The
-  affected connector credentials require operator rotation after moving them
-  out of argv; this audit did not rotate credentials.
+- The approval outbox has claim/lease, retry/backoff, poison/terminal, and
+  acknowledgement-state primitives; it deliberately has no success transition
+  that pretends execution restarted.
+- NATS configuration uses distinct named principals for its actual Model Plane
+  producers/consumers and removes the generic `model-runtime` principal. It
+  does **not** configure TLS, mTLS, or workload identity. The only former
+  broad gateway publisher is quarantined. Scoped principals are connected live,
+  but hostile-principal subject tests and transport identity remain absent.
+- The global health-attestation endpoint accepts only its dedicated global
+  health scope and operates on the global capability row. No configured,
+  attested reporter or live proof exists.
+- Signed ZDR is preserved at execution ingress and delegation, while inference
+  blocks each unattested modality before provider dispatch. This is fail-closed
+  source behavior, not a verified provider route.
+- Artifact v3 refuses a mutable/dirty release source and release mode requires
+  signed verification, compatibility gates, and an external runtime-env file.
+  No candidate or rollback artifact was created.
+- `buf lint` legacy violations and the missing usable `buf breaking` baseline
+  remain release gates.
 
-None of these source fixes changes the running containers until a safe staged
-deployment is performed. The live IDOR and MCP exposure therefore remain.
+These results classify mocks/test servers honestly: Capability Letta tests use
+a local HTTP test server; no external Letta, provider, Postgres release
+database, NATS deployment, or end-to-end Model Plane is represented as real
+production evidence.
 
-## Preserved behavior and corrected claims
+## Incremental source verification — 2026-07-16 after the 15:10 baseline
 
-- The Model Plane agent/tool loop is real code, not a mock. The agentic `ask`
-  path pauses before approval-required tools and persists the approval. Preserve
-  that behavior.
-- HITL is not globally safe in the running deployment: unauthenticated session
-  approval RPCs remain live. Session CAS/tenant containment and direct inline
-  MCP denial are fixed in source. Exact approval execution/session delegation,
-  affirmative resume acknowledgement, user-scoped durable decisions, and
-  retry-idempotency are source-tested. Gateway cache ownership, bounds, and
-  persist-before-publish ordering are also source-tested. A durable
-  outbox/reconciler and live
-  regression evidence are still required to prevent a granted decision from
-  remaining paused after process/network failure.
-- The previous claim that ordinary Velion v3 chat accidentally omits all tool
-  wiring is withdrawn. Current Frontend v3 supports explicit selected tools and
-  Plan/Agent Run Console agentic behavior; a plain no-tool turn is intentional.
-  The unresolved issue is divergent capability semantics across static UI
-  catalogs, ordinary chat, Browse, Plan, gateway discovery, capability-core,
-  and execution-core.
-- No real Velion Visma server is configured. The correct product status is
-  `not_configured`, with an onboarding contract—not “connected” or “working.”
+- `cargo fmt --check -p session-core`, `cargo check -p session-core`, and
+  `cargo test -p session-core --bin session-core` passed (128 passed, 7 ignored).
+  The focused managed-terminalization unit set passed (6 tests), and an isolated
+  disposable PostgreSQL 16 regression proved that a legacy terminal
+  `CompleteStep` cannot settle a managed run; the temporary database was removed.
+- `cargo fmt --check -p model-gateway`, `cargo check -p model-gateway`, and
+  `cargo test -p model-gateway --lib` passed (420 passed). Focused idempotency,
+  opaque-start-key, fail-closed startup, managed-lifecycle gRPC, and unary/
+  streaming E2E tests also passed. Three legacy unused-helper warnings remain;
+  no new gateway warning blocks these checks.
+- `cargo test -p execution-core --lib` passed (228 passed); `cargo test -p
+  inference-core --all-targets` passed (127 library plus 15 integration tests).
+  `cargo fmt --check -p inference-core` also passed.
+- The default Session Core context path now distinguishes verified empty memory,
+  returned entries, and bounded Letta degradation; focused RPC/timeout tests,
+  the Session Core suite above, and `go test ./...` for letta-bridge pass.
+  Compose health now checks bridge liveness at `/healthz`; semantic readiness
+  remains separately visible at `/readyz`.
+- The focused Control Plane Auth Core retention/token suite passed 72 tests and
+  `pnpm build` passed. Its new interactive policy is deployment-owned exact-org
+  configuration: absent configuration means all-ZDR, malformed configuration
+  fails closed, and neither a request nor a header can select a persistent
+  posture.
+- The subsequent Control registry hardening passes 93/93 focused loader,
+  controller, and deployment-contract tests plus Auth build, production Compose
+  parsing, scoped lint, shell syntax, and diff hygiene. The changed registry
+  module measures 91.58% lines. This is source evidence; the healthy running Auth
+  container still uses the runtime-only environment registry.
+- The final `release-contract`, `release-runtime-partition`, and
+  `release-input-security` suites plus Bash syntax passed at 22:24 CEST. They
+  validate artifact/rollback guardrails without building or starting a real
+  container.
 
-## MVP blockers
+These incremental source/tooling results are supplemented by the live local
+evidence below. They still do not establish a usable provider route, immutable
+release database/artifact, approval continuation, or rollback rehearsal. The
+five-minute SSE/gRPC heartbeat ticker and full browser background-dispatch path
+still require clock-driven release evidence.
 
-1. Safely deploy the source-restored backward-compatible, authenticated gRPC
-   contracts and prove chat/inference/tool behavior with dependency-aware
-   readiness, immutable rollback, and live positive/negative probes.
-2. Deploy and live-verify `cost-core` authentication and cross-tenant denial.
-3. Complete residual caller authentication and safely deploy/live-prove the
-   source-authenticated session, capability, inference-policy, MCP, browser,
-   sandbox, and bridge boundaries; add cryptographic NATS producer identity.
-4. Add user-scoped durable approval read-through plus a decision/resume outbox
-   or reconciler so cache eviction/crash cannot strand a decision; make browser
-   ownership durable/shared for multi-instance operation, and deploy/live-verify
-   the source-fixed caller graph without regressing guarded HITL.
-5. Restore Letta semantic search or expose a structured, observable degraded
-   state through readiness and user-facing contracts.
-6. Make the new capability contract an unavoidable model-offer and execution
-   authority; keep agent/run/thread/workspace/user scopes rejected until trusted
-   concrete identifiers and ownership checks exist, reconcile List/Get/model/
-   global semantics, and provision a
-   scoped health reporter. Then prove machine-readable
-   `available`, `disabled`, `unhealthy`, `approval_required`, and `unavailable`
-   states in every chat mode.
-7. Resolve the issuer policy that currently makes every credential ZDR while
-   durable product flows require non-ZDR, then prove ZDR cannot be downgraded
-   and does not persist through
-   sessions, compaction, memory, traces, tools, caches, or external bridges.
-8. Complete positive and negative live probes, contract/E2E tests, measured
-   coverage, deployment gates, and rollback rehearsal.
+## Live local reconciliation — 2026-07-16 20:05 CEST
 
-## Release evidence
+- All 21 Model containers run; all 19 health-checked containers are healthy and
+  restart counts are zero; this state was reconfirmed at 22:25 CEST. The three
+  protocol-critical gRPC listeners are
+  loopback-reachable and reject unauthenticated requests.
+- Control Auth Core is healthy and mints the canonical issuer
+  `http://localhost:3011/api/convex-auth`. No-auth, malformed credential, and
+  wrong-tenant service-token exchanges deny; the exact principal succeeds.
+  A valid inference-core token read Session RoutingPolicy successfully.
+- A valid Data retrieval-engine identity reached Inference Core. Its signed ZDR
+  claim overrode request `zdr=false`; both configured providers were skipped,
+  zero provider attempts occurred, and the call failed closed with
+  `FailedPrecondition`. No paid provider call was made.
+- Data retrieval, graph, and wiki are reachable from Model over the shared bus.
+  Gateway, Cost, Capability, Session, and Letta negative authorization probes
+  reject no auth, malformed bearer, and forged scope/tenant headers.
+- Capability Core accepted a valid execution identity but denied
+  `cap.retrieval.query` as `health_not_attested`; cross-organization reuse was
+  denied. All 27 enabled catalog rows currently derive unavailable, and no
+  global health attestation exists.
+- Letta liveness is 200; semantic readiness is 503 with
+  `DEGRADED_SEMANTIC_UNVERIFIED`. The configured agent-memory tier would require
+  provider-backed embeddings and has no independently verified ZDR route, so it
+  was not forced ready with an unsafe or paid probe.
+- Session migrations through `0015` and approval/terminalization outbox tables
+  are present. Four pre-existing requested approvals have zero delivery rows;
+  no approval was granted and no destructive effect was invoked.
+- The final release suites pass for artifact v3. They reject unsigned Compose
+  arguments, caller-relative runtime files, unsafe file types/modes/sizes,
+  concurrent artifact mutation, public/secret/artifact partition drift,
+  placeholder Auth/ZDR/rollback evidence, self/same-revision/same-image
+  rollback, and runtime secret-schema/keyset drift. A candidate binds a
+  separately signed rollback plus opaque secret-version reference and proves
+  only `rollback-config-renderable`; live credential, database, health, and
+  cutover proof remain later gates. The dirty tree, missing managed signer, and
+  missing accepted rollback artifact correctly prevent creation of a
+  production artifact.
 
-The detailed evidence matrix, finding register, acceptance-criteria status, and
-test commands are in `docs/core-research/plane-audit-2026-07-13.md`. The safe
-rebuild decision is in
-`docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md`. Enterprise-only
-work is separated in `MODEL_PLANE_ROADMAP.md`; this status does not claim
-enterprise readiness.
+## Critical blocked behavior
+
+### Live local protocol; no immutable rollback
+
+The gateway/inference/execution listeners are running and authenticated in the
+local integration stack. Artifact v3 is present, but production mode
+requires an isolated clean revision, managed signing/trust anchors,
+non-placeholder compatibility evidence, signed public policy, a private
+secret-only runtime file, and candidate-bound rollback runtime evidence. It
+deliberately refuses the current dirty tree. A separate known-good rollback
+artifact must use a different source revision and image payload; config
+renderability is not a live rollback drill.
+
+### Workload credentials are authenticated but tenant delegation is incomplete
+
+Control Auth's runtime registry now issues canonical-issuer, least-privilege
+service tokens and the live negative/exact-principal matrix passes. Source work
+adds a file-backed secret input so production does not need to place the
+credential-bearing registry directly in the container environment. The running
+Auth container still uses runtime-only environment configuration and has not
+been rebuilt from that source.
+
+Several cross-tenant workers currently require `allowAnyOrg`. Under that
+contract, possession of the workload credential is enough to request a token
+for a caller-selected organization; there is no separately signed delegated
+user/organization grant. This is not an observed bypass of a valid user token,
+but it expands the blast radius of a stolen workload key to every tenant. The
+production file loader now rejects every `allowAnyOrg` principal outside exact
+development/test; production can use only explicit per-principal organization
+allowlists until a separately verified tenant-delegation protocol exists. The
+running development container still permits the legacy dynamic shape and was
+not rebuilt. Caller-supplied organization headers/body fields alone never
+establish production scope; dynamic background/interactive paths remain
+unavailable until migrated.
+
+### Approval delivery is durable but cannot continue execution
+
+Session Core persists an approval-delivery intent, supports a lease-based
+claim, bounded retry/backoff, poison/terminal handling, and acknowledgement
+state, and gateway reads the durable record after cache eviction. However, the
+agent loop has already exited at the approval gate. There is no durable
+restartable continuation descriptor, authenticated continuation dispatcher, or
+success receipt that proves execution accepted the continuation. Execution
+therefore returns `Unavailable` after validating a grant rather than flipping
+process-local state and falsely claiming resume. HITL remains enforced, but
+successful post-approval continuation is a P0 blocker.
+
+This is deliberately not “fixed” by re-running the agent: the current pause
+path discards the exact tool arguments, so re-planning after a grant could
+change or duplicate an external effect. A general continuation needs either an
+encrypted, durable exact-effect descriptor or a downstream-owned immutable
+intent/receipt contract. Both are retention-bearing. ZDR callers must be
+rejected before descriptor creation, and no verified persistent-posture policy,
+envelope-encryption/KMS lifecycle, or downstream idempotency/receipt contract
+exists today. Approval-required external-effect capabilities must remain
+unavailable; grant-to-quarantine is the correct secure-MVP behavior.
+
+### Managed-run terminalization is source-implemented, not yet release-proven
+
+The additive Session Core lifecycle now supplies `StartManagedRun`,
+`RecordTerminalOutcome`, and `HeartbeatManagedRun`; migration `0015` stores a
+request-to-run binding and metadata-only obligation/receipt. Its leased worker
+reconciles open obligations with bounded backoff. The terminal outcome path is
+service-authenticated, derives the run owner from durable state, and records
+only allowlisted terminal metadata. Gateway and Execution send a narrowly
+scoped Session Core service token; direct, gRPC, SSE, and browser flows bind
+start/heartbeat/finalization to the managed run. A legacy terminal
+`CompleteStep` is now rejected for managed runs, preventing that bypass.
+
+The implementation is deliberately additive: existing `StartRun` behavior
+remains for deployed callers. Migrations through `0015` and the terminalization
+tables exist in the local database, and real Auth Core service-token issuance
+works. A missing final receipt remains `finalization_pending`, never a synthetic
+successful run. It still needs an immutable release-artifact migration/recovery
+run, old/new caller compatibility, crash/response-loss/cancel-race probes, and a
+rollback rehearsal before it can remove the P0 deployment gate. It is also
+separate from the still-missing approval-continuation dispatcher.
+
+### Capabilities fail closed until attested
+
+Capability Core migration `0008` binds known execution dispatch names, while
+every seeded capability starts unavailable with reason `health_not_attested`.
+Execution policy is enforced before all dispatch. A live valid execution-core
+identity was denied with `health_not_attested`, cross-organization reuse was
+denied, and all 27 enabled rows derive unavailable. A dedicated global-only
+health-attestation path prevents a tenant reporter from changing the global
+catalog row, but no reporter is configured or attested. A deployment must
+provision that reporter and prove `allow`, `ask`, `deny`, stale, unhealthy, and
+outage behavior end to end. Dynamic MCP dispatch has no authoritative binding
+and is denied.
+
+### All-ZDR versus provider availability
+
+Interactive user credentials default to all-ZDR. Auth Core now has a strict
+deployment-owned, exact-organization policy input for a persistent posture:
+absent policy remains all-ZDR, malformed policy fails closed, and no request,
+header, frontend, or service credential can choose the posture. Signed ZDR
+still cannot be downgraded at execution ingress or on delegated credentials,
+and inference rejects every unattested modality before provider I/O. Control
+Auth now mints canonical-issuer ZDR service tokens and a valid Session
+RoutingPolicy read succeeds. A live Data-to-Inference request proved signed ZDR
+cannot be downgraded: every configured provider was skipped with zero attempts
+and the RPC returned `FailedPrecondition` before provider I/O.
+
+No real organization policy has been provisioned and no provider deployment has
+independently verified ZDR eligibility. External inference therefore remains
+unavailable under the currently evidenced posture. A release must either
+provision and evidence a canonical exact-org retention decision or verify a
+ZDR-capable provider, then prove every content boundary end to end. Do not set
+a provider-confirmation flag or weaken issuer-monotonic enforcement without
+that evidence.
+
+### Letta and retrieval scope
+
+Letta tool search ranks tool definitions; it does not restore Session Core
+semantic memory. The default context path now preserves Letta's detailed
+outcome: `empty`, `results`, or a bounded `DEGRADED_LETTA_*` code. It emits
+content-free outcome/reason metrics and a structured warning rather than
+silently collapsing an RPC failure or timeout into an empty memory result.
+Compose checks process liveness at `/healthz`; `/readyz` remains the separate
+semantic-capability signal.
+
+Live `/healthz` returns 200 while `/readyz` returns 503 with
+`DEGRADED_SEMANTIC_UNVERIFIED`. This is an explicit, observable degraded state,
+not a silent empty result. The context response remains backward compatible;
+authenticated semantic success and Frontend user-facing degraded-state behavior
+remain unverified. Agentic RAG
+currently uses Data Plane's server-managed hybrid route only. SQL/tabular,
+graph, vector-only, and MCP retrieval are not configured. They require typed,
+parameterized/allowlisted owner-plane contracts, validated identity, strict
+row/time/cost limits, provenance, and ZDR tests; raw model-authored SQL/Cypher
+must never be introduced as an MVP shortcut.
+
+## MVP release blockers
+
+1. Isolate an exact reviewed revision; produce and verify signed artifact-v3
+   candidate and separate rollback artifacts with managed signing/verification
+   keys, non-secret compatibility gates, and an external allowlisted runtime
+   environment; rehearse restore without rebuilding.
+2. Persist the runtime-only scoped NATS credentials and Control Auth principal
+   registry through managed secret files/references; complete exact caller/
+   audience/scope compatibility without printing or reusing operator secrets.
+   Provision explicitly bounded tenant assignments accepted by the new
+   production loader, or later add verified tenant delegation; prove a stolen
+   or wrong-tenant workload credential cannot select another organization.
+3. Before enabling any approval-required external-effect capability, provision
+   verified non-ZDR retention, envelope-encryption/KMS lifecycle, scoped worker
+   identity, and tool-specific downstream idempotency/receipt evidence; then
+   implement and test an encrypted exact-effect descriptor, dispatcher, and
+   receipt. Reuse the existing lease/retry primitives and prove both crash
+   windows. Do not re-plan from a granted generic approval.
+4. Migrate and prove the managed-run terminalization implementation against a
+   release-shaped database and real scoped service tokens: process crash,
+   response loss, cancel race, no-side-effect replay, heartbeat expiry, and
+   backward-compatible caller behavior without persisting ZDR content.
+5. Deploy the dedicated global health reporter and prove capability state at
+   catalog, policy, offer, and execution dispatch.
+6. Provision and evidence either the exact-org retention policy or a verified
+   ZDR-capable provider; prove no content persistence/provider leakage end to
+   end without a ZDR downgrade.
+7. Run Session Core's ignored database tests and every migration against
+   disposable production-shaped Postgres; verify compaction, concurrency,
+   approval outbox, and ZDR behavior.
+8. Deploy and verify semantic memory or the new explicit operational degraded
+   state through authenticated search, `/readyz`, metrics, and Frontend UX.
+   Keep Letta tool ranking classified separately.
+9. Complete MCP execution DNS/auth/HITL proof and expose Visma as
+   `not_configured`; no real Velion Visma server exists today.
+10. Resolve or stage the legacy Buf quality debt and establish a real protocol
+   breaking baseline.
+11. Start only immutable candidates in safe dependency order and collect live
+   curl/gRPC/browser/NATS evidence for no auth, malformed bearer, wrong
+   audience/tenant/user/scope, forged headers, internal credential misuse,
+   valid access, HITL, cost, ZDR, retrieval degradation, and rollback.
+12. A Data Plane internal credential appeared in operator output during live
+   validation. Coordinate its secret-manager rotation across Data and Model
+   before production, without printing it. Also rotate/revoke previously
+   observed third-party connector credentials after moving them to an approved
+   mechanism.
+
+## Correct product claims
+
+- The agent/tool loop and server-side HITL gate are real, not mocked.
+- A granted approval can be persisted and placed in a lease/retry/terminal
+  delivery state, but is **not yet delivered to a restartable execution
+  continuation** and has no success receipt.
+- A browser run is reported complete only after an explicit successful result;
+  denied, timed-out, exhausted, cancelled, and aborted work cannot be presented
+  as success. Its source-level managed terminalization receipt/reconciliation
+  tables are migrated locally, but crash/recovery and immutable-release proof
+  remain absent.
+- Plain chat, explicitly selected tools, Browse, Plan, and Agent Run Console are
+  distinct modes; Frontend owns intentional tool UX while Model owns the
+  capability contract.
+- Letta tool search is optional tool-definition ranking. Semantic memory is a
+  different path; live readiness explicitly reports
+  `DEGRADED_SEMANTIC_UNVERIFIED`, while authenticated semantic success and
+  Frontend degraded behavior are not verified.
+- Agentic hybrid retrieval supports bounded reformulation/backtracking in
+  source. Structured/tabular, graph, and MCP retrieval are not configured.
+- No real Velion Visma MCP server is configured. The status is
+  `not_configured`, never the operator's separate Codex/Claude connector.
+- No provider or test double is reported as production. Ordinary external
+  inference remains unavailable under the current all-ZDR/no-verified-provider
+  posture; all unattested modalities fail closed before provider I/O.
+
+## Enterprise readiness
+
+No enterprise claim is made. Workload identity/mTLS, ABAC, HA/regional
+failover, DR drills, SLO/error budgets, enterprise audit export/retention,
+policy-as-code, key rotation, supply-chain provenance/signing, capacity/cost
+controls, residency, and compliance evidence remain in Enterprise-next after
+the MVP gates.

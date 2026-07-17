@@ -1,5 +1,9 @@
 # Decision Record: Do Not Rebuild Yet / Safe gRPC Rebuild
 
+> **Historical decision context.** The current binding release decision is
+> `grpc-safe-rebuild-decision-2026-07-16.md`, which records the no-runtime and
+> no-rollback-artifact state.
+
 - Date: 2026-07-13
 - Status: **Accepted as a release block; execution not authorized**
 - Scope: Model Plane `model-gateway`, `inference-core`, `execution-core`, their

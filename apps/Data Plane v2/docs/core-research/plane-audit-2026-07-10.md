@@ -6,7 +6,69 @@ Remediation re-verification: 2026-07-11
 
 Velion/GraphRAG re-verification: 2026-07-15
 
+Compose/rebuild re-verification: 2026-07-16
+
 Scope: Data Plane v2 services/infrastructure plus the Control, Frontend, Model, and Ingestion contracts that authorize, invoke, or persist Data Plane work.
+
+## 2026-07-16 Compose and embedding-auth addendum
+
+The production Data Compose posture requires an explicit shared GDPR broker
+URL; the standalone overlay can leave it empty without silently falling back
+to an unprovisioned Control hostname. The
+embedding-engine Model Plane provider now requires a dedicated Auth Core service
+principal, validates the bounded token response, and forwards only an
+org-bound `aud=inference-core` / `inference:invoke` bearer. Its missing workspace
+dependency and test-only runtime defects were corrected first.
+
+The fresh disposable rebuild (`COMPOSE_ANSI=never bash
+tests/e2e/run-isolated-mvp.sh`) built every image and reached healthy state. It
+passed **31 methods / 124 gRPC shapes**, **28/28 HTTP assertions**, and the
+six-store restrictive-ZDR final-state comparison. Static Compose, provenance,
+broker/GDPR, gRPC, browser, real-authority, and multi-store contracts also
+passed. The random project and all resources it created were removed.
+
+This is not a shared deployment claim: the isolated provider uses deterministic
+embeddings, so a provisioned sandbox call through the real Model Plane
+`inference-core` remains required. The local `.env` carries only the known
+Control broker URL/user and sandbox event-key paths; connected startup continues
+to fail closed until scoped GDPR broker credentials, deployment event keys, and
+the dedicated embedding service credential are provisioned. No shared/customer
+resource was changed.
+
+## 2026-07-16 independent-startup and secret-ownership addendum
+
+Data Plane's default Compose network is now private and local, so its services
+can bind against their own Postgres/Qdrant/Dragonfly/NATS/Quickwit dependencies
+without a running Control, User, or Model Plane. `make standalone-up` uses an
+explicit non-production overlay that pauses only cross-plane event consumers
+and the Control-owned GDPR durable subscriber. Authenticated traffic remains
+strict and fails closed while external authorities are unavailable. The graph
+index uses a mounted Auth Core public key instead of fetching JWKS at startup.
+`make cross-plane-up` applies the explicit external-network overlay after the
+deployment-owned shared network is provisioned.
+
+The Data Plane `.env` records only the non-secret Control broker URL/user and
+local sandbox event-key paths; it was not populated with guessed deployment
+credentials. The GDPR broker URL/password must match Control's scoped NATS ACL and durable;
+embedding/graph/retrieval service credentials must be registered in Auth Core
+with their audience and scopes; and event key pairs must come from deployment
+secret management. The connected preflight rejects local `.secrets/event-keys/`
+paths. Existing local event keys are sandbox material only. This
+boundary is a release blocker for shared deployment, not a reason to weaken
+standalone authorization or ZDR behavior.
+
+Evidence: Go tests for all four services, full Rust workspace tests, Compose
+security contract, both Compose overlay config checks, formatting, and diff
+checks passed on 2026-07-16. No production data, shared network, broker, or
+secret was mutated.
+
+The rebuilt standalone Compose project was also started locally. All 15
+long-running Data services reached healthy state; graph-index and
+embedding-engine stayed healthy while their external inference principals were
+absent because they now defer that credential check to the first inference
+request. Documents `/readyz` was healthy with the GDPR subscriber explicitly
+paused. The project uses the private `dpv2-cross-plane` network and was not
+attached to `inter-plane-bus`.
 
 ## 2026-07-15 final isolated acceptance addendum
 

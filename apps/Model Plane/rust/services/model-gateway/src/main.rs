@@ -7,7 +7,7 @@
 use anyhow::Result;
 use model_gateway::{
     auth, capability_consumer, doc_indexed_consumer, finetune_poller, gateway_metrics, grpc,
-    http_routes, state,
+    http_routes, readiness::GrpcReadiness, state,
 };
 use tracing::info;
 
@@ -21,8 +21,16 @@ async fn main() -> Result<()> {
     let app_state = state::AppState::from_env().await?;
     let prom_handle = gateway_metrics::install_recorder().ok();
 
-    let http_handle = tokio::spawn(http_routes::serve(app_state.clone(), prom_handle));
-    let grpc_handle = tokio::spawn(grpc::serve(app_state.clone()));
+    let grpc_readiness = GrpcReadiness::new();
+    let http_handle = tokio::spawn(http_routes::serve(
+        app_state.clone(),
+        prom_handle,
+        grpc_readiness.clone(),
+    ));
+    let grpc_handle = tokio::spawn(grpc::serve_with_readiness(
+        app_state.clone(),
+        grpc_readiness,
+    ));
 
     // Pending approvals remain durable in session-core and are loaded through
     // the authenticated, tenant-scoped read path. Global boot rehydration is

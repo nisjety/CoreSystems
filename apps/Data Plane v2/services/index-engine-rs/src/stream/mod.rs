@@ -126,7 +126,11 @@ pub async fn run_consumer(
                     match builder::process_document(&pool, &event, &chunk_config).await {
                         Ok(result) => {
                             let mut publish_failed = false;
-                            for kid in &result.knowledge_ids {
+                            // Only publish chunks that need embedding. Reused
+                            // (unchanged) chunks keep their existing Qdrant
+                            // vector under the same knowledge_id, so re-embedding
+                            // them would be wasted cost and latency.
+                            for kid in &result.pending_knowledge_ids {
                                 let embed_event = serde_json::json!({
                                     "knowledge_id": kid,
                                     "document_id": event.document_id,

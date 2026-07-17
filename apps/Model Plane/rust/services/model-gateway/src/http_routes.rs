@@ -38,12 +38,15 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::{
+    approvals,
     auth::{
         self, Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
         VerifiedInferenceBearer, VerifiedSessionBearer as VerifiedModelBearer,
     },
-    gateway_metrics, normalize, rate_limit, session_flow, sse,
+    gateway_metrics, normalize, rate_limit,
+    readiness::GrpcReadiness,
+    session_flow, sse,
     state::AppState,
 };
 
@@ -52,8 +55,12 @@ use crate::{
 /// # Errors
 ///
 /// Returns an error if the server fails to bind or serve.
-pub async fn serve(state: AppState, prom_handle: Option<PrometheusHandle>) -> anyhow::Result<()> {
-    let app = build_router(state, prom_handle);
+pub async fn serve(
+    state: AppState,
+    prom_handle: Option<PrometheusHandle>,
+    grpc_readiness: GrpcReadiness,
+) -> anyhow::Result<()> {
+    let app = build_router_with_readiness(state, prom_handle, grpc_readiness);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     info!("HTTP listening on :8080");
     axum::serve(listener, app).await?;
@@ -62,6 +69,17 @@ pub async fn serve(state: AppState, prom_handle: Option<PrometheusHandle>) -> an
 
 /// Build the axum router without binding a socket. Useful for tests.
 pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> Router {
+    let grpc_readiness = GrpcReadiness::new();
+    grpc_readiness.mark_bound();
+    build_router_with_readiness(state, prom_handle, grpc_readiness)
+}
+
+/// Build the axum router with the production gRPC-listener readiness gate.
+pub fn build_router_with_readiness(
+    state: AppState,
+    prom_handle: Option<PrometheusHandle>,
+    grpc_readiness: GrpcReadiness,
+) -> Router {
     let rate_limiter = state.rate_limiter.clone();
 
     // Public routes — no auth required
@@ -152,6 +170,7 @@ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> R
     Router::new()
         .merge(public)
         .merge(authed)
+        .layer(Extension(grpc_readiness))
         .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
         .with_state(state)
 }
@@ -397,8 +416,12 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-async fn readyz() -> &'static str {
-    "ok"
+async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response {
+    if grpc_readiness.is_bound() {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "grpc listener not bound").into_response()
+    }
 }
 
 async fn metrics_placeholder() -> impl IntoResponse {
@@ -439,6 +462,26 @@ fn authenticated_session_request<T>(
         .metadata_mut()
         .insert("authorization", authorization);
     Ok(request)
+}
+
+/// Session Core is the authoritative owner of a run. HTTP handlers may use a
+/// path/body run id only after this verified, tenant- and user-bound lookup;
+/// NATS publication is never an authorization boundary.
+async fn require_durable_run_owner(
+    state: &AppState,
+    claims: &Claims,
+    run_id: &str,
+    session_bearer: &VerifiedModelBearer,
+) -> Result<(), HttpJsonError> {
+    session_flow::require_durable_run_owner_with_token(
+        state,
+        run_id,
+        &claims.org_id,
+        &claims.user_id,
+        session_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| grpc_status_to_http(&error))
 }
 
 fn authenticated_execution_request<T>(
@@ -554,7 +597,7 @@ fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError
         Json(json!({
             "error": {
                 "code": "zdr_durable_mutation_forbidden",
-                "message": "Zero Data Retention credentials cannot create durable run events"
+                "message": "Zero Data Retention credentials cannot create, change, or delete durable state"
             }
         })),
     ))
@@ -918,7 +961,6 @@ struct DecideApprovalBody {
 async fn decide_approval(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
-    execution_bearer: VerifiedExecutionBearer,
     session_bearer: VerifiedModelBearer,
     Path(approval_id): Path<String>,
     Json(body): Json<DecideApprovalBody>,
@@ -974,36 +1016,16 @@ async fn decide_approval(
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
 
-    // Close the human-in-the-loop loop: a granted approval resumes the gated
-    // run on execution-core (flips AwaitingApproval → Running) so the agent
-    // proceeds without manual intervention. The durable decision above remains
-    // the record of authority, but an execution failure must remain observable
-    // instead of being reported as a fully applied approval.
+    // A grant is durable authority, but not a restartable continuation. Keep
+    // this HTTP path away from generic `ResumeRun` until the descriptor-backed,
+    // service-only dispatcher can return a durable execution receipt.
     if matches!(target_state, ApprovalState::Granted)
         && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
     {
-        let resume = state
-            .execution_client
-            .clone()
-            .resume_run(authenticated_execution_request(
-                ResumeRunRequest {
-                    run_id: approval.run_id.clone(),
-                    checkpoint_id: String::new(),
-                    org_id: claims.org_id.clone(),
-                },
-                &execution_bearer,
-                &session_bearer,
-            )?)
-            .await
-            .map_err(|error| grpc_status_to_http(&error))?
-            .into_inner();
-        let resume = require_execution_resume_ack(resume)?;
-        info!(
-            approval_id = %approval.id,
-            run_id = %approval.run_id,
-            resumed = resume.resumed,
-            "approval granted → execution-core resume_run"
-        );
+        approvals::quarantine_granted_approval_continuation(
+            &approvals::gateway_approval_from_proto(&approval),
+        )
+        .map_err(|error| grpc_status_to_http(&error))?;
     }
 
     Ok(Json(json!({ "approval": approval_value(&approval) })))
@@ -1013,9 +1035,11 @@ async fn decide_approval(
 async fn cancel_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     require_non_zdr_durable_mutation(&claims)?;
+    require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
     let envelope = mp_events::envelope::Envelope {
         event_id: new_ulid(),
         event_type: "RUN_CANCEL_REQUESTED".to_owned(),
@@ -1058,9 +1082,9 @@ async fn resume_run(
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     require_non_zdr_durable_mutation(&claims)?;
-    // Direct, immediate unblock: execution-core flips AwaitingApproval/paused
-    // → Running. Without this the event below has no consumer and the run
-    // stays stuck.
+    require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
+    // Direct, immediate unblock only for a user-paused run. Approval-gated
+    // work has no bare-resume path and remains in the descriptor quarantine.
     let resume = state
         .execution_client
         .clone()
@@ -1069,6 +1093,7 @@ async fn resume_run(
                 run_id: run_id.clone(),
                 checkpoint_id: String::new(),
                 org_id: claims.org_id.clone(),
+                approval_id: String::new(),
             },
             &execution_bearer,
             &session_bearer,
@@ -2036,6 +2061,9 @@ async fn mcp_register(
     headers: HeaderMap,
     Json(body): Json<McpRegisterBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // The runtime registry is durable gateway state as well as a Capability
+    // Core record, so reject ZDR before either registry is touched.
+    require_non_zdr_durable_mutation(&claims)?;
     if body.name.trim().is_empty() || body.url.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -2194,6 +2222,9 @@ async fn mcp_delete(
     headers: HeaderMap,
     Path(server_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Reject before ownership checks, Capability Core forwarding, or cache
+    // mutation; an issuer-ZDR principal may not change tool availability.
+    require_non_zdr_durable_mutation(&claims)?;
     let is_admin = req_is_admin(&claims, &headers);
     if !state.ownership.can_modify(
         &claims.org_id,
@@ -2254,6 +2285,9 @@ async fn mcp_share(
     Path(server_id): Path<String>,
     Json(body): Json<McpShareBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Sharing changes durable tool exposure policy and is never an ephemeral
+    // operation, regardless of any caller-supplied body fields.
+    require_non_zdr_durable_mutation(&claims)?;
     let updated = state
         .ownership
         .set_shares(
@@ -3849,11 +3883,17 @@ async fn get_capability_proxy(
 /// Proxy GET/POST to capability-core's /api/v1/{path}.
 async fn proxy_to_capability_core(
     state: &AppState,
+    claims: &Claims,
     bearer: &VerifiedCapabilityBearer,
     path: &str,
     method: &str,
     body: Option<&Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Capability Core remains authoritative, but stop an obvious issuer-ZDR
+    // mutation at the public boundary before forwarding any body or credential.
+    if method != "GET" {
+        require_non_zdr_durable_mutation(claims)?;
+    }
     let base = &state.capability_core_base_url;
     let url = format!("{base}/api/v1/{path}");
     let client = &state.http_client;
@@ -3920,7 +3960,7 @@ async fn list_tasks_proxy(
         c.org_id,
         q.get("status").cloned().unwrap_or_default()
     );
-    proxy_to_capability_core(&s, &bearer, &path, "GET", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
 }
 async fn create_task_proxy(
     State(s): State<AppState>,
@@ -3929,29 +3969,32 @@ async fn create_task_proxy(
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, &bearer, "tasks", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, "tasks", "POST", Some(&b)).await
 }
 async fn get_task_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("tasks/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("tasks/{id}"), "GET", None).await
 }
 async fn patch_task_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("tasks/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("tasks/{id}"), "PATCH", Some(&b)).await
 }
 async fn cancel_task_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("tasks/{id}/cancel"), "POST", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("tasks/{id}/cancel"), "POST", None).await
 }
 
 async fn list_cron_proxy(
@@ -3961,6 +4004,7 @@ async fn list_cron_proxy(
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(
         &s,
+        &c,
         &bearer,
         &format!("cron?org_id={}", c.org_id),
         "GET",
@@ -3975,29 +4019,32 @@ async fn create_cron_proxy(
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, &bearer, "cron", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, "cron", "POST", Some(&b)).await
 }
 async fn get_cron_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("cron/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("cron/{id}"), "GET", None).await
 }
 async fn patch_cron_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("cron/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("cron/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_cron_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("cron/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("cron/{id}"), "DELETE", None).await
 }
 
 async fn list_memory_proxy(
@@ -4009,6 +4056,7 @@ async fn list_memory_proxy(
     let scope = q.get("scope").cloned().unwrap_or_default();
     proxy_to_capability_core(
         &s,
+        &c,
         &bearer,
         &format!("memory?org_id={}&scope={scope}", c.org_id),
         "GET",
@@ -4023,29 +4071,32 @@ async fn create_memory_proxy(
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, &bearer, "memory", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, "memory", "POST", Some(&b)).await
 }
 async fn get_memory_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("memory/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("memory/{id}"), "GET", None).await
 }
 async fn patch_memory_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("memory/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("memory/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_memory_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("memory/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("memory/{id}"), "DELETE", None).await
 }
 
 async fn list_skills_proxy(
@@ -4055,6 +4106,7 @@ async fn list_skills_proxy(
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(
         &s,
+        &c,
         &bearer,
         &format!("skills?org_id={}", c.org_id),
         "GET",
@@ -4069,29 +4121,32 @@ async fn create_skill_proxy(
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, &bearer, "skills", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, "skills", "POST", Some(&b)).await
 }
 async fn get_skill_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "GET", None).await
 }
 async fn patch_skill_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_skill_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("skills/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
 }
 
 async fn list_plugins_proxy(
@@ -4101,6 +4156,7 @@ async fn list_plugins_proxy(
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(
         &s,
+        &c,
         &bearer,
         &format!("plugins?org_id={}", c.org_id),
         "GET",
@@ -4115,29 +4171,32 @@ async fn create_plugin_proxy(
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
     b["org_id"] = json!(c.org_id);
-    proxy_to_capability_core(&s, &bearer, "plugins", "POST", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, "plugins", "POST", Some(&b)).await
 }
 async fn get_plugin_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("plugins/{id}"), "GET", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("plugins/{id}"), "GET", None).await
 }
 async fn patch_plugin_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
     Json(b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("plugins/{id}"), "PATCH", Some(&b)).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("plugins/{id}"), "PATCH", Some(&b)).await
 }
 async fn delete_plugin_proxy(
     State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &bearer, &format!("plugins/{id}"), "DELETE", None).await
+    proxy_to_capability_core(&s, &c, &bearer, &format!("plugins/{id}"), "DELETE", None).await
 }
 
 pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
@@ -4371,8 +4430,14 @@ fn default_to_scope() -> String {
 async fn ingest_feedback(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
     Json(body): Json<FeedbackBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Feedback is a durable promotion signal. Reject the issuer-ZDR caller
+    // before the ownership lookup or publisher so neither downstream can retain
+    // request-derived state.
+    require_non_zdr_durable_mutation(&claims)?;
+    require_durable_run_owner(&state, &claims, &body.run_id, &session_bearer).await?;
     let envelope = Envelope {
         event_id: new_ulid(),
         event_type: "FEEDBACK_RATED".to_owned(),
@@ -4392,7 +4457,7 @@ async fn ingest_feedback(
             "to_scope": body.to_scope,
             "rating": body.rating,
         }),
-        zdr: false,
+        zdr: claims.effective_zdr(false),
     };
     state
         .publisher
@@ -4878,6 +4943,26 @@ async fn invoke(
                     })),
                 ));
             }
+            crate::idempotency_registry::Claim::Rejected(
+                crate::idempotency_registry::ClaimRejection::InvalidKey,
+            ) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "idempotency_key is invalid or too large",
+                    })),
+                ));
+            }
+            crate::idempotency_registry::Claim::Rejected(
+                crate::idempotency_registry::ClaimRejection::CapacityExceeded,
+            ) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "idempotency protection is temporarily unavailable",
+                    })),
+                ));
+            }
             crate::idempotency_registry::Claim::Proceed(guard) => Some(guard),
         },
         None => None,
@@ -4897,22 +4982,61 @@ async fn invoke(
     .await?;
 
     let request_id = new_ulid();
-    let session_run = session_flow::prepare_run_authenticated(
+    // `start_key` is durable in Session Core. Transform public client retry
+    // data before it crosses that boundary so ZDR never persists raw request
+    // or idempotency text, while keeping same-org/user retries deterministic.
+    let managed_start_key = state.managed_start_keys.derive(
+        &claims.org_id,
+        &claims.user_id,
+        req.idempotency_key.as_deref(),
+        &request_id,
+        "gateway-direct",
+    );
+    let session_run = session_flow::prepare_managed_run_authenticated(
         &state,
         normalized.thread_id.as_deref(),
         normalized.session_key.as_deref(),
         &claims.org_id,
         &claims.user_id,
         &normalized.content,
+        "model-gateway",
+        "execute",
+        &managed_start_key,
+        mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect,
+        effective_zdr,
         &model_bearer,
     )
     .await
     .map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": format!("session-core prepare_run failed: {error}")})),
+            Json(
+                serde_json::json!({"error": format!("session-core managed start failed: {error}")}),
+            ),
         )
     })?;
+    if session_run.already_started {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "managed run already exists; observe or resume the existing run",
+                "run_id": session_run.run_id,
+            })),
+        ));
+    }
+    // Do not contact a provider until Session Core has accepted a
+    // GatewayDirect heartbeat using the Gateway's fixed-scope workload token.
+    // In particular, the verified user bearer above is not an authority for
+    // this managed-run lease.
+    session_flow::ensure_direct_inference_run_liveness(&state, &session_run)
+        .await
+        .map_err(|error| {
+            warn!(%error, run_id = %session_run.run_id, "initial direct inference liveness heartbeat failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "session-core liveness heartbeat failed"})),
+            )
+        })?;
 
     // Emit ingress.accepted envelope
     let envelope = Envelope {
@@ -4934,17 +5058,27 @@ async fn invoke(
         zdr: effective_zdr,
     };
 
-    state
+    if let Err(error) = state
         .publisher
         .publish(&subjects::ingress_subject("accepted"), &envelope)
         .await
-        .map_err(|e| {
-            warn!(error = %e, "failed to publish INGRESS_ACCEPTED");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "internal server error"})),
-            )
-        })?;
+    {
+        warn!(%error, "failed to publish INGRESS_ACCEPTED");
+        if let Err(terminal_error) = session_flow::terminalize_direct_inference_run_authenticated(
+            &state,
+            &session_run,
+            session_flow::DirectInferenceTerminal::Failed("ingress_publish_failed"),
+            &model_bearer,
+        )
+        .await
+        {
+            warn!(%terminal_error, run_id = %session_run.run_id, "failed to terminalize aborted direct inference run");
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal server error"})),
+        ));
+    }
 
     // chat-parity safety (pii_filter): opt-in redaction before the prompt
     // reaches an external provider. Off by default → unchanged behavior.
@@ -4957,7 +5091,7 @@ async fn invoke(
     // Call inference-core
     let infer_resp = {
         use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
-        state
+        let response = state
             .inference_client
             .clone()
             .infer(authenticated_inference_request(
@@ -4982,29 +5116,76 @@ async fn invoke(
                 },
                 &inference_bearer,
             ))
-            .await
-            .map_err(|e| {
-                (
+            .await;
+        match response {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                if let Err(terminal_error) =
+                    session_flow::terminalize_direct_inference_run_authenticated(
+                        &state,
+                        &session_run,
+                        session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                        &model_bearer,
+                    )
+                    .await
+                {
+                    warn!(%terminal_error, run_id = %session_run.run_id, "failed to terminalize failed direct inference run");
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": "session-core terminalization failed"})),
+                    ));
+                }
+                return Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-            })?
-            .into_inner()
+                    Json(serde_json::json!({"error": error.to_string()})),
+                ));
+            }
+        }
     };
 
-    session_flow::append_assistant_message_authenticated(
+    if !effective_zdr {
+        if let Err(error) = session_flow::append_assistant_message_authenticated(
+            &state,
+            &session_run.thread_id,
+            &infer_resp.content,
+            &model_bearer,
+        )
+        .await
+        {
+            if let Err(terminal_error) =
+                session_flow::terminalize_direct_inference_run_authenticated(
+                    &state,
+                    &session_run,
+                    session_flow::DirectInferenceTerminal::Failed("assistant_persist_failed"),
+                    &model_bearer,
+                )
+                .await
+            {
+                warn!(%terminal_error, run_id = %session_run.run_id, "failed to terminalize assistant persistence failure");
+            }
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(
+                    serde_json::json!({"error": format!("session-core append assistant failed: {error}")}),
+                ),
+            ));
+        }
+    }
+
+    session_flow::terminalize_direct_inference_run_authenticated(
         &state,
-        &session_run.thread_id,
-        &infer_resp.content,
+        &session_run,
+        session_flow::DirectInferenceTerminal::Completed,
         &model_bearer,
     )
-        .await
-        .map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("session-core append assistant failed: {error}")})),
-            )
-        })?;
+    .await
+    .map_err(|error| {
+        warn!(%error, run_id = %session_run.run_id, "failed to terminalize completed direct inference run");
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "session-core terminalization failed"})),
+        )
+    })?;
 
     info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "http invoke completed");
 
@@ -5339,7 +5520,56 @@ mod approval_resume_auth_tests {
 #[cfg(test)]
 mod capability_contract_tests {
     use super::*;
+    use crate::auth::VerifiedCapabilityBearer;
     use mp_contracts::model_plane::v1::CapabilityDetail;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::net::TcpListener;
+
+    fn proxy_claims(zdr: bool) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    async fn proxy_counter() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback(axum::routing::any({
+            let calls = Arc::clone(&calls);
+            move || {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({}))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capability proxy counter");
+        let address = listener
+            .local_addr()
+            .expect("capability proxy counter address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve capability proxy counter");
+        });
+        (format!("http://{address}"), calls, task)
+    }
 
     #[test]
     fn gateway_preserves_authoritative_capability_availability_semantics() {
@@ -5380,5 +5610,323 @@ mod capability_contract_tests {
         assert_eq!(value["reason_code"], "availability_contract_missing");
         assert_eq!(value["execution_mode"], "unavailable");
         assert_eq!(value["cost_class"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn issuer_zdr_capability_mutations_do_not_forward_or_touch_mcp_registry() {
+        let (base_url, calls, task) = proxy_counter().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let zdr = proxy_claims(true);
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+
+        let mutation = proxy_to_capability_core(
+            &state,
+            &zdr,
+            &bearer,
+            "memory",
+            "POST",
+            Some(&json!({"zdr": false, "content": "must not forward"})),
+        )
+        .await
+        .expect_err("issuer-ZDR durable capability mutation must fail locally");
+        assert_eq!(mutation.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "ZDR mutation was forwarded"
+        );
+
+        let mcp = mcp_register(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            HeaderMap::new(),
+            Json(McpRegisterBody {
+                name: "must-not-register".to_owned(),
+                url: "https://mcp.example.test".to_owned(),
+                transport: "http".to_owned(),
+                token: String::new(),
+                tool_allowlist: vec!["records.read".to_owned()],
+                enabled: true,
+                server_id: String::new(),
+                scope: "user".to_owned(),
+            }),
+        )
+        .await
+        .expect_err("issuer-ZDR MCP registration must fail locally");
+        assert_eq!(mcp.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "ZDR MCP registration was forwarded"
+        );
+        let listed = mcp_list(State(state.clone()), Extension(zdr), HeaderMap::new())
+            .await
+            .expect("read-only MCP listing remains allowed")
+            .0;
+        assert_eq!(listed["data"]["servers"], json!([]));
+
+        let non_zdr = proxy_claims(false);
+        let _ = proxy_to_capability_core(
+            &state,
+            &non_zdr,
+            &bearer,
+            "memory",
+            "POST",
+            Some(&json!({"content": "explicitly allowed"})),
+        )
+        .await
+        .expect("explicit non-ZDR mutation should forward to Capability Core");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let _ =
+            proxy_to_capability_core(&state, &proxy_claims(true), &bearer, "memory", "GET", None)
+                .await
+                .expect("ZDR read should preserve normal capability discovery");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        task.abort();
+    }
+}
+
+#[cfg(test)]
+mod grpc_readiness_tests {
+    use super::*;
+    use crate::readiness::GrpcReadiness;
+    use axum::Extension;
+
+    #[tokio::test]
+    async fn readyz_fails_until_grpc_listener_is_bound() {
+        let readiness = GrpcReadiness::new();
+
+        let before_bind = readyz(Extension(readiness.clone())).await.into_response();
+        assert_eq!(before_bind.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        readiness.mark_bound();
+        let after_bind = readyz(Extension(readiness)).await.into_response();
+        assert_eq!(after_bind.status(), StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
+mod run_owner_publish_tests {
+    use super::*;
+    use crate::{
+        auth::{VerifiedExecutionBearer, VerifiedSessionBearer},
+        state::DynPublisher,
+    };
+    use mp_contracts::model_plane::v1::{
+        run_service_client::RunServiceClient,
+        run_service_server::{RunService, RunServiceServer},
+        CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse,
+        ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
+    };
+    use mp_events::publisher::InMemoryPublisher;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{
+        transport::{Endpoint, Server},
+        Request as TonicRequest, Response as TonicResponse, Status,
+    };
+
+    struct OwnerResolver;
+
+    #[tonic::async_trait]
+    impl RunService for OwnerResolver {
+        async fn get_run(
+            &self,
+            _: TonicRequest<GetRunRequest>,
+        ) -> Result<TonicResponse<RunDetail>, Status> {
+            Err(Status::unimplemented("get_run not needed in test"))
+        }
+
+        async fn list_runs(
+            &self,
+            _: TonicRequest<ListRunsRequest>,
+        ) -> Result<TonicResponse<ListRunsResponse>, Status> {
+            Err(Status::unimplemented("list_runs not needed in test"))
+        }
+
+        async fn cancel_run(
+            &self,
+            _: TonicRequest<CancelRunRequest>,
+        ) -> Result<TonicResponse<CancelRunResponse>, Status> {
+            Err(Status::unimplemented("cancel_run not needed in test"))
+        }
+
+        async fn resolve_run_owner(
+            &self,
+            request: TonicRequest<ResolveRunOwnerRequest>,
+        ) -> Result<TonicResponse<ResolveRunOwnerResponse>, Status> {
+            let bearer = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if bearer != Some("Bearer test-session-bearer") {
+                return Err(Status::unauthenticated(
+                    "verified session credential required",
+                ));
+            }
+            let request = request.into_inner();
+            Ok(TonicResponse::new(ResolveRunOwnerResponse {
+                authorized: request.run_id == "run-owned"
+                    && request.org_id == "org-owner"
+                    && request.user_id == "user-owner",
+            }))
+        }
+    }
+
+    async fn owner_resolver_client() -> RunServiceClient<tonic::transport::Channel> {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind run ownership mock");
+        let addr = listener.local_addr().expect("run ownership mock addr");
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(RunServiceServer::new(OwnerResolver))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("run ownership mock endpoint")
+            .connect()
+            .await
+            .expect("connect run ownership mock");
+        RunServiceClient::new(channel)
+    }
+
+    async fn test_state() -> (AppState, Arc<DynPublisher>) {
+        let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+        let mut state = AppState::new();
+        state.publisher = publisher.clone();
+        state.run_client = owner_resolver_client().await;
+        (state, publisher)
+    }
+
+    fn claims(org_id: &str, user_id: &str) -> Claims {
+        Claims {
+            sub: user_id.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: false,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn feedback(run_id: &str) -> FeedbackBody {
+        FeedbackBody {
+            run_id: run_id.to_owned(),
+            skill_id: "skill-test".to_owned(),
+            from_scope: "agent".to_owned(),
+            to_scope: "workspace".to_owned(),
+            rating: "good".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_run_ids_are_rejected_before_http_run_event_publishes() {
+        let (state, publisher) = test_state().await;
+        let foreign_user = claims("org-owner", "user-other");
+        let foreign_org = claims("org-other", "user-other");
+
+        let cancel = cancel_run(
+            State(state.clone()),
+            Extension(foreign_user.clone()),
+            VerifiedSessionBearer::for_test("test-session-bearer"),
+            Path("run-owned".to_owned()),
+        )
+        .await;
+        let feedback = ingest_feedback(
+            State(state.clone()),
+            Extension(foreign_user),
+            VerifiedSessionBearer::for_test("test-session-bearer"),
+            Json(feedback("run-owned")),
+        )
+        .await;
+        let resume = resume_run(
+            State(state),
+            Extension(foreign_org),
+            VerifiedExecutionBearer::for_test("test-execution-bearer"),
+            VerifiedSessionBearer::for_test("test-session-bearer"),
+            Path("run-owned".to_owned()),
+        )
+        .await;
+
+        let statuses = [cancel, feedback, resume].map(|result| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| error.0)
+                .expect("foreign run must be rejected")
+        });
+        assert_eq!(statuses, [StatusCode::FORBIDDEN; 3]);
+        assert!(
+            publisher.drain().is_empty(),
+            "foreign run IDs must not publish cancellation, resume, or feedback events"
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_zdr_feedback_is_rejected_before_owner_lookup_or_publish() {
+        let (state, publisher) = test_state().await;
+        let mut owner = claims("org-owner", "user-owner");
+        owner.zdr = true;
+
+        let result = ingest_feedback(
+            State(state),
+            Extension(owner),
+            // A bad downstream credential proves the ZDR decision happens
+            // before the owner lookup. The publisher proves no event escaped.
+            VerifiedSessionBearer::for_test("must-not-be-used"),
+            Json(feedback("run-owned")),
+        )
+        .await;
+
+        let error = result.expect_err("issuer-ZDR feedback must be rejected");
+        assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            publisher.drain().is_empty(),
+            "ZDR feedback published an event"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_http_run_owner_can_publish_cancel_and_feedback_events() {
+        let (state, publisher) = test_state().await;
+        let owner = claims("org-owner", "user-owner");
+
+        let _ = cancel_run(
+            State(state.clone()),
+            Extension(owner.clone()),
+            VerifiedSessionBearer::for_test("test-session-bearer"),
+            Path("run-owned".to_owned()),
+        )
+        .await
+        .expect("durable owner may request cancellation");
+        let _ = ingest_feedback(
+            State(state),
+            Extension(owner),
+            VerifiedSessionBearer::for_test("test-session-bearer"),
+            Json(feedback("run-owned")),
+        )
+        .await
+        .expect("durable owner may publish feedback");
+
+        let events = publisher.drain();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1.event_type, "RUN_CANCEL_REQUESTED");
+        assert_eq!(events[1].1.event_type, "FEEDBACK_RATED");
+        assert!(events.iter().all(|(subject, _)| {
+            subject == mp_events::subjects::SUBJECT_RUN || subject == "mp.v1.feedback.rated"
+        }));
     }
 }

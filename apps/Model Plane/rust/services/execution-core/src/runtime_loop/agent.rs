@@ -7,9 +7,10 @@
 //! allowlist, `Infer`, dispatch any requested tool calls back through
 //! `runtime_loop::execute_step` (the same permission/hook-gated path the
 //! `ExecuteStep` RPC uses), feed the outcomes back, and re-infer until the model
-//! answers or the round budget is exhausted. The assistant answer is persisted
-//! to the run's thread and the run is finalized with exactly ONE terminal
-//! `CompleteStep`.
+//! answers or the round budget is exhausted. When retention permits, the
+//! assistant answer is persisted to the run's thread. The terminal state is
+//! then recorded through Session Core's immutable managed-run receipt, before
+//! this process exposes a terminal projection.
 //!
 //! Governance is the point of this layer:
 //!   * **HITL** — when a tool call is gated (`ask` posture + a risky tool),
@@ -27,20 +28,20 @@
 //!     can publish an audit event, and the ZDR flag is threaded into every
 //!     inference round.
 //!
-//! Per-tool steps use a NON-TERMINAL status (`"running"`); only the single
-//! `step_id="final"` step is terminal. This is load-bearing: session-core's
-//! `record_run_terminal` flips the run status on the FIRST `completed`/`failed`
-//! `CompleteStep`, so a per-tool terminal status would end the run mid-loop.
+//! Per-tool audit steps use a NON-TERMINAL status (`"running"`). The separate
+//! managed-run lifecycle owns the single terminal transition, so a per-tool
+//! audit record can never end a run mid-loop.
 //!
-//! A run must NEVER be left `'queued'`: on any Infer/persist error this still
-//! appends a graceful assistant reply, flips the run terminal with a failed
-//! `CompleteStep`, transitions the plan to FAILED, and returns
-//! `RunAgentResponse { status: "failed", .. }`.
+//! A run must NEVER be left `'queued'`: an Infer/persist error attempts a
+//! durable failed managed receipt and then returns
+//! `RunAgentResponse { status: "failed", .. }`. If the receipt cannot be
+//! obtained, the call fails unavailable rather than claiming a terminal state.
 
 use std::collections::BTreeSet;
 
 use mp_contracts::model_plane::v1::{
     self as pb, inference_core_client::InferenceCoreClient,
+    managed_run_lifecycle_client::ManagedRunLifecycleClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     session_core_client::SessionCoreClient,
 };
@@ -49,6 +50,7 @@ use tracing::{info, warn};
 
 use crate::permission::PermissionMode;
 use crate::runtime_loop::{self, StepOutcome};
+use crate::session_terminal_auth::ManagedRunTokenProvider;
 
 /// Short agent preamble used as the system message. Names the bound scope so
 /// the model stays on the offered tools — including the WRITE-capable ones,
@@ -76,7 +78,11 @@ current, accurate, or actionable result — even when the user phrases the reque
 indirectly, or as a question rather than a command. Do not ask whether the user wants you to \
 proceed before making a read-only tool call, and do not reply that you 'cannot' do something a \
 listed tool covers; call the tool and let its result (or the approval step for an action tool) \
-decide the outcome. Only use the tools you have been given. When you have enough information or \
+decide the outcome. A knowledge_search result is JSON: when status is no_results or \
+low_confidence, reformulate with materially different terms and retry within the round budget; \
+never repeat the exact same retrieval, and never invent graph, SQL, structured, vector-only, or \
+MCP retrieval when the tool says that route is not configured. Only use the tools you have been \
+given. When you have enough information or \
 have taken the requested action, answer the user's request directly and clearly.";
 
 /// Temperature for each inference round.
@@ -129,13 +135,23 @@ struct ToolStepResult {
 ///
 /// Emits `PlanTransitioned DRAFT→EXECUTING`, then loops (offer tools → `Infer` →
 /// dispatch tool calls via [`runtime_loop::execute_step`] → feed outcomes back)
-/// up to the round budget. On a final answer it appends the assistant message,
-/// finalizes with ONE terminal `CompleteStep`, emits
+/// up to the round budget. On a final answer it appends the assistant message
+/// when retention permits, records ONE immutable managed terminal receipt, emits
 /// `PlanTransitioned EXECUTING→COMPLETED`, and snapshots the `StateStore`. If a
-/// tool call is gated it mints an approval and returns `awaiting_approval` early.
+/// tool call is gated it mints a durable approval and returns
+/// `awaiting_approval` early.
 /// On any failure it takes the graceful path and returns a `"failed"` response —
 /// never leaving the run `'queued'`.
-pub async fn run_agent(
+///
+/// # Errors
+///
+/// Returns `unavailable` when a HITL-gated tool cannot durably persist its
+/// approval. No pause state is reported in that case.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the authenticated execution boundary keeps each audience-specific bearer explicit"
+)]
+pub(crate) async fn run_agent(
     state: &crate::state::StateStore,
     session_channel: Channel,
     inference_channel: Channel,
@@ -143,7 +159,9 @@ pub async fn run_agent(
     data_plane_bearer: Option<String>,
     session_bearer: Option<String>,
     inference_bearer: String,
-) -> pb::RunAgentResponse {
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> Result<pb::RunAgentResponse, tonic::Status> {
     let tools = merged_tool_defs(&req.org_id, &req.user_id, &req.tools).await;
     run_agent_with_tools(
         state,
@@ -154,6 +172,8 @@ pub async fn run_agent(
         data_plane_bearer,
         session_bearer,
         inference_bearer,
+        capability_policy,
+        terminal_tokens,
     )
     .await
 }
@@ -213,7 +233,9 @@ async fn run_agent_with_tools(
     data_plane_bearer: Option<String>,
     session_bearer: Option<String>,
     inference_bearer: String,
-) -> pb::RunAgentResponse {
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
     // Posture: deployed agents default to `ask` (risky tools gated behind a
@@ -255,6 +277,8 @@ async fn run_agent_with_tools(
         "run_agent: purpose-locked governed multi-tool run starting"
     );
 
+    heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
+
     // 1. Plan: DRAFT → EXECUTING.
     publish_plan_transition(
         &session_channel,
@@ -283,8 +307,10 @@ async fn run_agent_with_tools(
     let mut answer: Option<String> = None;
     let mut rounds_executed: u32 = 0;
     let mut step_seq: u32 = 0;
+    let mut attempted_retrievals = BTreeSet::new();
 
     for _round in 0..max_rounds {
+        heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
         rounds_executed += 1;
         let mut infer_request = tonic::Request::new(pb::InferRequest {
             request_id: req.run_id.clone(),
@@ -324,6 +350,7 @@ async fn run_agent_with_tools(
                     false,
                     rounds_executed,
                     session_bearer.as_deref(),
+                    terminal_tokens,
                 )
                 .await;
             }
@@ -356,6 +383,25 @@ async fn run_agent_with_tools(
                 continue;
             }
 
+            // Agentic retrieval may reformulate/backtrack across rounds, but an
+            // exact repeat cannot add evidence and can burn the entire budget.
+            // Suppress only valid, canonical knowledge-search duplicates;
+            // changed queries or top_k values remain eligible and still flow
+            // through the same capability/permission policy at dispatch.
+            if let Some(signature) = retrieval_signature(&call.name, &call.arguments_json) {
+                if !attempted_retrievals.insert(signature) {
+                    outcomes.push(ToolStepResult {
+                        name: call.name.clone(),
+                        output: String::new(),
+                        error: Some(
+                            "duplicate knowledge_search suppressed; reformulate the query with materially different terms before retrying"
+                                .to_owned(),
+                        ),
+                    });
+                    continue;
+                }
+            }
+
             // Stable per-(run, step) id computed BEFORE dispatch so it is shared
             // by the gate, the durable approval binding (a provider write forwards
             // this step's real approval id), and the audit step record.
@@ -378,12 +424,13 @@ async fn run_agent_with_tools(
                 data_plane_bearer.as_deref(),
                 session_bearer.as_deref(),
                 Some(inference_bearer.as_str()),
+                capability_policy,
             )
             .await;
 
-            // HITL: a gated tool pauses the whole run. Mint the durable approval
-            // (same path as the ExecuteStep RPC), flip the run AwaitingApproval,
-            // and return early — resume re-invokes run_agent.
+            // HITL: a gated tool may be reported as paused only after the
+            // durable approval write succeeds. Otherwise propagate an explicit
+            // unavailable error without a false AwaitingApproval state/event.
             if outcome.status == "awaiting_approval" {
                 return pause_for_approval(
                     state,
@@ -398,7 +445,8 @@ async fn run_agent_with_tools(
             }
 
             // Non-terminal per-tool step (status "running") carrying the GDPR
-            // audit detail. NEVER a terminal status — that's the final step's job.
+            // audit detail. The managed lifecycle, not a step payload, owns
+            // terminalization.
             record_tool_step(
                 &session_channel,
                 &req.run_id,
@@ -457,6 +505,7 @@ async fn run_agent_with_tools(
         success,
         rounds_executed,
         session_bearer.as_deref(),
+        terminal_tokens,
     )
     .await
 }
@@ -505,6 +554,28 @@ fn tool_step_id(run_id: &str, seq: u32, call: &pb::ToolCall) -> String {
     };
     let _ = run_id;
     format!("tool_{seq}_{suffix}")
+}
+
+/// Canonical signature used only to suppress exact retrieval loops. Invalid or
+/// unsupported inputs deliberately return `None` so the normal dispatch path
+/// can produce the authoritative validation error after capability policy.
+fn retrieval_signature(tool_name: &str, tool_input: &str) -> Option<String> {
+    if tool_name != "knowledge_search" {
+        return None;
+    }
+    let input = super::parse_knowledge_input(tool_input).ok()?;
+    let normalized_query = input
+        .query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "{}|{}|{}",
+        input.route.as_str(),
+        input.top_k,
+        normalized_query
+    ))
 }
 
 /// The read-tool allowlist offered to the model. JSON-Schema literals follow the
@@ -564,8 +635,8 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         },
         pb::ToolDefinition {
             name: "knowledge_search".to_owned(),
-            description: "Search the organization's OWN internal knowledge base (ingested documents) and return the most relevant passages. Prefer this for questions about the company's own data, docs, or products.".to_owned(),
-            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look up in the org knowledge base"},"top_k":{"type":"integer","description":"Max passages 1-20"}},"required":["query"]}"#.to_owned(),
+            description: "Search the organization's OWN internal knowledge base through Data Plane's server-managed hybrid retrieval (dense/vector + sparse when configured). Returns a typed JSON status; reformulate on no_results/low_confidence. Graph, SQL/tabular, MCP, and vector-only routes are not configured by this contract.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look up in the org knowledge base"},"top_k":{"type":"integer","minimum":1,"maximum":20,"description":"Max passages 1-20"},"route":{"type":"string","enum":["hybrid"],"description":"Supported server-managed Data Plane retrieval contract"}},"required":["query"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "list_provider_actions".to_owned(),
@@ -640,7 +711,22 @@ async fn record_tool_step(
         "[data_category={} zdr={zdr} tool={tool_name}] ",
         data_category(tool_name)
     );
-    let (output, error) = if outcome.error.is_empty() {
+    let (output, error) = if zdr {
+        // ZDR persistence is classification/audit metadata only. The borrowed
+        // `outcome` remains untouched and is still fed ephemerally to the next
+        // inference round; only the durable Session Core payload is redacted.
+        let result = if outcome.error.is_empty() {
+            "success"
+        } else {
+            "error"
+        };
+        let redacted = format!("{detail}[content_redacted=true result={result}]");
+        if outcome.error.is_empty() {
+            (redacted, String::new())
+        } else {
+            (redacted.clone(), redacted)
+        }
+    } else if outcome.error.is_empty() {
         (
             format!("{detail}{}", truncate(&outcome.output, OUTPUT_TRUNCATE)),
             String::new(),
@@ -680,10 +766,11 @@ async fn record_tool_step(
 }
 
 /// HITL pause: mint a durable approval for the gated tool (same shape as the
-/// `ExecuteStep` RPC), flip the run `AwaitingApproval`, and return an
-/// `awaiting_approval` response. Deliberately NO terminal `CompleteStep` and NO
-/// plan COMPLETED/FAILED transition — the run is paused, not finished; resume
-/// re-invokes `run_agent`.
+/// `ExecuteStep` RPC), then flip the run `AwaitingApproval` and return an
+/// `awaiting_approval` response. A persistence failure returns `unavailable`
+/// before either state change or pause event. Deliberately NO terminal
+/// `CompleteStep` and NO plan COMPLETED/FAILED transition — a durable run is
+/// paused, not finished; resume re-invokes `run_agent`.
 async fn pause_for_approval(
     state: &crate::state::StateStore,
     session_channel: &Channel,
@@ -692,7 +779,7 @@ async fn pause_for_approval(
     tool_name: &str,
     rounds_executed: u32,
     bearer: Option<&str>,
-) -> pb::RunAgentResponse {
+) -> Result<pb::RunAgentResponse, tonic::Status> {
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             run_id: req.run_id.clone(),
@@ -712,21 +799,18 @@ async fn pause_for_approval(
         },
         bearer,
     );
-    let result = match request {
-        Ok(request) => {
-            OrchestrationCoreServiceClient::new(session_channel.clone())
-                .create_approval(request)
-                .await
-        }
-        Err(error) => Err(error),
-    };
-    if let Err(error) = result {
-        warn!(
-            run_id = %req.run_id,
-            error = %error,
-            "run_agent: failed to create approval for paused step (best-effort)"
-        );
-    }
+    let request = request?;
+    OrchestrationCoreServiceClient::new(session_channel.clone())
+        .create_approval(request)
+        .await
+        .map_err(|error| {
+            warn!(
+                run_id = %req.run_id,
+                code = ?error.code(),
+                "run_agent: durable approval persistence unavailable"
+            );
+            tonic::Status::unavailable("approval persistence unavailable")
+        })?;
 
     let mut snapshot = state.get_or_create(&req.run_id);
     snapshot.status = crate::state::RunStatus::AwaitingApproval;
@@ -738,17 +822,90 @@ async fn pause_for_approval(
         "run_agent: run paused for approval (HITL)"
     );
 
-    pb::RunAgentResponse {
+    Ok(pb::RunAgentResponse {
         status: "awaiting_approval".to_owned(),
         final_output: String::new(),
         rounds_executed,
-    }
+    })
 }
 
-/// Persist the answer, finalize the run terminal, transition the plan, and
-/// snapshot the in-memory state. `success` selects the completed vs failed
-/// terminal path. Emits the ONE terminal `CompleteStep` (`step_id="final"`).
-/// Always returns a [`pb::RunAgentResponse`].
+/// Renew the server-owned terminalization deadline before another agent round.
+/// The producer cannot choose a deadline or carry any content in this request.
+async fn heartbeat_managed_agent_run(
+    session_channel: &Channel,
+    req: &pb::RunAgentRequest,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> Result<(), tonic::Status> {
+    let token = terminal_tokens
+        .heartbeat_token(&req.org_id)
+        .await
+        .map_err(|error| {
+            warn!(run_id = %req.run_id, %error, "run_agent: managed heartbeat token unavailable");
+            tonic::Status::unavailable("managed terminalization heartbeat unavailable")
+        })?;
+    ManagedRunLifecycleClient::new(session_channel.clone())
+        .heartbeat_managed_run(authenticated_session_request(
+            pb::HeartbeatManagedRunRequest {
+                run_id: req.run_id.clone(),
+                source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            Some(&token),
+        )?)
+        .await
+        .map_err(|error| {
+            warn!(run_id = %req.run_id, code = ?error.code(), "run_agent: managed heartbeat rejected");
+            tonic::Status::unavailable("managed terminalization heartbeat unavailable")
+        })?;
+    Ok(())
+}
+
+/// Record a terminal receipt before any local state or successful response is
+/// exposed. Session Core derives run owner/ZDR from `run_id`; this request has
+/// no output, prompt, tool payload, or arbitrary error fields.
+async fn record_managed_agent_terminal_outcome(
+    session_channel: &Channel,
+    req: &pb::RunAgentRequest,
+    success: bool,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> Result<(), tonic::Status> {
+    let token = terminal_tokens
+        .terminalize_token(&req.org_id)
+        .await
+        .map_err(|error| {
+            warn!(run_id = %req.run_id, %error, "run_agent: managed terminal token unavailable");
+            tonic::Status::unavailable("managed terminalization unavailable")
+        })?;
+    ManagedRunLifecycleClient::new(session_channel.clone())
+        .record_terminal_outcome(authenticated_session_request(
+            pb::RecordTerminalOutcomeRequest {
+                run_id: req.run_id.clone(),
+                source: pb::ManagedRunSource::ExecutionAgent as i32,
+                outcome: if success {
+                    pb::TerminalOutcome::Completed as i32
+                } else {
+                    pb::TerminalOutcome::Failed as i32
+                },
+                failure_code: if success {
+                    String::new()
+                } else {
+                    "execution_failed".to_owned()
+                },
+            },
+            Some(&token),
+        )?)
+        .await
+        .map_err(|error| {
+            warn!(run_id = %req.run_id, code = ?error.code(), "run_agent: managed terminal receipt rejected");
+            tonic::Status::unavailable("managed terminalization unavailable")
+        })?;
+    Ok(())
+}
+
+/// Persist the answer when retention permits, obtain the immutable managed
+/// terminal receipt, then transition local projection state. In ZDR mode the
+/// answer remains only in the returned response; Session Core receives
+/// content-free metadata. No successful response or local terminal state is
+/// exposed if the receipt cannot be obtained.
 #[allow(clippy::too_many_arguments)]
 async fn finalize(
     state: &crate::state::StateStore,
@@ -759,70 +916,54 @@ async fn finalize(
     success: bool,
     rounds_executed: u32,
     bearer: Option<&str>,
-) -> pb::RunAgentResponse {
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> Result<pb::RunAgentResponse, tonic::Status> {
     let mut session = SessionCoreClient::new(session_channel.clone());
+    let mut terminal_success = success;
+    let mut final_answer = answer.to_owned();
 
-    // 3. Persist the assistant answer (what ListConversation reads back).
-    let append_request = authenticated_session_request(
-        pb::AppendMessageRequest {
-            thread_id: req.thread_id.clone(),
-            role: "assistant".to_owned(),
-            content: answer.to_owned(),
-            metadata: None,
-        },
-        bearer,
-    );
-    let append_result = match append_request {
-        Ok(request) => session.append_message(request).await,
-        Err(error) => Err(error),
-    };
-    if let Err(error) = append_result {
-        warn!(
-            run_id = %req.run_id,
-            error = %error,
-            "run_agent: append_message(assistant) failed (best-effort)"
+    // 3. Persist the assistant answer only when retention permits it. An
+    // append failure becomes a durable failed receipt, never a success.
+    if !req.zdr {
+        let append_request = authenticated_session_request(
+            pb::AppendMessageRequest {
+                thread_id: req.thread_id.clone(),
+                role: "assistant".to_owned(),
+                content: answer.to_owned(),
+                metadata: None,
+            },
+            bearer,
         );
+        let append_result = match append_request {
+            Ok(request) => session.append_message(request).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = append_result {
+            warn!(
+                run_id = %req.run_id,
+                error = %error,
+                "run_agent: append_message(assistant) failed; terminalizing as failed"
+            );
+            terminal_success = false;
+            final_answer = GRACEFUL_FAILURE_REPLY.to_owned();
+        }
     }
 
-    // 4. Finalize: the ONLY terminal CompleteStep. session-core's
-    //    record_run_terminal flips runs.status queued→terminal + writes
-    //    RUN_COMPLETED on the FIRST completed/failed status, so this is called
-    //    exactly once.
-    let (status, output, error) = if success {
-        (
-            "completed",
-            truncate(answer, OUTPUT_TRUNCATE),
-            String::new(),
-        )
+    // 4. Session Core owns the terminal run + plan transaction. On failure do
+    // not mutate StateStore or return a terminal RunAgent response.
+    record_managed_agent_terminal_outcome(session_channel, req, terminal_success, terminal_tokens)
+        .await?;
+
+    let status = if terminal_success {
+        "completed"
     } else {
-        ("failed", String::new(), "agent inference failed".to_owned())
+        "failed"
     };
 
-    let complete_request = authenticated_session_request(
-        pb::CompleteStepRequest {
-            run_id: req.run_id.clone(),
-            step_id: "final".to_owned(),
-            status: status.to_owned(),
-            output,
-            error,
-            terminal: true,
-        },
-        bearer,
-    );
-    let complete_result = match complete_request {
-        Ok(request) => session.complete_step(request).await,
-        Err(error) => Err(error),
-    };
-    if let Err(rpc_error) = complete_result {
-        warn!(
-            run_id = %req.run_id,
-            error = %rpc_error,
-            "run_agent: complete_step(final) failed — run may remain non-terminal"
-        );
-    }
-
-    // 5. Plan: EXECUTING → COMPLETED | FAILED.
-    let to = if success {
+    // 5. Keep the existing orchestration event projection for observers after
+    // Session Core's durable plan update has succeeded. It is no longer the
+    // authority for the terminal transition.
+    let to = if terminal_success {
         pb::PlanState::Completed
     } else {
         pb::PlanState::Failed
@@ -837,18 +978,18 @@ async fn finalize(
     )
     .await;
 
-    // 6. Snapshot the in-memory StateStore so ResumeRun/CancelRun stay
-    //    consistent with the durable terminal status.
+    // 6. Only after the receipt is durable may the in-memory StateStore expose
+    // a terminal projection.
     let mut snapshot = state.get_or_create(&req.run_id);
-    snapshot.status = if success {
+    snapshot.status = if terminal_success {
         crate::state::RunStatus::Completed
     } else {
         crate::state::RunStatus::Failed
     };
-    snapshot.last_error = if success {
+    snapshot.last_error = if terminal_success {
         None
     } else {
-        Some("agent inference failed".to_owned())
+        Some("execution_failed".to_owned())
     };
     state.update(snapshot);
 
@@ -858,11 +999,11 @@ async fn finalize(
         "run_agent: run finalized"
     );
 
-    pb::RunAgentResponse {
+    Ok(pb::RunAgentResponse {
         status: status.to_owned(),
-        final_output: answer.to_owned(),
+        final_output: final_answer,
         rounds_executed,
-    }
+    })
 }
 
 /// Publish a `PlanTransitioned` orchestration event on session-core's broadcast
@@ -938,8 +1079,10 @@ fn truncate(value: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_terminal_auth::SessionTerminalTokenError;
     use mp_contracts::model_plane::v1::{
         inference_core_server::{InferenceCore, InferenceCoreServer},
+        managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
         orchestration_core_service_server::{
             OrchestrationCoreService, OrchestrationCoreServiceServer,
         },
@@ -954,6 +1097,37 @@ mod tests {
         Request, Response, Status,
     };
 
+    #[test]
+    fn canonical_retrieval_signature_detects_exact_duplicate_queries() {
+        let first = retrieval_signature(
+            "knowledge_search",
+            r#"{"query":" Quarterly   Revenue ","top_k":5}"#,
+        )
+        .expect("knowledge search signature");
+        let same = retrieval_signature(
+            "knowledge_search",
+            r#"{"top_k":5,"query":"quarterly revenue","route":"hybrid"}"#,
+        )
+        .expect("knowledge search signature");
+        let broadened = retrieval_signature(
+            "knowledge_search",
+            r#"{"query":"quarterly revenue by region","top_k":5}"#,
+        )
+        .expect("knowledge search signature");
+
+        assert_eq!(first, same);
+        assert_ne!(first, broadened);
+    }
+
+    #[test]
+    fn duplicate_tracking_applies_only_to_valid_knowledge_retrieval() {
+        assert!(retrieval_signature("web_search", r#"{"query":"q"}"#).is_none());
+        assert!(retrieval_signature("knowledge_search", "not-json").is_none());
+        assert!(
+            retrieval_signature("knowledge_search", r#"{"query":"q","route":"graph"}"#).is_none()
+        );
+    }
+
     type InferStream = Pin<Box<dyn futures::Stream<Item = Result<pb::InferChunk, Status>> + Send>>;
     type VideoStream = Pin<
         Box<
@@ -965,19 +1139,62 @@ mod tests {
     type RunEventStream =
         Pin<Box<dyn futures::Stream<Item = Result<pb::OrchestrationEvent, Status>> + Send>>;
 
-    /// Records the calls the driver made into session-core / orchestration, so
-    /// the test can assert exactly-once `AppendMessage`(assistant) +
-    /// `CompleteStep`, the per-tool non-terminal steps, and any approval.
+    struct AllowCapabilityPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowCapabilityPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    static ALLOW_CAPABILITY_POLICY: AllowCapabilityPolicy = AllowCapabilityPolicy;
+
+    /// Records the calls the driver made into Session Core / orchestration, so
+    /// tests can distinguish non-terminal legacy tool audit steps from the
+    /// immutable managed terminal receipt.
     #[derive(Default)]
     struct Recorder {
         appended_assistant: Vec<String>,
-        completed: Vec<(String, String)>,  // (step_id, status)
-        plan_transitions: Vec<(i32, i32)>, // (from, to)
-        approvals: Vec<(String, String)>,  // (step_id, reason)
-        decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
+        completed: Vec<(String, String)>, // (step_id, status)
+        persisted_step_payloads: Vec<(String, String, String)>, // (step_id, output, error)
+        managed_terminal_outcomes: Vec<(String, i32, i32, String)>, // (run_id, source, outcome, failure_code)
+        managed_heartbeats: Vec<(String, i32)>,                     // (run_id, source)
+        plan_transitions: Vec<(i32, i32)>,                          // (from, to)
+        approvals: Vec<(String, String)>,                           // (step_id, reason)
+        decisions: Vec<(String, i32)>, // (approval_id, decision) — DecideApproval
     }
 
     type SharedRecorder = Arc<Mutex<Recorder>>;
+
+    /// Test-only fixed-scope service credential source. It deliberately does
+    /// not accept a caller's delegated session bearer, mirroring production's
+    /// distinct Auth Core service credential boundary.
+    struct StaticTerminalTokens;
+
+    #[tonic::async_trait]
+    impl ManagedRunTokenProvider for StaticTerminalTokens {
+        async fn terminalize_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-terminalize-service-token".to_owned())
+        }
+
+        async fn heartbeat_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-heartbeat-service-token".to_owned())
+        }
+    }
+
+    static STATIC_TERMINAL_TOKENS: StaticTerminalTokens = StaticTerminalTokens;
 
     /// One scripted inference outcome the mock returns per round.
     #[derive(Clone)]
@@ -1244,11 +1461,11 @@ mod tests {
             request: Request<pb::CompleteStepRequest>,
         ) -> Result<Response<pb::CompleteStepResponse>, Status> {
             let req = request.into_inner();
-            self.rec
-                .lock()
-                .unwrap()
-                .completed
-                .push((req.step_id, req.status));
+            let mut recorder = self.rec.lock().unwrap();
+            recorder.completed.push((req.step_id.clone(), req.status));
+            recorder
+                .persisted_step_payloads
+                .push((req.step_id, req.output, req.error));
             Ok(Response::new(pb::CompleteStepResponse { step_index: 1 }))
         }
 
@@ -1330,10 +1547,90 @@ mod tests {
         }
     }
 
+    // --- Managed terminalization mock: records immutable receipt operations. ---
+
+    struct MockManagedRunLifecycle {
+        rec: SharedRecorder,
+        fail_terminal_receipt: bool,
+    }
+
+    #[tonic::async_trait]
+    impl ManagedRunLifecycle for MockManagedRunLifecycle {
+        async fn start_managed_run(
+            &self,
+            _: Request<pb::StartManagedRunRequest>,
+        ) -> Result<Response<pb::StartManagedRunResponse>, Status> {
+            Err(Status::unimplemented("start_managed_run not used"))
+        }
+
+        async fn record_terminal_outcome(
+            &self,
+            request: Request<pb::RecordTerminalOutcomeRequest>,
+        ) -> Result<Response<pb::RecordTerminalOutcomeResponse>, Status> {
+            if request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer test-terminalize-service-token")
+            {
+                return Err(Status::unauthenticated(
+                    "managed terminal receipt requires its service credential",
+                ));
+            }
+            if self.fail_terminal_receipt {
+                return Err(Status::unavailable("managed terminal receipt unavailable"));
+            }
+            let req = request.into_inner();
+            self.rec.lock().unwrap().managed_terminal_outcomes.push((
+                req.run_id.clone(),
+                req.source,
+                req.outcome,
+                req.failure_code,
+            ));
+            Ok(Response::new(pb::RecordTerminalOutcomeResponse {
+                run_id: req.run_id,
+                source: req.source,
+                terminal_step_id: "execution-core-agent-final".to_owned(),
+                step_index: 1,
+                receipt_id: "receipt-test".to_owned(),
+                applied_at: None,
+                already_applied: false,
+                reconciliation_required: false,
+            }))
+        }
+
+        async fn heartbeat_managed_run(
+            &self,
+            request: Request<pb::HeartbeatManagedRunRequest>,
+        ) -> Result<Response<pb::HeartbeatManagedRunResponse>, Status> {
+            if request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer test-heartbeat-service-token")
+            {
+                return Err(Status::unauthenticated(
+                    "managed heartbeat requires its service credential",
+                ));
+            }
+            let req = request.into_inner();
+            self.rec
+                .lock()
+                .unwrap()
+                .managed_heartbeats
+                .push((req.run_id, req.source));
+            Ok(Response::new(pb::HeartbeatManagedRunResponse {
+                renewed_until: None,
+                already_terminal: false,
+            }))
+        }
+    }
+
     // --- Orchestration mock: records PlanTransitioned events. ---
 
     struct MockOrchestration {
         rec: SharedRecorder,
+        fail_create_approval: bool,
     }
 
     #[tonic::async_trait]
@@ -1406,6 +1703,9 @@ mod tests {
             &self,
             request: Request<pb::CreateApprovalRequest>,
         ) -> Result<Response<pb::CreateApprovalResponse>, Status> {
+            if self.fail_create_approval {
+                return Err(Status::unavailable("approval persistence unavailable"));
+            }
             let req = request.into_inner();
             self.rec
                 .lock()
@@ -1470,6 +1770,22 @@ mod tests {
             }))
         }
 
+        async fn claim_approval_deliveries(
+            &self,
+            _: Request<pb::ClaimApprovalDeliveriesRequest>,
+        ) -> Result<Response<pb::ClaimApprovalDeliveriesResponse>, Status> {
+            Err(Status::unimplemented("claim_approval_deliveries not used"))
+        }
+
+        async fn acknowledge_approval_delivery(
+            &self,
+            _: Request<pb::AcknowledgeApprovalDeliveryRequest>,
+        ) -> Result<Response<pb::AcknowledgeApprovalDeliveryResponse>, Status> {
+            Err(Status::unimplemented(
+                "acknowledge_approval_delivery not used",
+            ))
+        }
+
         async fn get_subagent_lineage(
             &self,
             _: Request<pb::GetSubagentLineageRequest>,
@@ -1492,9 +1808,29 @@ mod tests {
         }
     }
 
-    /// Bind an ephemeral in-process tonic server hosting both `SessionCore` and
-    /// `OrchestrationCoreService` (they share session-core's channel in prod).
+    /// Bind an ephemeral in-process tonic server hosting Session Core,
+    /// orchestration, and managed terminalization (they share one channel in
+    /// production).
     async fn spawn_session_channel(rec: SharedRecorder) -> Channel {
+        spawn_session_channel_with_failures(rec, false, false).await
+    }
+
+    async fn spawn_session_channel_with_approval_failure(
+        rec: SharedRecorder,
+        fail_create_approval: bool,
+    ) -> Channel {
+        spawn_session_channel_with_failures(rec, fail_create_approval, false).await
+    }
+
+    async fn spawn_session_channel_with_terminal_receipt_failure(rec: SharedRecorder) -> Channel {
+        spawn_session_channel_with_failures(rec, false, true).await
+    }
+
+    async fn spawn_session_channel_with_failures(
+        rec: SharedRecorder,
+        fail_create_approval: bool,
+        fail_terminal_receipt: bool,
+    ) -> Channel {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind session");
@@ -1503,7 +1839,12 @@ mod tests {
             Server::builder()
                 .add_service(SessionCoreServer::new(MockSession { rec: rec.clone() }))
                 .add_service(OrchestrationCoreServiceServer::new(MockOrchestration {
+                    rec: rec.clone(),
+                    fail_create_approval,
+                }))
+                .add_service(ManagedRunLifecycleServer::new(MockManagedRunLifecycle {
                     rec,
+                    fail_terminal_receipt,
                 }))
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
@@ -1565,6 +1906,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zdr_tool_step_persistence_is_metadata_only_for_success_and_error() {
+        const PRIVATE_OUTPUT: &str = "customer revenue is 12,345 NOK";
+        const PRIVATE_ERROR: &str = "retrieval failed for secret acquisition query";
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let success = StepOutcome {
+            status: "completed".to_owned(),
+            output: PRIVATE_OUTPUT.to_owned(),
+            error: String::new(),
+            compaction_triggered: false,
+        };
+        let degraded = StepOutcome {
+            status: "failed".to_owned(),
+            output: String::new(),
+            error: PRIVATE_ERROR.to_owned(),
+            compaction_triggered: false,
+        };
+
+        record_tool_step(
+            &session_channel,
+            "run-zdr",
+            "success-zdr",
+            "knowledge_search",
+            &success,
+            true,
+            Some("session-token"),
+        )
+        .await;
+        record_tool_step(
+            &session_channel,
+            "run-zdr",
+            "error-zdr",
+            "knowledge_search",
+            &degraded,
+            true,
+            Some("session-token"),
+        )
+        .await;
+
+        // Persistence redaction must not mutate the ephemeral result that the
+        // current agent round receives and may use for reasoning.
+        assert_eq!(success.output, PRIVATE_OUTPUT);
+        assert_eq!(degraded.error, PRIVATE_ERROR);
+
+        let r = rec.lock().unwrap();
+        for (step_id, output, error) in &r.persisted_step_payloads {
+            assert!(!output.contains(PRIVATE_OUTPUT), "{step_id} leaked output");
+            assert!(!output.contains(PRIVATE_ERROR), "{step_id} leaked error");
+            assert!(!error.contains(PRIVATE_OUTPUT), "{step_id} leaked output");
+            assert!(!error.contains(PRIVATE_ERROR), "{step_id} leaked error");
+            assert!(output.contains("zdr=true"));
+            assert!(output.contains("content_redacted=true"));
+        }
+        assert!(r.persisted_step_payloads[0].2.is_empty());
+        assert!(r.persisted_step_payloads[1].2.contains("result=error"));
+    }
+
+    #[tokio::test]
+    async fn non_zdr_tool_step_persistence_keeps_existing_content_behavior() {
+        const TOOL_OUTPUT: &str = "ordinary persisted tool output";
+        const TOOL_ERROR: &str = "ordinary persisted tool error";
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let success = StepOutcome {
+            status: "completed".to_owned(),
+            output: TOOL_OUTPUT.to_owned(),
+            error: String::new(),
+            compaction_triggered: false,
+        };
+        let failure = StepOutcome {
+            status: "failed".to_owned(),
+            output: String::new(),
+            error: TOOL_ERROR.to_owned(),
+            compaction_triggered: false,
+        };
+
+        record_tool_step(
+            &session_channel,
+            "run-persistent",
+            "success-persistent",
+            "knowledge_search",
+            &success,
+            false,
+            Some("session-token"),
+        )
+        .await;
+        record_tool_step(
+            &session_channel,
+            "run-persistent",
+            "error-persistent",
+            "knowledge_search",
+            &failure,
+            false,
+            Some("session-token"),
+        )
+        .await;
+
+        let r = rec.lock().unwrap();
+        assert!(r.persisted_step_payloads[0].1.contains(TOOL_OUTPUT));
+        assert!(r.persisted_step_payloads[0].2.is_empty());
+        assert!(r.persisted_step_payloads[1].2.contains(TOOL_ERROR));
+        assert!(!r.persisted_step_payloads[0]
+            .1
+            .contains("content_redacted=true"));
+    }
+
+    #[tokio::test]
     async fn no_tool_run_persists_answer_completes_and_transitions() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -1580,8 +2028,11 @@ mod tests {
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
         )
-        .await;
+        .await
+        .expect("ordinary agent run should succeed");
 
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.final_output, "The answer is 4.");
@@ -1594,8 +2045,26 @@ mod tests {
             "exactly one assistant message"
         );
         assert_eq!(r.appended_assistant[0], "The answer is 4.");
-        assert_eq!(r.completed.len(), 1, "exactly one terminal CompleteStep");
-        assert_eq!(r.completed[0], ("final".to_owned(), "completed".to_owned()));
+        assert!(
+            r.completed.is_empty(),
+            "a no-tool run must not use legacy CompleteStep for terminalization"
+        );
+        assert_eq!(
+            r.managed_terminal_outcomes,
+            vec![(
+                "run_test".to_owned(),
+                pb::ManagedRunSource::ExecutionAgent as i32,
+                pb::TerminalOutcome::Completed as i32,
+                String::new(),
+            )],
+            "the managed receipt is the sole terminal authority"
+        );
+        assert!(
+            r.managed_heartbeats
+                .iter()
+                .all(|(_, source)| *source == pb::ManagedRunSource::ExecutionAgent as i32),
+            "only Execution Core may renew an agent run"
+        );
         assert_eq!(
             r.plan_transitions,
             vec![
@@ -1640,15 +2109,43 @@ mod tests {
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
         )
-        .await;
+        .await
+        .expect("ZDR agent run should succeed");
 
         assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output, "ok",
+            "the caller still receives the ephemeral answer"
+        );
         let observed = observed_zdr.lock().unwrap();
         assert_eq!(observed.len(), 1, "exactly one inference round");
         assert!(
             observed[0],
             "the run's zdr=true must be threaded into the InferRequest"
+        );
+        drop(observed);
+
+        let r = rec.lock().unwrap();
+        assert!(
+            r.appended_assistant.is_empty(),
+            "ZDR must not append the assistant answer to durable conversation storage"
+        );
+        assert!(
+            r.completed.is_empty() && r.persisted_step_payloads.is_empty(),
+            "ZDR terminalization must not write a legacy final content payload"
+        );
+        assert_eq!(
+            r.managed_terminal_outcomes,
+            vec![(
+                "run_test".to_owned(),
+                pb::ManagedRunSource::ExecutionAgent as i32,
+                pb::TerminalOutcome::Completed as i32,
+                String::new(),
+            )],
+            "the metadata-only managed receipt carries no response content"
         );
     }
 
@@ -1667,8 +2164,11 @@ mod tests {
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
         )
-        .await;
+        .await
+        .expect("inference failure should be finalized as a response");
 
         assert_eq!(resp.status, "failed");
         assert_eq!(resp.final_output, GRACEFUL_FAILURE_REPLY);
@@ -1680,8 +2180,19 @@ mod tests {
             "a graceful assistant reply is still appended"
         );
         assert_eq!(r.appended_assistant[0], GRACEFUL_FAILURE_REPLY);
-        assert_eq!(r.completed.len(), 1, "exactly one terminal CompleteStep");
-        assert_eq!(r.completed[0], ("final".to_owned(), "failed".to_owned()));
+        assert!(
+            r.completed.is_empty(),
+            "inference failure must not fall back to a legacy terminal CompleteStep"
+        );
+        assert_eq!(
+            r.managed_terminal_outcomes,
+            vec![(
+                "run_test".to_owned(),
+                pb::ManagedRunSource::ExecutionAgent as i32,
+                pb::TerminalOutcome::Failed as i32,
+                "execution_failed".to_owned(),
+            )]
+        );
         assert_eq!(
             r.plan_transitions,
             vec![
@@ -1697,6 +2208,51 @@ mod tests {
         assert_eq!(
             state.get_or_create("run_test").status,
             crate::state::RunStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_receipt_failure_does_not_expose_terminal_projection() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel =
+            spawn_session_channel_with_terminal_receipt_failure(rec.clone()).await;
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("The answer is 4.".to_owned())]).await;
+        let state = crate::state::StateStore::new();
+
+        let error = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect_err("a missing durable terminal receipt must fail the agent run");
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(
+            state.snapshot("run_test").is_none(),
+            "the local state projection cannot become terminal without Session Core's receipt"
+        );
+
+        let r = rec.lock().unwrap();
+        assert!(
+            r.managed_terminal_outcomes.is_empty(),
+            "the failed RPC produced no durable terminal receipt"
+        );
+        assert!(
+            r.completed.is_empty(),
+            "the failure must not fall back to legacy CompleteStep terminalization"
+        );
+        assert_eq!(
+            r.plan_transitions,
+            vec![(pb::PlanState::Draft as i32, pb::PlanState::Executing as i32)],
+            "the terminal projection event is held until the receipt succeeds"
         );
     }
 
@@ -1731,8 +2287,11 @@ mod tests {
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
         )
-        .await;
+        .await
+        .expect("multi-tool agent run should succeed");
 
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.final_output, "Here is the weather summary.");
@@ -1743,25 +2302,22 @@ mod tests {
         assert_eq!(r.appended_assistant.len(), 1);
         assert_eq!(r.appended_assistant[0], "Here is the weather summary.");
 
-        // The per-tool step was recorded with a NON-TERMINAL status, proving the
-        // tool was dispatched through execute_step; and there is EXACTLY ONE
-        // terminal CompleteStep.
+        // The per-tool step is recorded through the legacy non-terminal audit
+        // API. The terminal authority is the separate immutable receipt.
         assert_eq!(
             r.completed,
-            vec![
-                ("tool_1_call-1".to_owned(), "running".to_owned()),
-                ("final".to_owned(), "completed".to_owned()),
-            ],
-            "one non-terminal per-tool step then one terminal final step"
+            vec![("tool_1_call-1".to_owned(), "running".to_owned())],
+            "the tool audit is non-terminal"
         );
-        let terminal = r
-            .completed
-            .iter()
-            .filter(|(_, status)| status == "completed" || status == "failed")
-            .count();
         assert_eq!(
-            terminal, 1,
-            "TERMINAL-ONCE: exactly one terminal CompleteStep"
+            r.managed_terminal_outcomes,
+            vec![(
+                "run_test".to_owned(),
+                pb::ManagedRunSource::ExecutionAgent as i32,
+                pb::TerminalOutcome::Completed as i32,
+                String::new(),
+            )],
+            "TERMINAL-ONCE: exactly one immutable managed receipt"
         );
 
         assert_eq!(
@@ -1775,6 +2331,69 @@ mod tests {
             ]
         );
         assert!(r.approvals.is_empty(), "non-risky tools need no approval");
+    }
+
+    #[tokio::test]
+    async fn exact_duplicate_retrieval_is_suppressed_but_run_can_backtrack() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let first = pb::ToolCall {
+            id: "search-1".to_owned(),
+            name: "knowledge_search".to_owned(),
+            arguments_json: r#"{"query":"Quarterly revenue","top_k":5}"#.to_owned(),
+        };
+        let duplicate = pb::ToolCall {
+            id: "search-2".to_owned(),
+            name: "knowledge_search".to_owned(),
+            arguments_json: r#"{"route":"hybrid","top_k":5,"query":" quarterly   REVENUE "}"#
+                .to_owned(),
+        };
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: "I will retrieve evidence.".to_owned(),
+                calls: vec![first],
+            },
+            Scripted::ToolCalls {
+                content: "I will try again.".to_owned(),
+                calls: vec![duplicate],
+            },
+            Scripted::Answer("I could not verify the revenue from available evidence.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            vec![pb::ToolDefinition {
+                name: "knowledge_search".to_owned(),
+                description: "Search knowledge".to_owned(),
+                parameters_json: "{}".to_owned(),
+            }],
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("duplicate retrieval run should succeed");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.rounds_executed, 3);
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.completed,
+            vec![("tool_1_search-1".to_owned(), "running".to_owned())],
+            "the duplicate is not dispatched or recorded as a second retrieval"
+        );
+        assert_eq!(r.managed_terminal_outcomes.len(), 1);
+        assert_eq!(
+            r.managed_terminal_outcomes[0].2,
+            pb::TerminalOutcome::Completed as i32
+        );
     }
 
     #[tokio::test]
@@ -1816,8 +2435,11 @@ mod tests {
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
         )
-        .await;
+        .await
+        .expect("durable approval should pause the run");
 
         assert_eq!(resp.status, "awaiting_approval");
         assert_eq!(resp.final_output, "");
@@ -1829,6 +2451,10 @@ mod tests {
         // Paused, not finished: no terminal step, no assistant answer, and the
         // plan stops at EXECUTING (no COMPLETED/FAILED transition).
         assert!(r.completed.is_empty(), "no CompleteStep on a paused run");
+        assert!(
+            r.managed_terminal_outcomes.is_empty(),
+            "a pause must not emit a managed terminal receipt"
+        );
         assert!(r.appended_assistant.is_empty());
         assert_eq!(
             r.plan_transitions,
@@ -1839,6 +2465,65 @@ mod tests {
         assert_eq!(
             state.get_or_create("run_test").status,
             crate::state::RunStatus::AwaitingApproval
+        );
+    }
+
+    #[tokio::test]
+    async fn gated_tool_rejects_an_undurable_approval_pause() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel_with_approval_failure(rec.clone(), true).await;
+        let call = pb::ToolCall {
+            id: "del-undurable".to_owned(),
+            name: "delete_records".to_owned(),
+            arguments_json: "{}".to_owned(),
+        };
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![call],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+
+        let error = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            vec![pb::ToolDefinition {
+                name: "delete_records".to_owned(),
+                description: "Delete records (destructive).".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }],
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect_err("an unpersisted approval must fail the agent HITL path");
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        let recorder = rec.lock().unwrap();
+        assert!(
+            recorder.approvals.is_empty(),
+            "no durable approval was created"
+        );
+        assert!(
+            recorder.completed.is_empty(),
+            "an undurable pause must not emit a terminal or paused step"
+        );
+        assert!(
+            recorder.managed_terminal_outcomes.is_empty(),
+            "an undurable pause must not emit a managed terminal receipt"
+        );
+        drop(recorder);
+        assert_ne!(
+            state.snapshot("run_test").map(|snapshot| snapshot.status),
+            Some(crate::state::RunStatus::AwaitingApproval),
+            "the in-memory state must not claim a durable pause"
         );
     }
 
@@ -1889,8 +2574,11 @@ mod tests {
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
         )
-        .await;
+        .await
+        .expect("provider write run should succeed");
         assert_eq!(resp.status, "completed");
 
         let r = rec.lock().unwrap();

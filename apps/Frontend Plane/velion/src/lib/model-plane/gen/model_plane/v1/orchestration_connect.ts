@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AttachSubagentRequest, AttachSubagentResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
+import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -145,6 +145,32 @@ export const OrchestrationCoreService = {
       name: "DecideApproval",
       I: DecideApprovalRequest,
       O: DecideApprovalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Claim due durable approval deliveries for an authenticated internal
+     * worker. Claims are tenant-scoped, leased, and opaque; the caller identity
+     * is derived from its verified service credential, never from this request.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries
+     */
+    claimApprovalDeliveries: {
+      name: "ClaimApprovalDeliveries",
+      I: ClaimApprovalDeliveriesRequest,
+      O: ClaimApprovalDeliveriesResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Acknowledge a claimed delivery as retryable or terminal. There is no
+     * delivered outcome until Execution Core can present a durable, authenticated
+     * continuation receipt proving that the paused work actually restarted.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery
+     */
+    acknowledgeApprovalDelivery: {
+      name: "AcknowledgeApprovalDelivery",
+      I: AcknowledgeApprovalDeliveryRequest,
+      O: AcknowledgeApprovalDeliveryResponse,
       kind: MethodKind.Unary,
     },
     /**

@@ -4,6 +4,36 @@ Generated: 2026-07-11 (supersedes the 2026-06-09 pass)
 
 Scope: `apps/Model Plane/rust/services/execution-core`
 
+## 2026-07-16 delta
+
+At 2026-07-16 20:05 CEST, the local integration container is healthy with
+restart count zero and additive gRPC `:9093` is loopback-reachable;
+unauthenticated dispatch rejects. A valid execution identity reached Capability
+Core, `cap.retrieval.query` denied as `health_not_attested`, and wrong-org reuse
+was denied. Forged approval decisions did not change durable counts. This is
+fail-closed live evidence, not a successful tool or approval continuation.
+Capability Core policy is now enforced before every direct and
+agentic dispatch: deny/outage fail closed and `ask` enters the approval gate.
+Session stores one content-free delivery intent per grant, but no authenticated
+dispatcher can restart and acknowledge the exited agent continuation. The outbox has
+claim/lease, bounded retry/backoff, poison/terminal, and acknowledgement-state
+primitives, but there is no restartable descriptor, authenticated dispatcher,
+or success receipt. Approval resume returns `Unavailable` rather than merely
+flipping process-local state and claiming success. Signed ZDR is preserved at
+execution ingress and delegation; a caller cannot downgrade it before dispatch.
+Knowledge search emits typed hybrid results, guides bounded
+reformulation/backtracking, suppresses exact repeats, distinguishes degraded
+from empty, and redacts durable tool content under ZDR. Structured/tabular,
+graph, vector-only, and MCP retrieval are not configured. Final candidate test
+evidence is now source-only: at 15:10 CEST the execution all-target suite
+passed (225 library + 17 integration tests; one live Quarry test intentionally
+ignored), but no positive live execution/HITL/retrieval proof exists. Browser results
+are typed across loop/bridge/runtime: only explicit success becomes completed;
+approval denial, timeout, and resource exhaustion fail; cancelled/aborted work
+remains cancellation. This does not solve P0 managed-run terminalization:
+Execution still lacks a durable Session Core outcome receipt/reconciliation
+contract after a producer crash or ambiguous terminal RPC response.
+
 ## 2026-07-13 secure-MVP correction
 
 The historical WIP description below is retained as audit history. Current
@@ -15,12 +45,12 @@ accepts only `AwaitingApproval` or `Paused`. `Completed`, `Failed`, `Cancelled`,
 `Running`, and unknown runs return `resumed=false` without mutation, so an
 identical approval replay cannot reactivate terminal work.
 
-The full package suite passes **201** tests; one live Quarry E2E remains ignored.
-Strict clippy and formatting pass, and the new `StateStore::resume` measured
-**93.75%** LLVM region coverage. This is source evidence only. No rebuild or
+Earlier command counts below are historical and must not be reused for the
+current uncommitted aggregate. This remains source evidence only. No rebuild or
 deployment occurred, `ResumeRunRequest` still has no approval ID for durable
-approval-to-resume binding, and decision/resume still requires a transactional
-outbox/reconciler. The do-not-rebuild decision remains binding.
+approval-to-resume binding, and continuation dispatch still requires a durable
+descriptor, authenticated dispatcher, and success receipt. The do-not-rebuild
+decision remains binding.
 
 Audit environment caveat: Docker's containerd content store is corrupted this
 pass — `docker exec`/`build`/`logs` fail fleet-wide. Every finding is graded

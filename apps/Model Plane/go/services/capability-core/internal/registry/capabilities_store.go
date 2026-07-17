@@ -213,6 +213,25 @@ func (s *CapabilitiesStore) GetForOrg(ctx context.Context, id, orgID string) (*C
 	return scanCapabilityRow(row)
 }
 
+// GetGlobal returns only a process-wide capability row. Global health
+// authorities use this exact lookup so a privileged attestation cannot be
+// redirected to a tenant-owned row with the same capability identifier.
+func (s *CapabilitiesStore) GetGlobal(ctx context.Context, id string) (*CapabilityRow, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, kind, name, version, description,
+		       risk_level, scope, lazy_load, enabled, idempotency_key,
+		       schema_input, schema_output, config_json, tags, enabled_for_scopes,
+		       success_rate, schema_fail_rate, p95_latency_ms, mean_cost_usd,
+		       approval_rate, incident_count, operator_rating, rollout_state,
+		       availability_state, availability_reason_code, availability_reason,
+		       execution_mode, cost_class, health_checked_at,
+		       created_by, created_at, updated_at
+		FROM capabilities
+		WHERE id = $1 AND org_id = 'global' AND deleted_at IS NULL
+	`, id)
+	return scanCapabilityRow(row)
+}
+
 // List returns capabilities, optionally filtered by org, kind, and rollout state.
 func (s *CapabilitiesStore) List(ctx context.Context, orgID, kind, rollout string, onlyEnabled bool, limit, offset int) ([]*CapabilityRow, error) {
 	if limit <= 0 {
@@ -361,6 +380,52 @@ func (s *CapabilitiesStore) AttestAvailabilityForOrg(ctx context.Context, id, or
 		FROM updated
 	`, update.State, update.ReasonCode, update.Reason, update.ExecutionMode,
 		update.CostClass, update.HealthCheckedAt.UTC(), id, orgID, update.ExpectedVersion, auditID, actor, diffJSON)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+// AttestAvailabilityGlobal atomically records a health attestation for a
+// process-wide capability. It is deliberately separate from the tenant path:
+// only the dedicated global health-authority scope reaches this method, and
+// the query cannot be redirected to a tenant-owned capability row.
+func (s *CapabilitiesStore) AttestAvailabilityGlobal(ctx context.Context, id, actor string, update AvailabilityUpdate) (bool, error) {
+	if id == "" || actor == "" || update.ExpectedVersion == "" {
+		return false, fmt.Errorf("capability, version, and actor are required")
+	}
+	diffJSON, err := json.Marshal(map[string]any{
+		"state":             update.State,
+		"version":           update.ExpectedVersion,
+		"reason_code":       update.ReasonCode,
+		"execution_mode":    update.ExecutionMode,
+		"cost_class":        update.CostClass,
+		"health_checked_at": update.HealthCheckedAt.UTC(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal global availability audit: %w", err)
+	}
+	auditID := "ral_" + uuid.NewString()
+	result, err := s.pool.Exec(ctx, `
+		WITH updated AS (
+		UPDATE capabilities
+		SET availability_state = $1,
+		    availability_reason_code = $2,
+		    availability_reason = $3,
+		    execution_mode = $4,
+		    cost_class = $5,
+		    health_checked_at = $6,
+		    updated_at = $6
+		WHERE id = $7 AND org_id = 'global' AND version = $8 AND deleted_at IS NULL
+		  AND (health_checked_at IS NULL OR health_checked_at < $6)
+		RETURNING id, org_id
+		)
+		INSERT INTO registry_audit_log
+		    (id, entity_kind, entity_id, action, actor, org_id, diff_json)
+		SELECT $9, 'capability', updated.id, 'global_availability_attested', $10, updated.org_id, $11::jsonb
+		FROM updated
+	`, update.State, update.ReasonCode, update.Reason, update.ExecutionMode,
+		update.CostClass, update.HealthCheckedAt.UTC(), id, update.ExpectedVersion, auditID, actor, diffJSON)
 	if err != nil {
 		return false, err
 	}

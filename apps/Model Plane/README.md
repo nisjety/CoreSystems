@@ -1,12 +1,46 @@
 # Model Plane
 
-> **Current release status — 2026-07-13:** not production-ready. The running `model-gateway` and `inference-core` have green HTTP health but no required gRPC listeners, so chat/inference/query embedding are down. Live cost/session/capability boundaries remain unauthenticated, semantic memory is degraded, and no Visma runtime integration exists. Authenticated/tenant-scoped source restoration, exact audience issuance/callers, terminal-safe approval replay, and the ordinary invoke graph pass source tests but are not deployed. Approval outbox/cache recovery, durable browser ownership, background callers, capability dispatch authority, release-database proof, a verified ZDR provider route, and rollback/live gates remain incomplete. Read [MODEL_PLANE_STATUS.md](MODEL_PLANE_STATUS.md), [plane-audit-2026-07-13.md](docs/core-research/plane-audit-2026-07-13.md), and [grpc-safe-rebuild-decision-2026-07-13.md](docs/core-research/grpc-safe-rebuild-decision-2026-07-13.md) before using the historical 2026-07-11 claims below.
+> **Current release status — 2026-07-16:** not production-ready and do not
+> rebuild/deploy yet. There are no Model Plane containers, images, or listeners
+> on the audited host, and no immutable rollback artifact. Source restores
+> gateway/inference gRPC listeners with bind-aware readiness, protects cost and
+> tool dispatch, has durable approval read-through plus claim/lease/retry/
+> terminal primitives, and provides typed multi-step hybrid retrieval plus
+> optional non-authoritative Letta tool-definition ranking. These changes are
+> not live. Approval continuation still lacks a restartable descriptor,
+> authenticated dispatcher, and successful execution receipt. Capability health
+> has a global-only scoped attestation path but no configured/attested reporter.
+> NATS has distinct named principals and no generic `model-runtime` principal,
+> but no TLS/mTLS/workload identity. Signed ZDR cannot be downgraded at
+> execution ingress and all unattested inference modalities fail closed before
+> provider I/O; interactive all-ZDR identity still has no independently verified
+> ZDR provider. Browser terminal statuses now fail/cancel honestly rather than
+> falsely completing, but durable managed-run terminalization/reconciliation is
+> still a P0 blocker. Artifact v2 requires signed verification, compatibility
+> gates, an external allowlisted runtime environment, and a separate verified
+> rollback artifact; no artifact exists.
+> Read [MODEL_PLANE_STATUS.md](MODEL_PLANE_STATUS.md),
+> [plane-audit-2026-07-16.md](docs/core-research/plane-audit-2026-07-16.md), and
+> [grpc-safe-rebuild-decision-2026-07-16.md](docs/core-research/grpc-safe-rebuild-decision-2026-07-16.md).
+> The 2026-07-11 and 2026-07-13 reports below are historical evidence, not
+> current runtime claims.
 
 Rust-first runtime and Go control shell for the CoreSystem AI reasoning layer (Layer 4). Replaces Model Plane v2 through incremental cutover.
 
-> **Verified 2026-07-11** — Live audit against running services and current source. All four Rust services healthy: `model-gateway` `/healthz` 200 (`/health` 401 = auth active) on host :8080; `session-core`/`inference-core`/`execution-core` `/healthz` 200 on host :18081/:18082/:18083 (host-published from container :8081/:8082/:8083 to dodge Ingestion-Plane/Expo collisions). The `model-gateway → execution-core` agent/tool loop is real and non-mocked: `execution-core` dispatches real tools (e.g. `shipping_tools.rs` → shipping-core `:3156`, live 200), and MCP tools are proxied through the gateway's registry (`ListMcpTools`/`ProxyMcpTool`). HITL is enforced server-side, not decorative (runtime_loop blocks provider writes without a durable approval reference; `book_shipment` is in `permission::is_risky_tool`). No Visma MCP is wired in source — see [MODEL_PLANE_DEEP_DIVE.md](MODEL_PLANE_DEEP_DIVE.md) and `docs/core-research/*` for the full MCP/Visma finding.
+> **Historical observation — 2026-07-11, not current runtime evidence:** Live
+> audit then found all four Rust services healthy: `model-gateway` `/healthz` 200
+> (`/health` 401 = auth active) on host :8080; `session-core`/
+> `inference-core`/`execution-core` `/healthz` 200 on host
+> :18081/:18082/:18083. The `model-gateway → execution-core` agent/tool loop
+> and server-side HITL were real, not mocked. No Visma MCP was wired in source.
+> The current 2026-07-16 host has no Model Plane runtime; do not use this
+> historical result as a deploy/readiness claim.
 
-## Current Stack Status (2026-04-16)
+## Historical source snapshot (2026-04-16)
+
+The following section is retained for architecture history. Its compile/test
+claims are not a substitute for the 2026-07-16 release gates or final candidate
+verification.
 
 ### Verified now
 
@@ -112,7 +146,8 @@ Highest-impact remaining work before cutover: production hardening, integration 
 ## Quickstart
 
 ```bash
-# Start infrastructure + services
+# Development-only: start infrastructure + services. This is not a production
+# or rollback command.
 ./scripts/compose.sh up -d
 
 # Optional: enable MCP/LSP bridge overlay
@@ -129,6 +164,24 @@ cd go
 for d in pkg/envelope pkg/natsx pkg/idempotency; do (cd "$d" && go test ./...); done
 for d in services/orchestrator-core services/capability-core; do (cd "$d" && go test ./...); done
 ```
+
+Production or rollback traffic must never use the mutable workspace Compose
+path. After all gates in the dated decision record pass, the only release entry
+point is the signed artifact runner, for example:
+
+```bash
+MODEL_PLANE_PRODUCTION=1 \
+MODEL_PLANE_RUNTIME_ENV_FILE=/managed/model-plane/runtime.env \
+MODEL_PLANE_ARTIFACT_VERIFY_KEY=/managed/model-plane/artifact-public.pem \
+./scripts/release-artifact.sh compose /accepted/artifact-v2 up -d
+```
+
+That command is intentionally blocked today: no accepted artifact or separate
+rollback artifact exists. Artifact creation additionally requires release mode,
+a managed signing key, the trusted verification key, and a non-secret
+compatibility-gates evidence file. Runtime credentials stay in the external
+runtime-env file and are validated against the artifact's key policy; they are
+not bundled into the archive.
 
 ## Service Topology
 
@@ -175,9 +228,29 @@ docs/           Architecture, contracts, cutover, verification
 ## Infrastructure (docker compose)
 
 Use `./scripts/compose.sh` from the Model Plane root. It pins the compose
-files and passes `--env-file .env`, so provider credentials and local service
-overrides are loaded consistently. Direct `docker compose` from `deploy/` only
-works on machines that have the ignored local `deploy/.env -> ../.env` symlink.
+files and passes the canonical ignored `deploy/.env`, so provider credentials
+and local service overrides are loaded consistently without sourcing or echoing
+them. Direct `docker compose` is unsupported because it can select a different
+environment file based on the caller's working directory.
+
+Immutable application images are produced only through release-artifact format
+v2 from an isolated reviewed revision. The artifact snapshots application image
+archives, digest-only image locks, Compose/NATS/OTEL/seccomp inputs, migrations,
+cross-plane revision records, and a root checksum manifest. In release mode it
+requires a managed signing key at build time and a trusted verification key at
+verify/deploy time, plus a non-secret compatibility-gates file that attests
+protocol, migration, live-authorization, approval-continuation, ZDR, and
+separate rollback evidence. The artifact never copies runtime credentials:
+deployment supplies a separately managed runtime-env file which must pass the
+artifact's key allowlist. `verify` and `restore` do not rebuild images; the
+artifact-contained `compose`/`deploy` path verifies the signed snapshot before
+calling Docker. Direct workspace production Compose and mutable workspace locks
+are refused.
+
+No artifact was produced during the 2026-07-16 audit: the workflow correctly
+refuses the current dirty source tree. A separately accepted rollback artifact
+must exist and be restore-rehearsed before the first current deployment; the
+candidate cannot be its own rollback.
 
 - **PostgreSQL 16** — session-core metadata (threads, runs, checkpoints, events, memory_index)
 - **NATS JetStream** — event bus (mp.v1.* subjects), compat adapter for v2 velion.* subjects

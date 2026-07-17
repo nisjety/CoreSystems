@@ -12,7 +12,19 @@ ingestion_production_compose="$root_dir/apps/Ingestion Plane/docker-compose.prod
 # of attaching to the shared runtime by accident.
 rg -Fq 'name: ${DATA_PLANE_COMPOSE_PROJECT:-data-plane-v2}' "$data_compose"
 rg -Fq 'name: ${DPV2_NETWORK_NAME:-dpv2-net}' "$data_compose"
-rg -Fq 'name: ${INTER_PLANE_BUS_NETWORK:-inter-plane-bus}' "$data_compose"
+rg -Fq 'name: ${DPV2_CROSS_PLANE_NETWORK:-dpv2-cross-plane}' "$data_compose"
+cross_plane_compose="$root_dir/apps/Data Plane v2/docker-compose.cross-plane.yml"
+[ -f "$cross_plane_compose" ] || { echo "FAIL: missing explicit cross-plane network overlay" >&2; exit 1; }
+rg -Fq 'external: true' "$cross_plane_compose"
+rg -Fq 'name: ${INTER_PLANE_BUS_NETWORK:-inter-plane-bus}' "$cross_plane_compose"
+makefile="$root_dir/apps/Data Plane v2/Makefile"
+if rg -q '^cross-plane-up: cp-env velion-net' "$makefile"; then
+  echo "FAIL: connected startup may silently create an unowned shared network" >&2
+  exit 1
+fi
+rg -q 'still points at local sandbox key material' "$makefile"
+standalone_compose="$root_dir/apps/Data Plane v2/docker-compose.standalone.yml"
+[ -f "$standalone_compose" ] || { echo "FAIL: missing explicit standalone overlay" >&2; exit 1; }
 
 # Data verifiers may receive only the public verification key, never the
 # directory that also contains Control's signing key.
@@ -20,12 +32,13 @@ if rg -q 'auth-core/keys:/app/keys' "$data_compose"; then
   echo "FAIL: Data container receives the complete auth-core key directory" >&2
   exit 1
 fi
-test "$(rg -c 'auth-core/keys/convex-auth\.pub:/app/keys/convex-auth\.pub:ro' "$data_compose")" -eq 2
+test "$(rg -c 'AUTH_CORE_PUBLIC_KEY_PATH:-\.\./Control Plane/auth-core/keys/convex-auth\.pub}:/app/keys/convex-auth\.pub:ro' "$data_compose")" -eq 3
+test "$(rg -c 'JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth\.pub' "$data_compose")" -eq 2
 
 # Async producers receive only their own private signing key; consumers receive
 # only direct producers' public verification keys. Signed consumption is enabled
 # on retrieval, index, embedding, graph, and the Quickwit projection adapter.
-test "$(rg -c 'ENABLE_SIGNED_EVENT_CONSUMERS: "1"' "$data_compose")" -eq 5
+test "$(rg -c 'ENABLE_SIGNED_EVENT_CONSUMERS: \$\{ENABLE_SIGNED_EVENT_CONSUMERS:-1\}' "$data_compose")" -eq 5
 test "$(rg -c 'EVENT_SIGNING_PRIVATE_KEY_PATH: /run/event-keys/documents-events\.pem' "$data_compose")" -eq 1
 test "$(rg -c 'INDEX_EVENT_PRIVATE_KEY_PATH: /run/event-keys/index-events\.pem' "$data_compose")" -eq 1
 test "$(rg -c 'EMBEDDING_EVENT_PRIVATE_KEY_PATH: /run/event-keys/embedding-events\.pem' "$data_compose")" -eq 1
@@ -75,5 +88,21 @@ rg -q 'MODEL_GATEWAY_AUTH_DEV_BYPASS: ""' "$model_production_compose"
 rg -q 'QUARRY_EDGE__CONTROL_API_KEY: \$\{QUARRY_CONTROL_API_KEY:\?' "$ingestion_production_compose"
 rg -q 'QUARRY_EDGE_AUTH_DEV_BYPASS: "0"' "$ingestion_production_compose"
 rg -q 'INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: \$\{INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:\?' "$ingestion_production_compose"
+
+# GDPR durable delivery is a cross-plane dependency. Never silently point a
+# standalone Data Plane at a guessed shared broker: an empty URL must fail
+# closed until Control Plane provisioning supplies the scoped endpoint.
+rg -q 'NATS_SHARED_URL: \$\{NATS_SHARED_URL:-\}' "$data_compose"
+rg -q 'GDPR_DURABLE_CONSUMER_REQUIRED: \$\{GDPR_DURABLE_CONSUMER_REQUIRED:-1\}' "$data_compose"
+rg -q 'USER_CORE_GRANTS_REQUIRED: \$\{USER_CORE_GRANTS_REQUIRED:-1\}' "$data_compose"
+
+# Standalone startup is an explicit local posture, never an implicit production
+# bypass. It keeps cross-plane authorization strict and disables only the
+# Control-owned durable consumer until the shared broker is provisioned.
+rg -q 'APP_ENV: standalone' "$standalone_compose"
+rg -q 'USER_CORE_GRANTS_REQUIRED: "0"' "$standalone_compose"
+rg -q 'GDPR_DURABLE_CONSUMER_REQUIRED: "0"' "$standalone_compose"
+rg -q 'NATS_SHARED_URL: ""' "$standalone_compose"
+rg -q 'NATS_SHARED_USER: ""' "$standalone_compose"
 
 echo "PASS: Compose security contract"

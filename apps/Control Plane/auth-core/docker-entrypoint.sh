@@ -7,12 +7,20 @@ set -e
 # privileges before any database migration or application code runs.
 if [ "$(id -u)" -eq 0 ]; then
   set -eu
-  mkdir -p /run/control-secrets
-  chown appuser:appgroup /run/control-secrets
-  chmod 0700 /run/control-secrets
+  secret_directory=/run/control-secrets
+  if [ -L "$secret_directory" ] || { [ -e "$secret_directory" ] && [ ! -d "$secret_directory" ]; }; then
+    echo "Control secret handoff path is not a regular directory" >&2
+    exit 1
+  fi
+  if [ ! -d "$secret_directory" ]; then
+    mkdir -- "$secret_directory"
+  fi
+  chown root:appgroup /run/control-secrets
+  chmod 0710 /run/control-secrets
   for variable in \
     AUTH_GRPC_SERVICE_CREDENTIALS_FILE \
     AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE \
+    PLANE_SERVICE_PRINCIPALS_FILE \
     USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE \
     USER_CORE_GRPC_TLS_CA_FILE \
     CONVEX_AUTH_PRIVATE_KEY_FILE \
@@ -20,11 +28,19 @@ if [ "$(id -u)" -eq 0 ]; then
     eval "source=\${$variable:-}"
     case "$source" in
       /run/secrets/*)
-        [ -f "$source" ] || { echo "$variable secret is not a regular file" >&2; exit 1; }
-        target="/run/control-secrets/$(basename "$source")"
-        cp -- "$source" "$target"
-        chown appuser:appgroup "$target"
-        chmod 0600 "$target"
+        [ -f "$source" ] && [ ! -L "$source" ] || { echo "$variable secret is not a regular file" >&2; exit 1; }
+        basename=$(basename "$source")
+        target="$secret_directory/$basename"
+        staged="$secret_directory/.$basename.new"
+        if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
+          echo "$variable handoff target is not a regular file" >&2
+          exit 1
+        fi
+        rm -f -- "$staged"
+        cp -- "$source" "$staged"
+        chown appuser:appgroup "$staged"
+        chmod 0600 "$staged"
+        mv -f -- "$staged" "$target"
         export "$variable=$target"
         ;;
       "")

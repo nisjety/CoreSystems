@@ -107,9 +107,9 @@ export const ModelGateway = {
       kind: MethodKind.Unary,
     },
     /**
-     * SendMessage — publish a typed message envelope onto NATS. Replaces
-     * the v2 send_message tool. Subject namespaces are enforced server-
-     * side so agents can't publish to arbitrary subjects.
+     * SendMessage — backwards-compatible quarantined legacy RPC. Every call
+     * fails with FAILED_PRECONDITION and cannot publish to NATS. Free-form
+     * agent-selected subjects bypass capability policy and approval enforcement.
      *
      * @generated from rpc model_plane.v1.ModelGateway.SendMessage
      */
@@ -134,9 +134,10 @@ export const ModelGateway = {
     },
     /**
      * EnterPlanMode — switch a run into plan-collect mode. While in plan
-     * mode, write-class tools (file_edit, file_write, bash, remote_trigger,
-     * send_message) are gated by the approval queue; read-class tools
-     * (fetch, web_search, extract_structured) flow normally.
+     * mode, write-class tools (file_edit, file_write, bash, remote_trigger)
+     * are gated by the approval queue; read-class tools (fetch, web_search,
+     * extract_structured) flow normally. SendMessage is independently
+     * quarantined and always fails closed.
      *
      * @generated from rpc model_plane.v1.ModelGateway.EnterPlanMode
      */

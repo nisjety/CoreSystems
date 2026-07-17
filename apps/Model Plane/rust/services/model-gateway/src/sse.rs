@@ -15,7 +15,7 @@ use futures::Stream;
 use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, ChatMessage, ContextSegment,
     GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState, RunAgentRequest,
-    StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
+    RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -98,6 +98,45 @@ fn error_stream(
     Sse::new(ReceiverStream::new(rx))
 }
 
+/// Fail a direct-inference turn after `StartRun` without leaving its durable
+/// lifecycle queued. This path is only for errors we have observed locally
+/// before dispatching inference or a tool action; transport ambiguity belongs
+/// to the explicit degraded/retry path instead.
+async fn prepared_direct_failure_stream(
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    failure_code: &'static str,
+    message: &str,
+    retryable: bool,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    match crate::session_flow::terminalize_direct_inference_run_authenticated(
+        state,
+        run,
+        crate::session_flow::DirectInferenceTerminal::Failed(failure_code),
+        bearer,
+    )
+    .await
+    {
+        Ok(()) => error_stream(request_id, failure_code, message, retryable),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                run_id = %run.run_id,
+                failure_code,
+                "known direct-run failure could not be durably terminalized"
+            );
+            error_stream(
+                request_id,
+                "session_terminalization_failed",
+                "Unable to record the chat run's terminal state; it remains retriable.",
+                true,
+            )
+        }
+    }
+}
+
 /// One-shot SSE stream that replays a cached completed answer as a single
 /// `chunk` + terminal `done` (chat-parity §1 idempotent regenerate replay).
 fn replay_cached_stream(
@@ -142,6 +181,13 @@ fn replay_cached_stream(
 ///
 /// Emits `STREAM_OPENED` on start, streams gRPC inference chunks,
 /// a final `event: done` sentinel, and then `STREAM_CLOSED` + `USAGE_ENVELOPE`.
+///
+/// # Panics
+///
+/// Only if an internal change violates the earlier agentic credential preflight
+/// invariant and reaches the agentic branch without its independently verified
+/// Data Plane or Execution Core bearer. That invariant is covered by the
+/// pre-dispatch credential checks immediately above session creation.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
@@ -324,25 +370,96 @@ pub async fn invoke_stream_sse(
                     false,
                 );
             }
+            crate::idempotency_registry::Claim::Rejected(
+                crate::idempotency_registry::ClaimRejection::InvalidKey,
+            ) => {
+                return error_stream(
+                    &request_id,
+                    "invalid_idempotency_key",
+                    "The idempotency key is invalid or too large.",
+                    false,
+                );
+            }
+            crate::idempotency_registry::Claim::Rejected(
+                crate::idempotency_registry::ClaimRejection::CapacityExceeded,
+            ) => {
+                return error_stream(
+                    &request_id,
+                    "idempotency_unavailable",
+                    "Idempotency protection is temporarily unavailable. Please retry.",
+                    true,
+                );
+            }
             crate::idempotency_registry::Claim::Proceed(g) => Some(g),
         },
         None => None,
     };
 
-    let session_run = match crate::session_flow::prepare_run_authenticated(
+    // Validate agentic-only credentials before durable session setup. A request
+    // that cannot be dispatched must not leave a queued run merely because the
+    // caller omitted one of its independent downstream credentials.
+    let agentic_requested = features.iter().any(|feature| feature == "agentic");
+    if agentic_requested {
+        if data_plane_bearer.is_none() {
+            return error_stream(
+                &request_id,
+                "data_plane_auth_required",
+                "Agentic knowledge access requires a cryptographically verified user credential",
+                false,
+            );
+        }
+        if execution_bearer.is_none() {
+            return error_stream(
+                &request_id,
+                "execution_core_auth_required",
+                "Agentic execution requires a dedicated Execution Core credential",
+                false,
+            );
+        }
+    }
+
+    // Start keys are durable Session Core metadata. Keep the raw browser/API
+    // retry identifier in the in-memory idempotency guard only; persist its
+    // scoped keyed-MAC derivative instead, including for ZDR callers.
+    let managed_start_key = state.managed_start_keys.derive(
+        &org_id,
+        &user_id,
+        req.idempotency_key.as_deref(),
+        &request_id,
+        if agentic_requested {
+            "execution-agent"
+        } else {
+            "gateway-direct"
+        },
+    );
+    let managed_source = if agentic_requested {
+        mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent
+    } else {
+        mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
+    };
+    let session_run = match crate::session_flow::prepare_managed_run_authenticated(
         &state,
         req.thread_id.as_deref(),
         req.session_key.as_deref(),
         &org_id,
         &user_id,
         &req.content,
+        if agentic_requested {
+            "execution-core"
+        } else {
+            "model-gateway"
+        },
+        "execute",
+        &managed_start_key,
+        managed_source,
+        effective_zdr,
         &model_bearer,
     )
     .await
     {
         Ok(run) => run,
         Err(error) => {
-            tracing::warn!(%error, request_id = %request_id, "session-core prepare_run failed");
+            tracing::warn!(%error, request_id = %request_id, "session-core managed start failed");
             return error_stream(
                 &request_id,
                 "session_unavailable",
@@ -351,6 +468,30 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    if session_run.already_started {
+        return error_stream(
+            &request_id,
+            "managed_run_already_started",
+            "This request already has a durable run; observe or resume that run instead of dispatching again.",
+            true,
+        );
+    }
+    // Gateway can renew only its own direct-inference producer source. The
+    // agentic path is owned by Execution Core, so it deliberately does not
+    // borrow the caller's bearer or impersonate that producer here.
+    if !agentic_requested {
+        if let Err(error) =
+            crate::session_flow::ensure_direct_inference_run_liveness(&state, &session_run).await
+        {
+            tracing::warn!(%error, run_id = %session_run.run_id, "initial SSE direct-inference liveness heartbeat failed");
+            return error_stream(
+                &request_id,
+                "session_liveness_failed",
+                "Unable to confirm the chat run is active. Please retry.",
+                true,
+            );
+        }
+    }
     let thread_scope = session_run.thread_id.clone();
 
     // chat-parity §2: multimodal vision input. If an image is attached, route
@@ -362,7 +503,7 @@ pub async fn invoke_stream_sse(
             request_id,
             org_id,
             model,
-            thread_scope,
+            session_run,
             image,
             req.content.clone(),
             idem_guard,
@@ -379,7 +520,7 @@ pub async fn invoke_stream_sse(
             request_id,
             org_id,
             image_generation_model(req.model.as_deref()),
-            thread_scope,
+            session_run,
             req.content.clone(),
             features,
             idem_guard,
@@ -394,28 +535,18 @@ pub async fn invoke_stream_sse(
     // answer. The gateway only ORCHESTRATES — code/tool execution happens in
     // execution-core under its sandbox. Falls back to a direct answer if the
     // run produces nothing (e.g. no live worker), so a reply is always returned.
-    if features.iter().any(|f| f == "agentic") {
+    if agentic_requested {
         // GDPR ZDR: carry the chat request's Zero-Data-Retention flag into the
         // agentic run so execution-core threads it through every inference round
         // and onto each tool step's audit detail. No org-level ZDR default is
         // readily available in this scope, so this is the request flag only;
         // OR-in an org default here once one is plumbed to the gateway.
-        let Some(data_plane_bearer) = data_plane_bearer else {
-            return error_stream(
-                &request_id,
-                "data_plane_auth_required",
-                "Agentic knowledge access requires a cryptographically verified user credential",
-                false,
-            );
-        };
-        let Some(execution_bearer) = execution_bearer else {
-            return error_stream(
-                &request_id,
-                "execution_core_auth_required",
-                "Agentic execution requires a dedicated Execution Core credential",
-                false,
-            );
-        };
+        // Checked before `prepare_run_authenticated`, so these `expect`s are
+        // unreachable unless this function's preflight is changed in tandem.
+        let data_plane_bearer =
+            data_plane_bearer.expect("agentic preflight requires a verified Data Plane bearer");
+        let execution_bearer =
+            execution_bearer.expect("agentic preflight requires a verified Execution Core bearer");
         // chat-parity: forward the client's declared tools onto the agentic
         // run. execution-core merges them with its built-in + MCP tool set and
         // gates every call through the same governed execute_step path, so this
@@ -433,6 +564,7 @@ pub async fn invoke_stream_sse(
             .collect();
         return agentic_run_stream(
             state.clone(),
+            session_run,
             request_id,
             org_id,
             user_id,
@@ -456,12 +588,16 @@ pub async fn invoke_stream_sse(
     // assembly is unavailable.
     let grounding = if crate::retrieval::wants_grounding(&features) {
         let Some(bearer) = data_plane_bearer.as_ref() else {
-            return error_stream(
+            return prepared_direct_failure_stream(
+                &state,
+                &session_run,
+                &model_bearer,
                 &request_id,
                 "data_plane_auth_required",
                 "Grounding requires a cryptographically verified user credential",
                 false,
-            );
+            )
+            .await;
         };
         crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr).await
     } else {
@@ -641,12 +777,16 @@ pub async fn invoke_stream_sse(
             )
             .await;
             let Ok(forced) = forced else {
-                return error_stream(
+                return prepared_direct_failure_stream(
+                    &state,
+                    &session_run,
+                    &model_bearer,
                     &request_id,
                     "audit_persistence_failed",
                     "Tool action could not be durably audited",
                     true,
-                );
+                )
+                .await;
             };
             messages = forced.messages;
             tool_events.extend(forced.events);
@@ -673,12 +813,16 @@ pub async fn invoke_stream_sse(
         )
         .await;
         let Ok(rounds) = rounds else {
-            return error_stream(
+            return prepared_direct_failure_stream(
+                &state,
+                &session_run,
+                &model_bearer,
                 &request_id,
                 "audit_persistence_failed",
                 "Tool action could not be durably audited",
                 true,
-            );
+            )
+            .await;
         };
         messages = rounds.messages;
         tool_events.extend(rounds.events);
@@ -731,7 +875,7 @@ pub async fn invoke_stream_sse(
                 features,
                 grounding,
                 tool_events,
-                session_run.thread_id,
+                session_run,
                 idem_guard,
                 inference_bearer,
                 model_bearer,
@@ -747,6 +891,7 @@ pub async fn invoke_stream_sse(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let session_state = state.clone();
     let session_thread_id = session_run.thread_id.clone();
+    let session_run_for_terminal = session_run.clone();
     let session_bearer = model_bearer.clone();
 
     tokio::spawn(async move {
@@ -768,6 +913,15 @@ pub async fn invoke_stream_sse(
             .await
             .is_err()
         {
+            if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
+                &session_state,
+                &session_run_for_terminal,
+                &session_bearer,
+            )
+            .await
+            {
+                tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel disconnected direct inference stream");
+            }
             cancels.finish(&req_id);
             return;
         }
@@ -812,10 +966,55 @@ pub async fn invoke_stream_sse(
         // docs/HARNESS_PHASE1.md §3b).
         let mut seq: u64 = 0;
         let mut assistant_output = String::new();
-        while let Some(result) = grpc_stream.next().await {
+        let mut terminal_assigned = false;
+        let mut cancelled = false;
+        let mut failure_code = "inference_stream_ended_without_terminal";
+        let mut heartbeat =
+            tokio::time::interval(crate::session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);
+        // Initial liveness is synchronously required before the provider call.
+        // Consume interval's immediate tick so this relay starts its cadence at
+        // five minutes rather than issuing an unnecessary duplicate receipt.
+        heartbeat.tick().await;
+        'stream: loop {
+            let next = tokio::select! {
+                next = grpc_stream.next() => next,
+                _ = heartbeat.tick() => {
+                    match crate::session_flow::heartbeat_direct_inference_run(
+                        &session_state,
+                        &session_run_for_terminal,
+                    ).await {
+                        Ok(true) => continue 'stream,
+                        Ok(false) => {
+                            failure_code = "session_liveness_failed";
+                            let event = crate::sse_events::ChatEvent::Error {
+                                code: failure_code.to_owned(),
+                                message: "The chat run is no longer active. Please retry.".to_owned(),
+                                retryable: true,
+                            };
+                            let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                            break 'stream;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "SSE direct stream liveness heartbeat failed");
+                            failure_code = "session_liveness_failed";
+                            let event = crate::sse_events::ChatEvent::Error {
+                                code: failure_code.to_owned(),
+                                message: "Unable to confirm the chat run is active. Please retry.".to_owned(),
+                                retryable: true,
+                            };
+                            let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                            break 'stream;
+                        }
+                    }
+                }
+            };
+            let Some(result) = next else {
+                break;
+            };
             // chat-parity §4: cooperative cancel — the cancel endpoint flipped
             // this flag; emit a terminal `stopped` and end the stream.
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                cancelled = true;
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
@@ -837,12 +1036,17 @@ pub async fn invoke_stream_sse(
                     // Buffer the delta for resumability before sending so a
                     // reconnect never races ahead of what we retained.
                     stream_buffers.append(&req_id, seq, &chunk.delta).await;
-                    let _ = tx
+                    if tx
                         .send(Ok(Event::default()
                             .id(seq.to_string())
                             .event("chunk")
                             .data(data)))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        cancelled = true;
+                        break;
+                    }
                     seq += 1;
                 }
                 Ok(chunk) => {
@@ -858,12 +1062,17 @@ pub async fn invoke_stream_sse(
                         };
                         let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                         stream_buffers.append(&req_id, seq, &chunk.delta).await;
-                        let _ = tx
+                        if tx
                             .send(Ok(Event::default()
                                 .id(seq.to_string())
                                 .event("chunk")
                                 .data(data)))
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            cancelled = true;
+                            break;
+                        }
                         seq += 1;
                     }
 
@@ -876,6 +1085,55 @@ pub async fn invoke_stream_sse(
                     };
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
+                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                        &session_state,
+                        &session_thread_id,
+                        &assistant_output,
+                        &session_bearer,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            request_id = %req_id,
+                            thread_id = %session_thread_id,
+                            "failed to persist streamed assistant message"
+                        );
+                        failure_code = "assistant_persist_failed";
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: failure_code.to_owned(),
+                            message: "Unable to persist the assistant response.".to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                        break;
+                    }
+
+                    if let Err(error) =
+                        crate::session_flow::terminalize_direct_inference_run_authenticated(
+                            &session_state,
+                            &session_run_for_terminal,
+                            crate::session_flow::DirectInferenceTerminal::Completed,
+                            &session_bearer,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to terminalize completed direct inference stream");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message: "Unable to finalize the chat run.".to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                        cancels.finish(&req_id);
+                        return;
+                    }
+                    terminal_assigned = true;
+
+                    // A resumable terminal frame and terminal-success telemetry
+                    // are legal only after Session Core durably acknowledged the
+                    // matching CompleteStep. Otherwise a reconnect could see
+                    // `done` for a run that is still queued/retriable.
                     let close_envelope = build_stream_envelope(
                         &req_id,
                         "STREAM_CLOSED",
@@ -913,8 +1171,6 @@ pub async fn invoke_stream_sse(
                         "SSE stream completed"
                     );
 
-                    // Record terminal state so a late resumer still receives a
-                    // correct `done` (lost-final-chunk handling, §3b).
                     stream_buffers
                         .finish(
                             &req_id,
@@ -926,22 +1182,6 @@ pub async fn invoke_stream_sse(
                             },
                         )
                         .await;
-
-                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
-                        &session_state,
-                        &session_thread_id,
-                        &assistant_output,
-                        &session_bearer,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            request_id = %req_id,
-                            thread_id = %session_thread_id,
-                            "failed to persist streamed assistant message"
-                        );
-                    }
 
                     // chat-parity §17: opt-in usage event (real tokens + latency)
                     // before the terminal done. Phase 7 B5 — cost_usd is priced
@@ -989,8 +1229,45 @@ pub async fn invoke_stream_sse(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, request_id = %req_id, "gRPC stream error");
+                    failure_code = "inference_stream_error";
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: failure_code.to_owned(),
+                        message: "The inference stream ended unexpectedly.".to_owned(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(event.to_sse(&req_id))).await;
                     break;
                 }
+            }
+        }
+        if !terminal_assigned {
+            if cancelled {
+                if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                )
+                .await
+                {
+                    tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel direct inference stream");
+                }
+            } else if let Err(error) =
+                crate::session_flow::terminalize_direct_inference_run_authenticated(
+                    &session_state,
+                    &session_run_for_terminal,
+                    crate::session_flow::DirectInferenceTerminal::Failed(failure_code),
+                    &session_bearer,
+                )
+                .await
+            {
+                tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to terminalize failed direct inference stream");
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "session_terminalization_failed".to_owned(),
+                    message: "Unable to record the failed chat run; it remains retriable."
+                        .to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(&req_id))).await;
             }
         }
         // chat-parity §4: stop tracking this stream for cancellation.
@@ -1316,7 +1593,7 @@ fn vision_stream(
     request_id: String,
     org_id: String,
     model: String,
-    thread_id: String,
+    run: crate::session_flow::SessionRun,
     image: crate::vision::ImageInput,
     prompt: String,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
@@ -1327,6 +1604,7 @@ fn vision_stream(
     tokio::spawn(async move {
         use mp_contracts::model_plane::v1::AnalyzeImageRequest;
         let _idem_guard = idem_guard;
+        let thread_id = run.thread_id.clone();
         let result = state
             .inference_client
             .clone()
@@ -1373,7 +1651,17 @@ fn vision_stream(
                         .await
                         .is_err()
                     {
-                        return; // client disconnected
+                        if let Err(error) =
+                            crate::session_flow::cancel_direct_inference_run_authenticated(
+                                &state,
+                                &run,
+                                &session_bearer,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, run_id = %run.run_id, "failed to cancel disconnected vision stream");
+                        }
+                        return;
                     }
                     seq += 1;
                 }
@@ -1391,6 +1679,44 @@ fn vision_stream(
                         thread_id = %thread_id,
                         "failed to persist vision assistant message"
                     );
+                    if let Err(terminal_error) =
+                        crate::session_flow::terminalize_direct_inference_run_authenticated(
+                            &state,
+                            &run,
+                            crate::session_flow::DirectInferenceTerminal::Failed(
+                                "assistant_persist_failed",
+                            ),
+                            &session_bearer,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize vision assistant persistence failure");
+                    }
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "assistant_persist_failed".to_owned(),
+                        message: "Unable to persist the assistant response.".to_owned(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    return;
+                }
+                if let Err(error) =
+                    crate::session_flow::terminalize_direct_inference_run_authenticated(
+                        &state,
+                        &run,
+                        crate::session_flow::DirectInferenceTerminal::Completed,
+                        &session_bearer,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize completed vision run");
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "session_terminalization_failed".to_owned(),
+                        message: "Unable to finalize the chat run.".to_owned(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    return;
                 }
                 let done = SseChunk {
                     request_id: request_id.clone(),
@@ -1408,6 +1734,17 @@ fn vision_stream(
                     .await;
             }
             Err(e) => {
+                if let Err(error) =
+                    crate::session_flow::terminalize_direct_inference_run_authenticated(
+                        &state,
+                        &run,
+                        crate::session_flow::DirectInferenceTerminal::Failed("vision_unavailable"),
+                        &session_bearer,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize unavailable vision run");
+                }
                 let evt = crate::sse_events::ChatEvent::Error {
                     code: "vision_unavailable".to_owned(),
                     message: e.message().to_owned(),
@@ -1431,7 +1768,7 @@ fn image_gen_stream(
     request_id: String,
     org_id: String,
     model: String,
-    thread_id: String,
+    run: crate::session_flow::SessionRun,
     prompt: String,
     features: Vec<String>,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
@@ -1442,6 +1779,7 @@ fn image_gen_stream(
     tokio::spawn(async move {
         use mp_contracts::model_plane::v1::GenerateImageRequest;
         let _idem_guard = idem_guard;
+        let thread_id = run.thread_id.clone();
         let result = state
             .inference_client
             .clone()
@@ -1542,7 +1880,26 @@ fn image_gen_stream(
                 )
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        if let Err(error) =
+                            crate::session_flow::terminalize_direct_inference_run_authenticated(
+                                &state,
+                                &run,
+                                crate::session_flow::DirectInferenceTerminal::Completed,
+                                &session_bearer,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize completed image generation run");
+                            let event = crate::sse_events::ChatEvent::Error {
+                                code: "session_terminalization_failed".to_owned(),
+                                message: "Unable to finalize the chat run.".to_owned(),
+                                retryable: true,
+                            };
+                            let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                            return;
+                        }
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!(
                             %error,
@@ -1550,6 +1907,26 @@ fn image_gen_stream(
                             thread_id = %thread_id,
                             "failed to persist generated image message"
                         );
+                        if let Err(terminal_error) =
+                            crate::session_flow::terminalize_direct_inference_run_authenticated(
+                                &state,
+                                &run,
+                                crate::session_flow::DirectInferenceTerminal::Failed(
+                                    "assistant_persist_failed",
+                                ),
+                                &session_bearer,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize image assistant persistence failure");
+                        }
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "assistant_persist_failed".to_owned(),
+                            message: "Unable to persist the assistant response.".to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                        return;
                     }
                     Err(_) => {
                         tracing::warn!(
@@ -1557,6 +1934,26 @@ fn image_gen_stream(
                             thread_id = %thread_id,
                             "timed out persisting generated image message"
                         );
+                        if let Err(terminal_error) =
+                            crate::session_flow::terminalize_direct_inference_run_authenticated(
+                                &state,
+                                &run,
+                                crate::session_flow::DirectInferenceTerminal::Failed(
+                                    "assistant_persist_timeout",
+                                ),
+                                &session_bearer,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize timed out image assistant persistence");
+                        }
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "assistant_persist_timeout".to_owned(),
+                            message: "Timed out persisting the assistant response.".to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                        return;
                     }
                 }
                 let done = SseChunk {
@@ -1579,6 +1976,19 @@ fn image_gen_stream(
                 );
             }
             Err(e) => {
+                if let Err(error) =
+                    crate::session_flow::terminalize_direct_inference_run_authenticated(
+                        &state,
+                        &run,
+                        crate::session_flow::DirectInferenceTerminal::Failed(
+                            "image_gen_unavailable",
+                        ),
+                        &session_bearer,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize unavailable image generation run");
+                }
                 let evt = crate::sse_events::ChatEvent::Error {
                     code: "image_gen_unavailable".to_owned(),
                     message: e.message().to_owned(),
@@ -1661,7 +2071,7 @@ fn infer_fallback_stream(
     features: Vec<String>,
     grounding: Option<crate::retrieval::Grounding>,
     tool_events: Vec<crate::sse_events::ChatEvent>,
-    thread_id: String,
+    run: crate::session_flow::SessionRun,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
     inference_bearer: VerifiedInferenceBearer,
     session_bearer: VerifiedModelBearer,
@@ -1706,6 +2116,7 @@ fn infer_fallback_stream(
 
         let publisher = state.publisher.clone();
         let buffers = state.stream_buffers.clone();
+        let thread_id = run.thread_id.clone();
         let result = state
             .inference_client
             .clone()
@@ -1744,7 +2155,17 @@ fn infer_fallback_stream(
                         .await
                         .is_err()
                     {
-                        return; // client disconnected
+                        if let Err(error) =
+                            crate::session_flow::cancel_direct_inference_run_authenticated(
+                                &state,
+                                &run,
+                                &session_bearer,
+                            )
+                            .await
+                        {
+                            tracing::warn!(%error, run_id = %run.run_id, "failed to cancel disconnected fallback inference stream");
+                        }
+                        return;
                     }
                     seq += 1;
                 }
@@ -1762,6 +2183,52 @@ fn infer_fallback_stream(
                         thread_id = %thread_id,
                         "failed to persist fallback assistant message"
                     );
+                    if let Err(terminal_error) =
+                        crate::session_flow::terminalize_direct_inference_run_authenticated(
+                            &state,
+                            &run,
+                            crate::session_flow::DirectInferenceTerminal::Failed(
+                                "assistant_persist_failed",
+                            ),
+                            &session_bearer,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize fallback assistant persistence failure");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message: "Unable to record the failed chat run; it remains retriable."
+                                .to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                        return;
+                    }
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "assistant_persist_failed".to_owned(),
+                        message: "Unable to persist the assistant response.".to_owned(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    return;
+                }
+                if let Err(error) =
+                    crate::session_flow::terminalize_direct_inference_run_authenticated(
+                        &state,
+                        &run,
+                        crate::session_flow::DirectInferenceTerminal::Completed,
+                        &session_bearer,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize completed fallback inference run");
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "session_terminalization_failed".to_owned(),
+                        message: "Unable to finalize the chat run.".to_owned(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    return;
                 }
 
                 let close = build_stream_envelope(
@@ -1847,6 +2314,27 @@ fn infer_fallback_stream(
                     request_id = %request_id,
                     "infer fallback also failed; emitting error event"
                 );
+                if let Err(error) =
+                    crate::session_flow::terminalize_direct_inference_run_authenticated(
+                        &state,
+                        &run,
+                        crate::session_flow::DirectInferenceTerminal::Failed(
+                            "inference_unavailable",
+                        ),
+                        &session_bearer,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize unavailable fallback inference run");
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "session_terminalization_failed".to_owned(),
+                        message: "Unable to record the failed chat run; it remains retriable."
+                            .to_owned(),
+                        retryable: true,
+                    };
+                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    return;
+                }
                 let close =
                     build_stream_envelope(&request_id, "STREAM_CLOSED", &org_id, &user_id, &model);
                 let _ = publisher
@@ -2142,9 +2630,11 @@ async fn read_latest_assistant(
         .map(|m| m.content)
 }
 
-/// Direct (non-agentic) inference fallback — used when an agentic run produced
-/// no answer (e.g. no live orchestration/execution worker), so a reply is
-/// always returned.
+/// Direct inference used only by the persistence-free ZDR response path.
+///
+/// Governed agent runs deliberately never call this as a substitute for an
+/// uncertain execution outcome: doing so would bypass their approval/tool
+/// lifecycle and falsely present a completion.
 async fn direct_infer(
     state: &AppState,
     request_id: &str,
@@ -2277,17 +2767,6 @@ async fn zdr_direct_stream(
     Sse::new(ReceiverStream::new(rx))
 }
 
-/// Dispatch a prepared run to execution-core's agent driver (`RunAgent`).
-///
-/// This is the missing link: `session-core.StartRun` durably records the run as
-/// `'queued'` but nothing drove it, so no orchestration events flowed and no
-/// answer was persisted. The driver emits `PlanTransitioned` events (observed
-/// by the `StreamRunEvents` tail) and appends the assistant answer (returned by
-/// `read_latest_assistant`). Spawned so the stream tail starts observing
-/// immediately. On transport error the run isn't driven; the
-/// `read_latest_assistant` / `direct_infer` fallback still returns a reply, so
-/// Server-side approval-posture floor for the authenticated principal.
-///
 /// Reads the (server-signed) JWT scopes on `claims`. A principal carrying an
 /// autonomous / deployed-agent scope is pinned to `Ask` (never un-gated),
 /// regardless of the client-supplied profile. Every other principal gets the
@@ -2320,8 +2799,8 @@ fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPostur
     crate::profile::floor_from_scopes(&claims.scopes, &autonomous, base_floor)
 }
 
-/// `read_latest_assistant` / `direct_infer` fallback still returns a reply, so
-/// the stream is never failed.
+/// Build the independently authenticated Execution Core request. Failure here
+/// is deterministic and happens before any remote dispatch attempt.
 #[allow(clippy::result_large_err)]
 fn authenticated_run_agent_request(
     request: RunAgentRequest,
@@ -2362,6 +2841,12 @@ fn authenticated_run_agent_request(
     Ok(request)
 }
 
+/// Start dispatch of a prepared run to Execution Core's governed agent driver.
+///
+/// A successfully created task only proves that the client RPC has been
+/// initiated. The caller must inspect its response before reporting any
+/// lifecycle outcome: a timeout or transport error is ambiguous and must stay
+/// durable/retriable rather than being papered over with direct inference.
 // Dispatch requires both Model and Data authorization contexts plus the
 // immutable run/request fields; keep them explicit at this security boundary.
 #[allow(clippy::too_many_arguments)] // cohesive dispatch — all are run context
@@ -2378,7 +2863,7 @@ fn spawn_run_dispatch(
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
-) {
+) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     let run_agent_req = RunAgentRequest {
         run_id: run.run_id.clone(),
@@ -2401,47 +2886,62 @@ fn spawn_run_dispatch(
         // built-in + MCP set under the same governed execute_step path.
         tools: tools.to_vec(),
     };
-    let dispatch_run_id = run.run_id.clone();
-    let run_agent_req = match authenticated_run_agent_request(
+    let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
         data_plane_bearer,
         session_bearer,
         inference_bearer,
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                run_id = %dispatch_run_id,
-                "execution-core run_agent dispatch credential was malformed"
-            );
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        if let Err(error) = execution_client.run_agent(run_agent_req).await {
-            tracing::warn!(
-                %error,
-                run_id = %dispatch_run_id,
-                "execution-core run_agent dispatch failed; relying on direct_infer fallback"
-            );
-        }
-    });
+    )?;
+    Ok(tokio::spawn(async move {
+        execution_client
+            .run_agent(run_agent_req)
+            .await
+            .map(tonic::Response::into_inner)
+    }))
 }
 
-/// chat-parity Phase 3 — agentic run stream. The chat turn becomes a
-/// session-core run (`StartRun` via `prepare_run`); the gateway streams the run's
-/// orchestration events as `step_update`, then streams the run's resulting
-/// assistant answer. The gateway only ORCHESTRATES + observes — tool/code
-/// execution happens in execution-core under its sandbox. If the run yields no
-/// answer within the idle window (e.g. no live worker), it falls back to a
-/// direct inference so a reply is always returned. Known contracts only
-/// (`StartRun`, `StreamRunEvents`, `ListConversation`, `Infer`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgenticRunOutcome {
+    Completed,
+    Failed,
+    AwaitingApproval,
+    Unknown,
+}
+
+fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
+    match status {
+        "completed" => AgenticRunOutcome::Completed,
+        "failed" => AgenticRunOutcome::Failed,
+        // Execution Core deliberately uses this non-terminal status after it
+        // has persisted the approval record. Gateway must preserve that pause.
+        "awaiting_approval" => AgenticRunOutcome::AwaitingApproval,
+        _ => AgenticRunOutcome::Unknown,
+    }
+}
+
+/// Only these gRPC codes prove the remote execution boundary rejected the
+/// request before it could start a governed run. Unavailable, deadline, reset,
+/// and unknown errors are deliberately not included because a server may have
+/// accepted the request before the response was lost.
+fn is_confirmed_agent_dispatch_rejection(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::InvalidArgument | tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+    )
+}
+
+/// Agentic run stream for the one already-prepared durable Session Core run.
+///
+/// Execution Core owns agent progression, tool dispatch, approvals, assistant
+/// persistence, and its terminal transition. Gateway may report a terminal
+/// outcome only from the governed `RunAgent` response; it never substitutes a
+/// tool-free inference fallback for an uncertain agent dispatch.
 #[allow(clippy::too_many_arguments)] // cohesive stream entry — all are request context
-#[allow(clippy::too_many_lines)] // cohesive agentic-run stream: spawn → dispatch → observe → answer → lifecycle
+#[allow(clippy::too_many_lines)] // cohesive agentic-run stream: dispatch → observe → outcome → lifecycle
 fn agentic_run_stream(
     state: AppState,
+    run: crate::session_flow::SessionRun,
     request_id: String,
     org_id: String,
     user_id: String,
@@ -2460,37 +2960,15 @@ fn agentic_run_stream(
     tokio::spawn(async move {
         let _idem_guard = idem_guard;
         let start = std::time::Instant::now();
+        let run_id = run.run_id.clone();
+        let thread_id = run.thread_id.clone();
 
-        // 1. Spawn the run (session-core StartRun; also persists the user turn).
-        let run = match crate::session_flow::prepare_run_authenticated(
-            &state,
-            None,
-            None,
-            &org_id,
-            &user_id,
-            &content,
-            &model_bearer,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let err = crate::sse_events::ChatEvent::Error {
-                    code: "agentic_run_start_failed".to_owned(),
-                    message: e.to_string(),
-                    retryable: true,
-                };
-                let _ = tx.send(Ok(err.to_sse(&request_id))).await;
-                return;
-            }
-        };
-
-        // The run exists — surface its ids so the SPA can drive durable
+        // The prepared run exists — surface its ids so the SPA can drive durable
         // observation (GET /v1/runs/{run_id}/events) and approvals.
         let connected = json!({
             "ok": true,
-            "run_id": run.run_id,
-            "thread_id": run.thread_id,
+            "run_id": run_id,
+            "thread_id": thread_id,
             "request_id": request_id,
         });
         let _ = tx
@@ -2499,22 +2977,10 @@ fn agentic_run_stream(
                 .data(connected.to_string())))
             .await;
 
-        // Phase 7 B12 — publish the RUN_STARTED lifecycle event so insight-core's
-        // agents producer records it (surface=agents). The live agentic path runs
-        // through execution-core's RunAgent, not orchestrator-core's Temporal
-        // workflow, so nobody was emitting run lifecycle events; the metrics view
-        // stayed empty for real runs. Metadata-only (no content) → never ZDR.
-        let run_started =
-            build_stream_envelope(&request_id, "RUN_STARTED", &org_id, &user_id, &model);
-        let _ = state
-            .publisher
-            .publish(&subjects::run_event_subject(&run.run_id), &run_started)
-            .await;
-
-        // 1b. Dispatch the run to execution-core's agent driver (RunAgent) —
-        //     the missing link that actually drives the queued run. The run's
-        //     ZDR flag rides along so execution-core honors it durably.
-        spawn_run_dispatch(
+        // Construct the authenticated request before reporting the run as
+        // started. A deterministic local credential/metadata failure is a
+        // confirmed pre-dispatch rejection, not an ambiguous remote outage.
+        let dispatch = match spawn_run_dispatch(
             &state,
             &run,
             &org_id,
@@ -2527,61 +2993,307 @@ fn agentic_run_stream(
             &data_plane_bearer,
             &model_bearer,
             &inference_bearer,
-        );
+        ) {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                tracing::warn!(%error, run_id = %run.run_id, "RunAgent request construction rejected before dispatch");
+                let terminalized =
+                    crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
+                        &state,
+                        &run,
+                        "agent_dispatch_rejected",
+                        &model_bearer,
+                    )
+                    .await;
+                match terminalized {
+                    Ok(()) => {
+                        let failed = build_stream_envelope(
+                            &request_id,
+                            "RUN_FAILED",
+                            &org_id,
+                            &user_id,
+                            &model,
+                        );
+                        let _ = state
+                            .publisher
+                            .publish(&subjects::run_event_subject(&run.run_id), &failed)
+                            .await;
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "agent_dispatch_rejected".to_owned(),
+                            message: "The agent run could not be accepted.".to_owned(),
+                            retryable: false,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                    Err(terminal_error) => {
+                        tracing::error!(%terminal_error, run_id = %run.run_id, "confirmed agent dispatch rejection could not be durably terminalized");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message:
+                                "Unable to record the rejected agent run; it remains retriable."
+                                    .to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                }
+                return;
+            }
+        };
 
-        // 2. Stream the run's orchestration events as step_update, bounded by an
-        //    idle timeout (stop once the run goes quiet / ends / errors).
-        if let Ok(resp) = state
-            .orchestration_client
-            .clone()
-            .stream_run_events(
-                match authenticated_session_request(
-                    StreamRunEventsRequest {
-                        run_id: run.run_id.clone(),
-                        after_event_id: String::new(),
-                    },
-                    &model_bearer,
-                ) {
-                    Ok(request) => request,
-                    Err(_) => return,
-                },
-            )
-            .await
-        {
-            let mut events = resp.into_inner();
-            // Observe until the run goes idle (25s), ends, or errors.
-            while let Ok(Some(Ok(ev))) =
-                tokio::time::timeout(std::time::Duration::from_secs(25), events.next()).await
+        // Phase 7 B12 — only after local dispatch construction succeeds may the
+        // metrics stream call this run started. The envelope is metadata-only.
+        let run_started =
+            build_stream_envelope(&request_id, "RUN_STARTED", &org_id, &user_id, &model);
+        let _ = state
+            .publisher
+            .publish(&subjects::run_event_subject(&run.run_id), &run_started)
+            .await;
+
+        // Observe orchestration updates while the driver works. Failure to tail
+        // events cannot decide the run outcome, so it never returns early or
+        // manufactures a terminal SSE frame.
+        if let Ok(request) = authenticated_session_request(
+            StreamRunEventsRequest {
+                run_id: run.run_id.clone(),
+                after_event_id: String::new(),
+            },
+            &model_bearer,
+        ) {
+            if let Ok(resp) = state
+                .orchestration_client
+                .clone()
+                .stream_run_events(request)
+                .await
             {
-                if let Some(step) = orchestration_event_to_step_update(&ev) {
-                    if step.should_emit(&features) {
-                        let _ = tx.send(Ok(step.to_sse(&request_id))).await;
+                let mut events = resp.into_inner();
+                while let Ok(Some(Ok(ev))) =
+                    tokio::time::timeout(std::time::Duration::from_secs(25), events.next()).await
+                {
+                    if let Some(step) = orchestration_event_to_step_update(&ev) {
+                        if step.should_emit(&features) {
+                            let _ = tx.send(Ok(step.to_sse(&request_id))).await;
+                        }
                     }
                 }
             }
         }
 
-        // 3. The answer: the run's appended assistant message, else a direct
-        //    inference fallback (always reply).
-        let answer = read_latest_assistant(&state, &org_id, &run.thread_id, &model_bearer)
-            .await
-            .filter(|a| !a.trim().is_empty());
-        let final_text = match answer {
-            Some(a) => a,
-            None => direct_infer(
-                &state,
-                &request_id,
-                &org_id,
-                &model,
-                &content,
-                zdr,
-                &inference_bearer,
-            )
-            .await
-            .unwrap_or_else(|| "The agent run produced no output.".to_owned()),
+        // An absent response after the bounded wait is ambiguous: the remote
+        // server may have accepted the run even if this client never received
+        // its reply. Leave the durable state alone and make the uncertainty
+        // visible/retryable instead of injecting a tool-free answer.
+        let dispatch_result =
+            tokio::time::timeout(std::time::Duration::from_secs(30), dispatch).await;
+        let response = match dispatch_result {
+            Err(_) => {
+                let degraded = build_stream_envelope(
+                    &request_id,
+                    "RUN_DISPATCH_DEGRADED",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &degraded)
+                    .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "agent_dispatch_unavailable".to_owned(),
+                    message: "The agent dispatch outcome is unknown; the run remains retriable."
+                        .to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                return;
+            }
+            Ok(Err(join_error)) => {
+                tracing::error!(%join_error, run_id = %run.run_id, "RunAgent dispatch task terminated before a response");
+                let degraded = build_stream_envelope(
+                    &request_id,
+                    "RUN_DISPATCH_DEGRADED",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &degraded)
+                    .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "agent_dispatch_unavailable".to_owned(),
+                    message: "The agent dispatch outcome is unknown; the run remains retriable."
+                        .to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                return;
+            }
+            Ok(Ok(Err(status))) if is_confirmed_agent_dispatch_rejection(&status) => {
+                tracing::warn!(code = ?status.code(), run_id = %run.run_id, "Execution Core rejected RunAgent before it began");
+                match crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
+                    &state,
+                    &run,
+                    "agent_dispatch_rejected",
+                    &model_bearer,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        let failed = build_stream_envelope(
+                            &request_id,
+                            "RUN_FAILED",
+                            &org_id,
+                            &user_id,
+                            &model,
+                        );
+                        let _ = state
+                            .publisher
+                            .publish(&subjects::run_event_subject(&run.run_id), &failed)
+                            .await;
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "agent_dispatch_rejected".to_owned(),
+                            message: "The agent run could not be accepted.".to_owned(),
+                            retryable: false,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                    Err(terminal_error) => {
+                        tracing::error!(%terminal_error, run_id = %run.run_id, "remote dispatch rejection could not be durably terminalized");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message:
+                                "Unable to record the rejected agent run; it remains retriable."
+                                    .to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                }
+                return;
+            }
+            Ok(Ok(Err(status))) => {
+                tracing::warn!(code = ?status.code(), run_id = %run.run_id, "RunAgent transport outcome is ambiguous");
+                let degraded = build_stream_envelope(
+                    &request_id,
+                    "RUN_DISPATCH_DEGRADED",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &degraded)
+                    .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "agent_dispatch_unavailable".to_owned(),
+                    message: "The agent dispatch outcome is unknown; the run remains retriable."
+                        .to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                return;
+            }
+            Ok(Ok(Ok(response))) => response,
         };
 
-        // 4. Stream the answer as chunks + a terminal done.
+        match classify_agentic_run_outcome(&response.status) {
+            AgenticRunOutcome::AwaitingApproval => {
+                let paused = build_stream_envelope(
+                    &request_id,
+                    "RUN_AWAITING_APPROVAL",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &paused)
+                    .await;
+                let _ = tx
+                    .send(Ok(Event::default().event("awaiting_approval").data(
+                        json!({
+                            "run_id": run.run_id,
+                            "request_id": request_id,
+                            "status": "awaiting_approval",
+                        })
+                        .to_string(),
+                    )))
+                    .await;
+                return;
+            }
+            AgenticRunOutcome::Failed => {
+                let failed =
+                    build_stream_envelope(&request_id, "RUN_FAILED", &org_id, &user_id, &model);
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &failed)
+                    .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "agent_run_failed".to_owned(),
+                    message: "The governed agent run failed.".to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                return;
+            }
+            AgenticRunOutcome::Unknown => {
+                tracing::error!(status = %response.status, run_id = %run.run_id, "Execution Core returned an unknown agent run status");
+                let degraded = build_stream_envelope(
+                    &request_id,
+                    "RUN_DISPATCH_DEGRADED",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &degraded)
+                    .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "agent_run_state_unknown".to_owned(),
+                    message: "The agent returned an unsupported lifecycle state.".to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                return;
+            }
+            AgenticRunOutcome::Completed => {}
+        }
+
+        // Execution owns the assistant append. Its response is preferred; the
+        // durable conversation is a recovery read only, never a direct-infer
+        // substitute. A completed response without an answer is surfaced as a
+        // corrupt/degraded result instead of a fabricated success frame.
+        let final_text = if response.final_output.trim().is_empty() {
+            read_latest_assistant(&state, &org_id, &run.thread_id, &model_bearer)
+                .await
+                .filter(|answer| !answer.trim().is_empty())
+        } else {
+            Some(response.final_output)
+        };
+        let Some(final_text) = final_text else {
+            let degraded = build_stream_envelope(
+                &request_id,
+                "RUN_OUTPUT_UNAVAILABLE",
+                &org_id,
+                &user_id,
+                &model,
+            );
+            let _ = state
+                .publisher
+                .publish(&subjects::run_event_subject(&run.run_id), &degraded)
+                .await;
+            let event = crate::sse_events::ChatEvent::Error {
+                code: "agent_run_output_unavailable".to_owned(),
+                message: "The completed agent run did not provide an answer.".to_owned(),
+                retryable: true,
+            };
+            let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            return;
+        };
+
+        // Stream only a confirmed completed answer.
         for piece in chunk_for_stream(&final_text, 48) {
             let chunk = SseChunk {
                 request_id: request_id.clone(),
@@ -2618,8 +3330,8 @@ fn agentic_run_stream(
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
         }
 
-        // Phase 7 B12 — RUN_COMPLETED lifecycle event (the run produced its answer)
-        // so insight-core records agent_runs_completed (surface=agents).
+        // `RunAgent` confirmed completion and supplied an answer, so this is the
+        // one point Gateway may publish its completed lifecycle projection.
         let run_completed =
             build_stream_envelope(&request_id, "RUN_COMPLETED", &org_id, &user_id, &model);
         let _ = state
@@ -3041,7 +3753,11 @@ impl EnumName for SubagentRole {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_stream_envelope, build_usage_envelope, orchestration_event_to_step_update};
+    use super::{
+        build_stream_envelope, build_usage_envelope, classify_agentic_run_outcome,
+        is_confirmed_agent_dispatch_rejection, orchestration_event_to_step_update,
+        AgenticRunOutcome,
+    };
 
     #[test]
     fn orchestration_plan_event_maps_to_step_update() {
@@ -3232,5 +3948,47 @@ mod tests {
         assert!(request.metadata().get("x-api-key").is_none());
         assert!(request.metadata().get("x-user-id").is_none());
         assert!(request.metadata().get("x-org-id").is_none());
+    }
+
+    #[test]
+    fn agentic_outcomes_preserve_approval_and_unknown_states_as_nonterminal() {
+        assert_eq!(
+            classify_agentic_run_outcome("completed"),
+            AgenticRunOutcome::Completed
+        );
+        assert_eq!(
+            classify_agentic_run_outcome("failed"),
+            AgenticRunOutcome::Failed
+        );
+        assert_eq!(
+            classify_agentic_run_outcome("awaiting_approval"),
+            AgenticRunOutcome::AwaitingApproval,
+            "HITL pause must never become a synthetic completed agent result"
+        );
+        assert_eq!(
+            classify_agentic_run_outcome("queued"),
+            AgenticRunOutcome::Unknown,
+            "unrecognized states must not be terminalized by Gateway"
+        );
+    }
+
+    #[test]
+    fn only_proven_pre_dispatch_rejections_are_safe_to_terminalize() {
+        assert!(is_confirmed_agent_dispatch_rejection(
+            &tonic::Status::invalid_argument("bad request")
+        ));
+        assert!(is_confirmed_agent_dispatch_rejection(
+            &tonic::Status::unauthenticated("bad credential")
+        ));
+        assert!(is_confirmed_agent_dispatch_rejection(
+            &tonic::Status::permission_denied("denied")
+        ));
+        assert!(
+            !is_confirmed_agent_dispatch_rejection(&tonic::Status::unavailable("timeout")),
+            "the server may have accepted an unavailable request before its response was lost"
+        );
+        assert!(!is_confirmed_agent_dispatch_rejection(
+            &tonic::Status::deadline_exceeded("timeout")
+        ));
     }
 }

@@ -6,11 +6,60 @@ Generated: 2026-07-11; corrected and updated 2026-07-13 (supersedes the
 Scope: `apps/Model Plane/rust/services/session-core`
 Distinct from Control Plane `session-core` (`:3017`/`:50017`, container `session-core-service`). This is the **Model Plane** durable-state authority: gRPC `:9091`, HTTP health/metrics `:18081` (container port `8081`), container `model-plane-session-core-1`.
 
+## 2026-07-16 delta
+
+Model Plane Session Core is running in Docker, reports healthy, and had zero
+restarts in the 2026-07-16 read-only inspection. Missing and malformed gRPC
+credentials are denied; a valid, organization-bound Inference Core service
+credential reaches the scoped routing-policy method. Database inspection shows
+migrations through `0015` and the approval/terminal delivery outbox tables.
+There are four pre-existing approvals in `requested` state and zero approval
+delivery rows; no approval was granted or external effect executed during this
+audit. The earlier 479-success/0-error compaction counters remain historical:
+a release-shaped live compaction, retry, concurrency, poison-input, and ZDR
+exercise has not yet been performed.
+
+Source now transactionally compare-and-sets a grant and inserts one content-free
+`approval_delivery_outbox` row; exact grant replay reuses that delivery ID. The
+outbox has claim/lease, bounded retry/backoff, poison/terminal, and
+acknowledgement-state primitives. A restartable continuation descriptor,
+authenticated dispatcher, and successful execution receipt are still absent
+and remain a P0 blocker. A generic continuation cannot be safely re-planned:
+it requires an encrypted exact-effect descriptor or a downstream immutable
+intent/receipt, neither of which has verified retention/KMS/idempotency support.
+Approval-required external-effect capabilities therefore remain unavailable.
+
+Managed-run terminalization is now source-implemented: additive
+`StartManagedRun`, `RecordTerminalOutcome`, and `HeartbeatManagedRun`, migration
+`0015`, request-to-run binding, metadata-only obligation/receipt, and leased
+reconciliation worker. Gateway/Execution use scoped service tokens and legacy
+terminal `CompleteStep` is rejected for managed runs. Incremental validation
+passes 128 Session Core tests with seven database-gated ignores; a disposable
+Postgres regression confirms the legacy bypass is denied. Default context
+assembly also distinguishes verified empty semantic memory from bounded Letta
+RPC/timeout degradation, with content-free metrics; bridge liveness is
+`/healthz` while semantic readiness stays `/readyz`. Migration presence and
+authentication are live evidence; exact-effect continuation, semantic-provider
+success, compaction recovery/concurrency, and end-to-end ZDR retention behavior
+remain source-only or unproven. All-target Rust coverage remains below target
+and `approval_delivery.rs` is 35.32% line covered.
+
+Historical references below to a grant emitting `RunResumedAfterApproval` are
+not current completion evidence: the current source does not treat a grant or
+outbox acknowledgement as proof that execution resumed.
+
 ## 2026-07-13 correction and secure-MVP source state
 
 The headline 2026-07-11 claim that compaction was failing 100% is **withdrawn**. Current read-only live metrics show 479 successful compactions, 0 errors, and 24 persisted checkpoints, with no duplicate run ordinal observed. The prior counters were either misattributed or from a different runtime interval. This corrects the live finding; it does not yet prove poison-input handling, retry/backoff behavior, concurrent idempotency, or ZDR-safe compaction.
 
-The running gRPC service remains unauthenticated. Safe live probes also demonstrated a serious adjacent approval flaw: approvals with an empty organization could be listed, and `DecideApproval` trusted caller-supplied actor/tenant fields. That is distinct from the real execution-core `ask` gate and must not be used to describe HITL as mocked.
+At the 2026-07-13 cutoff, the running gRPC service remained unauthenticated.
+That historical image also demonstrated a serious adjacent approval flaw:
+approvals with an empty organization could be listed, and `DecideApproval`
+trusted caller-supplied actor/tenant fields. The current 2026-07-16 local
+listener denies missing/malformed credentials; the historical finding is
+retained here without overriding the current delta above. It is distinct from
+the real execution-core `ask` gate and must not be used to describe HITL as
+mocked.
 
 Source-only remediation now:
 

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
@@ -25,8 +27,40 @@ type fakeAvailabilityStore struct {
 	auditAction string
 }
 
+func TestGlobalHealthAttestationRequiresDedicatedServiceScope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		principal authctx.Principal
+		want      bool
+	}{
+		{name: "exact health authority", principal: authctx.Principal{OrganizationID: "ops", ActorID: "capability-health-attestor", PrincipalType: "service", Scopes: []string{authz.GlobalHealthWriteScope}}, want: true},
+		{name: "tenant health reporter is not global authority", principal: authctx.Principal{OrganizationID: "org-a", ActorID: "health", PrincipalType: "service", Scopes: []string{authz.HealthWriteScope}}},
+		{name: "global catalog writer is not health authority", principal: authctx.Principal{OrganizationID: "ops", ActorID: "admin", PrincipalType: "service", Scopes: []string{authz.GlobalWriteScope}}},
+		{name: "user is never global authority", principal: authctx.Principal{OrganizationID: "ops", ActorID: "user-a", PrincipalType: "user", Scopes: []string{authz.GlobalHealthWriteScope}}},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mayAttestGlobalCapability(test.principal); got != test.want {
+				t.Fatalf("mayAttestGlobalCapability() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func (store *fakeAvailabilityStore) GetForOrg(_ context.Context, _ string, organizationID string) (*registry.CapabilityRow, error) {
 	store.gotOrgID = organizationID
+	if store.getErr != nil {
+		return nil, store.getErr
+	}
+	return store.row, nil
+}
+
+func (store *fakeAvailabilityStore) GetGlobal(_ context.Context, _ string) (*registry.CapabilityRow, error) {
 	if store.getErr != nil {
 		return nil, store.getErr
 	}
@@ -37,6 +71,12 @@ func (store *fakeAvailabilityStore) AttestAvailabilityForOrg(_ context.Context, 
 	store.gotOrgID = organizationID
 	store.gotUpdate = update
 	store.auditAction = "availability_attested"
+	return store.updated, store.updateErr
+}
+
+func (store *fakeAvailabilityStore) AttestAvailabilityGlobal(_ context.Context, _, _ string, update registry.AvailabilityUpdate) (bool, error) {
+	store.gotUpdate = update
+	store.auditAction = "global_availability_attested"
 	return store.updated, store.updateErr
 }
 

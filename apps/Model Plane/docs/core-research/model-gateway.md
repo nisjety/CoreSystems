@@ -4,6 +4,37 @@ Generated: 2026-07-11 (supersedes the 2026-06-09 dive)
 
 Scope: `apps/Model Plane/rust/services/model-gateway`
 
+## 2026-07-16 delta
+
+At 2026-07-16 20:05 CEST, the local integration container is running healthy
+with restart count zero. HTTP `/readyz` is 200 and the additive gRPC listener is
+loopback-reachable on `:9090`; a descriptor-specific unauthenticated call is
+rejected before business handling. The image is a dirty-tree, unsigned
+`working-tree` build, not an immutable production candidate. Approval cache misses read
+through to the durable Session record and re-bind owner/org before use. A grant
+can enter the durable claim/lease/retry/terminal state machine, but cannot
+continue execution without a restartable descriptor, authenticated dispatcher,
+and successful execution receipt, so the gateway must propagate non-success
+rather than claim resume. Public free-form `SendMessage` is quarantined and
+fails closed; the gateway NATS ACL no longer grants `agents.>`, `org.>`, or
+`notify.>` and retains only normal `mp.v1` event authority. The old free-form
+bridge is unavailable, not capability-dispatched. Browser status mapping now
+allows completion only for explicit success; denial, timeout, and resource
+exhaustion terminalize failed while cancellation/abort invoke `CancelRun`.
+Unknown/approval-paused outcomes remain nonterminal. At 15:10 CEST, source
+tests passed 409 library plus 41 integration cases. Incremental validation now
+passes 420 gateway library tests, including managed-start-key, service-token
+heartbeat, and initial-heartbeat fail-closed regressions. The gateway derives
+an opaque keyed-MAC managed start key instead of persisting raw caller
+idempotency material, and its idempotency cache has fixed key, entry, value,
+and TTL bounds. The P0 Session Core managed-run terminalization
+receipt/reconciler now exists in source and is used by Gateway, but it has no
+release-database migration, live service-token, periodic-ticker/browser
+background-dispatch, or rollback evidence. Browser/session/SSE coverage remains
+below the target. Live no-auth, malformed-bearer, and forged-identity gateway
+probes deny, but a full valid chat/tool/browser E2E and immutable artifact do
+not exist.
+
 Method note: audited under a corrupted Docker containerd content store — no
 `docker exec` / `build` / `logs`. Live facts come from host curl to published
 ports and `docker ps` / `docker inspect`; everything else is read from source,
@@ -22,15 +53,9 @@ verification and identity binding; issuer ZDR is monotonic. Legacy gRPC MCP
 registration and remote trigger remain quarantined rather than reopening RCE,
 ownership, or DNS-rebinding gaps.
 
-Source verification includes the full model-gateway library suite, 21/21
-authenticated HTTP/SSE invoke-chain tests, the three-test secure gRPC
-compatibility contract, and 5/5 signed-token orchestration HTTP tests, plus
-combined all-target compilation, workspace formatting, and strict clippy. The
-integration target initially exposed missing delegated credentials; the source
-caller/issuer graph and stale dev-bypass fixtures were corrected with exact
-signed model/session/execution tokens without weakening authentication. The
-HTTP JWKS loader is startup-warmed, redirect-denying,
-status-checked, time-bounded, and body-bounded. No `:9090` live claim is made:
+Earlier source-test counts below are historical and must not be reused for the
+current uncommitted aggregate. The HTTP JWKS loader is startup-warmed,
+redirect-denying, status-checked, time-bounded, and body-bounded. No `:9090` live claim is made:
 the running listener still refuses connections. Approval/browser paths now
 require separate exact execution/session credentials and affirmative execution
 resume; durable decision persistence precedes in-memory mutation. An already-

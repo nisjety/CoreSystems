@@ -733,3 +733,201 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "model_plane/v1/sessions.proto",
 }
+
+const (
+	ManagedRunLifecycle_StartManagedRun_FullMethodName       = "/model_plane.v1.ManagedRunLifecycle/StartManagedRun"
+	ManagedRunLifecycle_RecordTerminalOutcome_FullMethodName = "/model_plane.v1.ManagedRunLifecycle/RecordTerminalOutcome"
+	ManagedRunLifecycle_HeartbeatManagedRun_FullMethodName   = "/model_plane.v1.ManagedRunLifecycle/HeartbeatManagedRun"
+)
+
+// ManagedRunLifecycleClient is the client API for ManagedRunLifecycle service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ManagedRunLifecycle owns the additive, durable terminalization protocol for
+// runs whose producers can lose a terminal RPC response. It intentionally
+// lives beside, rather than inside, SessionCore so legacy SessionCore clients
+// and mocks remain source-compatible.
+type ManagedRunLifecycleClient interface {
+	// Start a run and its single terminalization obligation atomically.
+	StartManagedRun(ctx context.Context, in *StartManagedRunRequest, opts ...grpc.CallOption) (*StartManagedRunResponse, error)
+	// Record one immutable, metadata-only terminal outcome from an authenticated
+	// workload identity. The response is a durable terminal receipt.
+	RecordTerminalOutcome(ctx context.Context, in *RecordTerminalOutcomeRequest, opts ...grpc.CallOption) (*RecordTerminalOutcomeResponse, error)
+	// Renew the server-owned recovery deadline while an accepted producer is
+	// still working. This request cannot carry content or choose a deadline.
+	HeartbeatManagedRun(ctx context.Context, in *HeartbeatManagedRunRequest, opts ...grpc.CallOption) (*HeartbeatManagedRunResponse, error)
+}
+
+type managedRunLifecycleClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewManagedRunLifecycleClient(cc grpc.ClientConnInterface) ManagedRunLifecycleClient {
+	return &managedRunLifecycleClient{cc}
+}
+
+func (c *managedRunLifecycleClient) StartManagedRun(ctx context.Context, in *StartManagedRunRequest, opts ...grpc.CallOption) (*StartManagedRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartManagedRunResponse)
+	err := c.cc.Invoke(ctx, ManagedRunLifecycle_StartManagedRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *managedRunLifecycleClient) RecordTerminalOutcome(ctx context.Context, in *RecordTerminalOutcomeRequest, opts ...grpc.CallOption) (*RecordTerminalOutcomeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordTerminalOutcomeResponse)
+	err := c.cc.Invoke(ctx, ManagedRunLifecycle_RecordTerminalOutcome_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *managedRunLifecycleClient) HeartbeatManagedRun(ctx context.Context, in *HeartbeatManagedRunRequest, opts ...grpc.CallOption) (*HeartbeatManagedRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HeartbeatManagedRunResponse)
+	err := c.cc.Invoke(ctx, ManagedRunLifecycle_HeartbeatManagedRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ManagedRunLifecycleServer is the server API for ManagedRunLifecycle service.
+// All implementations must embed UnimplementedManagedRunLifecycleServer
+// for forward compatibility.
+//
+// ManagedRunLifecycle owns the additive, durable terminalization protocol for
+// runs whose producers can lose a terminal RPC response. It intentionally
+// lives beside, rather than inside, SessionCore so legacy SessionCore clients
+// and mocks remain source-compatible.
+type ManagedRunLifecycleServer interface {
+	// Start a run and its single terminalization obligation atomically.
+	StartManagedRun(context.Context, *StartManagedRunRequest) (*StartManagedRunResponse, error)
+	// Record one immutable, metadata-only terminal outcome from an authenticated
+	// workload identity. The response is a durable terminal receipt.
+	RecordTerminalOutcome(context.Context, *RecordTerminalOutcomeRequest) (*RecordTerminalOutcomeResponse, error)
+	// Renew the server-owned recovery deadline while an accepted producer is
+	// still working. This request cannot carry content or choose a deadline.
+	HeartbeatManagedRun(context.Context, *HeartbeatManagedRunRequest) (*HeartbeatManagedRunResponse, error)
+	mustEmbedUnimplementedManagedRunLifecycleServer()
+}
+
+// UnimplementedManagedRunLifecycleServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedManagedRunLifecycleServer struct{}
+
+func (UnimplementedManagedRunLifecycleServer) StartManagedRun(context.Context, *StartManagedRunRequest) (*StartManagedRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartManagedRun not implemented")
+}
+func (UnimplementedManagedRunLifecycleServer) RecordTerminalOutcome(context.Context, *RecordTerminalOutcomeRequest) (*RecordTerminalOutcomeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordTerminalOutcome not implemented")
+}
+func (UnimplementedManagedRunLifecycleServer) HeartbeatManagedRun(context.Context, *HeartbeatManagedRunRequest) (*HeartbeatManagedRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HeartbeatManagedRun not implemented")
+}
+func (UnimplementedManagedRunLifecycleServer) mustEmbedUnimplementedManagedRunLifecycleServer() {}
+func (UnimplementedManagedRunLifecycleServer) testEmbeddedByValue()                             {}
+
+// UnsafeManagedRunLifecycleServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ManagedRunLifecycleServer will
+// result in compilation errors.
+type UnsafeManagedRunLifecycleServer interface {
+	mustEmbedUnimplementedManagedRunLifecycleServer()
+}
+
+func RegisterManagedRunLifecycleServer(s grpc.ServiceRegistrar, srv ManagedRunLifecycleServer) {
+	// If the following call panics, it indicates UnimplementedManagedRunLifecycleServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ManagedRunLifecycle_ServiceDesc, srv)
+}
+
+func _ManagedRunLifecycle_StartManagedRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartManagedRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ManagedRunLifecycleServer).StartManagedRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ManagedRunLifecycle_StartManagedRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ManagedRunLifecycleServer).StartManagedRun(ctx, req.(*StartManagedRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ManagedRunLifecycle_RecordTerminalOutcome_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordTerminalOutcomeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ManagedRunLifecycleServer).RecordTerminalOutcome(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ManagedRunLifecycle_RecordTerminalOutcome_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ManagedRunLifecycleServer).RecordTerminalOutcome(ctx, req.(*RecordTerminalOutcomeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ManagedRunLifecycle_HeartbeatManagedRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeartbeatManagedRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ManagedRunLifecycleServer).HeartbeatManagedRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ManagedRunLifecycle_HeartbeatManagedRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ManagedRunLifecycleServer).HeartbeatManagedRun(ctx, req.(*HeartbeatManagedRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ManagedRunLifecycle_ServiceDesc is the grpc.ServiceDesc for ManagedRunLifecycle service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ManagedRunLifecycle_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ManagedRunLifecycle",
+	HandlerType: (*ManagedRunLifecycleServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "StartManagedRun",
+			Handler:    _ManagedRunLifecycle_StartManagedRun_Handler,
+		},
+		{
+			MethodName: "RecordTerminalOutcome",
+			Handler:    _ManagedRunLifecycle_RecordTerminalOutcome_Handler,
+		},
+		{
+			MethodName: "HeartbeatManagedRun",
+			Handler:    _ManagedRunLifecycle_HeartbeatManagedRun_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}

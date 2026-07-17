@@ -105,18 +105,19 @@ type ModelGatewayClient interface {
 	// Used by automations to ping internal services or third-party
 	// webhooks. Routes through the same security envelope as Fetch.
 	RemoteTrigger(ctx context.Context, in *RemoteTriggerRequest, opts ...grpc.CallOption) (*RemoteTriggerResponse, error)
-	// SendMessage — publish a typed message envelope onto NATS. Replaces
-	// the v2 send_message tool. Subject namespaces are enforced server-
-	// side so agents can't publish to arbitrary subjects.
+	// SendMessage — backwards-compatible quarantined legacy RPC. Every call
+	// fails with FAILED_PRECONDITION and cannot publish to NATS. Free-form
+	// agent-selected subjects bypass capability policy and approval enforcement.
 	SendMessage(ctx context.Context, in *SendMessageRequest, opts ...grpc.CallOption) (*SendMessageResponse, error)
 	// SyntheticOutput — test/debug tool that echoes a fixed payload back
 	// to the caller. Used by integration tests + smoke probes; production
 	// builds may want to gate behind a feature flag.
 	SyntheticOutput(ctx context.Context, in *SyntheticOutputRequest, opts ...grpc.CallOption) (*SyntheticOutputResponse, error)
 	// EnterPlanMode — switch a run into plan-collect mode. While in plan
-	// mode, write-class tools (file_edit, file_write, bash, remote_trigger,
-	// send_message) are gated by the approval queue; read-class tools
-	// (fetch, web_search, extract_structured) flow normally.
+	// mode, write-class tools (file_edit, file_write, bash, remote_trigger)
+	// are gated by the approval queue; read-class tools (fetch, web_search,
+	// extract_structured) flow normally. SendMessage is independently
+	// quarantined and always fails closed.
 	EnterPlanMode(ctx context.Context, in *EnterPlanModeRequest, opts ...grpc.CallOption) (*EnterPlanModeResponse, error)
 	// ExitPlanMode — leave plan mode. Pending actions in the plan are
 	// discarded unless the caller explicitly approved them separately.
@@ -743,18 +744,19 @@ type ModelGatewayServer interface {
 	// Used by automations to ping internal services or third-party
 	// webhooks. Routes through the same security envelope as Fetch.
 	RemoteTrigger(context.Context, *RemoteTriggerRequest) (*RemoteTriggerResponse, error)
-	// SendMessage — publish a typed message envelope onto NATS. Replaces
-	// the v2 send_message tool. Subject namespaces are enforced server-
-	// side so agents can't publish to arbitrary subjects.
+	// SendMessage — backwards-compatible quarantined legacy RPC. Every call
+	// fails with FAILED_PRECONDITION and cannot publish to NATS. Free-form
+	// agent-selected subjects bypass capability policy and approval enforcement.
 	SendMessage(context.Context, *SendMessageRequest) (*SendMessageResponse, error)
 	// SyntheticOutput — test/debug tool that echoes a fixed payload back
 	// to the caller. Used by integration tests + smoke probes; production
 	// builds may want to gate behind a feature flag.
 	SyntheticOutput(context.Context, *SyntheticOutputRequest) (*SyntheticOutputResponse, error)
 	// EnterPlanMode — switch a run into plan-collect mode. While in plan
-	// mode, write-class tools (file_edit, file_write, bash, remote_trigger,
-	// send_message) are gated by the approval queue; read-class tools
-	// (fetch, web_search, extract_structured) flow normally.
+	// mode, write-class tools (file_edit, file_write, bash, remote_trigger)
+	// are gated by the approval queue; read-class tools (fetch, web_search,
+	// extract_structured) flow normally. SendMessage is independently
+	// quarantined and always fails closed.
 	EnterPlanMode(context.Context, *EnterPlanModeRequest) (*EnterPlanModeResponse, error)
 	// ExitPlanMode — leave plan mode. Pending actions in the plan are
 	// discarded unless the caller explicitly approved them separately.

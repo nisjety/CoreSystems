@@ -5,6 +5,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mockGetSession = jest.fn();
 jest.mock('./auth', () => ({
@@ -16,9 +19,11 @@ jest.mock('./plane-token-membership', () => ({
 }));
 
 import { ModelPlaneTokenController } from './model-plane-token.controller';
+import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
 
 describe('ModelPlaneTokenController secure ZDR issuance', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
+  const originalRegistryFile = process.env.PLANE_SERVICE_PRINCIPALS_FILE;
   const issuedAt = '2026-07-15T00:00:00.000Z';
   const mintedToken = [
     'header',
@@ -42,6 +47,11 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       delete process.env.PLANE_SERVICE_PRINCIPALS_JSON;
     } else {
       process.env.PLANE_SERVICE_PRINCIPALS_JSON = originalRegistry;
+    }
+    if (originalRegistryFile === undefined) {
+      delete process.env.PLANE_SERVICE_PRINCIPALS_FILE;
+    } else {
+      process.env.PLANE_SERVICE_PRINCIPALS_FILE = originalRegistryFile;
     }
   });
 
@@ -74,7 +84,6 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith({
       userId: 'user-a',
       orgId: 'org-a',
-      zdr: true,
       email: 'user-a@example.test',
       scopes: undefined,
     });
@@ -137,6 +146,32 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     expect(tokenService.issueModelPlaneToken).not.toHaveBeenCalled();
   });
 
+  it('fails closed when the issuer-owned interactive retention policy is invalid', async () => {
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a' },
+      session: { activeOrganizationId: 'org-a' },
+    });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
+    const tokenService = {
+      issueModelPlaneToken: jest.fn().mockImplementation(() => {
+        throw new InteractiveRetentionPolicyConfigurationError(
+          'invalid policy',
+        );
+      }),
+    };
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      availableAudit() as never,
+    );
+
+    await expect(
+      controller.getToken({ headers: {} } as never),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
   it('rejects a session without a verified active organization', async () => {
     mockGetSession.mockResolvedValue({
       user: { id: 'user-a' },
@@ -184,20 +219,100 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith({
         userId: 'user-a',
         orgId: 'org-a',
-        zdr: true,
         email: undefined,
         scopes: ['admin'],
       });
     },
   );
 
-  it('mints only the configured model audience, tenant, and scope', async () => {
+  it('mints only the file-configured model audience, tenant, and scope', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'model-plane-principals-'));
+    const registryFile = join(directory, 'registry.json');
+    writeFileSync(
+      registryFile,
+      JSON.stringify({
+        'model-worker': {
+          credential: 'test-only-model-worker-key',
+          audiences: ['model-gateway'],
+          orgIds: ['org-a'],
+          scopes: ['runs:submit'],
+        },
+      }),
+      { mode: 0o600 },
+    );
+    delete process.env.PLANE_SERVICE_PRINCIPALS_JSON;
+    process.env.PLANE_SERVICE_PRINCIPALS_FILE = registryFile;
+    const tokenService = {
+      issueModelPlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
+    };
+    const auditPublisher = availableAudit();
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      auditPublisher as never,
+    );
+
+    try {
+      await expect(
+        controller.issueInternalToken(
+          'model-worker',
+          'test-only-model-worker-key',
+          {
+            orgId: 'org-a',
+            scopes: ['runs:submit'],
+            reason: 'submit scheduled evaluation',
+          },
+        ),
+      ).resolves.toEqual({ token: mintedToken });
+      expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith({
+        userId: 'service:model-worker',
+        orgId: 'org-a',
+        scopes: ['runs:submit'],
+        principalType: 'service',
+        serviceId: 'model-worker',
+        reason: 'submit scheduled evaluation',
+        retentionPosture: {
+          zdr: true,
+          authority: 'service-principal-policy',
+        },
+      });
+      expect(auditPublisher.publishAuditDurable).toHaveBeenCalledWith(
+        'velion.audit.v2.control.auth-core.model_service_token_issued',
+        expect.objectContaining({
+          occurred_at: issuedAt,
+          event_id: `model-token:${createHash('sha256')
+            .update(mintedToken)
+            .digest('hex')}`,
+          org_id: 'org-a',
+          actor_role: 'service',
+          plane: 'control',
+          producer: 'auth-core',
+          event: 'model_service_token_issued',
+          subject: 'service:model-worker',
+          resource_id: 'model-gateway',
+          outcome: 'ok',
+          details: {
+            audience: 'model-gateway',
+            scopes: ['runs:submit'],
+            reason: 'submit scheduled evaluation',
+            zdr: true,
+          },
+        }),
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('uses exact deployment policy for non-ZDR Model service issuance', async () => {
     process.env.PLANE_SERVICE_PRINCIPALS_JSON = JSON.stringify({
       'model-worker': {
         credential: 'test-only-model-worker-key',
         audiences: ['model-gateway'],
         orgIds: ['org-a'],
         scopes: ['runs:submit'],
+        retentionByAudience: {
+          'model-gateway': 'persistent',
+        },
       },
     });
     const tokenService = {
@@ -208,6 +323,54 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       tokenService as never,
       auditPublisher as never,
     );
+    const callerBody = {
+      orgId: 'org-a',
+      scopes: ['runs:submit'],
+      reason: 'submit scheduled evaluation',
+    };
+
+    await expect(
+      controller.issueInternalToken(
+        'model-worker',
+        'test-only-model-worker-key',
+        callerBody,
+      ),
+    ).resolves.toEqual({ token: mintedToken });
+    expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionPosture: {
+          zdr: false,
+          authority: 'service-principal-policy',
+        },
+      }),
+    );
+    expect(auditPublisher.publishAuditDurable).toHaveBeenCalledWith(
+      'velion.audit.v2.control.auth-core.model_service_token_issued',
+      expect.objectContaining({
+        details: {
+          audience: 'model-gateway',
+          scopes: ['runs:submit'],
+          reason: 'submit scheduled evaluation',
+          zdr: false,
+        },
+      }),
+    );
+  });
+
+  it('rejects Model retention posture supplied in either the request body or headers', async () => {
+    process.env.PLANE_SERVICE_PRINCIPALS_JSON = JSON.stringify({
+      'model-worker': {
+        credential: 'test-only-model-worker-key',
+        audiences: ['model-gateway'],
+        orgIds: ['org-a'],
+        scopes: ['runs:submit'],
+      },
+    });
+    const tokenService = { issueModelPlaneToken: jest.fn() };
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      availableAudit() as never,
+    );
 
     await expect(
       controller.issueInternalToken(
@@ -216,42 +379,30 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
         {
           orgId: 'org-a',
           scopes: ['runs:submit'],
-          reason: 'submit scheduled evaluation',
+          reason: 'attempt body persistence downgrade',
+          zdr: false,
         },
       ),
-    ).resolves.toEqual({ token: mintedToken });
-    expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith({
-      userId: 'service:model-worker',
-      orgId: 'org-a',
-      scopes: ['runs:submit'],
-      principalType: 'service',
-      serviceId: 'model-worker',
-      reason: 'submit scheduled evaluation',
-      zdr: true,
-    });
-    expect(auditPublisher.publishAuditDurable).toHaveBeenCalledWith(
-      'velion.audit.v2.control.auth-core.model_service_token_issued',
-      expect.objectContaining({
-        occurred_at: issuedAt,
-        event_id: `model-token:${createHash('sha256')
-          .update(mintedToken)
-          .digest('hex')}`,
-        org_id: 'org-a',
-        actor_role: 'service',
-        plane: 'control',
-        producer: 'auth-core',
-        event: 'model_service_token_issued',
-        subject: 'service:model-worker',
-        resource_id: 'model-gateway',
-        outcome: 'ok',
-        details: {
-          audience: 'model-gateway',
+    ).rejects.toBeInstanceOf(BadRequestException);
+    const issueWithHeader = controller.issueInternalToken.bind(controller) as (
+      serviceId: string,
+      credential: string,
+      body: object,
+      zdrHeader?: string,
+    ) => Promise<unknown>;
+    await expect(
+      issueWithHeader(
+        'model-worker',
+        'test-only-model-worker-key',
+        {
+          orgId: 'org-a',
           scopes: ['runs:submit'],
-          reason: 'submit scheduled evaluation',
-          zdr: true,
+          reason: 'attempt header persistence downgrade',
         },
-      }),
-    );
+        'false',
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tokenService.issueModelPlaneToken).not.toHaveBeenCalled();
   });
 
   it('fails closed when the durable service-token audit event cannot publish', async () => {

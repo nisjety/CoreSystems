@@ -8,7 +8,14 @@ import (
 
 func TestStoreScopesCopiesAndRevokesGrants(t *testing.T) {
 	store := NewStore()
-	created, err := store.Create("org-a", "user-a", "session-a", "browser://cloud", time.Minute)
+	created, err := store.Create(
+		"org-a",
+		"user-a",
+		"session-a",
+		"browser://cloud",
+		[]string{"example.com"},
+		time.Minute,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +58,14 @@ func TestStoreScopesCopiesAndRevokesGrants(t *testing.T) {
 
 func TestStoreReportsExpiredAndUnknownGrants(t *testing.T) {
 	store := NewStore()
-	expired, err := store.Create("org-a", "user-a", "session-a", "browser://cloud", -time.Second)
+	expired, err := store.Create(
+		"org-a",
+		"user-a",
+		"session-a",
+		"browser://cloud",
+		[]string{"example.com"},
+		-time.Second,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,4 +75,59 @@ func TestStoreReportsExpiredAndUnknownGrants(t *testing.T) {
 	if _, err := store.GetScoped("missing", "org-a", "user-a"); !errors.Is(err, ErrGrantNotFound) {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func TestNormalizeAllowedDomainsRejectsUnboundedOrNonHostPolicy(t *testing.T) {
+	for _, domains := range [][]string{
+		nil,
+		{},
+		{""},
+		{"https://example.com"},
+		{"example.com/path"},
+		{"*.example.com"},
+		{"127.0.0.1"},
+		{"localhost"},
+	} {
+		if _, err := NormalizeAllowedDomains(domains); !errors.Is(err, ErrInvalidDomainPolicy) {
+			t.Fatalf("NormalizeAllowedDomains(%#v) error = %v, want ErrInvalidDomainPolicy", domains, err)
+		}
+	}
+}
+
+func TestStoreCopiesCanonicalAllowedDomains(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create(
+		"org-a",
+		"user-a",
+		"session-a",
+		"browser://cloud",
+		[]string{"EXAMPLE.com", "api.example.com", "example.com"},
+		time.Minute,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := created.AllowedDomains, []string{"api.example.com", "example.com"}; !sameStrings(got, want) {
+		t.Fatalf("created policy = %#v, want %#v", got, want)
+	}
+	created.AllowedDomains[0] = "attacker.example"
+	stored, err := store.GetScoped(created.ID, "org-a", "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stored.AllowedDomains, []string{"api.example.com", "example.com"}; !sameStrings(got, want) {
+		t.Fatalf("stored policy = %#v, want %#v", got, want)
+	}
+}
+
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }

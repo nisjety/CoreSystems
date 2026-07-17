@@ -1,4 +1,16 @@
-import { authorizePlaneServicePrincipal } from './plane-service-principal';
+import {
+  chmodSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  authorizePlaneServicePrincipal,
+  loadPlaneServicePrincipalRegistry,
+} from './plane-service-principal';
 
 const configured = JSON.stringify({
   'graph-worker': {
@@ -30,15 +42,17 @@ describe('plane service-principal issuance policy', () => {
     });
   });
 
-  it('allows persistent posture only for an explicitly authorized principal', () => {
+  it('derives persistent posture only from exact deployment-owned audience policy', () => {
     const persistenceAuthorized = JSON.stringify({
       'ingestion-writer': {
         credential: 'test-only-ingestion-key',
         audiences: ['data-plane'],
         orgIds: [],
         allowAnyOrg: true,
-        allowPersistentData: true,
         scopes: ['documents:write', 'org:data:write_all'],
+        retentionByAudience: {
+          'data-plane': 'persistent',
+        },
       },
     });
 
@@ -50,21 +64,21 @@ describe('plane service-principal issuance policy', () => {
         orgId: 'org-a',
         requestedScopes: ['documents:write', 'org:data:write_all'],
         reason: 'persist approved ingestion fixture',
-        zdr: false,
       }),
     ).toMatchObject({ zdr: false, orgId: 'org-a' });
 
-    expect(() =>
-      authorizePlaneServicePrincipal(configured, {
-        serviceId: 'graph-worker',
-        credential: 'test-only-caller-key',
-        audience: 'data-plane',
-        orgId: 'org-a',
-        requestedScopes: ['graph:read'],
-        reason: 'attempt persistence downgrade',
-        zdr: false,
-      }),
-    ).toThrow();
+    const callerDowngrade = {
+      serviceId: 'graph-worker',
+      credential: 'test-only-caller-key',
+      audience: 'data-plane',
+      orgId: 'org-a',
+      requestedScopes: ['graph:read'],
+      reason: 'attempt persistence downgrade',
+      zdr: false,
+    };
+    expect(
+      authorizePlaneServicePrincipal(configured, callerDowngrade),
+    ).toMatchObject({ zdr: true, orgId: 'org-a' });
   });
 
   it.each([
@@ -269,14 +283,24 @@ describe('plane service-principal issuance policy', () => {
     ).toThrow();
   });
 
-  it('rejects a malformed persistent-data authorization policy', () => {
+  it.each([
+    { allowPersistentData: true },
+    {
+      retentionByAudience: {
+        'data-plane': 'persistent',
+        unknown: 'persistent',
+      },
+    },
+    { retentionByAudience: {} },
+    { retentionByAudience: { 'data-plane': 'sometimes' } },
+  ])('rejects ambiguous retention policy: %o', (override) => {
     const malformed = JSON.stringify({
       'graph-worker': {
         credential: 'test-only-caller-key',
         audiences: ['data-plane'],
         orgIds: ['org-a'],
         scopes: ['graph:read'],
-        allowPersistentData: 'yes',
+        ...override,
       },
     });
 
@@ -290,5 +314,132 @@ describe('plane service-principal issuance policy', () => {
         reason: 'serve graph retrieval',
       }),
     ).toThrow();
+  });
+});
+
+describe('plane service-principal registry loading', () => {
+  let directory: string;
+  let registryFile: string;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'plane-service-principals-'));
+    registryFile = join(directory, 'registry.json');
+    writeFileSync(registryFile, configured, { mode: 0o600 });
+  });
+
+  afterEach(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('loads a private absolute registry file and preserves development JSON compatibility', () => {
+    expect(
+      loadPlaneServicePrincipalRegistry({
+        NODE_ENV: 'development',
+        PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+      }),
+    ).toBe(configured);
+    expect(
+      loadPlaneServicePrincipalRegistry({
+        NODE_ENV: 'development',
+        PLANE_SERVICE_PRINCIPALS_JSON: configured,
+      }),
+    ).toBe(configured);
+  });
+
+  it.each(['production', 'staging', undefined])(
+    'rejects unbound dynamic tenants from a %s file-backed registry',
+    (runtime) => {
+      const dynamicRegistry = JSON.stringify({
+        'retrieval-engine': {
+          credential: 'test-only-retrieval-key',
+          audiences: ['inference-core'],
+          orgIds: [],
+          allowAnyOrg: true,
+          scopes: ['inference:invoke'],
+        },
+      });
+      writeFileSync(registryFile, dynamicRegistry, { mode: 0o600 });
+
+      expect(() =>
+        loadPlaneServicePrincipalRegistry({
+          NODE_ENV: runtime,
+          PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+        }),
+      ).toThrow(/fixed organization allowlists/);
+    },
+  );
+
+  it('requires the file-backed registry outside development and tests', () => {
+    expect(() =>
+      loadPlaneServicePrincipalRegistry({
+        NODE_ENV: 'production',
+        PLANE_SERVICE_PRINCIPALS_JSON: configured,
+      }),
+    ).toThrow(/FILE is required/);
+    expect(() =>
+      loadPlaneServicePrincipalRegistry({
+        NODE_ENV: 'staging',
+        PLANE_SERVICE_PRINCIPALS_JSON: configured,
+      }),
+    ).toThrow(/FILE is required/);
+  });
+
+  it('rejects ambiguous file and environment registries', () => {
+    expect(() =>
+      loadPlaneServicePrincipalRegistry({
+        PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+        PLANE_SERVICE_PRINCIPALS_JSON: configured,
+      }),
+    ).toThrow(/both configured/);
+  });
+
+  it.each([
+    ['relative path', () => 'registry.json', /normalized absolute path/],
+    [
+      'symbolic link',
+      () => {
+        const link = join(directory, 'registry-link.json');
+        symlinkSync(registryFile, link);
+        return link;
+      },
+      /private regular file/,
+    ],
+    [
+      'oversized file',
+      () => {
+        const oversized = join(directory, 'oversized.json');
+        writeFileSync(oversized, Buffer.alloc(1024 * 1024 + 1), {
+          mode: 0o600,
+        });
+        return oversized;
+      },
+      /too large/,
+    ],
+    [
+      'unreadable file',
+      () => {
+        const unreadable = join(directory, 'unreadable.json');
+        writeFileSync(unreadable, configured, { mode: 0o600 });
+        chmodSync(unreadable, 0o000);
+        return unreadable;
+      },
+      /private regular file/,
+    ],
+  ])('rejects an unsafe %s', (_name, fileFactory, expectedError) => {
+    expect(() =>
+      loadPlaneServicePrincipalRegistry({
+        PLANE_SERVICE_PRINCIPALS_FILE: fileFactory(),
+      }),
+    ).toThrow(expectedError);
+  });
+
+  it('rejects a registry file readable by group or other users', () => {
+    chmodSync(registryFile, 0o644);
+
+    expect(() =>
+      loadPlaneServicePrincipalRegistry({
+        PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+      }),
+    ).toThrow(/private/);
   });
 });

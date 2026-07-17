@@ -456,6 +456,10 @@ pub async fn delete_document(
     bearer: VerifiedBearer,
     Path(document_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Deletion changes retained Data Plane state and may emit downstream audit
+    // effects. The verified issuer posture is authoritative; this route has no
+    // caller-controlled retention field that could weaken it.
+    reject_zdr_durable_mutation(&claims, false)?;
     let resp = state
         .document_client
         .clone()
@@ -1605,7 +1609,118 @@ pub async fn review_wiki_proposal(
 
 #[cfg(test)]
 mod zdr_contract_tests {
-    use super::{document_zdr_requested, durable_mutation_blocked, effective_retrieval_zdr_mode};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use super::*;
+    use mp_contracts::dataplane::documents_v2::{
+        document_service_client::DocumentServiceClient,
+        document_service_server::{DocumentService, DocumentServiceServer},
+    };
+    use tonic::{Response, Status};
+
+    #[derive(Clone)]
+    struct DocumentDeleteRecorder {
+        delete_calls: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl DocumentService for DocumentDeleteRecorder {
+        async fn get_document(
+            &self,
+            _request: tonic::Request<doc_pb::GetDocumentRequest>,
+        ) -> Result<Response<doc_pb::GetDocumentResponse>, Status> {
+            Err(Status::unimplemented("not used by delete ZDR test"))
+        }
+
+        async fn list_documents(
+            &self,
+            _request: tonic::Request<doc_pb::ListDocumentsRequest>,
+        ) -> Result<Response<doc_pb::ListDocumentsResponse>, Status> {
+            Err(Status::unimplemented("not used by delete ZDR test"))
+        }
+
+        async fn create_document(
+            &self,
+            _request: tonic::Request<doc_pb::CreateDocumentRequest>,
+        ) -> Result<Response<doc_pb::CreateDocumentResponse>, Status> {
+            Err(Status::unimplemented("not used by delete ZDR test"))
+        }
+
+        async fn delete_document(
+            &self,
+            _request: tonic::Request<doc_pb::DeleteDocumentRequest>,
+        ) -> Result<Response<doc_pb::DeleteDocumentResponse>, Status> {
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(doc_pb::DeleteDocumentResponse {
+                success: true,
+            }))
+        }
+
+        async fn bulk_ingest(
+            &self,
+            _request: tonic::Request<doc_pb::BulkIngestRequest>,
+        ) -> Result<Response<doc_pb::BulkIngestResponse>, Status> {
+            Err(Status::unimplemented("not used by delete ZDR test"))
+        }
+
+        async fn get_document_index_status(
+            &self,
+            _request: tonic::Request<doc_pb::GetDocumentIndexStatusRequest>,
+        ) -> Result<Response<doc_pb::GetDocumentIndexStatusResponse>, Status> {
+            Err(Status::unimplemented("not used by delete ZDR test"))
+        }
+
+        async fn get_ingest_status(
+            &self,
+            _request: tonic::Request<doc_pb::IngestStatusRequest>,
+        ) -> Result<Response<doc_pb::IngestStatusResponse>, Status> {
+            Err(Status::unimplemented("not used by delete ZDR test"))
+        }
+    }
+
+    async fn state_with_document_delete_recorder(
+        delete_calls: Arc<AtomicUsize>,
+    ) -> (AppState, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind document delete recorder");
+        let address = listener
+            .local_addr()
+            .expect("document delete recorder address");
+        let handle = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(DocumentServiceServer::new(DocumentDeleteRecorder {
+                    delete_calls,
+                }))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.document_client = DocumentServiceClient::connect(format!("http://{address}"))
+            .await
+            .expect("connect document delete recorder");
+        (state, handle)
+    }
+
+    fn document_claims(zdr: bool) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "auth-core".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
 
     #[test]
     fn durable_document_proxy_rejects_every_restrictive_zdr_shape() {
@@ -1649,6 +1764,39 @@ mod zdr_contract_tests {
     #[test]
     fn wiki_mutations_are_blocked_by_verified_claim_zdr() {
         assert!(durable_mutation_blocked(true, false));
+    }
+
+    #[tokio::test]
+    async fn issuer_zdr_document_delete_is_rejected_before_data_plane_forwarding() {
+        let delete_calls = Arc::new(AtomicUsize::new(0));
+        let (state, handle) = state_with_document_delete_recorder(delete_calls.clone()).await;
+
+        let error = delete_document(
+            State(state.clone()),
+            Extension(document_claims(true)),
+            VerifiedBearer::for_test("must-not-forward"),
+            Path("doc-retained".to_owned()),
+        )
+        .await
+        .expect_err("issuer-ZDR document deletion must fail before Data Plane forwarding");
+        assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(
+            delete_calls.load(Ordering::SeqCst),
+            0,
+            "ZDR document deletion reached Data Plane"
+        );
+
+        let response = delete_document(
+            State(state),
+            Extension(document_claims(false)),
+            VerifiedBearer::for_test("explicit-non-zdr"),
+            Path("doc-retained".to_owned()),
+        )
+        .await
+        .expect("explicit non-ZDR deletion should preserve the normal forward path");
+        assert_eq!(response.0["success"], json!(true));
+        assert_eq!(delete_calls.load(Ordering::SeqCst), 1);
+        handle.abort();
     }
 
     #[test]

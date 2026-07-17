@@ -10,7 +10,7 @@ struct RunOwner {
     user_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
     Running,
     /// User-initiated pause (Phase 2 B5) — distinct from `AwaitingApproval`
@@ -84,25 +84,33 @@ impl StateStore {
         self.runs.insert(snapshot.run_id.clone(), snapshot);
     }
 
-    /// Atomically resume only a genuinely gated run.
-    ///
-    /// Returning `None` for running, unknown, and terminal runs makes an
-    /// approval retry fail closed: a stale decision can never revive a run
-    /// that completed, failed, or was cancelled after its first resume.
-    #[must_use]
-    pub fn resume(&self, run_id: &str) -> Option<u32> {
+    fn resume_if_status(&self, run_id: &str, expected: RunStatus) -> Option<u32> {
         let Entry::Occupied(mut entry) = self.runs.entry(run_id.to_owned()) else {
             return None;
         };
-        if !matches!(
-            entry.get().status,
-            RunStatus::AwaitingApproval | RunStatus::Paused
-        ) {
+        if entry.get().status != expected {
             return None;
         }
-        let step_index = entry.get().step_index;
-        entry.get_mut().status = RunStatus::Running;
-        Some(step_index)
+        let current = entry.get().clone();
+        entry.insert(RunSnapshot {
+            status: RunStatus::Running,
+            ..current.clone()
+        });
+        Some(current.step_index)
+    }
+
+    /// Atomically resume only a user-paused run. Approval-gated runs require
+    /// the distinct durable-approval transition below.
+    #[must_use]
+    pub fn resume_paused(&self, run_id: &str) -> Option<u32> {
+        self.resume_if_status(run_id, RunStatus::Paused)
+    }
+
+    /// Atomically resume only a run waiting on approval. The caller must first
+    /// verify the durable granted approval and its run/tenant binding.
+    #[must_use]
+    pub fn resume_approved(&self, run_id: &str) -> Option<u32> {
+        self.resume_if_status(run_id, RunStatus::AwaitingApproval)
     }
 
     #[must_use]
@@ -207,14 +215,52 @@ mod tests {
                 last_error: None,
             });
 
-            assert_eq!(store.resume("run_approval"), Some(4));
+            assert_eq!(store.resume_approved("run_approval"), Some(4));
             let mut finished = store.get_or_create("run_approval");
-            finished.status = terminal.clone();
+            finished.status = terminal;
             store.update(finished);
 
-            assert_eq!(store.resume("run_approval"), None);
+            assert_eq!(store.resume_approved("run_approval"), None);
             assert_eq!(store.get_or_create("run_approval").status, terminal);
         }
+    }
+
+    #[test]
+    fn manual_resume_cannot_bypass_an_approval_gate() {
+        let store = StateStore::new();
+        store.update(RunSnapshot {
+            run_id: "run_approval".to_owned(),
+            step_index: 4,
+            status: RunStatus::AwaitingApproval,
+            last_error: None,
+        });
+
+        assert_eq!(store.resume_paused("run_approval"), None);
+        assert_eq!(
+            store.get_or_create("run_approval").status,
+            RunStatus::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn durable_approval_delivery_and_manual_pause_use_distinct_transitions() {
+        let store = StateStore::new();
+        store.update(RunSnapshot {
+            run_id: "run_approval".to_owned(),
+            step_index: 7,
+            status: RunStatus::AwaitingApproval,
+            last_error: None,
+        });
+        store.update(RunSnapshot {
+            run_id: "run_paused".to_owned(),
+            step_index: 2,
+            status: RunStatus::Paused,
+            last_error: None,
+        });
+
+        assert_eq!(store.resume_approved("run_paused"), None);
+        assert_eq!(store.resume_paused("run_paused"), Some(2));
+        assert_eq!(store.resume_approved("run_approval"), Some(7));
     }
 
     #[test]

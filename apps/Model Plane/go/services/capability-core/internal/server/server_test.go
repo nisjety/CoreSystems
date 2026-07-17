@@ -7,14 +7,45 @@ import (
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+type toolSearchStub struct {
+	matches  []lettatools.Match
+	err      error
+	calls    int
+	gotQuery string
+	gotLimit int
+}
+
+type rankingTrailerStream struct {
+	trailer metadata.MD
+}
+
+func (*rankingTrailerStream) Method() string {
+	return mpv1.CapabilityCore_ListCapabilities_FullMethodName
+}
+func (*rankingTrailerStream) SetHeader(metadata.MD) error  { return nil }
+func (*rankingTrailerStream) SendHeader(metadata.MD) error { return nil }
+func (stream *rankingTrailerStream) SetTrailer(value metadata.MD) error {
+	stream.trailer = metadata.Join(stream.trailer, value)
+	return nil
+}
+
+func (stub *toolSearchStub) Search(_ context.Context, query string, limit int) ([]lettatools.Match, error) {
+	stub.calls++
+	stub.gotQuery = query
+	stub.gotLimit = limit
+	return append([]lettatools.Match(nil), stub.matches...), stub.err
+}
 
 type capabilityStoreStub struct {
 	row        *registry.CapabilityRow
@@ -168,6 +199,162 @@ func TestListCapabilitiesPinsDurableRankingToVerifiedTenant(t *testing.T) {
 	}
 }
 
+func TestListCapabilitiesLettaRanksOnlyExactLocalDispatchIntersection(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	server.store = &capabilityStoreStub{scored: []registry.ScoredCapability{
+		{Row: &registry.CapabilityRow{
+			ID: "cap.track", OrgID: "org-a", Name: "Shipment lookup", Kind: models.KindTool,
+			Version: "1", Description: "Read an exact carrier state", RiskLevel: models.RiskLow, Enabled: true,
+			ConfigJSON: []byte(`{"dispatch_name":"track_shipment"}`),
+		}},
+		{Row: &registry.CapabilityRow{
+			ID: "cap.book", OrgID: "global", Name: "Shipment booking", Kind: models.KindTool,
+			Version: "1", Description: "Create a shipment", RiskLevel: models.RiskHigh, Enabled: true,
+			ConfigJSON: []byte(`{"dispatch_name":"book_shipment"}`),
+		}},
+		{Row: &registry.CapabilityRow{
+			ID: "cap.admin", OrgID: "org-a", Name: "Administration", Kind: models.KindTool,
+			Version: "1", Description: "Unrelated local authority", RiskLevel: models.RiskHigh, Enabled: true,
+			ConfigJSON: []byte(`{"dispatch_name":"admin_delete_everything"}`),
+		}},
+	}}
+	searcher := &toolSearchStub{matches: []lettatools.Match{
+		{Name: "book_shipment"},
+		{Name: "remote_only_tool"},
+		{Name: "track_shipment"},
+	}}
+	server.WithLettaToolSearcher(searcher)
+	nonZDR := false
+
+	response, err := server.ListCapabilities(
+		verifiedGRPCContextWithRetention(t, "org-a", &nonZDR),
+		&mpv1.ListCapabilitiesRequest{Query: "shipment", Limit: 20},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searcher.calls != 1 || searcher.gotQuery != "shipment" || searcher.gotLimit < 1 || searcher.gotLimit > 100 {
+		t.Fatalf("Letta search call = %+v", searcher)
+	}
+	if len(response.Capabilities) != 2 {
+		t.Fatalf("capabilities = %+v", response.Capabilities)
+	}
+	if response.Capabilities[0].CapabilityId != "cap.book" || response.Capabilities[1].CapabilityId != "cap.track" {
+		t.Fatalf("ranked local intersection = %+v", response.Capabilities)
+	}
+	for _, capability := range response.Capabilities {
+		if capability.CapabilityId == "remote_only_tool" || capability.CapabilityId == "cap.admin" {
+			t.Fatalf("external search added/authorized a tool: %+v", capability)
+		}
+	}
+}
+
+func TestListCapabilitiesSkipsExternalRankingForZDRAndUnspecifiedRetention(t *testing.T) {
+	t.Parallel()
+
+	contexts := []struct {
+		name string
+		zdr  *bool
+	}{
+		{name: "verified ZDR", zdr: func() *bool { value := true; return &value }()},
+		{name: "retention unspecified", zdr: nil},
+	}
+	for _, test := range contexts {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := newTestServer()
+			server.store = &capabilityStoreStub{scored: []registry.ScoredCapability{
+				{Row: &registry.CapabilityRow{
+					ID: "cap.track", OrgID: "org-a", Name: "Shipment lookup", Kind: models.KindTool,
+					Version: "1", Description: "Read shipment state", RiskLevel: models.RiskLow, Enabled: true,
+					ConfigJSON: []byte(`{"dispatch_name":"track_shipment"}`),
+				}},
+			}}
+			searcher := &toolSearchStub{matches: []lettatools.Match{{Name: "track_shipment"}}}
+			server.WithLettaToolSearcher(searcher)
+
+			response, err := server.ListCapabilities(
+				verifiedGRPCContextWithRetention(t, "org-a", test.zdr),
+				&mpv1.ListCapabilitiesRequest{Query: "shipment"},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if searcher.calls != 0 {
+				t.Fatalf("external search called %d times", searcher.calls)
+			}
+			if len(response.Capabilities) != 1 || response.Capabilities[0].CapabilityId != "cap.track" {
+				t.Fatalf("local fallback = %+v", response.Capabilities)
+			}
+		})
+	}
+}
+
+func TestListCapabilitiesFallsBackLocallyWhenLettaUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer()
+	server.store = &capabilityStoreStub{scored: []registry.ScoredCapability{
+		{Row: &registry.CapabilityRow{
+			ID: "cap.track", OrgID: "org-a", Name: "Shipment lookup", Kind: models.KindTool,
+			Version: "1", Description: "Read shipment state", RiskLevel: models.RiskLow, Enabled: true,
+			ConfigJSON: []byte(`{"dispatch_name":"track_shipment"}`),
+		}},
+	}}
+	searcher := &toolSearchStub{err: errors.New("upstream unavailable")}
+	server.WithLettaToolSearcher(searcher)
+	nonZDR := false
+
+	response, err := server.ListCapabilities(
+		verifiedGRPCContextWithRetention(t, "org-a", &nonZDR),
+		&mpv1.ListCapabilitiesRequest{Query: "shipment"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searcher.calls != 1 || len(response.Capabilities) != 1 || response.Capabilities[0].CapabilityId != "cap.track" {
+		t.Fatalf("local fail-safe fallback = %+v calls=%d", response.Capabilities, searcher.calls)
+	}
+}
+
+func TestCapabilityRankingReasonIsEmittedAsSafeGRPCTrailer(t *testing.T) {
+	t.Parallel()
+
+	stream := &rankingTrailerStream{}
+	ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+	recordCapabilityRanking(ctx, "local", "zdr_external_disabled")
+
+	if got := stream.trailer.Get("x-capability-ranking-source"); len(got) != 1 || got[0] != "local" {
+		t.Fatalf("ranking source trailer = %v", got)
+	}
+	if got := stream.trailer.Get("x-capability-ranking-reason"); len(got) != 1 || got[0] != "zdr_external_disabled" {
+		t.Fatalf("ranking reason trailer = %v", got)
+	}
+}
+
+func TestExactLocalToolIntersectionRejectsWildcardMalformedAndAmbiguousBindings(t *testing.T) {
+	t.Parallel()
+
+	rows := []*registry.CapabilityRow{
+		{ID: "cap.first", Kind: models.KindTool, ConfigJSON: []byte(`{"dispatch_name":"duplicate_tool"}`)},
+		{ID: "cap.second", Kind: models.KindTool, ConfigJSON: []byte(`{"dispatch_name":"duplicate_tool"}`)},
+		{ID: "cap.wildcard", Kind: models.KindTool, ConfigJSON: []byte(`{"dispatch_name":"subagent.*"}`)},
+		{ID: "cap.malformed", Kind: models.KindTool, Name: "fallback_name", ConfigJSON: []byte(`{"dispatch_name":`)},
+		{ID: "cap.group", Kind: models.KindTool, ConfigJSON: []byte(`{"dispatch_name":"web_search/web_fetch"}`)},
+	}
+	ranked := exactLocalToolIntersection(rows, []lettatools.Match{
+		{Name: "duplicate_tool"},
+		{Name: "subagent.research"},
+		{Name: "fallback_name"},
+		{Name: "web_fetch"},
+	})
+	if len(ranked) != 1 || ranked[0].ID != "cap.group" {
+		t.Fatalf("exact fail-closed intersection = %+v", ranked)
+	}
+}
+
 func TestPromoteSkillIsQuarantinedWhenDurableStoreIsAttached(t *testing.T) {
 	t.Parallel()
 
@@ -275,6 +462,33 @@ func TestEvaluatePolicyUsesDurableTenantAndFailsClosedRuntimeState(t *testing.T)
 				t.Fatalf("reason = %q, want %q", response.Reason, test.wantReason)
 			}
 		})
+	}
+}
+
+func TestEvaluatePolicyAllowsCurrentGlobalDispatchAttestationButRejectsStaleHealth(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	row := &registry.CapabilityRow{
+		ID: "cap.retrieval.query", OrgID: "global", Name: "Knowledge retrieval", Kind: models.KindTool,
+		Version: "1.0.0", RiskLevel: models.RiskLow, Scope: "global", Enabled: true,
+		EnabledForScopes: []string{"global"}, RolloutState: "stable",
+		AvailabilityState: string(models.AvailabilityAvailable), ReasonCode: "runtime_healthy",
+		ExecutionMode: models.ExecutionDirectRead, CostClass: models.CostBounded, HealthCheckedAt: &now,
+	}
+	server := newTestServer()
+	server.store = &capabilityStoreStub{row: row}
+	request := &mpv1.EvaluatePolicyRequest{CapabilityId: row.ID, RunId: "run-a", AgentId: "execution-core", Scope: "global"}
+	response, err := server.EvaluatePolicy(verifiedGRPCContext(t, "tenant-a"), request)
+	if err != nil || response.Decision != policy.DecisionAllow {
+		t.Fatalf("current global attestation response = %+v, err = %v", response, err)
+	}
+
+	stale := now.Add(-models.AvailabilityAttestationTTL - time.Second)
+	row.HealthCheckedAt = &stale
+	response, err = server.EvaluatePolicy(verifiedGRPCContext(t, "tenant-a"), request)
+	if err != nil || response.Decision != policy.DecisionDeny || response.Reason != "health_attestation_stale" {
+		t.Fatalf("stale global attestation response = %+v, err = %v", response, err)
 	}
 }
 
@@ -426,12 +640,16 @@ func newAvailablePolicyTestServer(t *testing.T) *Server {
 	t.Helper()
 	checkedAt := time.Now().UTC()
 	available := func(id, name, kind, version, risk string) *models.Capability {
+		executionMode := models.ExecutionDirectRead
+		if risk == models.RiskHigh {
+			executionMode = models.ExecutionAgentic
+		}
 		return &models.Capability{
 			ID: id, Name: name, Kind: kind, Version: version, RiskLevel: risk,
 			Scope: "global", Enabled: true, OrgID: "triodelab",
 			EnabledForScopes:  []string{"global"},
 			AvailabilityState: string(models.AvailabilityAvailable),
-			ExecutionMode:     models.ExecutionDirectRead, CostClass: models.CostBounded,
+			ExecutionMode:     executionMode, CostClass: models.CostBounded,
 			HealthCheckedAt: &checkedAt,
 		}
 	}
@@ -620,13 +838,13 @@ func TestEvaluatePolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("high-risk -> deny", func(t *testing.T) {
+	t.Run("high-risk -> ask", func(t *testing.T) {
 		resp, err := s.EvaluatePolicy(ctx, baseReq("cap.sandbox.exec"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if resp.Decision != policy.DecisionDeny {
-			t.Errorf("expected deny, got %s", resp.Decision)
+		if resp.Decision != policy.DecisionAsk {
+			t.Errorf("expected ask, got %s", resp.Decision)
 		}
 		if resp.Reason == "" {
 			t.Errorf("expected non-empty reason for deny")

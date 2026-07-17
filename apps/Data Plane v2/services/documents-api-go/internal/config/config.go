@@ -18,6 +18,10 @@ type Config struct {
 	SharedNatsPassword         string
 	GDPRConsumerRequired       bool
 	UserCoreServiceToken       string
+	// UserCoreGrantsRequired keeps production fail-closed while allowing an
+	// explicit standalone boot posture. When false, grant-only documents remain
+	// hidden until User Core is connected; owner/org-visible policy is unchanged.
+	UserCoreGrantsRequired     bool
 	EventSigningPrivateKeyPath string
 	// UserCoreURL is the user-core base URL used to resolve a viewer's explicit
 	// resource grants (the per-user authz facade). Per-user ownership filtering.
@@ -36,6 +40,7 @@ func Load() (*Config, error) {
 		SharedNatsPassword:         strings.TrimSpace(os.Getenv("NATS_SHARED_PASSWORD")),
 		GDPRConsumerRequired:       os.Getenv("GDPR_DURABLE_CONSUMER_REQUIRED") == "1",
 		UserCoreServiceToken:       envOr("USER_CORE_SERVICE_TOKEN", ""),
+		UserCoreGrantsRequired:     envOr("USER_CORE_GRANTS_REQUIRED", "1") != "0",
 		EventSigningPrivateKeyPath: envOr("EVENT_SIGNING_PRIVATE_KEY_PATH", ""),
 		UserCoreURL:                envOr("USER_CORE_URL", "http://user-core:8080"),
 	}

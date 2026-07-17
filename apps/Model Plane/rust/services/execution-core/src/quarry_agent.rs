@@ -71,6 +71,10 @@ pub struct AgentConstraints {
 #[derive(Debug, Clone, Serialize)]
 pub struct StartRunRequest {
     pub org_id: String,
+    /// Opaque broker-issued grant identifier, validated by execution-core
+    /// immediately before launch. Forwarded so Quarry can bind the lease and
+    /// every subsequent action to the same authorization context.
+    pub grant_id: String,
     pub constraints: AgentConstraints,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
@@ -91,6 +95,8 @@ pub struct StartRunResponse {
 pub struct StepRequest {
     pub run_id: String,
     pub lease_id: String,
+    /// Must match the broker-validated grant used for StartRun.
+    pub grant_id: String,
     pub action: AgentAction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
@@ -344,9 +350,11 @@ impl QuarryAgentClient {
         constraints: &AgentConstraints,
         zdr: bool,
         profile_id: Option<String>,
+        grant_id: &str,
     ) -> Result<StartRunResponse, AgentClientError> {
         let body = StartRunRequest {
             org_id: org_id.to_owned(),
+            grant_id: grant_id.to_owned(),
             constraints: constraints.clone(),
             profile_id,
             zdr,
@@ -382,10 +390,12 @@ impl QuarryAgentClient {
         action: AgentAction,
         constraints: &AgentConstraints,
         zdr: bool,
+        grant_id: &str,
     ) -> Result<WireObservation, AgentClientError> {
         let body = StepRequest {
             run_id: run_id.to_owned(),
             lease_id: lease_id.to_owned(),
+            grant_id: grant_id.to_owned(),
             action,
             instruction: None,
             constraints: constraints.clone(),
@@ -478,7 +488,7 @@ impl QuarryAgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn act(action_type: ActionType, selector: &str, value: &str, url: &str) -> BrowserAction {
@@ -588,6 +598,12 @@ mod tests {
             .and(path("/v1/agent/runs"))
             .and(header("authorization", "Bearer tok"))
             .and(header("x-quarry-org", "org_1"))
+            .and(body_json(serde_json::json!({
+                "org_id": "org_1",
+                "grant_id": "grant_broker_validated",
+                "constraints": {"max_steps": 0, "allowed_domains": []},
+                "zdr": false,
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": { "run_id": "run_abc", "lease_id": "lease_xyz" },
                 "meta": { "request_id": "req_1" },
@@ -598,7 +614,13 @@ mod tests {
 
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         let resp = client
-            .start_run("org_1", &AgentConstraints::default(), false, None)
+            .start_run(
+                "org_1",
+                &AgentConstraints::default(),
+                false,
+                None,
+                "grant_broker_validated",
+            )
             .await
             .unwrap();
         assert_eq!(resp.run_id, "run_abc");
@@ -610,6 +632,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/agent/runs/run_abc/step"))
+            .and(body_json(serde_json::json!({
+                "run_id": "run_abc",
+                "lease_id": "lease_xyz",
+                "grant_id": "grant_broker_validated",
+                "action": {"type": "get_content"},
+                "constraints": {"max_steps": 0, "allowed_domains": []},
+                "zdr": false,
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": {
                     "run_id": "run_abc",
@@ -634,6 +664,7 @@ mod tests {
                 AgentAction::GetContent,
                 &AgentConstraints::default(),
                 false,
+                "grant_broker_validated",
             )
             .await
             .unwrap();
@@ -663,6 +694,7 @@ mod tests {
                 },
                 &AgentConstraints::default(),
                 false,
+                "grant_broker_validated",
             )
             .await
             .unwrap_err();
@@ -691,6 +723,7 @@ mod tests {
                 AgentAction::GetContent,
                 &AgentConstraints::default(),
                 false,
+                "grant_broker_validated",
             )
             .await
             .expect_err("second 401 must be surfaced");

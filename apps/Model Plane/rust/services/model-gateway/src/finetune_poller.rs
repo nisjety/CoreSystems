@@ -218,6 +218,7 @@ async fn apply_update_status(
                 "fine_tuned_model": fine_tuned_model,
                 "terminal": terminal,
             }),
+            false,
         )
         .await;
     }
@@ -288,6 +289,7 @@ async fn apply_deploy_then_update(
                 "deployment_name": deployment_name,
                 "fine_tuned_model": fine_tuned_model,
             }),
+            false,
         )
         .await;
         publish_finetune_event(
@@ -302,6 +304,7 @@ async fn apply_deploy_then_update(
                 "deployment_name": deployment_name,
                 "fine_tuned_model": fine_tuned_model,
             }),
+            false,
         )
         .await;
     }

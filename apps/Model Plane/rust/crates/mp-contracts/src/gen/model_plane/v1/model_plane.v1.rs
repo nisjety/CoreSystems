@@ -11,6 +11,11 @@ pub struct AcquireGrantRequest {
     /// Tenant identifier.
     #[prost(string, tag="3")]
     pub org_id: ::prost::alloc::string::String,
+    /// Broker-owned navigation policy. An empty policy is never an unrestricted
+    /// browser grant: issuance rejects it. Values are normalized and persisted by
+    /// the broker, then returned by ValidateGrant for downstream enforcement.
+    #[prost(string, repeated, tag="4")]
+    pub allowed_domains: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AcquireGrantResponse {
@@ -23,6 +28,9 @@ pub struct AcquireGrantResponse {
     /// Grant expiry time.
     #[prost(message, optional, tag="3")]
     pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Canonical broker-owned navigation policy for this grant.
+    #[prost(string, repeated, tag="4")]
+    pub allowed_domains: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RevokeGrantRequest {
@@ -65,6 +73,10 @@ pub struct ValidateGrantResponse {
     /// Grant expiry time.
     #[prost(message, optional, tag="3")]
     pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Canonical broker-owned navigation policy. Consumers must reject an empty
+    /// policy and must not substitute caller-supplied domains.
+    #[prost(string, repeated, tag="4")]
+    pub allowed_domains: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// BrowserAction describes a single browser action to be executed by Quarry.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2154,6 +2166,11 @@ pub struct ResumeRunRequest {
     /// Tenant identifier.
     #[prost(string, tag="3")]
     pub org_id: ::prost::alloc::string::String,
+    /// Durable granted approval authorizing an AwaitingApproval -> Running
+    /// transition. Empty is valid only for a user-paused run; it can never
+    /// resume an approval gate.
+    #[prost(string, tag="4")]
+    pub approval_id: ::prost::alloc::string::String,
 }
 /// ResumeRunResponse — acknowledgement that the run has been resumed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2801,9 +2818,8 @@ pub struct RemoteTriggerResponse {
     #[prost(string, tag="5")]
     pub final_url: ::prost::alloc::string::String,
 }
-/// SendMessageRequest — publish a JSON-encoded payload to a NATS
-/// subject. Subject prefixes are enforced server-side: only
-/// `agents.>`, `org.>`, and `notify.>` are allowed for now.
+/// SendMessageRequest — legacy request retained for wire compatibility.
+/// It is quarantined and cannot cause a NATS publish.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SendMessageRequest {
     #[prost(string, tag="1")]
@@ -2815,8 +2831,8 @@ pub struct SendMessageRequest {
     /// JSON-encoded payload. Empty string → no payload.
     #[prost(string, tag="4")]
     pub payload_json: ::prost::alloc::string::String,
-    /// Idempotency key — repeat publishes with the same key within
-    /// 5 minutes are dropped.
+    /// Retained for wire compatibility; it is not processed while the RPC is
+    /// quarantined.
     #[prost(string, tag="5")]
     pub idempotency_key: ::prost::alloc::string::String,
 }
@@ -2824,8 +2840,8 @@ pub struct SendMessageRequest {
 pub struct SendMessageResponse {
     #[prost(string, tag="1")]
     pub request_id: ::prost::alloc::string::String,
-    /// Set to false if the publish was dropped because the idempotency
-    /// key was already seen; true otherwise.
+    /// Reserved for backwards compatibility. Quarantined calls return an error
+    /// instead of a successful response.
     #[prost(bool, tag="2")]
     pub published: bool,
 }
@@ -4645,6 +4661,89 @@ pub struct DecideApprovalResponse {
     #[prost(message, optional, tag="1")]
     pub approval: ::core::option::Option<Approval>,
 }
+// --- Approval delivery outbox ---
+
+/// A leased identifier-only delivery record. This intentionally contains no
+/// user prompt, tool arguments, provider response, or continuation data.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApprovalDelivery {
+    /// Stable identifier for this delivery attempt stream.
+    #[prost(string, tag="1")]
+    pub delivery_id: ::prost::alloc::string::String,
+    /// Durable granted approval authorizing the eventual continuation.
+    #[prost(string, tag="2")]
+    pub approval_id: ::prost::alloc::string::String,
+    /// Run bound to this approval.
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Canonical tenant and run owner copied from the durable approval row.
+    #[prost(string, tag="4")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Opaque one-time lease capability. It is returned only to the claiming
+    /// service and is retained in storage only as a hash.
+    #[prost(string, tag="6")]
+    pub lease_token: ::prost::alloc::string::String,
+    /// One-based claim attempt count, including this lease.
+    #[prost(uint32, tag="7")]
+    pub attempt: u32,
+    /// Server-assigned expiration for the lease.
+    #[prost(message, optional, tag="8")]
+    pub lease_expires_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClaimApprovalDeliveriesRequest {
+    /// Tenant to claim. It must exactly match the verified service identity.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Upper bound on returned claims. The server enforces a small fixed cap.
+    #[prost(uint32, tag="2")]
+    pub max_deliveries: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClaimApprovalDeliveriesResponse {
+    /// Claimed deliveries, each with an independent opaque lease token.
+    #[prost(message, repeated, tag="1")]
+    pub deliveries: ::prost::alloc::vec::Vec<ApprovalDelivery>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AcknowledgeApprovalDeliveryRequest {
+    /// Tenant filter. It must exactly match the verified service identity.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Delivery being acknowledged.
+    #[prost(string, tag="2")]
+    pub delivery_id: ::prost::alloc::string::String,
+    /// Exact opaque lease capability returned by ClaimApprovalDeliveries.
+    #[prost(string, tag="3")]
+    pub lease_token: ::prost::alloc::string::String,
+    /// Retry or terminal. A successful execution acknowledgement is deliberately
+    /// unavailable until a durable continuation receipt exists.
+    #[prost(enumeration="ApprovalDeliveryAcknowledgement", tag="4")]
+    pub acknowledgement: i32,
+    /// A bounded allowlisted failure classification, not a free-form error.
+    #[prost(string, tag="5")]
+    pub failure_code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AcknowledgeApprovalDeliveryResponse {
+    /// False when the lease was already settled, expired, or no longer matches.
+    /// These cases are deliberately indistinguishable so the response discloses
+    /// no additional outbox state.
+    #[prost(bool, tag="1")]
+    pub acknowledged: bool,
+    /// True when the outbox item is permanently terminal. It does not mean the
+    /// associated run resumed.
+    #[prost(bool, tag="2")]
+    pub terminal: bool,
+    /// Total claims made for this delivery.
+    #[prost(uint32, tag="3")]
+    pub attempt: u32,
+    /// Next eligible retry time. Empty for terminal entries or exact replays.
+    #[prost(message, optional, tag="4")]
+    pub next_attempt_at: ::core::option::Option<::prost_types::Timestamp>,
+}
 // --- GetSubagentLineage ---
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4913,10 +5012,10 @@ pub mod orchestration_event {
         pub approval_id: ::prost::alloc::string::String,
     }
     /// The pending browser-action approval above was decided (granted, denied,
-    /// or timed out). The durable decision and the generic
-    /// `ApprovalStateChanged`/`RunResumedAfterApproval` events are recorded by
-    /// the existing `DecideApproval` RPC as usual; this is the browser-specific
-    /// companion that carries the action back so the timeline can show
+    /// or timed out). `DecideApproval` records the durable decision and the
+    /// generic `ApprovalStateChanged` event. A later authenticated continuation
+    /// dispatcher may emit `RunResumedAfterApproval` only after it can prove the
+    /// exact paused work started; this companion lets the timeline show
     /// "checkout on example.com — granted", not just an approval id.
     #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
     pub struct BrowserActionDecided {
@@ -5312,6 +5411,40 @@ impl SubagentRole {
             "SUBAGENT_ROLE_RESEARCHER" => Some(Self::Researcher),
             "SUBAGENT_ROLE_EXPLORER" => Some(Self::Explorer),
             "SUBAGENT_ROLE_GENERIC" => Some(Self::Generic),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ApprovalDeliveryAcknowledgement {
+    /// Unknown acknowledgement; rejected.
+    Unspecified = 0,
+    /// No durable execution proof was produced. Requeue with server-owned
+    /// exponential backoff, or mark terminal when the bounded attempt limit is
+    /// exhausted.
+    Retry = 1,
+    /// The delivery cannot proceed safely. This never emits a run-resumed event.
+    Terminal = 2,
+}
+impl ApprovalDeliveryAcknowledgement {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED",
+            Self::Retry => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_RETRY",
+            Self::Terminal => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED" => Some(Self::Unspecified),
+            "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_RETRY" => Some(Self::Retry),
+            "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL" => Some(Self::Terminal),
             _ => None,
         }
     }

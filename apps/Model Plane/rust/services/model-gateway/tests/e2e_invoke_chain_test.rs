@@ -15,6 +15,8 @@ use model_gateway::{
 use mp_contracts::model_plane::v1::{
     inference_core_client::InferenceCoreClient,
     inference_core_server::{InferenceCore, InferenceCoreServer},
+    managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     session_core_client::SessionCoreClient,
     session_core_server::{SessionCore, SessionCoreServer},
     AnalyzeDocumentRequest, AnalyzeDocumentResponse, AnalyzeImageRequest, AnalyzeImageResponse,
@@ -27,17 +29,19 @@ use mp_contracts::model_plane::v1::{
     ExtractImageTextRequest, ExtractImageTextResponse, FinalizeToolActionRequest,
     FinalizeToolActionResponse, GenerateImageRequest, GenerateImageResponse, GeneratedImage,
     GetContextAssemblyRequest, GetContextAssemblyResponse, GetVideoGenerationJobRequest,
-    GetVideoGenerationJobResponse, InferChunk, InferRequest, InferResponse, LanguageAnalysisResult,
-    ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest,
-    ListConversationResponse, ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest,
-    ListSpeechVoicesResponse, ListThreadsRequest, ListThreadsResponse,
-    ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ModelInfo,
+    GetVideoGenerationJobResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse,
+    InferChunk, InferRequest, InferResponse, LanguageAnalysisResult, ListAgentSkillsRequest,
+    ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListModelsRequest,
+    ListModelsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListThreadsRequest,
+    ListThreadsResponse, ListTranslationLanguagesRequest, ListTranslationLanguagesResponse,
+    ManagedRunSource, ModelInfo, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
     ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
     SaveCheckpointRequest, SaveCheckpointResponse, SessionMessage, SpeechVoiceInfo,
-    StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
-    StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
-    TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse,
-    TranslationDetection, TranslationLanguageInfo,
+    StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse,
+    StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse,
+    SynthesizeSpeechRequest, SynthesizeSpeechResponse, TerminalOutcome, TranscribeSpeechRequest,
+    TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse, TranslationDetection,
+    TranslationLanguageInfo,
 };
 use mp_events::publisher::InMemoryPublisher;
 use std::pin::Pin;
@@ -46,7 +50,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::OnceCell};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{
     transport::{Endpoint, Server},
@@ -73,6 +77,7 @@ const TEST_AUTH_ISSUER: &str = "https://auth.test/model";
 struct MockOk {
     captured_messages: Option<CapturedMessages>,
     captured_zdr_requests: Option<CapturedZdrRequests>,
+    infer_call_count: Option<Arc<AtomicUsize>>,
 }
 
 impl MockOk {
@@ -80,6 +85,7 @@ impl MockOk {
         Self {
             captured_messages: Some(captured_messages),
             captured_zdr_requests: None,
+            infer_call_count: None,
         }
     }
 
@@ -87,10 +93,22 @@ impl MockOk {
         Self {
             captured_messages: None,
             captured_zdr_requests: Some(captured_zdr_requests),
+            infer_call_count: None,
+        }
+    }
+
+    fn counting(infer_call_count: Arc<AtomicUsize>) -> Self {
+        Self {
+            captured_messages: None,
+            captured_zdr_requests: None,
+            infer_call_count: Some(infer_call_count),
         }
     }
 
     fn capture(&self, request: &InferRequest) {
+        if let Some(infer_call_count) = &self.infer_call_count {
+            infer_call_count.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(captured_messages) = &self.captured_messages {
             captured_messages.lock().unwrap().push(
                 request
@@ -749,19 +767,22 @@ impl InferenceCore for MockStreamDown {
 struct MockSessionHandles {
     create_thread_count: Arc<AtomicUsize>,
     append_message_count: Arc<AtomicUsize>,
-    start_run_count: Arc<AtomicUsize>,
+    managed_start_captures: Arc<Mutex<Vec<StartManagedRunRequest>>>,
+    terminal_outcome_captures: Arc<Mutex<Vec<(String, RecordTerminalOutcomeRequest)>>>,
+    heartbeat_captures: Arc<Mutex<Vec<(String, HeartbeatManagedRunRequest)>>>,
     context_assembly_count: Arc<AtomicUsize>,
     /// (role, `thread_id`) per `append_message` call
     append_captures: Arc<Mutex<Vec<(String, String)>>>,
     conversation: Arc<Mutex<Vec<(String, String, String)>>>,
     context_assembly_requests: Arc<Mutex<Vec<(String, String, u32)>>>,
     context_segments: Arc<Mutex<Option<Vec<ContextSegment>>>>,
-    start_run_thread_id: Arc<Mutex<Option<String>>>,
     append_missing_thread_once: Arc<Mutex<Option<String>>>,
     reserve_tool_action_captures: Arc<Mutex<Vec<ReserveToolActionRequest>>>,
     finalize_tool_action_captures: Arc<Mutex<Vec<FinalizeToolActionRequest>>>,
     fail_reserve_tool_action: Arc<AtomicBool>,
     fail_finalize_tool_action: Arc<AtomicBool>,
+    fail_terminal_outcome: Arc<AtomicBool>,
+    fail_heartbeat: Arc<AtomicBool>,
 }
 
 struct MockSessionCore {
@@ -773,18 +794,21 @@ impl MockSessionCore {
         let handles = MockSessionHandles {
             create_thread_count: Arc::new(AtomicUsize::new(0)),
             append_message_count: Arc::new(AtomicUsize::new(0)),
-            start_run_count: Arc::new(AtomicUsize::new(0)),
+            managed_start_captures: Arc::new(Mutex::new(Vec::new())),
+            terminal_outcome_captures: Arc::new(Mutex::new(Vec::new())),
+            heartbeat_captures: Arc::new(Mutex::new(Vec::new())),
             context_assembly_count: Arc::new(AtomicUsize::new(0)),
             append_captures: Arc::new(Mutex::new(Vec::new())),
             conversation: Arc::new(Mutex::new(Vec::new())),
             context_assembly_requests: Arc::new(Mutex::new(Vec::new())),
             context_segments: Arc::new(Mutex::new(None)),
-            start_run_thread_id: Arc::new(Mutex::new(None)),
             append_missing_thread_once: Arc::new(Mutex::new(None)),
             reserve_tool_action_captures: Arc::new(Mutex::new(Vec::new())),
             finalize_tool_action_captures: Arc::new(Mutex::new(Vec::new())),
             fail_reserve_tool_action: Arc::new(AtomicBool::new(false)),
             fail_finalize_tool_action: Arc::new(AtomicBool::new(false)),
+            fail_terminal_outcome: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: Arc::new(AtomicBool::new(false)),
         };
         (
             Self {
@@ -850,15 +874,11 @@ impl SessionCore for MockSessionCore {
 
     async fn start_run(
         &self,
-        request: TReq<StartRunRequest>,
+        _: TReq<StartRunRequest>,
     ) -> Result<Response<StartRunResponse>, Status> {
-        self.handles.start_run_count.fetch_add(1, Ordering::SeqCst);
-        let req = request.into_inner();
-        *self.handles.start_run_thread_id.lock().unwrap() = Some(req.thread_id.clone());
-        Ok(Response::new(StartRunResponse {
-            run_id: format!("run-for-{}", req.thread_id),
-            created_at: None,
-        }))
+        Err(Status::unimplemented(
+            "legacy StartRun must not be called by the managed Gateway path",
+        ))
     }
 
     async fn complete_step(
@@ -866,7 +886,7 @@ impl SessionCore for MockSessionCore {
         _: TReq<CompleteStepRequest>,
     ) -> Result<Response<CompleteStepResponse>, Status> {
         Err(Status::unimplemented(
-            "complete_step not needed in this test",
+            "legacy CompleteStep must not be called by the managed Gateway path",
         ))
     }
 
@@ -1005,6 +1025,129 @@ impl SessionCore for MockSessionCore {
         Err(Status::unimplemented(
             "set_run_mode not needed in this test",
         ))
+    }
+}
+
+#[derive(Clone)]
+struct MockManagedRunLifecycle {
+    handles: MockSessionHandles,
+}
+
+fn managed_terminal_step(source: ManagedRunSource) -> &'static str {
+    match source {
+        ManagedRunSource::GatewayDirect => "model-gateway-direct-inference-final",
+        ManagedRunSource::ExecutionAgent => "execution-core-agent-final",
+        ManagedRunSource::ExecutionBrowser => "execution-core-browser-final",
+        ManagedRunSource::GatewayAgentDispatchRejected => "model-gateway-agent-dispatch-rejected",
+        ManagedRunSource::GatewayBrowser => "model-gateway-browser-agent-final",
+        ManagedRunSource::Unspecified => "",
+    }
+}
+
+fn managed_source(source: i32) -> Result<ManagedRunSource, Status> {
+    let source = ManagedRunSource::try_from(source)
+        .map_err(|_| Status::invalid_argument("invalid managed terminal source"))?;
+    if source == ManagedRunSource::Unspecified {
+        return Err(Status::invalid_argument(
+            "managed terminal source is required",
+        ));
+    }
+    Ok(source)
+}
+
+fn service_authorization<T>(request: &TReq<T>) -> String {
+    request
+        .metadata()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[tonic::async_trait]
+impl ManagedRunLifecycle for MockManagedRunLifecycle {
+    async fn start_managed_run(
+        &self,
+        request: TReq<StartManagedRunRequest>,
+    ) -> Result<Response<StartManagedRunResponse>, Status> {
+        let request = request.into_inner();
+        let source = managed_source(request.terminal_source)?;
+        let thread_id = if request.thread_id.is_empty() {
+            "metadata-only-thread".to_owned()
+        } else {
+            request.thread_id.clone()
+        };
+        let run_id = format!("managed-run-for-{thread_id}");
+        self.handles
+            .managed_start_captures
+            .lock()
+            .unwrap()
+            .push(request);
+        Ok(Response::new(StartManagedRunResponse {
+            run_id,
+            created_at: None,
+            terminal_step_id: managed_terminal_step(source).to_owned(),
+            already_started: false,
+            thread_id,
+        }))
+    }
+
+    async fn record_terminal_outcome(
+        &self,
+        request: TReq<RecordTerminalOutcomeRequest>,
+    ) -> Result<Response<RecordTerminalOutcomeResponse>, Status> {
+        let authorization = service_authorization(&request);
+        let request = request.into_inner();
+        let source = managed_source(request.source)?;
+        self.handles
+            .terminal_outcome_captures
+            .lock()
+            .unwrap()
+            .push((authorization.clone(), request.clone()));
+        if authorization != "Bearer gateway-terminalizer-token" {
+            return Err(Status::unauthenticated(
+                "managed terminal receipt requires the scoped service credential",
+            ));
+        }
+        if self.handles.fail_terminal_outcome.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("terminal receipt unavailable"));
+        }
+        Ok(Response::new(RecordTerminalOutcomeResponse {
+            run_id: request.run_id,
+            source: source as i32,
+            terminal_step_id: managed_terminal_step(source).to_owned(),
+            step_index: 1,
+            receipt_id: "receipt-managed-terminal".to_owned(),
+            applied_at: None,
+            already_applied: false,
+            reconciliation_required: false,
+        }))
+    }
+
+    async fn heartbeat_managed_run(
+        &self,
+        request: TReq<HeartbeatManagedRunRequest>,
+    ) -> Result<Response<HeartbeatManagedRunResponse>, Status> {
+        let authorization = service_authorization(&request);
+        let request = request.into_inner();
+        self.handles
+            .heartbeat_captures
+            .lock()
+            .unwrap()
+            .push((authorization.clone(), request.clone()));
+        if authorization != "Bearer gateway-terminalizer-token" {
+            return Err(Status::unauthenticated(
+                "managed heartbeat requires the scoped service credential",
+            ));
+        }
+        let _ = managed_source(request.source)?;
+        if self.handles.fail_heartbeat.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("managed heartbeat unavailable"));
+        }
+        Ok(Response::new(HeartbeatManagedRunResponse {
+            renewed_until: None,
+            already_terminal: false,
+        }))
     }
 }
 
@@ -1209,6 +1352,36 @@ fn with_delegated_user_tokens(app: Router, tokens: DelegatedUserTokens) -> Route
     ))
 }
 
+/// Exercise a normal authenticated chat path with every required downstream
+/// bearer except Data Plane. This is intentionally not the ZDR preflight: it
+/// reaches `StartManagedRun` first so the regression proves the prepared run is
+/// terminalized on the known grounding credential error.
+fn with_delegated_user_tokens_without_data_plane(
+    app: Router,
+    tokens: DelegatedUserTokens,
+) -> Router {
+    app.layer(middleware::from_fn(
+        move |mut request: Request<Body>, next: Next| {
+            let tokens = tokens.clone();
+            async move {
+                let headers = request.headers_mut();
+                for (name, token) in [
+                    ("x-session-authorization", tokens.session),
+                    ("x-inference-authorization", tokens.inference),
+                    ("x-execution-authorization", tokens.execution),
+                ] {
+                    headers.insert(
+                        name,
+                        HeaderValue::from_str(&format!("Bearer {token}"))
+                            .expect("signed JWT is valid HTTP header content"),
+                    );
+                }
+                next.run(request).await
+            }
+        },
+    ))
+}
+
 async fn authenticated_user_router(
     app: Router,
     org_id: &str,
@@ -1262,14 +1435,21 @@ fn clear_model_auth_env() {
     std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
 }
 
-async fn spawn_session_mock<S: SessionCore>(
-    svc: S,
-) -> SessionCoreClient<tonic::transport::Channel> {
+struct SessionMockClients {
+    session: SessionCoreClient<tonic::transport::Channel>,
+    lifecycle: ManagedRunLifecycleClient<tonic::transport::Channel>,
+}
+
+async fn spawn_session_mock(svc: MockSessionCore) -> SessionMockClients {
+    let lifecycle = MockManagedRunLifecycle {
+        handles: svc.handles.clone(),
+    };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         Server::builder()
             .add_service(SessionCoreServer::new(svc))
+            .add_service(ManagedRunLifecycleServer::new(lifecycle))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .ok();
@@ -1279,19 +1459,147 @@ async fn spawn_session_mock<S: SessionCore>(
         .connect()
         .await
         .unwrap();
-    SessionCoreClient::new(ch)
+    SessionMockClients {
+        session: SessionCoreClient::new(ch.clone()),
+        lifecycle: ManagedRunLifecycleClient::new(ch),
+    }
 }
 
-fn make_state(
+async fn terminal_auth_core_url() -> String {
+    static AUTH_CORE: OnceCell<MockServer> = OnceCell::const_new();
+    let auth_core = AUTH_CORE
+        .get_or_init(|| async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/session-core/internal-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "token": "gateway-terminalizer-token",
+                    "expiresInSeconds": 300,
+                    "audience": "session-core"
+                })))
+                .mount(&server)
+                .await;
+            server
+        })
+        .await;
+    auth_core.uri()
+}
+
+async fn make_state(
     client: InferenceCoreClient<tonic::transport::Channel>,
-    session_client: SessionCoreClient<tonic::transport::Channel>,
+    session_clients: SessionMockClients,
 ) -> (AppState, Arc<DynPublisher>) {
     let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
     let mut state = AppState::new();
     state.publisher = publisher.clone();
     state.inference_client = client;
-    state.session_client = session_client;
+    state.managed_run_client = session_clients.lifecycle;
+    state.session_client = session_clients.session;
+    state
+        .configure_managed_terminalization(
+            &terminal_auth_core_url().await,
+            "model-gateway",
+            "test-model-gateway-service-credential",
+        )
+        .expect("configure scoped terminalization credential");
     (state, publisher)
+}
+
+/// Return the only thread that Gateway prepared with `StartManagedRun`.
+///
+/// A client without a durable session key gets a fresh server-generated key,
+/// so tests must verify ownership through the actual managed-start request rather
+/// than a fixture-only literal thread id.
+fn prepared_thread_id(handles: &MockSessionHandles) -> String {
+    let starts = handles.managed_start_captures.lock().unwrap();
+    assert_eq!(
+        starts.len(),
+        1,
+        "Gateway must prepare exactly one run before terminalizing it"
+    );
+    starts[0].thread_id.clone()
+}
+
+fn managed_start_count(handles: &MockSessionHandles) -> usize {
+    handles.managed_start_captures.lock().unwrap().len()
+}
+
+/// Assert that Gateway persisted its one user turn on the same thread supplied
+/// to `StartManagedRun`, with no orphaned or duplicate user message.
+fn assert_single_user_message_on_prepared_thread(
+    handles: &MockSessionHandles,
+    prepared_thread_id: &str,
+) {
+    let appended = handles.append_captures.lock().unwrap();
+    let user_thread_ids = appended
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .map(|(_, thread_id)| thread_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        user_thread_ids,
+        vec![prepared_thread_id.to_owned()],
+        "Gateway must persist exactly one user turn on the one prepared thread"
+    );
+}
+
+/// Assert the exact direct-inference terminal receipt belongs to the run
+/// returned by the prepared `StartManagedRun` call.
+///
+/// `MockManagedRunLifecycle::start_managed_run` deterministically returns
+/// `managed-run-for-<thread>`.
+/// Deriving the expected id from its captured request ensures this verifies the
+/// real thread/run handoff instead of relying on a stale generated-thread
+/// fixture value.
+fn assert_direct_terminal_for_prepared_run(
+    handles: &MockSessionHandles,
+    outcome: TerminalOutcome,
+    failure_code: &str,
+    assertion_message: &str,
+) {
+    let thread_id = prepared_thread_id(handles);
+    assert_single_user_message_on_prepared_thread(handles, &thread_id);
+    let receipts = handles.terminal_outcome_captures.lock().unwrap();
+    assert_eq!(receipts.len(), 1, "{assertion_message}");
+    let (authorization, receipt) = &receipts[0];
+    assert_eq!(
+        authorization, "Bearer gateway-terminalizer-token",
+        "{assertion_message}: terminalization must use the scoped workload token, not a user bearer"
+    );
+    assert_eq!(
+        receipt.run_id,
+        format!("managed-run-for-{thread_id}"),
+        "{assertion_message}"
+    );
+    assert_eq!(
+        receipt.source,
+        ManagedRunSource::GatewayDirect as i32,
+        "{assertion_message}"
+    );
+    assert_eq!(receipt.outcome, outcome as i32, "{assertion_message}");
+    assert_eq!(receipt.failure_code, failure_code, "{assertion_message}");
+
+    let heartbeats = handles.heartbeat_captures.lock().unwrap();
+    assert!(
+        heartbeats.len() >= 2,
+        "{assertion_message}: Gateway must heartbeat before provider dispatch and before its terminal receipt"
+    );
+    for (authorization, heartbeat) in heartbeats.iter() {
+        assert_eq!(
+            authorization, "Bearer gateway-terminalizer-token",
+            "{assertion_message}: heartbeat must use the scoped workload token, not a user bearer"
+        );
+        assert_eq!(
+            heartbeat.run_id,
+            format!("managed-run-for-{thread_id}"),
+            "{assertion_message}: heartbeat must be bound to the prepared run"
+        );
+        assert_eq!(
+            heartbeat.source,
+            ManagedRunSource::GatewayDirect as i32,
+            "{assertion_message}: direct inference must not heartbeat another producer's run"
+        );
+    }
 }
 
 async fn call_zdr_unary_routes(app: axum::Router, bearer: &str, request_zdr: bool) {
@@ -1359,7 +1667,7 @@ async fn ai_unary_routes_forward_request_zdr_to_chat_and_embeddings() {
     let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _) = make_state(client, session_client);
+    let (state, _) = make_state(client, session_client).await;
 
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
@@ -1384,7 +1692,7 @@ async fn ai_unary_routes_cannot_downgrade_signed_zdr_posture() {
     let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _) = make_state(client, session_client);
+    let (state, _) = make_state(client, session_client).await;
 
     let (app, _delegated_jwks) =
         authenticated_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
@@ -1405,7 +1713,7 @@ async fn scoped_service_token_reaches_only_chat_and_embeddings_with_monotonic_zd
     let client = spawn_mock(MockOk::capturing_zdr(captured.clone())).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _) = make_state(client, session_client);
+    let (state, _) = make_state(client, session_client).await;
 
     let (_inference_jwks, inference_token) =
         signed_delegated_service_inference_token(&["models:invoke"]).await;
@@ -1428,7 +1736,7 @@ async fn service_machine_routes_require_their_exact_scope() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _) = make_state(client, session_client);
+    let (state, _) = make_state(client, session_client).await;
     let app = build_router(state, None);
 
     assert_eq!(
@@ -1465,7 +1773,7 @@ async fn service_token_is_denied_on_user_delegated_retrieval_and_session_routes(
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _) = make_state(client, session_client);
+    let (state, _) = make_state(client, session_client).await;
     let app = build_router(state, None);
 
     for (method, uri, body, delegated) in [
@@ -1495,7 +1803,7 @@ async fn ai_images_routes_forward_to_inference_core() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, _) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _) = make_state(client, session_client);
+    let (state, _) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -1641,7 +1949,7 @@ async fn invoke_emits_ingress_and_usage_on_success() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, publisher) = make_state(client, session_client);
+    let (state, publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -1668,11 +1976,80 @@ async fn invoke_emits_ingress_and_usage_on_success() {
         session_handles.append_message_count.load(Ordering::SeqCst),
         2
     );
-    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(managed_start_count(&session_handles), 1);
     let captures = session_handles.append_captures.lock().unwrap();
     assert_eq!(captures.len(), 2);
     assert_eq!(captures[0].0, "user");
     assert_eq!(captures[1].0, "assistant");
+    drop(captures);
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Completed,
+        "",
+        "ordinary unary chat must close its one durable run exactly once",
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_fails_closed_before_provider_when_initial_managed_heartbeat_is_unavailable() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let inference_calls = Arc::new(AtomicUsize::new(0));
+    let client = spawn_mock(MockOk::counting(Arc::clone(&inference_calls))).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles.fail_heartbeat.store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, publisher) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"must not reach provider","model":"m"}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        inference_calls.load(Ordering::SeqCst),
+        0,
+        "an unavailable initial heartbeat must block provider dispatch"
+    );
+    assert_eq!(managed_start_count(&session_handles), 1);
+    assert!(
+        publisher.drain().is_empty(),
+        "ingress is not accepted before liveness"
+    );
+    assert!(
+        session_handles
+            .terminal_outcome_captures
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "Gateway must not manufacture a terminal receipt after it cannot establish ownership"
+    );
+    let heartbeats = session_handles.heartbeat_captures.lock().unwrap();
+    assert_eq!(
+        heartbeats.len(),
+        1,
+        "only the required initial heartbeat runs"
+    );
+    assert_eq!(heartbeats[0].0, "Bearer gateway-terminalizer-token");
+    assert_ne!(
+        heartbeats[0].0, "Bearer dev",
+        "a delegated user bearer must never reach the heartbeat RPC"
+    );
+    clear_model_auth_env();
 }
 
 #[tokio::test]
@@ -1683,7 +2060,7 @@ async fn invoke_returns_502_when_inference_unavailable() {
     let client = spawn_mock(MockDown).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, publisher) = make_state(client, session_client);
+    let (state, publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -1710,7 +2087,13 @@ async fn invoke_returns_502_when_inference_unavailable() {
         session_handles.append_message_count.load(Ordering::SeqCst),
         1
     );
-    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(managed_start_count(&session_handles), 1);
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Failed,
+        "provider_unavailable",
+        "ordinary unary inference failure must close its prepared run as failed",
+    );
 }
 
 #[tokio::test]
@@ -1719,9 +2102,9 @@ async fn invoke_stream_emits_stream_and_usage_on_success() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
     let client = spawn_mock(MockOk::default()).await;
-    let (mock_session, _session_handles) = MockSessionCore::new();
+    let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, publisher) = make_state(client, session_client);
+    let (state, publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -1749,6 +2132,184 @@ async fn invoke_stream_emits_stream_and_usage_on_success() {
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.opened"));
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.closed"));
     assert!(drained.iter().any(|(s, _)| s.starts_with("mp.v1.usage.")));
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Completed,
+        "",
+        "ordinary streamed chat must close its durable run after its assistant turn",
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_never_presents_or_replays_done_before_terminal_receipt() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    session_handles
+        .fail_terminal_outcome
+        .store(true, Ordering::SeqCst);
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, publisher) = make_state(client, session_client).await;
+    let stream_buffers = state.stream_buffers.clone();
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"content":"hi","model":"m"}"#))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: chunk"), "{body}");
+    assert!(body.contains("session_terminalization_failed"), "{body}");
+    assert!(
+        !body.contains("event: done"),
+        "a terminal-receipt failure must never be presented as a completed stream: {body}"
+    );
+
+    let request_id = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|value| {
+            value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .expect("connected SSE event must expose its request id");
+    let replay = stream_buffers.replay_after(&request_id, None).await;
+    assert!(replay.found);
+    assert!(
+        replay.done.is_none(),
+        "a reconnect must not receive done before Session Core acknowledges terminal state"
+    );
+
+    let drained = publisher.drain();
+    assert!(
+        !drained
+            .iter()
+            .any(|(subject, _)| subject == "mp.v1.stream.closed"),
+        "terminal-success telemetry must follow terminal receipt"
+    );
+    assert!(
+        !drained
+            .iter()
+            .any(|(subject, _)| subject.starts_with("mp.v1.usage.")),
+        "usage success telemetry must follow terminal receipt"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_terminalizes_prepared_run_when_grounding_bearer_is_missing() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let (delegated_jwks, tokens) =
+        signed_delegated_user_tokens("org_placeholder", "user_placeholder").await;
+    let app = with_delegated_user_tokens_without_data_plane(build_router(state, None), tokens);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"ground this safely","model":"m","features":["rag"]}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("data_plane_auth_required"), "{body}");
+    assert!(!body.contains("event: done"), "{body}");
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Failed,
+        "inference_failed",
+        "a known post-managed-start grounding credential error must close the direct run",
+    );
+    drop(delegated_jwks);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: connected"), "{body}");
+    assert!(body.contains("event: error"), "{body}");
+    assert!(body.contains("agent_dispatch_unavailable"), "{body}");
+    assert!(
+        !body.contains("event: done"),
+        "an ambiguous RunAgent dispatch must not be reported as a completed agent run: {body}"
+    );
+
+    assert_eq!(
+        session_handles.create_thread_count.load(Ordering::SeqCst),
+        1,
+        "agentic chat must create exactly one thread"
+    );
+    assert_eq!(
+        managed_start_count(&session_handles),
+        1,
+        "agentic chat must dispatch exactly the prepared run"
+    );
+    assert_eq!(
+        session_handles.append_message_count.load(Ordering::SeqCst),
+        1,
+        "agentic chat must persist its user turn exactly once; execution owns any assistant turn"
+    );
+    let prepared_thread_id = prepared_thread_id(&session_handles);
+    assert_single_user_message_on_prepared_thread(&session_handles, &prepared_thread_id);
+    assert!(
+        session_handles
+            .terminal_outcome_captures
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "a transport-ambiguous dispatch remains retriable; Gateway must not terminalize it"
+    );
 }
 
 #[tokio::test]
@@ -1761,7 +2322,7 @@ async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {
     *session_handles.append_missing_thread_once.lock().unwrap() =
         Some("thread-client-provisional".to_owned());
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -1797,10 +2358,10 @@ async fn invoke_stream_recovers_when_client_thread_id_is_not_durable_yet() {
         session_handles.append_message_count.load(Ordering::SeqCst),
         3
     );
-    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(managed_start_count(&session_handles), 1);
     assert_eq!(
-        *session_handles.start_run_thread_id.lock().unwrap(),
-        Some("thread-thread-client-provisional".to_owned())
+        prepared_thread_id(&session_handles),
+        "thread-thread-client-provisional".to_owned()
     );
     let appended = session_handles.append_captures.lock().unwrap();
     assert_eq!(
@@ -1839,7 +2400,7 @@ async fn invoke_stream_includes_thread_history_and_persists_assistant() {
         ),
     ]);
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -1877,7 +2438,7 @@ async fn invoke_stream_includes_thread_history_and_persists_assistant() {
         session_handles.create_thread_count.load(Ordering::SeqCst),
         0
     );
-    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(managed_start_count(&session_handles), 1);
     let appended = session_handles.append_captures.lock().unwrap();
     assert_eq!(
         appended.as_slice(),
@@ -1937,7 +2498,7 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
         },
     ]);
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2027,7 +2588,7 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
     let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (mut state, _publisher) = make_state(client, session_client);
+    let (mut state, _publisher) = make_state(client, session_client).await;
     state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
         base_url: quarry.uri(),
         token: "test-token".to_owned(),
@@ -2137,7 +2698,7 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
     let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (mut state, _publisher) = make_state(client, session_client);
+    let (mut state, _publisher) = make_state(client, session_client).await;
     state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
         base_url: quarry.uri(),
         token: "test-token".to_owned(),
@@ -2218,7 +2779,7 @@ async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted()
         .fail_reserve_tool_action
         .store(true, Ordering::SeqCst);
     let session_client = spawn_session_mock(mock_session).await;
-    let (mut state, _publisher) = make_state(client, session_client);
+    let (mut state, _publisher) = make_state(client, session_client).await;
     state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
         base_url: quarry.uri(),
         token: "test-token".to_owned(),
@@ -2256,6 +2817,12 @@ async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted()
         .lock()
         .unwrap()
         .is_empty());
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Failed,
+        "inference_failed",
+        "a known audit-precondition failure after managed start must close the prepared direct run",
+    );
 }
 
 #[tokio::test]
@@ -2287,7 +2854,7 @@ async fn invoke_stream_leaves_a_durable_reservation_when_tool_audit_finalization
         .fail_finalize_tool_action
         .store(true, Ordering::SeqCst);
     let session_client = spawn_session_mock(mock_session).await;
-    let (mut state, _publisher) = make_state(client, session_client);
+    let (mut state, _publisher) = make_state(client, session_client).await;
     state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
         base_url: quarry.uri(),
         token: "test-token".to_owned(),
@@ -2328,6 +2895,12 @@ async fn invoke_stream_leaves_a_durable_reservation_when_tool_audit_finalization
         .lock()
         .unwrap()
         .is_empty());
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Failed,
+        "inference_failed",
+        "a known audit-finalization failure after managed start must close the prepared direct run",
+    );
 }
 
 #[tokio::test]
@@ -2338,7 +2911,7 @@ async fn invoke_stream_generate_image_emits_attachment_and_persists() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2404,7 +2977,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     let client = spawn_mock(MockOk::capturing(captured_messages.clone())).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (mut state, _publisher) = make_state(client, session_client);
+    let (mut state, _publisher) = make_state(client, session_client).await;
     state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
         base_url: quarry.uri(),
         token: "test-token".to_owned(),
@@ -2531,9 +3104,9 @@ async fn invoke_stream_falls_back_to_infer_when_stream_unavailable() {
     // must reveal Infer's real content in chunks and close with a real `done`
     // (the 8ac31cfb fallback) — never a bare empty-done stub.
     let client = spawn_mock(MockStreamDown).await;
-    let (mock_session, _session_handles) = MockSessionCore::new();
+    let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, publisher) = make_state(client, session_client);
+    let (state, publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2563,6 +3136,12 @@ async fn invoke_stream_falls_back_to_infer_when_stream_unavailable() {
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.opened"));
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.closed"));
     assert!(drained.iter().any(|(s, _)| s.starts_with("mp.v1.usage.")));
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Completed,
+        "",
+        "fallback success must close the same prepared direct-inference run",
+    );
 }
 
 #[tokio::test]
@@ -2574,9 +3153,9 @@ async fn invoke_stream_emits_error_when_inference_fully_unavailable() {
     // event (chat-parity §20), never a fake successful `done`, and publish no
     // usage because no tokens were produced.
     let client = spawn_mock(MockDown).await;
-    let (mock_session, _session_handles) = MockSessionCore::new();
+    let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, publisher) = make_state(client, session_client);
+    let (state, publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2604,6 +3183,12 @@ async fn invoke_stream_emits_error_when_inference_fully_unavailable() {
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.opened"));
     assert!(drained.iter().any(|(s, _)| s == "mp.v1.stream.closed"));
     assert!(!drained.iter().any(|(s, _)| s.starts_with("mp.v1.usage.")));
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Failed,
+        "provider_unavailable",
+        "ordinary streamed inference failure must close its prepared run as failed",
+    );
 }
 
 #[tokio::test]
@@ -2614,7 +3199,7 @@ async fn invoke_replay_determinism() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
 
     for _ in 0..2 {
         let (app, _delegated_jwks) = authenticated_user_router(
@@ -2644,7 +3229,7 @@ async fn invoke_replay_determinism() {
         session_handles.append_message_count.load(Ordering::SeqCst),
         4
     );
-    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 2);
+    assert_eq!(managed_start_count(&session_handles), 2);
 }
 
 #[tokio::test]
@@ -2655,7 +3240,7 @@ async fn invoke_propagates_thread_id() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2676,8 +3261,8 @@ async fn invoke_propagates_thread_id() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     assert_eq!(
-        *session_handles.start_run_thread_id.lock().unwrap(),
-        Some("thread-sk-x".into())
+        prepared_thread_id(&session_handles),
+        "thread-sk-x".to_owned()
     );
 }
 
@@ -2689,7 +3274,7 @@ async fn invoke_reuses_existing_thread() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client);
+    let (state, _publisher) = make_state(client, session_client).await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2717,9 +3302,9 @@ async fn invoke_reuses_existing_thread() {
         session_handles.append_message_count.load(Ordering::SeqCst),
         2
     );
-    assert_eq!(session_handles.start_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(managed_start_count(&session_handles), 1);
     assert_eq!(
-        *session_handles.start_run_thread_id.lock().unwrap(),
-        Some("thread-existing".into())
+        prepared_thread_id(&session_handles),
+        "thread-existing".to_owned()
     );
 }

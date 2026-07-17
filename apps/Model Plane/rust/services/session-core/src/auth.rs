@@ -149,9 +149,19 @@ impl VerifiedIdentity {
 
     #[cfg(test)]
     pub(crate) fn service_for_test(org_id: &str, scopes: &[&str], zdr: bool) -> Self {
+        Self::service_for_test_as(org_id, "service:session-core", scopes, zdr)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn service_for_test_as(
+        org_id: &str,
+        principal_id: &str,
+        scopes: &[&str],
+        zdr: bool,
+    ) -> Self {
         Self {
             org_id: Arc::from(org_id),
-            principal_id: Arc::from("service:session-core"),
+            principal_id: Arc::from(principal_id),
             user_id: None,
             scopes: scopes
                 .iter()

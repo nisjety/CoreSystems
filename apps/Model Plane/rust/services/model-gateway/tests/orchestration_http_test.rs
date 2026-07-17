@@ -3,20 +3,30 @@ use axum::{
     body::Body,
     http::{header::AUTHORIZATION, Request, StatusCode},
 };
-use model_gateway::{http_routes::build_router, state::AppState};
+use model_gateway::{
+    http_routes::build_router,
+    state::{AppState, DynPublisher},
+};
 use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
-    orchestration_event, Approval, ApprovalState, AttachSubagentRequest, AttachSubagentResponse,
+    orchestration_event,
+    run_service_client::RunServiceClient,
+    run_service_server::{RunService, RunServiceServer},
+    AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, Approval,
+    ApprovalState, AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
+    CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
-    GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse,
+    GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
     GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse,
     LineageEdge, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse,
-    ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest,
-    OrgPendingApprovalsResponse, Plan, PlanState, RecordOrchestrationEventRequest,
-    RecordOrchestrationEventResponse, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
+    ListRunsRequest, ListRunsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
+    OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
+    RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, ResolveRunOwnerRequest,
+    ResolveRunOwnerResponse, RunDetail, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
     TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
 };
+use mp_events::publisher::InMemoryPublisher;
 use std::{
     pin::Pin,
     sync::{Arc, Mutex},
@@ -478,6 +488,20 @@ impl OrchestrationCoreService for MockOrchestration {
         }))
     }
 
+    async fn claim_approval_deliveries(
+        &self,
+        _: TonicRequest<ClaimApprovalDeliveriesRequest>,
+    ) -> Result<Response<ClaimApprovalDeliveriesResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+
+    async fn acknowledge_approval_delivery(
+        &self,
+        _: TonicRequest<AcknowledgeApprovalDeliveryRequest>,
+    ) -> Result<Response<AcknowledgeApprovalDeliveryResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+
     async fn get_subagent_lineage(
         &self,
         request: TonicRequest<GetSubagentLineageRequest>,
@@ -568,6 +592,78 @@ fn make_state(
     let mut state = AppState::new();
     state.orchestration_client = orchestration_client;
     state
+}
+
+struct MockRunOwner;
+
+#[tonic::async_trait]
+impl RunService for MockRunOwner {
+    async fn get_run(&self, _: TonicRequest<GetRunRequest>) -> Result<Response<RunDetail>, Status> {
+        Err(Status::unimplemented("get_run not needed in test"))
+    }
+
+    async fn list_runs(
+        &self,
+        _: TonicRequest<ListRunsRequest>,
+    ) -> Result<Response<ListRunsResponse>, Status> {
+        Err(Status::unimplemented("list_runs not needed in test"))
+    }
+
+    async fn cancel_run(
+        &self,
+        _: TonicRequest<CancelRunRequest>,
+    ) -> Result<Response<CancelRunResponse>, Status> {
+        Err(Status::unimplemented("cancel_run not needed in test"))
+    }
+
+    async fn resolve_run_owner(
+        &self,
+        request: TonicRequest<ResolveRunOwnerRequest>,
+    ) -> Result<Response<ResolveRunOwnerResponse>, Status> {
+        let bearer = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        if !bearer.is_some_and(|value| value.starts_with("Bearer ")) {
+            return Err(Status::unauthenticated(
+                "verified session credential required",
+            ));
+        }
+        let request = request.into_inner();
+        Ok(Response::new(ResolveRunOwnerResponse {
+            authorized: request.run_id == "run-owned"
+                && request.org_id == "org-owner"
+                && request.user_id == "owner-user",
+        }))
+    }
+}
+
+async fn spawn_run_owner_mock() -> RunServiceClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind run ownership mock");
+    let addr = listener.local_addr().expect("run ownership mock addr");
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(RunServiceServer::new(MockRunOwner))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("run ownership mock endpoint")
+        .connect()
+        .await
+        .expect("connect run ownership mock");
+    RunServiceClient::new(channel)
+}
+
+async fn run_owner_state() -> (AppState, Arc<DynPublisher>) {
+    let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+    let mut state = AppState::new();
+    state.publisher = publisher.clone();
+    state.run_client = spawn_run_owner_mock().await;
+    (state, publisher)
 }
 
 #[tokio::test]
@@ -791,6 +887,18 @@ impl OrchestrationCoreService for OrgScopedMock {
                 ..owned_approval(ApprovalState::Requested)
             }),
         }))
+    }
+    async fn claim_approval_deliveries(
+        &self,
+        _: TonicRequest<ClaimApprovalDeliveriesRequest>,
+    ) -> Result<Response<ClaimApprovalDeliveriesResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn acknowledge_approval_delivery(
+        &self,
+        _: TonicRequest<AcknowledgeApprovalDeliveryRequest>,
+    ) -> Result<Response<AcknowledgeApprovalDeliveryResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
     }
     async fn get_subagent_lineage(
         &self,
@@ -1018,4 +1126,105 @@ async fn list_approvals_is_scoped_to_the_callers_org() {
         0,
         "a different org must see no approvals for someone else's run"
     );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn http_run_event_routes_require_a_durable_owner_before_publish() {
+    let _auth = AuthFixture::start().await;
+    let owner = AuthFixture::user_tokens("org-owner", "owner-user");
+    let same_org_other_user = AuthFixture::user_tokens("org-owner", "user-other");
+    let other_org = AuthFixture::user_tokens("org-other", "user-other");
+    let (state, publisher) = run_owner_state().await;
+    let app = build_router(state, None);
+
+    let cancel = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/runs/run-owned/cancel")
+        .header(
+            AUTHORIZATION,
+            format!("Bearer {}", same_org_other_user.model),
+        )
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", same_org_other_user.session),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let cancel = app.clone().oneshot(cancel).await.unwrap();
+    assert_eq!(cancel.status(), StatusCode::FORBIDDEN);
+
+    let feedback = Request::builder()
+        .method("POST")
+        .uri("/v1/feedback")
+        .header(AUTHORIZATION, format!("Bearer {}", other_org.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", other_org.session),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"run_id":"run-owned","skill_id":"skill-test","rating":"good"}"#,
+        ))
+        .unwrap();
+    let feedback = app.clone().oneshot(feedback).await.unwrap();
+    assert_eq!(feedback.status(), StatusCode::FORBIDDEN);
+
+    let resume = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/runs/run-owned/resume")
+        .header(
+            AUTHORIZATION,
+            format!("Bearer {}", same_org_other_user.model),
+        )
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", same_org_other_user.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", same_org_other_user.execution),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resume = app.clone().oneshot(resume).await.unwrap();
+    assert_eq!(resume.status(), StatusCode::FORBIDDEN);
+    assert!(
+        publisher.drain().is_empty(),
+        "a foreign run must not publish cancellation, feedback, or resume events"
+    );
+
+    let owner_cancel = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/runs/run-owned/cancel")
+        .header(AUTHORIZATION, format!("Bearer {}", owner.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", owner.session),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let owner_cancel = app.clone().oneshot(owner_cancel).await.unwrap();
+    assert_eq!(owner_cancel.status(), StatusCode::OK);
+
+    let owner_feedback = Request::builder()
+        .method("POST")
+        .uri("/v1/feedback")
+        .header(AUTHORIZATION, format!("Bearer {}", owner.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", owner.session),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"run_id":"run-owned","skill_id":"skill-test","rating":"good"}"#,
+        ))
+        .unwrap();
+    let owner_feedback = app.oneshot(owner_feedback).await.unwrap();
+    assert_eq!(owner_feedback.status(), StatusCode::OK);
+
+    let events = publisher.drain();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].1.event_type, "RUN_CANCEL_REQUESTED");
+    assert_eq!(events[1].1.event_type, "FEEDBACK_RATED");
 }
