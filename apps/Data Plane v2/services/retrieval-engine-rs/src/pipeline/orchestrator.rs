@@ -128,6 +128,79 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
     }
 }
 
+/// Pure placement of ColQwen (late-interaction MaxSim) scores into the fused
+/// candidate list — extracted from `visual_rerank` so both modes are
+/// unit-testable without a live ColQwen server.
+///
+/// - **Band mode** (`joint = false`, the historical behavior): the visual
+///   candidates are reordered *among themselves* by ColQwen relevance but keep
+///   the fused-score band they already occupy — a visual hit can never
+///   leapfrog a text hit.
+/// - **Joint mode** (`joint = true`, default): ColQwen scores are min-max
+///   mapped onto the fused list's global score range and the whole list is
+///   re-sorted — true joint text-vs-image ordering, where a strongly relevant
+///   page image CAN outrank weaker text candidates (and a weak one can sink).
+///   Degenerate spreads (all ColQwen scores equal, or a flat fused range)
+///   fall back to band mode rather than fabricate an ordering.
+///
+/// `idxs[k]` is the fused-list slot of the visual candidate scored `scores[k]`.
+fn apply_colqwen_scores(
+    mut fused: Vec<ScoredCandidate>,
+    idxs: &[usize],
+    scores: &[f32],
+    joint: bool,
+) -> Vec<ScoredCandidate> {
+    if idxs.is_empty() || idxs.len() != scores.len() {
+        return fused;
+    }
+
+    let cq_min = scores.iter().copied().fold(f32::INFINITY, f32::min);
+    let cq_max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let g_min = fused
+        .iter()
+        .map(|c| c.final_score)
+        .fold(f32::INFINITY, f32::min);
+    let g_max = fused
+        .iter()
+        .map(|c| c.final_score)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    if joint && cq_max > cq_min && g_max > g_min {
+        // Joint text-vs-image: map each ColQwen score onto the global fused
+        // score range, then re-sort the whole list.
+        for (k, &slot) in idxs.iter().enumerate() {
+            let mapped = g_min + (scores[k] - cq_min) / (cq_max - cq_min) * (g_max - g_min);
+            fused[slot].rerank_score = scores[k];
+            fused[slot].final_score = mapped;
+        }
+        fused.sort_by(|a, b| {
+            b.final_score
+                .partial_cmp(&a.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return fused;
+    }
+
+    // Band mode: pair each visual candidate with its ColQwen score, sort
+    // best-first, and write them back into the visual slots by descending band
+    // score — only the order among the visual candidates changes.
+    let mut ranked: Vec<(ScoredCandidate, f32)> = idxs
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| (fused[i].clone(), scores[k]))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut band: Vec<f32> = idxs.iter().map(|&i| fused[i].final_score).collect();
+    band.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    for (rank, &slot) in idxs.iter().enumerate() {
+        let (mut cand, cq) = ranked[rank].clone();
+        cand.rerank_score = cq;
+        cand.final_score = band[rank];
+        fused[slot] = cand;
+    }
+    fused
+}
+
 /// Pure fusion chain extracted from `retrieve()` so it is unit-testable and so
 /// the concurrently-gathered arms fuse in EXACTLY the original sequential order:
 ///
@@ -209,7 +282,7 @@ impl RetrievalPipeline {
     async fn visual_rerank(
         &self,
         query: &str,
-        mut fused: Vec<ScoredCandidate>,
+        fused: Vec<ScoredCandidate>,
         embed_zdr: bool,
     ) -> Vec<ScoredCandidate> {
         let Some(ref client) = self.colqwen else {
@@ -244,26 +317,13 @@ impl RetrievalPipeline {
                 return fused;
             }
         };
-        // Pair each visual candidate with its ColQwen score and sort best-first.
-        let mut ranked: Vec<(ScoredCandidate, f32)> = idxs
-            .iter()
-            .enumerate()
-            .map(|(k, &i)| (fused[i].clone(), scores[k]))
-            .collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        // The score band the visual candidates currently occupy (desc), reused so
-        // the reordered subset interleaves with text candidates exactly as before.
-        let mut band: Vec<f32> = idxs.iter().map(|&i| fused[i].final_score).collect();
-        band.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        // Write the best ColQwen candidate into the earliest visual slot with the
-        // highest band score, and so on — reorders the subset in place.
-        for (rank, &slot) in idxs.iter().enumerate() {
-            let (mut cand, cq) = ranked[rank].clone();
-            cand.rerank_score = cq;
-            cand.final_score = band[rank];
-            fused[slot] = cand;
-        }
-        tracing::info!(reranked = urls.len(), "visual reranker (ColQwen) applied");
+        let joint = self.config.joint_multimodal_rerank;
+        let fused = apply_colqwen_scores(fused, &idxs, &scores, joint);
+        tracing::info!(
+            reranked = urls.len(),
+            joint,
+            "visual reranker (ColQwen) applied"
+        );
         fused
     }
 
@@ -1594,5 +1654,65 @@ mod tests {
             true,
         );
         assert_eq!(project(&got_empty), project(&expected_empty));
+    }
+
+    // --- apply_colqwen_scores: joint (text-vs-image) vs band-preserving modes.
+
+    use super::apply_colqwen_scores;
+
+    /// fused = [text 0.9, visual 0.5, text 0.4, visual 0.2] (already desc).
+    fn multimodal_fixture() -> Vec<ScoredCandidate> {
+        vec![
+            cand("t1", "doc-t1", 0.9),
+            cand("v1", "doc-v1", 0.5),
+            cand("t2", "doc-t2", 0.4),
+            cand("v2", "doc-v2", 0.2),
+        ]
+    }
+
+    fn ids(v: &[ScoredCandidate]) -> Vec<&str> {
+        v.iter().map(|c| c.knowledge_id.as_str()).collect()
+    }
+
+    #[test]
+    fn joint_mode_lets_strong_visual_leapfrog_text() {
+        // v2 (slot 3, weakest fused score) gets the strongest ColQwen score:
+        // in joint mode it maps to the global max (0.9) and must leapfrog t2.
+        let got = apply_colqwen_scores(multimodal_fixture(), &[1, 3], &[2.0, 10.0], true);
+        assert_eq!(ids(&got), vec!["t1", "v2", "t2", "v1"]);
+        // Raw ColQwen scores are preserved on rerank_score for the trace.
+        let v2 = got.iter().find(|c| c.knowledge_id == "v2").unwrap();
+        assert_eq!(v2.rerank_score, 10.0);
+        assert!((v2.final_score - 0.9).abs() < 1e-6);
+        let v1 = got.iter().find(|c| c.knowledge_id == "v1").unwrap();
+        assert!((v1.final_score - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn band_mode_reorders_visuals_within_their_band_only() {
+        // Same ColQwen scores, band mode: v2 takes v1's band slot (0.5) and
+        // vice versa — but neither crosses a text candidate.
+        let got = apply_colqwen_scores(multimodal_fixture(), &[1, 3], &[2.0, 10.0], false);
+        assert_eq!(ids(&got), vec!["t1", "v2", "t2", "v1"]);
+        let scores: Vec<f32> = got.iter().map(|c| c.final_score).collect();
+        assert_eq!(scores, vec![0.9, 0.5, 0.4, 0.2]);
+    }
+
+    #[test]
+    fn joint_mode_degenerate_scores_fall_back_to_band() {
+        // All ColQwen scores equal → no honest joint ordering exists; keep the
+        // band behavior instead of fabricating one.
+        let got = apply_colqwen_scores(multimodal_fixture(), &[1, 3], &[5.0, 5.0], true);
+        let scores: Vec<f32> = got.iter().map(|c| c.final_score).collect();
+        assert_eq!(scores, vec![0.9, 0.5, 0.4, 0.2]);
+    }
+
+    #[test]
+    fn colqwen_placement_ignores_mismatched_inputs() {
+        let fused = multimodal_fixture();
+        let got = apply_colqwen_scores(fused.clone(), &[1, 3], &[1.0], true);
+        assert_eq!(project(&got), project(&fused));
+        let got_empty = apply_colqwen_scores(fused.clone(), &[], &[], true);
+        assert_eq!(project(&got_empty), project(&fused));
     }
 }

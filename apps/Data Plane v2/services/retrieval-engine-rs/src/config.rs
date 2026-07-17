@@ -112,6 +112,12 @@ pub struct Config {
     pub colqwen_endpoint_url: String,
     #[serde(default = "default_visual_rerank_top_k")]
     pub visual_rerank_top_k: usize,
+    /// Joint text-vs-image scoring (ON by default): ColQwen scores are mapped
+    /// onto the fused score range so visual candidates interleave with text by
+    /// relevance. `false` restores the band-preserving behavior (visual hits
+    /// only reorder among themselves and can never leapfrog text).
+    #[serde(default = "default_true")]
+    pub joint_multimodal_rerank: bool,
 
     // Semantic *response* cache (Data-Plane-v2-owned vector tier for the
     // model-gateway SemanticCache seam). ON by default (CAG read path); the

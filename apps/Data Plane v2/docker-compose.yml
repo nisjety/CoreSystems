@@ -366,6 +366,10 @@ services:
       VISUAL_RERANK_ENABLED: ${VISUAL_RERANK_ENABLED:-true}
       COLQWEN_ENDPOINT_URL: ${COLQWEN_ENDPOINT_URL:-}
       VISUAL_RERANK_TOP_K: ${VISUAL_RERANK_TOP_K:-20}
+      # Joint text-vs-image scoring: ColQwen scores mapped onto the fused score
+      # range so page images interleave with text by relevance (false = legacy
+      # band-preserving order).
+      JOINT_MULTIMODAL_RERANK: ${JOINT_MULTIMODAL_RERANK:-true}
       # Deep multi-hop graph arm — graph-index's /v1/graph/traverse (Neo4j
       # read-model, server-side Postgres fallback). The caller's verified
       # bearer is forwarded; graph-index re-verifies + org-pins it itself.
