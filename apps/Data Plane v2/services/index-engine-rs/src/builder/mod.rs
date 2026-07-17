@@ -52,6 +52,17 @@ fn canonical_document_is_indexable(deleted: bool, zdr_classification: &str) -> b
     )
 }
 
+/// The `(content_hash, knowledge_id)` pair assigned to a chunk. Both are pure
+/// functions of the document id, the chunk's position, and its text, so a
+/// chunk's durable identity never depends on existing database rows. This is
+/// what lets the ingest loop INSERT unconditionally instead of issuing a
+/// per-chunk existence/dedup SELECT.
+fn chunk_identity(document_id: &str, chunk_index: usize, text: &str) -> (String, String) {
+    let hash = content_hash(text);
+    let kid = stable_chunk_id(document_id, chunk_index, &hash);
+    (hash, kid)
+}
+
 pub async fn process_document(
     pool: &PgPool,
     event: &DocumentEvent,
@@ -154,73 +165,21 @@ pub async fn process_document(
 
     let mut knowledge_ids = Vec::with_capacity(chunks.len());
 
-    // Phase 5 cost graft — near-duplicate detection. Token-Jaccard >= 0.95
-    // means "effectively unchanged" (e.g. a footer/date line churned on
-    // re-crawl). Used below to reuse an already-embedded chunk instead of
-    // paying to embed a trivially-different one.
-    fn near_duplicate(a: &str, b: &str) -> bool {
-        use std::collections::HashSet;
-        let ta: HashSet<String> = a
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        let tb: HashSet<String> = b
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        if ta.is_empty() && tb.is_empty() {
-            return true;
-        }
-        let union = ta.union(&tb).count();
-        if union == 0 {
-            return false;
-        }
-        ta.intersection(&tb).count() as f64 / union as f64 >= 0.95
-    }
-
     for chunk in &chunks {
-        let hash = content_hash(&chunk.text);
-        let kid = stable_chunk_id(&event.document_id, chunk.index, &hash);
-
-        // Check for existing chunk with same hash (dedup across documents)
-        let existing = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM knowledge_units WHERE knowledge_id = $1",
-        )
-        .bind(&kid)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        if existing > 0 {
-            tracing::debug!(knowledge_id = %kid, "chunk already exists, skipping");
-            knowledge_ids.push(kid);
-            continue;
-        }
-
-        // Phase 5 near-dup: this exact hash is new, but if a 'done' unit already
-        // exists for this (document, chunk_index) and the text is ~unchanged,
-        // reuse its embedding rather than re-embedding footer/whitespace churn.
-        if let Some((prior_kid, prior_text)) = sqlx::query_as::<_, (String, String)>(
-            "SELECT knowledge_id, text FROM knowledge_units \
-             WHERE document_id = $1 AND chunk_index = $2 AND embedding_status = 'done' \
-             ORDER BY updated_at DESC LIMIT 1",
-        )
-        .bind(&event.document_id)
-        .bind(chunk.index as i32)
-        .fetch_optional(&mut *tx)
-        .await?
-        {
-            if near_duplicate(&prior_text, &chunk.text) {
-                tracing::debug!(
-                    document_id = %event.document_id,
-                    chunk_index = chunk.index,
-                    "near-duplicate chunk; reusing existing embedding (skip re-embed)"
-                );
-                knowledge_ids.push(prior_kid);
-                continue;
-            }
-        }
+        // knowledge_id is a pure function of (document_id, chunk_index,
+        // content_hash); no database state is consulted here. Two per-chunk
+        // SELECTs used to run at this point — an existence COUNT(*) on
+        // knowledge_id, and a near-duplicate ("Phase 5 cost graft") lookup for a
+        // prior 'done' unit at the same (document_id, chunk_index). Both were
+        // unreachable at runtime: the unconditional
+        // `DELETE FROM knowledge_units WHERE document_id = $1 AND org_id = $2`
+        // above runs in THIS transaction, so each query could only observe the
+        // post-delete state — the COUNT was always 0, and the 'done' lookup
+        // always returned no rows (rows re-inserted below are 'pending'). Every
+        // chunk therefore always fell through to the INSERT. Computing the
+        // identity in-memory preserves that outcome exactly while removing two
+        // round-trips per chunk.
+        let (hash, kid) = chunk_identity(&event.document_id, chunk.index, &chunk.text);
 
         let metadata = serde_json::json!({
             "title": event.title,
@@ -324,7 +283,10 @@ pub async fn process_document(
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
-    use super::{canonical_document_is_indexable, orphaned_ids, process_document, DocumentEvent};
+    use super::{
+        canonical_document_is_indexable, chunk_identity, orphaned_ids, process_document,
+        DocumentEvent,
+    };
     use crate::chunker::ChunkConfig;
 
     #[test]
@@ -434,5 +396,26 @@ mod tests {
         let old: Vec<String> = vec![];
         let new = vec!["a".to_string()];
         assert!(orphaned_ids(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn chunk_identity_is_pure_and_index_scoped() {
+        // Deterministic: identical inputs produce an identical (hash, id) pair,
+        // so the loop's knowledge_ids are a pure function of the chunks.
+        let (h1, k1) = chunk_identity("doc-1", 0, "hello world");
+        let (h2, k2) = chunk_identity("doc-1", 0, "hello world");
+        assert_eq!((h1.as_str(), k1.as_str()), (h2.as_str(), k2.as_str()));
+
+        // Same text at a different chunk_index yields a different knowledge_id,
+        // so distinct chunks in one build never share an id — the removed
+        // per-chunk "skip if exists" COUNT(*) could not have deduped within a
+        // single build even before the DELETE made it unreachable.
+        let (_, k_next_index) = chunk_identity("doc-1", 1, "hello world");
+        assert_ne!(k1, k_next_index);
+
+        // Different content yields a different hash and id.
+        let (h_diff, k_diff) = chunk_identity("doc-1", 0, "different content");
+        assert_ne!(h1, h_diff);
+        assert_ne!(k1, k_diff);
     }
 }
