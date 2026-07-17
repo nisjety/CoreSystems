@@ -1,4 +1,5 @@
-//! In-memory LRU prompt cache using `DashMap` with TTL-based eviction.
+//! In-memory prompt cache using `DashMap` with TTL expiry and
+//! least-recently-used eviction at capacity.
 //!
 //! Keyed by blake3 hash of (model + serialized messages). Only caches
 //! non-streaming responses. TTL defaults to 5 minutes.
@@ -13,10 +14,16 @@ use crate::provider::{InferRequest, InferResponse};
 /// Maximum number of cached entries.
 const MAX_ENTRIES: usize = 10_000;
 
-/// A cached response with expiry timestamp.
+/// Low-water mark after a capacity eviction: drop the least-recently-used
+/// entries down to this. The ~10% headroom lets the O(n) eviction scan amortize
+/// over many subsequent inserts instead of running on every at-capacity `put`.
+const EVICT_TO: usize = 9_000;
+
+/// A cached response with expiry and last-access timestamps (for LRU eviction).
 struct CacheEntry {
     response: InferResponse,
     expires_at: Instant,
+    last_access: Instant,
 }
 
 /// Thread-safe prompt cache with TTL-based eviction.
@@ -69,14 +76,15 @@ impl PromptCache {
         }
         let key = Self::cache_key(req);
 
-        let entry = self.entries.get(&key)?;
+        let mut entry = self.entries.get_mut(&key)?;
         if entry.expires_at < Instant::now() {
             drop(entry);
             self.entries.remove(&key);
             debug!(cache_key = %key, "cache entry expired");
             return None;
         }
-
+        // Record the read so capacity eviction is genuinely least-recently-used.
+        entry.last_access = Instant::now();
         Some(entry.response.clone())
     }
 
@@ -85,22 +93,26 @@ impl PromptCache {
         if req.zdr {
             return;
         }
-        // Simple eviction: if at capacity, skip insertion.
-        // A more sophisticated LRU could be added later.
+        // At capacity: reclaim expired entries first, then, if still full, evict
+        // the least-recently-used entries down to EVICT_TO. Previously this path
+        // skipped insertion entirely once full, so a busy tenant's cache silently
+        // froze — every new prompt was dropped and the cache degraded to a no-op,
+        // forfeiting all further inference-cost savings.
         if self.entries.len() >= MAX_ENTRIES {
             self.evict_expired();
             if self.entries.len() >= MAX_ENTRIES {
-                debug!("cache full, skipping insertion");
-                return;
+                self.evict_lru();
             }
         }
 
+        let now = Instant::now();
         let key = Self::cache_key(req);
         self.entries.insert(
             key,
             CacheEntry {
                 response: response.clone(),
-                expires_at: Instant::now() + self.ttl,
+                expires_at: now + self.ttl,
+                last_access: now,
             },
         );
     }
@@ -109,6 +121,26 @@ impl PromptCache {
     fn evict_expired(&self) {
         let now = Instant::now();
         self.entries.retain(|_, entry| entry.expires_at > now);
+    }
+
+    /// Evict the least-recently-used entries down to `EVICT_TO`. Runs only when
+    /// the cache is still at capacity after expired-eviction. Takes one O(n)
+    /// snapshot of (key, last_access) and removes the oldest `len - EVICT_TO`;
+    /// batching to the low-water mark amortizes the scan over the freed headroom.
+    fn evict_lru(&self) {
+        let mut stamps: Vec<(String, Instant)> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.last_access))
+            .collect();
+        if stamps.len() <= EVICT_TO {
+            return;
+        }
+        // Most-recently-used first; evict everything past the low-water mark.
+        stamps.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        for (key, _) in stamps.into_iter().skip(EVICT_TO) {
+            self.entries.remove(&key);
+        }
     }
 
     /// Number of entries currently in the cache.
@@ -229,6 +261,32 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         assert!(cache.get(&req).is_none());
+    }
+
+    #[test]
+    fn full_cache_evicts_lru_instead_of_dropping_new_entries() {
+        // Regression: at capacity the cache used to skip insertion entirely,
+        // freezing to a no-op. It must instead evict old entries and still admit
+        // new ones, staying bounded at MAX_ENTRIES.
+        let cache = PromptCache::new(300);
+        for i in 0..(MAX_ENTRIES + 200) {
+            let mut req = sample_request();
+            req.messages[0].content = format!("prompt-{i}");
+            cache.put(&req, &sample_response());
+        }
+        assert!(
+            cache.len() <= MAX_ENTRIES,
+            "cache exceeded MAX_ENTRIES: {}",
+            cache.len()
+        );
+        // The most recently inserted prompt must be retrievable — the old
+        // skip-when-full behavior would have dropped it.
+        let mut newest = sample_request();
+        newest.messages[0].content = format!("prompt-{}", MAX_ENTRIES + 199);
+        assert!(
+            cache.get(&newest).is_some(),
+            "newest entry was dropped — cache froze at capacity"
+        );
     }
 
     #[test]
