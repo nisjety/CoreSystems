@@ -124,6 +124,17 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub semantic_cache_require_scope: bool,
 
+    // Deep multi-hop graph arm — graph-index-rs's `/v1/graph/traverse` (Neo4j
+    // read-model with server-side Postgres fallback), reached over HTTP with
+    // the caller's verified bearer forwarded. Empty URL = remote path off; the
+    // fused graph arm then uses its in-process 1-hop SQL grounding only.
+    #[serde(default = "default_graph_index_url")]
+    pub graph_index_url: String,
+    #[serde(default = "default_graph_remote_timeout_ms")]
+    pub graph_remote_timeout_ms: u64,
+    #[serde(default = "default_graph_remote_max_hops")]
+    pub graph_remote_max_hops: u8,
+
     #[serde(default = "default_sparse_search_backend")]
     pub sparse_search_backend: String,
     #[serde(default = "default_quickwit_url")]
@@ -259,6 +270,17 @@ fn default_semantic_cache_min_score() -> f32 {
 }
 fn default_semantic_cache_ttl_secs() -> u64 {
     86_400
+}
+fn default_graph_index_url() -> String {
+    // Compose-internal DNS; empty it out (GRAPH_INDEX_URL=) to disable the
+    // remote deep-hop path outside the composed deployment.
+    "http://graph-index:9203".into()
+}
+fn default_graph_remote_timeout_ms() -> u64 {
+    1_500
+}
+fn default_graph_remote_max_hops() -> u8 {
+    3
 }
 fn default_sparse_search_backend() -> String {
     "postgres".into()

@@ -364,6 +364,12 @@ services:
       VISUAL_RERANK_ENABLED: ${VISUAL_RERANK_ENABLED:-false}
       COLQWEN_ENDPOINT_URL: ${COLQWEN_ENDPOINT_URL:-}
       VISUAL_RERANK_TOP_K: ${VISUAL_RERANK_TOP_K:-20}
+      # Deep multi-hop graph arm — graph-index's /v1/graph/traverse (Neo4j
+      # read-model, server-side Postgres fallback). The caller's verified
+      # bearer is forwarded; graph-index re-verifies + org-pins it itself.
+      GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://graph-index:9203}
+      GRAPH_REMOTE_TIMEOUT_MS: ${GRAPH_REMOTE_TIMEOUT_MS:-1500}
+      GRAPH_REMOTE_MAX_HOPS: ${GRAPH_REMOTE_MAX_HOPS:-3}
       # Text cross-encoder rerank endpoint. Empty = public Cohere (api.cohere.ai,
       # Bearer). Set to an Azure AI Foundry serverless Cohere rerank URL +
       # RERANK_USE_API_KEY=true to use the in-EU deployment.

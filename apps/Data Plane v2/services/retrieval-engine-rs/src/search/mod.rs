@@ -4,6 +4,7 @@ pub mod dense;
 pub mod filters;
 pub mod fusion;
 pub mod graph;
+pub mod graph_remote;
 pub mod rerank;
 pub mod sparse;
 pub mod timeline;

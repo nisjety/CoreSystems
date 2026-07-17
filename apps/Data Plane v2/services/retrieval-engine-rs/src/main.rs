@@ -310,6 +310,19 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Deep multi-hop graph arm — graph-index's traverse endpoint (Neo4j
+    // read-model). Disabled by emptying GRAPH_INDEX_URL; bearer-less requests
+    // skip it regardless (the arm degrades to in-process 1-hop grounding).
+    let graph_remote = crate::search::graph_remote::GraphTraverseClient::from_config(
+        &cfg.graph_index_url,
+        cfg.graph_remote_timeout_ms,
+    );
+    if graph_remote.is_some() {
+        tracing::info!(url = %cfg.graph_index_url, "deep graph arm (traverse endpoint) enabled");
+    } else {
+        tracing::info!("deep graph arm disabled (GRAPH_INDEX_URL empty); in-process 1-hop only");
+    }
+
     let pipeline = Arc::new(RetrievalPipeline {
         pool: pool.clone(),
         qdrant,
@@ -324,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
         sparse_backend,
         visual_embedder,
         colqwen,
+        graph_remote,
     });
 
     // Prometheus metrics

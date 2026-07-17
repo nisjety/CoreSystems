@@ -106,6 +106,11 @@ pub struct RetrievalPipeline {
     /// Embed-v4's page-image candidates by ColQwen late-interaction (MaxSim)
     /// relevance; any failure degrades to the Embed-v4 order (non-fatal).
     pub colqwen: Option<crate::search::colqwen::ColqwenClient>,
+    /// Deep multi-hop graph traversal client (graph-index's `/v1/graph/traverse`,
+    /// Neo4j read-model). `None` when `GRAPH_INDEX_URL` is empty. Used by the
+    /// fused graph arm only when the request carries a verified bearer to
+    /// forward; otherwise the arm's in-process 1-hop grounding serves alone.
+    pub graph_remote: Option<crate::search::graph_remote::GraphTraverseClient>,
 }
 
 /// A page-image candidate's fetchable `image_url`, read from its raw Qdrant
@@ -343,24 +348,89 @@ impl RetrievalPipeline {
         }
     }
 
-    /// Graph arm — org-scoped graph-neighbourhood grounding: chunks of entities
-    /// matching the query PLUS chunks of their 1-hop relationship neighbours,
-    /// mapped back to candidates (the "entities → candidates" shape adapter).
+    /// Graph arm — org-scoped graph-neighbourhood grounding, in two tiers:
+    ///
+    ///   1. **Deep multi-hop (remote):** when `graph_remote` is configured AND
+    ///      the request carries a verified bearer, resolve seed entities from
+    ///      the query text and call graph-index's `POST /v1/graph/traverse`
+    ///      (Neo4j read-model, server-side Postgres fallback) forwarding that
+    ///      bearer — graph-index independently re-verifies it and pins the org.
+    ///      The traversed `(entity, hop)` set is grounded back to org-visible
+    ///      chunks nearest-hop-first (the "entities → candidates" adapter).
+    ///   2. **In-process 1-hop (fallback):** the local SQL grounding (entities
+    ///      matching the query + their 1-hop neighbours). Also the only tier on
+    ///      bearer-less internal calls.
+    ///
     /// Gated on `w_graph > 0`. Uses the query TEXT (no embedding), so it runs
-    /// regardless of the dense route and needs no query vector. NON-FATAL: any
-    /// error yields an empty arm, exactly like the wiki/visual arms. The graph
-    /// is built only from `visibility = 'org'` provenance and the step-6
-    /// canonical gate still re-filters, so this arm cannot leak.
+    /// regardless of the dense route. NON-FATAL at every step: remote errors
+    /// degrade to tier 2; tier-2 errors yield an empty arm, exactly like the
+    /// wiki/visual arms. The graph is built only from `visibility = 'org'`
+    /// provenance and the step-6 canonical gate still re-filters, so this arm
+    /// cannot leak.
     async fn arm_graph(
         &self,
         query: &str,
         org_id: &str,
+        bearer: Option<&str>,
         w_graph: f32,
         top_k: usize,
     ) -> Vec<ScoredCandidate> {
         if w_graph <= 0.0 {
             return Vec::new();
         }
+
+        // Tier 1 — deep multi-hop via graph-index's traverse endpoint.
+        if let (Some(remote), Some(bearer)) = (self.graph_remote.as_ref(), bearer) {
+            match crate::search::graph::seed_entities_for_query(&self.pool, query, org_id, 8).await
+            {
+                Ok(seeds) if !seeds.is_empty() => {
+                    match remote
+                        .traverse(
+                            bearer,
+                            org_id,
+                            &seeds,
+                            self.config.graph_remote_max_hops,
+                            top_k as u32,
+                        )
+                        .await
+                    {
+                        Ok(reached) => {
+                            // Seeds are the direct query matches (hop 0); the
+                            // traversal contributes the connected facts.
+                            let mut entities: Vec<(String, u8)> =
+                                seeds.into_iter().map(|id| (id, 0)).collect();
+                            entities.extend(reached);
+                            match crate::search::graph::chunks_for_entities(
+                                &self.pool,
+                                org_id,
+                                &entities,
+                                top_k as i64,
+                            )
+                            .await
+                            {
+                                Ok(candidates) => return candidates,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "graph arm chunk grounding failed; falling back to 1-hop")
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "graph traverse (remote) failed; falling back to 1-hop")
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // No seed entities match the query — the 1-hop SQL would
+                    // find nothing either (same match predicate); skip cleanly.
+                    return Vec::new();
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "graph seed resolution failed; falling back to 1-hop")
+                }
+            }
+        }
+
+        // Tier 2 — in-process 1-hop grounding.
         match crate::search::graph::graph_arm_candidates(&self.pool, query, org_id, top_k as i64)
             .await
         {
@@ -597,7 +667,13 @@ impl RetrievalPipeline {
         let (dense_res, sparse_res, graph_candidates, wiki_candidates, visual_candidates) = tokio::join!(
             self.arm_dense(&query_vector, &req.org_id, conditions, top_k),
             self.arm_sparse(&req.query, &req.org_id, top_k, route.sparse),
-            self.arm_graph(&req.query, &req.org_id, mix_for_scoring.w_graph, top_k),
+            self.arm_graph(
+                &req.query,
+                &req.org_id,
+                req.verified_bearer.as_deref(),
+                mix_for_scoring.w_graph,
+                top_k,
+            ),
             self.arm_wiki(&query_vector, &req.org_id, mix_for_scoring.w_wiki, top_k),
             self.arm_visual(
                 &req.query,
