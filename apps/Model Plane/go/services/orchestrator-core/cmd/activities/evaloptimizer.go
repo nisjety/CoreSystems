@@ -44,7 +44,10 @@ type EvalOptimizerInput struct {
 	ZDR bool
 }
 
-func (in EvalOptimizerInput) toConfig() evaloptimizer.Config {
+// ToConfig maps the activity/workflow input onto the pure loop config. It is
+// exported so the durable workflow driver builds its config from the exact
+// same mapping the in-process activity uses.
+func (in EvalOptimizerInput) ToConfig() evaloptimizer.Config {
 	return evaloptimizer.Config{
 		GeneratorModel:      in.GeneratorModel,
 		GeneratorSystem:     in.GeneratorSystem,
@@ -137,11 +140,17 @@ func toInferRequest(req evaloptimizer.InvokeRequest, runID string, seq int) *mpv
 
 // ── Activity: EvaluatorOptimizerActivity ─────────────────────────────────────
 
-// EvaluatorOptimizerActivity runs the evaluator-optimizer loop against
-// inference-core. The generator and (distinct) judge invocations both flow
-// through the shared InferenceCore client; the loop enforces the turn/token
-// caps in code. Per-round observability is emitted through the existing run
-// event publisher, and OTEL counters record the terminal outcome.
+// EvaluatorOptimizerActivity runs the ENTIRE evaluator-optimizer loop against
+// inference-core inside one activity — a single crash domain: if the worker
+// dies mid-loop, the activity retry restarts from round 0. It remains for
+// cheap one-shot/in-process use; the durable, resume-safe driver is
+// EvaluatorOptimizerWorkflow (cmd/workflows), which runs each leg as its own
+// activity via InferModelActivity so completed legs replay from history.
+//
+// The generator and (distinct) judge invocations both flow through the shared
+// InferenceCore client; the loop enforces the turn/token caps in code.
+// Per-round observability is emitted through the existing run event publisher,
+// and OTEL counters record the terminal outcome.
 func (a *Activities) EvaluatorOptimizerActivity(ctx context.Context, input EvalOptimizerInput) (EvalOptimizerOutput, error) {
 	if a.clients == nil || a.clients.InferenceCore == nil {
 		return EvalOptimizerOutput{}, status.Error(codes.Unavailable, "inference-core unavailable")
@@ -152,7 +161,7 @@ func (a *Activities) EvaluatorOptimizerActivity(ctx context.Context, input EvalO
 		runID:  input.RunID,
 	}
 
-	outcome, err := evaloptimizer.RunLoop(ctx, input.toConfig(), inv)
+	outcome, err := evaloptimizer.RunLoop(ctx, input.ToConfig(), inv)
 	out := outcomeToOutput(outcome)
 
 	if err != nil {

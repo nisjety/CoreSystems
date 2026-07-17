@@ -6,10 +6,22 @@
 //
 // The loop is pure: it depends only on a ModelInvoker abstraction and the
 // standard library, so it is exercised end-to-end by table-driven tests with
-// a scripted fake invoker. The Model Plane wires the real path by supplying an
-// inference-core-backed ModelInvoker from a Temporal activity (see
-// cmd/activities); the loop itself performs no I/O, holds no clock, and uses
-// no randomness, which keeps it deterministic and reusable.
+// a scripted fake invoker. The loop itself performs no I/O, holds no clock,
+// and uses no randomness, which keeps it deterministic and reusable.
+//
+// Two drivers exist over the SAME stepping primitives:
+//
+//   - RunLoop: the in-process driver (single crash domain). Cheap, but a crash
+//     mid-loop loses all completed rounds.
+//   - EvaluatorOptimizerWorkflow (cmd/workflows): the DURABLE driver. It calls
+//     the exported primitives (GeneratorRequest, JudgeRequest, BuildAttempt,
+//     RoundPassed, BudgetExceeded, BuildOutcome) from Temporal workflow code
+//     and runs each model leg as its own activity, so every leg is a durable
+//     checkpoint and a crashed worker resumes at the exact leg it died on.
+//
+// Because both drivers share the primitives — and the primitives are
+// deterministic — the two paths cannot drift (enforced by the equivalence
+// test in stepper_test.go).
 package evaloptimizer
 
 import (
@@ -176,7 +188,10 @@ const (
 	defaultTemperature        = 0.7
 )
 
-func (c Config) withDefaults() Config {
+// WithDefaults returns a copy of the config with unset fields defaulted.
+// Drivers (RunLoop and the durable workflow) MUST apply this before stepping
+// so both paths run with identical parameters.
+func (c Config) WithDefaults() Config {
 	if c.MaxRounds <= 0 {
 		c.MaxRounds = defaultMaxRounds
 	}
@@ -212,118 +227,146 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// RunLoop runs the evaluator-optimizer loop. Each round invokes the generator,
-// then — as a distinct call — the judge, feeding the judge's feedback into the
-// next generator round. It stops on the first passing attempt, when the round
-// cap is reached, or when the cumulative token budget is exhausted, and always
-// returns the best-scoring attempt seen plus the full transcript.
+// RunLoop runs the evaluator-optimizer loop in-process. Each round invokes the
+// generator, then — as a distinct call — the judge, feeding the judge's
+// feedback into the next generator round. It stops on the first passing
+// attempt, when the round cap is reached, or when the cumulative token budget
+// is exhausted, and always returns the best-scoring attempt seen plus the full
+// transcript.
 //
-// A ModelInvoker error aborts the run and is returned to the caller; the
-// partial Outcome (rounds so far, best-effort best) is returned alongside so
-// callers can still observe progress.
+// RunLoop is built ONLY from the exported stepping primitives below, so its
+// behaviour is identical to the durable per-leg workflow driver by
+// construction. A ModelInvoker error aborts the run and is returned to the
+// caller; the partial Outcome (rounds so far, best-effort best) is returned
+// alongside so callers can still observe progress.
 func RunLoop(ctx context.Context, cfg Config, inv ModelInvoker) (Outcome, error) {
 	if inv == nil {
 		return Outcome{}, errors.New("evaloptimizer: model invoker is nil")
 	}
-	cfg = cfg.withDefaults()
+	cfg = cfg.WithDefaults()
 	if err := cfg.Validate(); err != nil {
 		return Outcome{}, err
 	}
 
 	var (
-		rounds   []Attempt
-		best     Attempt
-		haveBest bool
-		spent    int
-		prev     *Attempt
+		rounds []Attempt
+		spent  int
+		prev   *Attempt
 	)
 
 	for round := 0; round < cfg.MaxRounds; round++ {
 		// Hard stop, checked before spending on a new round (mirrors
 		// cost-core's >= budget gate).
-		if budgetExceeded(spent, cfg.TotalTokenBudget) {
-			return finalize(rounds, best, haveBest, StopBudgetExhausted, spent), nil
+		if cfg.BudgetExceeded(spent) {
+			return BuildOutcome(rounds, StopBudgetExhausted, spent), nil
 		}
 
 		// --- Generator leg ---
-		genRes, err := inv.Invoke(ctx, cfg.generatorRequest(prev))
+		genRes, err := inv.Invoke(ctx, cfg.GeneratorRequest(prev))
 		if err != nil {
-			return finalize(rounds, best, haveBest, StopError, spent),
+			return BuildOutcome(rounds, StopError, spent),
 				fmt.Errorf("evaloptimizer: generator round %d: %w", round, err)
 		}
 		spent += genRes.TotalTokens()
 
 		// --- Judge leg (distinct invocation, never self-grading) ---
-		judgeRes, err := inv.Invoke(ctx, cfg.judgeRequest(genRes.Content))
+		judgeRes, err := inv.Invoke(ctx, cfg.JudgeRequest(genRes.Content))
 		if err != nil {
-			return finalize(rounds, best, haveBest, StopError, spent),
+			return BuildOutcome(rounds, StopError, spent),
 				fmt.Errorf("evaloptimizer: judge round %d: %w", round, err)
 		}
 		spent += judgeRes.TotalTokens()
 
-		attempt := Attempt{
-			Round:       round,
-			Answer:      genRes.Content,
-			GenTokens:   genRes.TotalTokens(),
-			JudgeTokens: judgeRes.TotalTokens(),
-		}
-		if v, perr := ParseVerdict(judgeRes.Content); perr != nil {
-			// Fail closed: an unparseable grade is never a pass.
-			attempt.VerdictParseError = perr.Error()
-		} else {
-			attempt.Verdict = v
-		}
-
+		attempt := BuildAttempt(round, genRes, judgeRes)
 		rounds = append(rounds, attempt)
-		if !haveBest || attempt.Verdict.Score > best.Verdict.Score {
-			best, haveBest = attempt, true
-		}
 
-		if roundPassed(cfg, attempt) {
-			// The accepted attempt is the best result on a pass.
-			return finalize(rounds, attempt, true, StopPassed, spent), nil
+		if cfg.RoundPassed(attempt) {
+			return BuildOutcome(rounds, StopPassed, spent), nil
 		}
 
 		a := attempt // avoid aliasing the loop variable
 		prev = &a
 	}
 
-	return finalize(rounds, best, haveBest, StopMaxRounds, spent), nil
+	return BuildOutcome(rounds, StopMaxRounds, spent), nil
 }
 
-// roundPassed reports whether an attempt satisfies the rubric. The judge must
+// ── Stepping primitives ──────────────────────────────────────────────────────
+//
+// Everything below is pure and deterministic (no clock, randomness, or I/O),
+// which makes it safe to call from Temporal WORKFLOW code: on replay after a
+// crash, re-executing these functions with the recorded activity results
+// reconstructs the loop state exactly, so a run resumes at the leg it died on.
+
+// BuildAttempt assembles one round's Attempt from the generator and judge leg
+// results, parsing the judge's verdict fail-closed (an unparseable grade is
+// never a pass).
+func BuildAttempt(round int, gen, judge InvokeResult) Attempt {
+	attempt := Attempt{
+		Round:       round,
+		Answer:      gen.Content,
+		GenTokens:   gen.TotalTokens(),
+		JudgeTokens: judge.TotalTokens(),
+	}
+	if v, err := ParseVerdict(judge.Content); err != nil {
+		attempt.VerdictParseError = err.Error()
+	} else {
+		attempt.Verdict = v
+	}
+	return attempt
+}
+
+// RoundPassed reports whether an attempt satisfies the rubric. The judge must
 // assert Passed, and when a threshold is configured the score must clear it.
-func roundPassed(cfg Config, a Attempt) bool {
+func (c Config) RoundPassed(a Attempt) bool {
 	if a.VerdictParseError != "" || !a.Verdict.Passed {
 		return false
 	}
-	if cfg.PassThreshold > 0 && a.Verdict.Score < cfg.PassThreshold {
+	if c.PassThreshold > 0 && a.Verdict.Score < c.PassThreshold {
 		return false
 	}
 	return true
 }
 
-// budgetExceeded mirrors cost-core CheckBudget semantics: a limit of 0 means
-// unlimited; otherwise spend >= limit is exhausted.
-func budgetExceeded(spent, limit int) bool { return limit > 0 && spent >= limit }
+// BudgetExceeded mirrors cost-core CheckBudget semantics: a limit of 0 means
+// unlimited; otherwise spend >= limit is exhausted. Checked BEFORE spending on
+// a new round so the budget is a hard stop, not a soft target.
+func (c Config) BudgetExceeded(spent int) bool {
+	return c.TotalTokenBudget > 0 && spent >= c.TotalTokenBudget
+}
 
-func finalize(rounds []Attempt, best Attempt, haveBest bool, reason string, spent int) Outcome {
+// BuildOutcome assembles the terminal Outcome from a round transcript. On a
+// pass the accepted (last) attempt is the best result; otherwise the
+// highest-scoring attempt wins.
+func BuildOutcome(rounds []Attempt, stopReason string, spent int) Outcome {
 	o := Outcome{
 		Rounds:      rounds,
-		StopReason:  reason,
+		StopReason:  stopReason,
 		TotalTokens: spent,
-		Passed:      reason == StopPassed,
+		Passed:      stopReason == StopPassed,
 	}
-	if haveBest {
-		o.Best = best
+	if len(rounds) == 0 {
+		return o
 	}
+	if o.Passed {
+		o.Best = rounds[len(rounds)-1]
+		return o
+	}
+	best := rounds[0]
+	for _, a := range rounds[1:] {
+		if a.Verdict.Score > best.Verdict.Score {
+			best = a
+		}
+	}
+	o.Best = best
 	return o
 }
 
-// generatorRequest composes the generator call for a round. On the first round
-// it presents the task; on later rounds it threads the prior answer and the
-// judge's feedback so the generator revises rather than restarts.
-func (c Config) generatorRequest(prev *Attempt) InvokeRequest {
+// GeneratorRequest composes the generator call for a round. On the first round
+// (prev == nil) it presents the task; on later rounds it threads the prior
+// answer and the judge's feedback so the generator revises rather than
+// restarts. Pure and deterministic — safe in workflow code.
+func (c Config) GeneratorRequest(prev *Attempt) InvokeRequest {
 	msgs := []Message{
 		{Role: RoleSystem, Content: c.GeneratorSystem},
 		{Role: RoleUser, Content: c.Task},
@@ -349,10 +392,11 @@ func (c Config) generatorRequest(prev *Attempt) InvokeRequest {
 	}
 }
 
-// judgeRequest composes the judge call. The judge grades the OUTCOME against
+// JudgeRequest composes the judge call. The judge grades the OUTCOME against
 // the written rubric and returns a structured verdict; it runs at temperature
-// 0 for reproducible grading and requests the verdict schema.
-func (c Config) judgeRequest(answer string) InvokeRequest {
+// 0 for reproducible grading and requests the verdict schema. Pure and
+// deterministic — safe in workflow code.
+func (c Config) JudgeRequest(answer string) InvokeRequest {
 	system := strings.TrimSpace(c.JudgeSystem)
 	if system == "" {
 		system = "You are a strict evaluator. Grade the candidate answer only against the rubric."

@@ -108,6 +108,9 @@ func main() {
 	w.RegisterActivity(a.UpdateRegistryActivity)
 	w.RegisterActivity(a.AggregateFeedbackActivity)
 	w.RegisterActivity(a.EvaluatorOptimizerActivity)
+	w.RegisterActivity(a.InferModelActivity)
+	w.RegisterActivity(a.PublishEvalRoundActivity)
+	w.RegisterActivity(a.RecordEvalOutcomeActivity)
 
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
