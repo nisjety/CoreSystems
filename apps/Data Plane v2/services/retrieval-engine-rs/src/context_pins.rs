@@ -70,6 +70,8 @@ pub async fn list_pins(pool: &PgPool, org_id: &str, limit: i64) -> anyhow::Resul
 
 /// Creates or updates a pin. The org predicate on the UPDATE arm means a
 /// colliding pin_id from another org is a no-op, never a cross-org overwrite.
+/// Returns `false` in exactly that no-op case (0 rows affected) so the caller
+/// can surface a conflict instead of a misleading success.
 pub async fn upsert_pin(
     pool: &PgPool,
     org_id: &str,
@@ -78,8 +80,8 @@ pub async fn upsert_pin(
     content: &str,
     priority: i32,
     pinned_by: Option<&str>,
-) -> anyhow::Result<()> {
-    sqlx::query(upsert_pin_sql())
+) -> anyhow::Result<bool> {
+    let result = sqlx::query(upsert_pin_sql())
         .bind(pin_id)
         .bind(org_id)
         .bind(title)
@@ -88,7 +90,7 @@ pub async fn upsert_pin(
         .bind(pinned_by)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// Deletes an org's pin. Returns whether a row was removed.

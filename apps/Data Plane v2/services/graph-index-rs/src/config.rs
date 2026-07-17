@@ -76,6 +76,11 @@ pub struct Config {
     pub neo4j_password: String,
     #[serde(default = "default_neo4j_database")]
     pub neo4j_database: String,
+    // Boot connect retry count (3s apart). Must outlast a Neo4j cold start so
+    // NEO4J_ENABLED=true doesn't silently lose the startup race. Default 30
+    // (≈90s). Env: NEO4J_BOOT_ATTEMPTS.
+    #[serde(default = "default_neo4j_boot_attempts")]
+    pub neo4j_boot_attempts: u32,
     // Multi-hop traversal bounds (Phase 4). Requests are clamped to these; the
     // hop count is additionally ceilinged at `neo4j::MAX_HOPS_CEILING`.
     #[serde(default = "default_graph_max_hops")]
@@ -158,6 +163,9 @@ fn default_max_entities_per_chunk() -> usize {
     20
 }
 
+fn default_neo4j_boot_attempts() -> u32 {
+    30
+}
 fn default_community_min_size() -> usize {
     3
 }

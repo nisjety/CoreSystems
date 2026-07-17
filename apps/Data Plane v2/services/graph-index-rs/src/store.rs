@@ -692,6 +692,18 @@ impl GraphStore {
         communities: &[Community],
     ) -> anyhow::Result<()> {
         let mut tx = self.pool.begin().await?;
+        // Per-org transaction advisory lock: serializes concurrent recomputes
+        // (post-extraction consumer + rebuild endpoint, possibly across
+        // replicas). Without it the default READ COMMITTED DELETE-then-INSERT
+        // races — each run mints fresh UUID community_ids so nothing conflicts,
+        // and a run whose snapshot predates a concurrent commit fails to delete
+        // the other run's just-inserted rows, leaving duplicated communities.
+        // The lock releases on commit/rollback. hashtextextended keeps the key
+        // stable across sessions.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM graph_communities WHERE org_id = $1")
             .bind(org_id)
             .execute(&mut *tx)

@@ -370,9 +370,17 @@ pub async fn run_consumer(
                 "graph extraction complete"
             );
 
+            // Ack BEFORE the community refresh: the refresh is a whole-org
+            // recompute (two bulk queries + a replace tx), so running it inside
+            // the ack window would extend the JetStream deadline under bulk
+            // ingest and risk redelivery. Post-ack keeps the message settled;
+            // the per-org advisory lock in `replace_communities` serializes any
+            // concurrent recompute so overlapping runs can't duplicate rows.
+            let _ = msg.ack().await;
+
             // Refresh the org's derived communities when this document added
-            // relationships (two bulk queries + one replace tx). Best-effort:
-            // a failure never blocks the ack, and detect_communities only
+            // relationships. Best-effort: a failure is logged, never retried
+            // here (the message is already acked), and detect_communities only
             // replaces rows AFTER a successful listing — a transient DB error
             // cannot wipe existing communities.
             if total_rels > 0 {
@@ -382,8 +390,6 @@ pub async fn run_consumer(
                     tracing::warn!(err = %e, org_id, "community refresh failed (non-fatal)");
                 }
             }
-
-            let _ = msg.ack().await;
         }
     }
 }

@@ -293,7 +293,11 @@ fn default_graph_index_url() -> String {
     "http://graph-index:9203".into()
 }
 fn default_graph_remote_timeout_ms() -> u64 {
-    1_500
+    // Kept under the retrieval p95<800ms gate budget: this arm overlaps the
+    // dense/sparse round-trips via tokio::join!, but a slow-but-alive
+    // graph-index must not drag the fused phase past the gate. The circuit
+    // breaker (graph_remote.rs) skips the hop entirely after repeated failures.
+    800
 }
 fn default_graph_remote_max_hops() -> u8 {
     3

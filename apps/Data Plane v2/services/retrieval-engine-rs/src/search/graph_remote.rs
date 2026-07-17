@@ -10,13 +10,67 @@
 //! verifications of the same principal). No service-key fallback: without a
 //! bearer the arm uses the in-process SQL grounding instead.
 
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
 use anyhow::Context;
 
-/// Thin client over graph-index's traverse endpoint. Cheap to clone.
+/// Consecutive failures before the breaker opens.
+const BREAKER_FAILURE_THRESHOLD: u32 = 3;
+/// How long the breaker stays open (skipping the hop) once tripped.
+const BREAKER_COOLDOWN_MS: u64 = 10_000;
+
+/// Circuit breaker so a persistently-down/slow graph-index isn't re-called
+/// (and re-timed-out) on every single retrieval. Shared across the process via
+/// `Arc`; all state is atomic. Time is measured against `origin` so the pure
+/// decision helpers are unit-testable with an injected clock.
+struct Breaker {
+    origin: Instant,
+    consecutive_failures: AtomicU32,
+    open_until_ms: AtomicU64,
+}
+
+impl Breaker {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            consecutive_failures: AtomicU32::new(0),
+            open_until_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.origin.elapsed().as_millis() as u64
+    }
+
+    /// True when the breaker is open (skip the hop) at `now_ms`.
+    fn is_open(&self, now_ms: u64) -> bool {
+        now_ms < self.open_until_ms.load(Ordering::Relaxed)
+    }
+
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.open_until_ms.store(0, Ordering::Relaxed);
+    }
+
+    /// Counts a failure and opens the breaker once the threshold is reached.
+    fn record_failure(&self, now_ms: u64) {
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= BREAKER_FAILURE_THRESHOLD {
+            self.open_until_ms
+                .store(now_ms + BREAKER_COOLDOWN_MS, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Thin client over graph-index's traverse endpoint. Cheap to clone (shares
+/// the reqwest pool and the circuit breaker).
 #[derive(Clone)]
 pub struct GraphTraverseClient {
     http: reqwest::Client,
     base_url: String,
+    breaker: Arc<Breaker>,
 }
 
 impl GraphTraverseClient {
@@ -36,6 +90,7 @@ impl GraphTraverseClient {
         Some(Self {
             http,
             base_url: base_url.to_string(),
+            breaker: Arc::new(Breaker::new()),
         })
     }
 
@@ -44,6 +99,32 @@ impl GraphTraverseClient {
     /// must match the bearer's verified org or graph-index rejects with 403 —
     /// callers always pass the same org the bearer was verified for.
     pub async fn traverse(
+        &self,
+        bearer: &str,
+        org_id: &str,
+        seed_ids: &[String],
+        max_hops: u8,
+        max_entities: u32,
+    ) -> anyhow::Result<Vec<(String, u8)>> {
+        // Circuit breaker: after repeated failures, skip the hop entirely for a
+        // cooldown so a down/slow graph-index doesn't impose its timeout on
+        // every query. The caller degrades to the in-process 1-hop tier.
+        let now_ms = self.breaker.now_ms();
+        if self.breaker.is_open(now_ms) {
+            anyhow::bail!("graph traverse breaker open; skipping remote hop");
+        }
+
+        let result = self
+            .traverse_inner(bearer, org_id, seed_ids, max_hops, max_entities)
+            .await;
+        match &result {
+            Ok(_) => self.breaker.record_success(),
+            Err(_) => self.breaker.record_failure(self.breaker.now_ms()),
+        }
+        result
+    }
+
+    async fn traverse_inner(
         &self,
         bearer: &str,
         org_id: &str,
@@ -135,5 +216,32 @@ mod tests {
     fn parse_traverse_entities_empty_on_malformed_body() {
         assert!(parse_traverse_entities(&serde_json::json!({})).is_empty());
         assert!(parse_traverse_entities(&serde_json::json!({"entities": "nope"})).is_empty());
+    }
+
+    #[test]
+    fn breaker_opens_after_threshold_failures_and_resets_on_success() {
+        let b = Breaker::new();
+        // Below threshold: stays closed.
+        b.record_failure(0);
+        b.record_failure(0);
+        assert!(!b.is_open(0), "closed before threshold");
+        // Threshold reached: opens for the cooldown window.
+        b.record_failure(0);
+        assert!(b.is_open(0), "open at trip time");
+        assert!(b.is_open(BREAKER_COOLDOWN_MS - 1), "open within cooldown");
+        assert!(
+            !b.is_open(BREAKER_COOLDOWN_MS),
+            "closed after cooldown elapses"
+        );
+        // A success clears the failure streak and any open window.
+        b.record_failure(1000);
+        b.record_failure(1000);
+        b.record_success();
+        b.record_failure(2000);
+        b.record_failure(2000);
+        assert!(
+            !b.is_open(2000),
+            "success reset the consecutive-failure count"
+        );
     }
 }

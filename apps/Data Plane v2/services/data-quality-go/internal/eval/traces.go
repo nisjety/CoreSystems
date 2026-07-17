@@ -68,10 +68,12 @@ func (s *PostgresTraceSource) Recent(ctx context.Context, orgID string, limit in
 
 	// One batch query for the traces' persisted top-10 candidates — the ids
 	// golden-set judgments score against. Ordered so append preserves rank.
+	// retrieval-engine persists rank 1-based (rank+1), so the top-10 occupy
+	// ranks 1..10 — `rank <= 10`, not `< 10` (which would drop rank 10).
 	candRows, err := s.pool.Query(ctx, `
 		SELECT trace_id, knowledge_id, document_id
 		FROM retrieval_candidates
-		WHERE trace_id = ANY($1) AND rank < 10
+		WHERE trace_id = ANY($1) AND rank <= 10
 		ORDER BY trace_id, rank
 	`, traceIDs)
 	if err != nil {

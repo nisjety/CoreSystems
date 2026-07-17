@@ -48,9 +48,14 @@ async fn main() -> anyhow::Result<()> {
     // optional read-model, so there is no compose `depends_on: neo4j`. Instead
     // we connect with a bounded boot retry (handles the startup race) and then
     // degrade to the Postgres fallback rather than blocking or crashing.
+    // The window must outlast a Neo4j 5 (JVM) COLD start — 20-60s, longer on
+    // first run when the image is still being pulled — else NEO4J_ENABLED=true
+    // silently loses the race and the mirror stays off for the whole process
+    // lifetime. Default ≈ 90s (30 × 3s), env-tunable via NEO4J_BOOT_ATTEMPTS.
     let neo4j: Option<Arc<neo4j::Neo4jClient>> = if cfg.neo4j_enabled {
+        let attempts = cfg.neo4j_boot_attempts.max(1);
         let mut connected = None;
-        for attempt in 1..=5u32 {
+        for attempt in 1..=attempts {
             match neo4j::Neo4jClient::connect(&cfg).await {
                 Ok(client) => match client.ensure_schema().await {
                     Ok(()) => {
@@ -59,16 +64,20 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     Err(e) => {
-                        tracing::warn!(attempt, err = %e, "neo4j schema bootstrap failed; retrying")
+                        tracing::warn!(attempt, attempts, err = %e, "neo4j schema bootstrap failed; retrying")
                     }
                 },
-                Err(e) => tracing::warn!(attempt, err = %e, "neo4j connect failed; retrying"),
+                Err(e) => {
+                    tracing::warn!(attempt, attempts, err = %e, "neo4j connect failed; retrying")
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
         if connected.is_none() {
             tracing::error!(
-                "neo4j unavailable after retries; degrading to postgres graph fallback"
+                attempts,
+                "neo4j unavailable after boot retries; degrading to postgres graph fallback \
+                 (POST /v1/graph/rebuild can backfill the mirror once neo4j is reachable)"
             );
         }
         connected

@@ -1298,7 +1298,7 @@ async fn upsert_context_pin(
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let pinned_by = auth.as_ref().and_then(|ext| ext.user_id.clone());
-    crate::context_pins::upsert_pin(
+    let saved = crate::context_pins::upsert_pin(
         &pipeline.pool,
         &req.org_id,
         &pin_id,
@@ -1308,6 +1308,14 @@ async fn upsert_context_pin(
         pinned_by.as_deref(),
     )
     .await?;
+    if !saved {
+        // The pin_id exists under a different org — the conflict-update arm's
+        // org guard made it a no-op. Report the conflict rather than a
+        // misleading 200 (caller should retry with a server-generated id).
+        return Err(AppError::conflict(
+            "pin_id belongs to another tenant; omit pin_id to create a new pin",
+        ));
+    }
     Ok(Json(serde_json::json!({"pin_id": pin_id})))
 }
 

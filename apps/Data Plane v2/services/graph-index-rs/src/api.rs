@@ -90,6 +90,9 @@ pub fn router(
         .route("/v1/graph/traverse", post(traverse_graph))
         // On-demand re-detection of the org's derived communities.
         .route("/v1/graph/communities/rebuild", post(rebuild_communities))
+        // Backfill the Neo4j read-model from the canonical Postgres graph —
+        // heals drift after a degraded window (boot race, Neo4j volume reset).
+        .route("/v1/graph/rebuild", post(rebuild_neo4j_mirror))
         // §16.1.5 — graph_exports endpoint. Formats: json (default),
         // graphml, markdown.
         .route("/v1/graph/exports", post(create_export))
@@ -572,6 +575,68 @@ async fn rebuild_communities(
     }
 }
 
+#[derive(Deserialize)]
+struct RebuildMirrorRequest {
+    org_id: String,
+}
+
+/// Upper bound on nodes/edges pulled per backfill — well above current per-org
+/// graph sizes (< 10k entities); protects against an unbounded scan.
+const BACKFILL_NODE_CAP: i32 = 200_000;
+const BACKFILL_EDGE_CAP: i32 = 400_000;
+
+/// Backfills the Neo4j read-model from the canonical Postgres graph for one org.
+/// Idempotent (`MERGE` on the shared Postgres PKs), org-scoped, and only the
+/// org-visible subgraph is mirrored (inherits `snapshot_org_graph`'s visibility
+/// gate). 503 when the mirror is disabled/unreachable — there is nothing to
+/// backfill into, and callers must not read a false success.
+async fn rebuild_neo4j_mirror(
+    State(store): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(neo4j): Extension<Option<Arc<Neo4jClient>>>,
+    Json(req): Json<RebuildMirrorRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let org_id = require_org(&principal, &req.org_id)?;
+    let Some(client) = neo4j.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let (entities, relationships, _n, _e) = store
+        .snapshot_org_graph(org_id, BACKFILL_NODE_CAP, BACKFILL_EDGE_CAP)
+        .await
+        .map_err(|e| store_failure("snapshot_org_graph", e))?;
+
+    let mirror_entities: Vec<crate::model::MirrorEntity> = entities
+        .iter()
+        .map(|e| crate::model::MirrorEntity {
+            entity_id: e.entity_id.clone(),
+            entity_type: e.entity_type.clone(),
+            entity_text: e.entity_text.clone(),
+            confidence: e.confidence,
+        })
+        .collect();
+    let mirror_rels: Vec<crate::model::MirrorRelationship> = relationships
+        .iter()
+        .map(|r| crate::model::MirrorRelationship {
+            rel_id: r.rel_id.clone(),
+            entity_a_id: r.entity_a_id.clone(),
+            entity_b_id: r.entity_b_id.clone(),
+            relation_type: r.relation_type.clone(),
+            confidence: r.confidence,
+        })
+        .collect();
+
+    client
+        .merge_extraction(org_id, &mirror_entities, &mirror_rels)
+        .await
+        .map_err(|e| store_failure("neo4j backfill merge", e))?;
+
+    Ok(Json(serde_json::json!({
+        "entities": mirror_entities.len(),
+        "relationships": mirror_rels.len(),
+    })))
+}
+
 /// Serializes entities with an attached `hops` distance. Missing hops (Postgres
 /// fallback, which does not track per-entity distance) default to 1.
 fn entities_with_hops(
@@ -778,6 +843,11 @@ mod auth_tests {
             },
             RouteCase {
                 method: Method::POST,
+                uri: "/v1/graph/rebuild",
+                body: Some(communities_body),
+            },
+            RouteCase {
+                method: Method::POST,
                 uri: "/v1/graph/exports",
                 body: Some(export_body),
             },
@@ -892,10 +962,17 @@ mod auth_tests {
                 .await
                 .expect("response")
                 .status();
-            assert_eq!(
-                status,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "an unavailable graph store must fail honestly for own-org route {}",
+            // The point is that a verified own-org principal is ACCEPTED past
+            // auth and reaches the handler — proven by a server-side failure
+            // rather than a 401/403/404. Most routes surface the broken store as
+            // 500; /v1/graph/rebuild legitimately short-circuits to 503 first
+            // (the Neo4j mirror is disabled in this harness), which equally
+            // proves the principal passed the auth gate.
+            let accepted = status == StatusCode::INTERNAL_SERVER_ERROR
+                || (case.uri == "/v1/graph/rebuild" && status == StatusCode::SERVICE_UNAVAILABLE);
+            assert!(
+                accepted,
+                "own-org route {} must fail past auth (got {status})",
                 case.uri
             );
         }

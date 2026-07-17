@@ -374,7 +374,7 @@ services:
       # read-model, server-side Postgres fallback). The caller's verified
       # bearer is forwarded; graph-index re-verifies + org-pins it itself.
       GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://graph-index:9203}
-      GRAPH_REMOTE_TIMEOUT_MS: ${GRAPH_REMOTE_TIMEOUT_MS:-1500}
+      GRAPH_REMOTE_TIMEOUT_MS: ${GRAPH_REMOTE_TIMEOUT_MS:-800}
       GRAPH_REMOTE_MAX_HOPS: ${GRAPH_REMOTE_MAX_HOPS:-3}
       # Text cross-encoder rerank endpoint. Empty = public Cohere (api.cohere.ai,
       # Bearer). Set to an Azure AI Foundry serverless Cohere rerank URL +
@@ -640,6 +640,9 @@ services:
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-dataplane}
       NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      # Boot connect retry (3s apart) must outlast a Neo4j cold start so the
+      # default-ON mirror doesn't silently lose the startup race. 30 ≈ 90s.
+      NEO4J_BOOT_ATTEMPTS: ${NEO4J_BOOT_ATTEMPTS:-30}
       GRAPH_MAX_HOPS: ${GRAPH_MAX_HOPS:-3}
       GRAPH_TRAVERSE_MAX_ENTITIES: ${GRAPH_TRAVERSE_MAX_ENTITIES:-100}
     volumes:
