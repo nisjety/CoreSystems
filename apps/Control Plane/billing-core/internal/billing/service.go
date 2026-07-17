@@ -802,6 +802,12 @@ func (s *Service) CanUseFeature(ctx context.Context, orgID, feature string) (boo
 	if account.SubscriptionState == SubscriptionStateCanceled {
 		return false, account, nil
 	}
+	// A past_due subscription keeps access during a grace window, then is
+	// suspended: after PastDueGracePeriod (60 days) elapsed since it entered
+	// past_due, all feature access is denied.
+	if pastDueGraceExpired(account, time.Now().UTC()) {
+		return false, account, nil
+	}
 
 	if account.Entitlements[feature] {
 		return true, account, nil

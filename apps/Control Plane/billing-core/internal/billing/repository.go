@@ -41,6 +41,7 @@ func (r *Repository) Ping(ctx context.Context) error {
 // CAS prevents provider, checkout, hydration, and trial writers from applying
 // a stale full snapshot over a newer canonical or same-revision write.
 func (r *Repository) SaveAccountStateCAS(ctx context.Context, account Account) error {
+	account = applyPastDueClock(account, time.Now().UTC())
 	products, err := json.Marshal(account.Products)
 	if err != nil {
 		return fmt.Errorf("marshal products: %w", err)
@@ -147,6 +148,7 @@ WHERE org_id = $1 AND plan_revision = $12 AND updated_at = $13`,
 // checks the permanent deletion tombstone under the lifecycle lock, and writes
 // the derived account only when the incoming Org revision is newer.
 func (r *Repository) ApplyOrganizationPlanRevision(ctx context.Context, account Account, revision int64) (bool, error) {
+	account = applyPastDueClock(account, time.Now().UTC())
 	if revision < 1 {
 		return false, fmt.Errorf("plan revision must be positive")
 	}
