@@ -21,6 +21,14 @@ import (
 // don't fan out to 3 cores every time.
 const ControlSessionCacheTTL = 30 * time.Second
 
+// ControlSessionOrgIndexTTL bounds the org->users reverse index maintained
+// alongside each snapshot write (G34-followup-2). A grace above
+// ControlSessionCacheTTL keeps the index reliably outliving the snapshots it
+// points at — an index that expired first couldn't invalidate them — while
+// still self-healing so it never grows unbounded. It is refreshed on every
+// snapshot write, so idle orgs age out ~this long after their last read.
+const ControlSessionOrgIndexTTL = ControlSessionCacheTTL + 30*time.Second
+
 // ControlSession is the aggregated app-context snapshot velion needs for
 // post-login routing, plan gating, and entitlement-driven UI. It composes
 // user-core (identity + onboarding routing), org-core (org + entitlements),
@@ -29,12 +37,12 @@ const ControlSessionCacheTTL = 30 * time.Second
 // G10 (per ADR 0002): produced by the repurposed CP session-core, served at
 // GET /api/v1/sessions/current.
 type ControlSession struct {
-	User             ControlSessionUser   `json:"user"`
-	Organization     *ControlSessionOrg   `json:"organization,omitempty"`
-	Entitlements     []clients.Entitlement `json:"entitlements"`
+	User             ControlSessionUser      `json:"user"`
+	Organization     *ControlSessionOrg      `json:"organization,omitempty"`
+	Entitlements     []clients.Entitlement   `json:"entitlements"`
 	Billing          *clients.BillingAccount `json:"billing,omitempty"`
-	OnboardingStatus string               `json:"onboardingStatus"`
-	FetchedAt        time.Time            `json:"fetchedAt"`
+	OnboardingStatus string                  `json:"onboardingStatus"`
+	FetchedAt        time.Time               `json:"fetchedAt"`
 }
 
 type ControlSessionUser struct {
@@ -180,6 +188,17 @@ func (s *ControlSessionService) Get(ctx context.Context, userID string) (*Contro
 	if s.cache != nil {
 		if err := s.cache.CacheControlSession(ctx, userID, routing.OrgID, out, ControlSessionCacheTTL); err != nil {
 			log.Warn().Err(err).Str("user_id", userID).Msg("control-session: cache write degraded")
+		}
+
+		// G34-followup-2: maintain the org->users reverse index in lockstep
+		// with the snapshot write so an org-only upstream event can bust
+		// exactly the affected users' snapshots (see the subscribers pkg)
+		// instead of waiting out the TTL. Best-effort: an index-write error
+		// must not fail the request — the snapshot TTL is the backstop.
+		if routing.OrgID != "" {
+			if err := s.cache.IndexOrgUser(ctx, routing.OrgID, userID, ControlSessionOrgIndexTTL); err != nil {
+				log.Warn().Err(err).Str("user_id", userID).Str("org_id", routing.OrgID).Msg("control-session: org index write degraded")
+			}
 		}
 	}
 

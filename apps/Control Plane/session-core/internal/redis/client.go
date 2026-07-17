@@ -141,6 +141,77 @@ func (c *Client) InvalidateControlSession(ctx context.Context, userID, orgID str
 	return iter.Err()
 }
 
+// --- Org -> Users reverse index (G34-followup-2) ---
+
+// IndexOrgUser records `userID` in the org->users reverse-index set for
+// `orgID` and (re)sets the set's TTL to `ttl`. It is maintained alongside
+// every CacheControlSession write so an org-scoped upstream event (which
+// carries no user_id) can resolve the exact set of users whose snapshots
+// must be busted — see InvalidateOrgSessions — instead of waiting out the
+// per-snapshot TTL.
+//
+// SADD + EXPIRE run in one pipeline round trip. Refreshing the TTL on every
+// write makes the index self-healing: once writes stop, the set expires
+// ~ttl later, so it never grows unbounded. `ttl` should be >= the snapshot
+// TTL so the index reliably outlives the snapshots it points at.
+//
+// Best-effort by contract: callers treat a returned error as non-fatal (the
+// snapshot TTL is the backstop) and must not fail the request on it. Never
+// panics on a nil client.
+func (c *Client) IndexOrgUser(ctx context.Context, orgID, userID string, ttl time.Duration) error {
+	if c == nil || orgID == "" || userID == "" {
+		return nil
+	}
+	key := orgUserIndexKey(orgID)
+	pipe := c.rdb.Pipeline()
+	pipe.SAdd(ctx, key, userID)
+	pipe.Expire(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("index org user: %w", err)
+	}
+	return nil
+}
+
+// InvalidateOrgSessions busts the cached Control Session snapshots of every
+// user recorded in the org->users reverse index for `orgID`, then clears the
+// index set. It returns the number of users whose snapshot key was targeted.
+//
+// Used for org-scoped upstream events (e.g. organization.plan.changed) that
+// carry no user_id: SMEMBERS resolves the affected users, and each snapshot
+// for THIS org is deleted precisely (a user's snapshots for other orgs are
+// left untouched). DEL is variadic and atomic in Redis. The index set is
+// then dropped; members re-populate it on their next read-through cache
+// write, and the set TTL is the backstop if this clear is ever lost.
+//
+// Best-effort by contract: a returned error is non-fatal for the caller (the
+// snapshot TTL still bounds staleness). Never panics on a nil client or an
+// unavailable Redis.
+func (c *Client) InvalidateOrgSessions(ctx context.Context, orgID string) (int, error) {
+	if c == nil || orgID == "" {
+		return 0, nil
+	}
+	indexKey := orgUserIndexKey(orgID)
+	userIDs, err := c.rdb.SMembers(ctx, indexKey).Result()
+	if err != nil {
+		return 0, fmt.Errorf("org index members: %w", err)
+	}
+	if len(userIDs) == 0 {
+		return 0, nil
+	}
+	snapKeys := make([]string, 0, len(userIDs))
+	for _, uid := range userIDs {
+		snapKeys = append(snapKeys, controlSessionKey(uid, orgID))
+	}
+	// Snapshot deletes + index clear in one pipeline round trip.
+	pipe := c.rdb.Pipeline()
+	pipe.Del(ctx, snapKeys...)
+	pipe.Del(ctx, indexKey)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, fmt.Errorf("invalidate org sessions: %w", err)
+	}
+	return len(userIDs), nil
+}
+
 // ErrCacheMiss exposes `redis.Nil` so callers can branch on it without
 // importing the underlying client.
 var ErrCacheMiss = goredis.Nil
@@ -157,4 +228,12 @@ func controlSessionPrefix(userID string) string {
 
 func controlSessionKey(userID, orgID string) string {
 	return controlSessionPrefix(userID) + orgID
+}
+
+// orgUserIndexKey names the org->users reverse-index set. Deliberately under
+// a `control:sess:` namespace distinct from the `controlsession:` snapshot
+// keyspace so a per-user wildcard snapshot SCAN can never match — or clobber
+// — the index set.
+func orgUserIndexKey(orgID string) string {
+	return "control:sess:org:" + orgID
 }

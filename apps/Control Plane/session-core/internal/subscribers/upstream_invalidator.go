@@ -23,13 +23,13 @@ import (
 // is the correctness safety net. Missing one delivery just means the cache
 // entry expires naturally.
 const (
-	SubjectUserProfileUpdated     = "user.profile.updated"
-	SubjectOrgPlanChanged         = "organization.plan.changed"
-	SubjectOrgMemberAdded         = "organization.member.added"
-	SubjectOrgMemberRemoved       = "organization.member.removed"
-	SubjectOrgUpdated             = "organization.updated"
-	SubjectBillingAccountUpdated  = "billing.account.updated"
-	SubjectBillingPlanChanged     = "billing.plan.changed"
+	SubjectUserProfileUpdated    = "user.profile.updated"
+	SubjectOrgPlanChanged        = "organization.plan.changed"
+	SubjectOrgMemberAdded        = "organization.member.added"
+	SubjectOrgMemberRemoved      = "organization.member.removed"
+	SubjectOrgUpdated            = "organization.updated"
+	SubjectBillingAccountUpdated = "billing.account.updated"
+	SubjectBillingPlanChanged    = "billing.plan.changed"
 )
 
 // upstreamEvent is the union of fields we care about across all five
@@ -121,13 +121,21 @@ func (u *UpstreamInvalidator) handle(ctx context.Context, subject string) nats.M
 				log.Warn().Err(err).Str("subject", subject).Str("user_id", userID).Msg("upstream-invalidator: cache invalidate")
 			}
 		} else if orgID != "" {
-			// Org-only event (e.g. org plan changed). Without a per-org
-			// reverse index, we can't bust every affected user's cache
-			// from one event. Best-effort: log + skip. G34-followup-2
-			// documents the missing index. The 30s TTL eventually bounds
-			// staleness; explicit POST /api/v1/sessions/refresh from the
-			// affected user is the fast path.
-			log.Debug().Str("subject", subject).Str("org_id", orgID).Msg("upstream-invalidator: org-only event, no user index — relying on TTL")
+			// Org-only event (e.g. org plan changed). G34-followup-2: use the
+			// org->users reverse index (maintained on every snapshot cache
+			// write) to bust exactly the affected users' snapshots
+			// immediately, instead of waiting out the 30s TTL. Best-effort:
+			// on a Redis error we log and fall back to the TTL bound (the
+			// prior behavior); we never hard-fail or panic.
+			n, err := u.cache.InvalidateOrgSessions(ctx, orgID)
+			switch {
+			case err != nil:
+				log.Warn().Err(err).Str("subject", subject).Str("org_id", orgID).Msg("upstream-invalidator: org index invalidate degraded — relying on TTL")
+			case n == 0:
+				log.Debug().Str("subject", subject).Str("org_id", orgID).Msg("upstream-invalidator: org-only event, no indexed users — TTL backstops")
+			default:
+				log.Info().Str("subject", subject).Str("org_id", orgID).Int("invalidated", n).Msg("upstream-invalidator: org-only event, busted indexed user snapshots")
+			}
 		}
 
 		// Re-publish so notification-core can fire the user-visible toast.
