@@ -88,6 +88,8 @@ pub fn router(
         .route("/v1/graph/expand", post(expand_graph))
         // GraphRAG multi-hop traversal (Neo4j read-model, Postgres fallback).
         .route("/v1/graph/traverse", post(traverse_graph))
+        // On-demand re-detection of the org's derived communities.
+        .route("/v1/graph/communities/rebuild", post(rebuild_communities))
         // §16.1.5 — graph_exports endpoint. Formats: json (default),
         // graphml, markdown.
         .route("/v1/graph/exports", post(create_export))
@@ -539,6 +541,37 @@ async fn traverse_graph(
     }
 }
 
+#[derive(Deserialize)]
+struct RebuildCommunitiesRequest {
+    org_id: String,
+    #[serde(default = "default_community_min_size")]
+    min_size: usize,
+}
+
+fn default_community_min_size() -> usize {
+    3
+}
+
+/// Re-detects the org's derived communities (connected components over the
+/// visibility-gated graph) and atomically replaces `graph_communities`. Also
+/// runs automatically after each document's extraction; this endpoint covers
+/// backfill and operator-triggered refresh.
+async fn rebuild_communities(
+    State(store): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<RebuildCommunitiesRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let org_id = require_org(&principal, &req.org_id)?;
+    let min_size = req.min_size.clamp(2, 100);
+    match crate::community::detect_communities(&store, org_id, min_size).await {
+        Ok(count) => Ok(Json(serde_json::json!({
+            "communities": count,
+            "min_size": min_size,
+        }))),
+        Err(e) => Err(store_failure("rebuild_communities", e)),
+    }
+}
+
 /// Serializes entities with an attached `hops` distance. Missing hops (Postgres
 /// fallback, which does not track per-entity distance) default to 1.
 fn entities_with_hops(
@@ -686,6 +719,11 @@ mod auth_tests {
         } else {
             r#"{"org_id":"org-b","seed_entity_ids":["entity-1"]}"#
         };
+        let communities_body = if org_id == "org-a" {
+            r#"{"org_id":"org-a"}"#
+        } else {
+            r#"{"org_id":"org-b"}"#
+        };
         let export_body = if org_id == "org-a" {
             r#"{"org_id":"org-a","format":"json"}"#
         } else {
@@ -732,6 +770,11 @@ mod auth_tests {
                 method: Method::POST,
                 uri: "/v1/graph/traverse",
                 body: Some(traverse_body),
+            },
+            RouteCase {
+                method: Method::POST,
+                uri: "/v1/graph/communities/rebuild",
+                body: Some(communities_body),
             },
             RouteCase {
                 method: Method::POST,

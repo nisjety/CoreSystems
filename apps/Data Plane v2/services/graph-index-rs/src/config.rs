@@ -57,8 +57,9 @@ pub struct Config {
     #[serde(default = "default_max_entities_per_chunk")]
     pub max_entities_per_chunk: usize,
 
+    // Minimum member count for a derived community. Consumed by the
+    // post-extraction refresh and the /v1/graph/communities/rebuild endpoint.
     #[serde(default = "default_community_min_size")]
-    #[allow(dead_code)] // consumed by detect_communities once that path is wired
     pub community_min_size: usize,
 
     // Neo4j graph read-model (Phase 2). Disabled by default so the change is

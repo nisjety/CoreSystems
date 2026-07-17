@@ -634,11 +634,83 @@ impl GraphStore {
         Ok((claims, count))
     }
 
-    #[allow(dead_code)] // called by detect_communities; that entry point lands in a later phase
-    pub async fn save_community(&self, _community: &Community) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "community persistence disabled until communities carry canonical document provenance"
+    /// All org entity ids whose provenance is live + org-visible (the same
+    /// `graph_text_units` → `documents` gate every read uses). One bulk query —
+    /// community detection must not do a per-entity N+1.
+    pub async fn list_visible_entity_ids(&self, org_id: &str) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT ge.entity_id FROM graph_entities AS ge
+             WHERE ge.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             LIMIT 10000",
         )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// All org relationship endpoint pairs with live + org-visible provenance.
+    /// One bulk query backing the community adjacency build.
+    pub async fn list_visible_relationship_pairs(
+        &self,
+        org_id: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(sqlx::query_as::<_, (String, String)>(
+            "SELECT gr.entity_a_id, gr.entity_b_id FROM graph_relationships AS gr
+             WHERE gr.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             LIMIT 50000",
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Atomically replaces the org's derived communities with a fresh detection
+    /// run (communities are a derived artifact — delete-and-replace inside one
+    /// transaction keeps re-detection idempotent at the set level and never
+    /// leaves a half-written state). Membership provenance is inherited: every
+    /// member entity id comes from the visibility-gated listing above, and the
+    /// read side additionally requires the queried entity set to cover the
+    /// community (`retrieval-engine` COMMUNITY_SUMMARY_SQL subset check).
+    pub async fn replace_communities(
+        &self,
+        org_id: &str,
+        communities: &[Community],
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM graph_communities WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
+        for c in communities {
+            sqlx::query(
+                "INSERT INTO graph_communities (community_id, org_id, entity_ids, summary, level)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(&c.community_id)
+            .bind(org_id)
+            .bind(serde_json::json!(c.entity_ids))
+            .bind(&c.summary)
+            .bind(c.level)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn get_graph_expansion(

@@ -212,6 +212,8 @@ pub async fn run_consumer(
     // Optional Neo4j read-model mirror. `None` disables the mirror; the
     // canonical Postgres graph is written regardless.
     neo4j: Option<Arc<Neo4jClient>>,
+    // Minimum member count for a derived community (config `community_min_size`).
+    community_min_size: usize,
 ) -> anyhow::Result<()> {
     loop {
         let mut messages = consumer
@@ -367,6 +369,19 @@ pub async fn run_consumer(
                 claims = total_claims,
                 "graph extraction complete"
             );
+
+            // Refresh the org's derived communities when this document added
+            // relationships (two bulk queries + one replace tx). Best-effort:
+            // a failure never blocks the ack, and detect_communities only
+            // replaces rows AFTER a successful listing — a transient DB error
+            // cannot wipe existing communities.
+            if total_rels > 0 {
+                if let Err(e) =
+                    crate::community::detect_communities(&store, &org_id, community_min_size).await
+                {
+                    tracing::warn!(err = %e, org_id, "community refresh failed (non-fatal)");
+                }
+            }
 
             let _ = msg.ack().await;
         }

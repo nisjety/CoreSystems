@@ -171,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("graph-index gRPC on {grpc_addr}");
 
     let consumer_neo4j = neo4j.clone();
+    let community_min_size = cfg.community_min_size;
     let consumer_task = async move {
         match event_runtime {
             Some((consumer, cleanup_consumer, nats, verifier, cleanup_verifier, _)) => {
@@ -181,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
                     nats,
                     verifier,
                     consumer_neo4j,
+                    community_min_size,
                 );
                 let cleanup =
                     stream::run_cleanup_consumer(cleanup_consumer, store, cleanup_verifier);
