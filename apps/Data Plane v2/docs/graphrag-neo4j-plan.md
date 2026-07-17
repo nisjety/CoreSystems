@@ -356,6 +356,22 @@ conventional commits; `cargo clippy --workspace -- -D warnings` and
    (`dual_write_then_traverse_roundtrip_is_org_scoped`, `#[ignore]` on
    `NEO4J_TEST_URL`); roadmap/gap/graph-index notes updated.
 
+### 2026-07-17 follow-up program (RAG full-support)
+
+7. **Remote deep-hop arm** ✅ — `arm_graph` now consumes `POST /v1/graph/traverse`
+   over HTTP (`search/graph_remote.rs`): seed entities from the query text →
+   traverse (caller's verified bearer forwarded; graph-index re-verifies +
+   org-pins) → `(entity, hop)` grounded to org-visible chunks nearest-hop-first;
+   every failure degrades to the in-process 1-hop tier. `GRAPH_INDEX_URL` on by
+   default in compose.
+8. **Communities wired** ✅ — `community.rs` detection is live (visibility-gated
+   connected components, two bulk queries, transactional delete-and-replace),
+   runs post-extraction + via org-pinned `POST /v1/graph/communities/rebuild`.
+9. **Defaults on** ✅ — `NEO4J_ENABLED` default true in compose (fallback posture
+   unchanged); `w_graph` 0.2 drives scoring by default; smart hybrid raises it
+   on relational queries. `mode_mix_applied` now records the real applied
+   weights (the zeroed-graph/wiki note is historical).
+
 ## 11. Risks & non-goals
 
 - **Risk: read-model drift.** Mitigated by best-effort dual-write + rebuild endpoint +
@@ -364,9 +380,11 @@ conventional commits; `cargo clippy --workspace -- -D warnings` and
 - **Risk: traversal latency inside the retrieval hot path.** Mitigated by the arm
   being non-fatal + bounded hops/entities + concurrent `tokio::join!` (overlaps the
   dense/sparse round-trips) + the p95<800ms gate covering it.
-- **Risk: Neo4j as a new SPOF/infra dependency.** Mitigated by `NEO4J_ENABLED=false`
-  default + transparent Postgres-BFS fallback in the endpoint — nothing breaks if
-  Neo4j is absent.
+- **Risk: Neo4j as a new SPOF/infra dependency.** Mitigated by the transparent
+  Postgres-BFS fallback in the endpoint plus boot-retry — nothing breaks if Neo4j
+  is absent. (`NEO4J_ENABLED` defaults ON in the composed stack since 2026-07-17;
+  the env flag remains the off-switch and the code default stays false for bare
+  binaries.)
 - **Non-goals (this program):** Neo4j-per-org physical isolation; LLM→Cypher natural-
   language querying (reference architecture's `text2cypher` — we use structured,
   parameterised traversal only, avoiding the reference's noted Cypher-generation
