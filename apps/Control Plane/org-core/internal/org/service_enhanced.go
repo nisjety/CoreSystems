@@ -484,6 +484,23 @@ func (s *Service) UpdatePlan(ctx context.Context, orgID, plan, changedBy, reason
 	return s.repo.GetOrganization(ctx, orgID)
 }
 
+// SetInteractiveRetention persists the org's interactive Zero-Data-Retention
+// posture (zdr=true is the privacy-preserving default). It records durable
+// org-admin intent; live enforcement is applied through auth-core's managed,
+// attested retention policy. Returns the refreshed organization projection.
+func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) (*Organization, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	if err := s.repo.SetInteractiveRetention(ctx, orgID, zdr, changedBy); err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+	}
+	return s.repo.GetOrganization(ctx, orgID)
+}
+
 // FlushPlanChangeOutbox publishes committed plan intents and acknowledges each
 // row only after JetStream confirms the publish. A crash after publish but
 // before acknowledgement causes a duplicate delivery, which Billing rejects by

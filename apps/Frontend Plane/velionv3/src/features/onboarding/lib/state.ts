@@ -17,6 +17,7 @@ export function createInitialOnboardingState(): OnboardingState {
     },
     organization: {
       name: '',
+      zeroDataRetention: true,
     },
     connectors: [],
     themeMode: 'brand',

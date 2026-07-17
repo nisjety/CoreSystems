@@ -43,3 +43,39 @@ export async function switchActiveOrganization(organizationId: string): Promise<
     body: JSON.stringify({ organizationId }),
   })
 }
+
+/**
+ * Read the organization's interactive Zero-Data-Retention posture. ZDR-on
+ * (true) is the privacy-preserving default returned when no posture is stored.
+ */
+export async function getOrganizationZdr(organizationId: string): Promise<boolean> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}`,
+  )
+  const metadata = record(record(payload)?.metadata)
+  const interactiveRetention = record(metadata?.interactiveRetention)
+  const zdr = interactiveRetention?.zdr
+  return typeof zdr === 'boolean' ? zdr : true
+}
+
+/**
+ * Persist the organization's interactive Zero-Data-Retention posture. Org-admin
+ * gated at the gateway; the value is durable org intent, not a per-request
+ * override. Returns the resolved posture after the write.
+ */
+export async function updateOrganizationZdr(
+  organizationId: string,
+  zeroDataRetention: boolean,
+): Promise<boolean> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/settings`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ zeroDataRetention }),
+    },
+  )
+  const metadata = record(record(payload)?.metadata)
+  const interactiveRetention = record(metadata?.interactiveRetention)
+  const zdr = interactiveRetention?.zdr
+  return typeof zdr === 'boolean' ? zdr : zeroDataRetention
+}

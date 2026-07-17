@@ -65,6 +65,10 @@ export type OnboardingState = {
     industry?: string
     /** Brreg organisasjonsform.beskrivelse (e.g. "Aksjeselskap"). */
     orgForm?: string
+    /** Zero Data Retention posture for interactive AI content. ON (true) is the
+     * privacy-preserving default: conversation content is not retained. Turning
+     * it off lets Velion persist interactive content to power history/memory. */
+    zeroDataRetention: boolean
   }
   connectors: ConnectedSource[]
   recommendation?: PlanRecommendation

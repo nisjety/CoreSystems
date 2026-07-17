@@ -1,4 +1,4 @@
-import { Fingerprint } from 'lucide-solid'
+import { Fingerprint, Info } from 'lucide-solid'
 import { For, Show } from 'solid-js'
 import type { BrregEnhet } from '@/features/onboarding/lib/api'
 import { OnboardingField } from '@/features/onboarding/components/shared/OnboardingField'
@@ -9,6 +9,10 @@ import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { VelionChoiceChip } from '@/shared/ui/velion/VelionChoiceChip'
 import { VelionSelectableRow } from '@/shared/ui/velion/VelionSelectableRow'
+import { VelionSwitch } from '@/shared/ui/velion/VelionSwitch'
+
+const ZDR_TOOLTIP =
+  'Zero Data Retention (ZDR) er på som standard: samtaleinnhold lagres ikke og forlater ikke tjenesten. Slå av for å la Velion lagre innhold slik at historikk og minne fungerer på tvers av økter. Kan endres senere i organisasjonsinnstillingene.'
 
 type OrganizationStepContentProps = {
   organization: OnboardingState['organization']
@@ -23,6 +27,7 @@ type OrganizationStepContentProps = {
   onSelectResult: (item: BrregEnhet) => void
   onSelectSize: (size: OrgSize) => void
   onSkipStep: () => void
+  onToggleZdr: (value: boolean) => void
 }
 
 export function OrganizationStepContent(props: OrganizationStepContentProps) {
@@ -94,6 +99,29 @@ export function OrganizationStepContent(props: OrganizationStepContentProps) {
           </For>
         </div>
       </fieldset>
+
+      <div class="onboarding-zdr-row">
+        <div class="onboarding-zdr-row__text">
+          <div class="onboarding-zdr-row__label">
+            <span>Zero Data Retention</span>
+            <span
+              class="onboarding-info"
+              tabindex="0"
+              role="img"
+              aria-label={ZDR_TOOLTIP}
+              title={ZDR_TOOLTIP}
+            >
+              <Info size={14} aria-hidden="true" />
+            </span>
+          </div>
+          <p>Samtaleinnhold lagres ikke når dette er på.</p>
+        </div>
+        <VelionSwitch
+          label="Zero Data Retention"
+          checked={props.organization.zeroDataRetention}
+          onChange={(value) => props.onToggleZdr(value)}
+        />
+      </div>
 
       <div class="onboarding-actions">
         <Button

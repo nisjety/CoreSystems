@@ -270,6 +270,38 @@ INSERT INTO organization_plan_change_outbox (
 	return change, applied, err
 }
 
+// SetInteractiveRetention persists an organization's interactive Zero-Data-
+// Retention posture into organizations.metadata.interactiveRetention. This
+// records the org's durable INTENT (zdr=true is the privacy-preserving
+// default). Live token-issue enforcement is applied separately through the
+// managed, attested retention policy in auth-core; this writer never grants a
+// per-request override. The write is a targeted jsonb_set so it never clobbers
+// unrelated metadata keys, and it is RLS-scoped to the organization.
+func (r *Repository) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) error {
+	payload, err := json.Marshal(map[string]any{
+		"zdr":       zdr,
+		"updatedBy": changedBy,
+		"updatedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal interactive retention: %w", err)
+	}
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+UPDATE organizations
+SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{interactiveRetention}', $2::jsonb, true),
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL`, orgID, payload)
+		if err != nil {
+			return fmt.Errorf("update interactive retention: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
 func (r *Repository) ClaimPlanChangeOutbox(ctx context.Context, limit int) ([]PlanChangeOutboxRow, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("plan change outbox limit must be between 1 and 1000")

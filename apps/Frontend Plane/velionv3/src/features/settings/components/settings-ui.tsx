@@ -1,5 +1,5 @@
-import { Check, ChevronDown } from 'lucide-solid'
-import { For, splitProps, type JSX } from 'solid-js'
+import { Check, ChevronDown, Info } from 'lucide-solid'
+import { For, Show, splitProps, type JSX } from 'solid-js'
 import { cn } from '@/shared/lib/cn'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { VelionSelect } from '@/shared/ui/velion/VelionSelect'
@@ -178,12 +178,27 @@ export function ToggleRow(props: {
   description: string
   enabled: boolean
   disabled?: boolean
+  /** Optional hover/focus explanation shown via an "i" icon next to the title. */
+  info?: string
   onChange?: (checked: boolean) => void
 }) {
   return (
     <div class="velion-settings-toggle-row">
       <div>
-        <p>{props.title}</p>
+        <p class="velion-settings-toggle-title">
+          {props.title}
+          <Show when={props.info}>
+            <span
+              class="velion-settings-info"
+              tabindex="0"
+              role="img"
+              aria-label={props.info}
+              title={props.info}
+            >
+              <Info size={13} aria-hidden="true" />
+            </span>
+          </Show>
+        </p>
         <span>{props.description}</span>
       </div>
       <VelionSwitch

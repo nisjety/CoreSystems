@@ -491,17 +491,23 @@ export default function OnboardingPage() {
         name: state.organization.name,
         plan: 'trial',
         orgNumber: state.organization.orgNumber,
-        metadata: state.website.branding
-          ? {
-              onboarding_branding: {
-                site_name: state.website.branding.siteName,
-                theme_color: state.website.branding.themeColor,
-                favicon: state.website.branding.favicon,
-                logo_candidate: state.website.branding.logoCandidate,
-                palette: state.website.branding.palette?.slice(0, 8),
-              },
-            }
-          : undefined,
+        metadata: {
+          // Persist the org's interactive Zero-Data-Retention intent at
+          // creation. zdr=true is the privacy-preserving default; live
+          // enforcement is applied through auth-core's managed retention policy.
+          interactiveRetention: { zdr: state.organization.zeroDataRetention },
+          ...(state.website.branding
+            ? {
+                onboarding_branding: {
+                  site_name: state.website.branding.siteName,
+                  theme_color: state.website.branding.themeColor,
+                  favicon: state.website.branding.favicon,
+                  logo_candidate: state.website.branding.logoCandidate,
+                  palette: state.website.branding.palette?.slice(0, 8),
+                },
+              }
+            : {}),
+        },
       })
 
       setState('organization', 'id', created.id)
@@ -897,6 +903,7 @@ export default function OnboardingPage() {
             onSearch={runBrregSearch}
             onSelectResult={selectOrganizationResult}
             onSelectSize={(size) => setState('organization', 'size', size)}
+            onToggleZdr={(value) => setState('organization', 'zeroDataRetention', value)}
             onContinue={submitOrganization}
             onSkipStep={() => setState('step', 'connect')}
           />

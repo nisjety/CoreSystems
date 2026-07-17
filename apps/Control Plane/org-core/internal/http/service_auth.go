@@ -282,6 +282,8 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:read:self", "org:read:any"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
+	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "settings":
+		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "brreg":
 		return []string{"org:settings:write:self"}
 	default:
@@ -307,7 +309,7 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:read:self", "org:read:any"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
-	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "capabilities":
+	case len(rest) == 2 && method == http.MethodPatch && (rest[1] == "capabilities" || rest[1] == "settings"):
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodDelete && rest[1] == "gdpr" && (rest[2] == "erase" || rest[2] == "soft-delete"):
 		return []string{"org:erase:self"}

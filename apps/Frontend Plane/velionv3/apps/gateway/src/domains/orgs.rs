@@ -1,6 +1,7 @@
 mod info;
 mod members;
 mod roles;
+mod settings;
 mod shared;
 mod switch;
 
@@ -28,6 +29,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/:id/entitlements",
             get(info::get_org_entitlements),
+        )
+        // Org-admin settings (interactive Zero-Data-Retention posture)
+        .route(
+            "/api/v1/orgs/:id/settings",
+            patch(settings::update_org_settings),
         )
         // Members
         .route("/api/v1/orgs/:id/members", get(members::list_members))

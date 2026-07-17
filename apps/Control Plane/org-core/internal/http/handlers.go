@@ -313,6 +313,32 @@ func (s *Server) updatePlan(c *gin.Context) {
 	c.JSON(http.StatusOK, orgData)
 }
 
+// updateOrgSettings persists org-admin-owned organization settings. Today it
+// carries the interactive Zero-Data-Retention posture. Authorization is
+// enforced upstream (gateway require_org_admin) and by the membership guard;
+// the persisted value is org intent, never a per-request enforcement override.
+func (s *Server) updateOrgSettings(c *gin.Context) {
+	orgID := c.Param("id")
+	var req struct {
+		ZeroDataRetention *bool `json:"zeroDataRetention"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.ZeroDataRetention == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "zeroDataRetention (boolean) is required"})
+		return
+	}
+	changedBy := c.GetHeader("x-user-id")
+	orgData, err := s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
+	if err != nil {
+		if err == org.ErrNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
+		return
+	}
+	c.JSON(http.StatusOK, orgData)
+}
+
 func (s *Server) getEntitlements(c *gin.Context) {
 	orgID := c.Param("id")
 	entitlements, err := s.orgService.GetEntitlements(c.Request.Context(), orgID)

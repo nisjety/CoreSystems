@@ -39,6 +39,8 @@ import {
   type MetaFacebookSdkConfig,
 } from '@/shared/integrations/meta-facebook-sdk'
 import { getSession } from '@/shared/session/session-store'
+import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { getOrganizationZdr, updateOrganizationZdr } from '@/shared/api/organization-client'
 import {
   getWorkspaceSettingsSection,
   isWorkspaceSettingsSection,
@@ -1154,19 +1156,78 @@ function RecentSecurityEvents() {
   )
 }
 
+const ZDR_TOOLTIP =
+  'Zero Data Retention (ZDR) is on by default: interactive AI content is not retained and does not leave the service. Turn it off to let Velion store conversation content so history and memory work across sessions. ZDR-on is enforced by default; turning it off is applied through Velion’s managed, attested retention policy.'
+
 function OrgSecuritySection() {
+  const session = getSession()
+  const orgId = () => session.activeOrg?.id ?? null
+  const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
+  const [zdr, setZdr] = createSignal(true)
+  const [zdrLoaded, setZdrLoaded] = createSignal(false)
+  const [zdrBusy, setZdrBusy] = createSignal(false)
+  const [zdrError, setZdrError] = createSignal<string | null>(null)
+
+  onMount(async () => {
+    const id = orgId()
+    if (!id) {
+      setZdrLoaded(true)
+      return
+    }
+    try {
+      setZdr(await getOrganizationZdr(id))
+    } catch {
+      // Keep the privacy-preserving default (ZDR on) if the read fails.
+    } finally {
+      setZdrLoaded(true)
+    }
+  })
+
+  async function toggleZdr(next: boolean) {
+    const id = orgId()
+    if (!id || zdrBusy()) return
+    const previous = zdr()
+    setZdr(next) // optimistic
+    setZdrBusy(true)
+    setZdrError(null)
+    try {
+      setZdr(await updateOrganizationZdr(id, next))
+    } catch (reason) {
+      setZdr(previous) // revert on failure
+      setZdrError(
+        reason instanceof Error ? reason.message : 'Could not update Zero Data Retention.',
+      )
+    } finally {
+      setZdrBusy(false)
+    }
+  }
+
   return (
     <>
       <SectionHeader title="Security policy" description="Set organization-wide security requirements and audit controls." />
       <div class="velion-settings-divided-list">
+        <ToggleRow
+          title="Zero Data Retention"
+          description="When on, interactive AI content is not retained. Turn off to let Velion store conversation history and power memory."
+          info={ZDR_TOOLTIP}
+          enabled={zdr()}
+          disabled={!isAdmin() || zdrBusy() || !zdrLoaded() || !orgId()}
+          onChange={(value) => void toggleZdr(value)}
+        />
         <For each={securityControls}>
           {(control) => (
             <ToggleRow title={control.title} description={control.description} enabled={false} disabled />
           )}
         </For>
       </div>
+      <Show when={zdrError()}>
+        <p class="velion-settings-panel-note" role="alert">{zdrError()}</p>
+      </Show>
+      <Show when={!isAdmin()}>
+        <p class="velion-settings-panel-note">Only organization owners and admins can change Zero Data Retention.</p>
+      </Show>
       <p class="velion-settings-panel-note">
-        Organization-wide security policy is not yet connected to a live source for this workspace, so these controls are shown unconfigured. They will reflect real policy state once an org-security backend is wired.
+        The MFA, domain-restriction, and admin-audit controls below are not yet connected to a live source for this workspace, so they are shown unconfigured. They will reflect real policy state once an org-security backend is wired.
       </p>
       <div class="velion-settings-field-grid velion-settings-field-grid--spaced">
         <SettingsSelect

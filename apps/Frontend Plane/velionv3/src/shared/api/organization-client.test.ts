@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { listOrganizations, switchActiveOrganization } from './organization-client'
+import {
+  getOrganizationZdr,
+  listOrganizations,
+  switchActiveOrganization,
+  updateOrganizationZdr,
+} from './organization-client'
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -33,5 +38,40 @@ describe('organization client', () => {
     expect(path).toBe('/api/v1/orgs/switch-active')
     expect(init.method).toBe('POST')
     expect(JSON.parse(String(init.body))).toEqual({ organizationId: 'org_2' })
+  })
+
+  it('reads the stored Zero Data Retention posture from org metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({ id: 'org_1', name: 'Acme', metadata: { interactiveRetention: { zdr: false } } }),
+      ),
+    )
+
+    const zdr = await getOrganizationZdr('org_1')
+
+    const [path] = vi.mocked(fetch).mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/orgs/org_1')
+    expect(zdr).toBe(false)
+  })
+
+  it('defaults to ZDR-on (privacy-preserving) when no posture is stored', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ id: 'org_1', name: 'Acme', metadata: {} })))
+    await expect(getOrganizationZdr('org_1')).resolves.toBe(true)
+  })
+
+  it('persists ZDR through the org-admin settings route with a boolean body', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: 'org_1', name: 'Acme', metadata: { interactiveRetention: { zdr: false } } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await updateOrganizationZdr('org_1', false)
+
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/orgs/org_1/settings')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ zeroDataRetention: false })
+    expect(result).toBe(false)
   })
 })

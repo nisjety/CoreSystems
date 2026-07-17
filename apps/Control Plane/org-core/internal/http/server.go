@@ -93,6 +93,7 @@ func (s *Server) setupRoutes() {
 	// its first owner). It still requires x-user-id in the handler.
 	v1.POST("/organizations", s.createOrganization)
 	v1.POST("/organizations/:id/plan", guard, s.updatePlan)
+	v1.PATCH("/organizations/:id/settings", guard, s.updateOrgSettings)
 	v1.PATCH("/organizations/:id/brreg", guard, s.verifyOrgBrreg)
 	v1.GET("/brreg/search", s.searchBrreg)
 	v1.GET("/brreg/:orgnr", s.lookupBrreg)
