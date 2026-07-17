@@ -36,13 +36,23 @@ _URL_REWRITES = [
     if "=" in p
 ]
 
-# Device/precision: CUDA→bf16 (prod GPU), Apple MPS→fp32 (local verify), else CPU.
+# Device/precision: CUDA→bf16 (prod GPU), Apple MPS→fp16 (local verify — fp32
+# was tried first but the model's single weight buffer is 15.15 GB in fp32,
+# above MPS's max buffer size, so the load hard-fails; fp16 halves it and is
+# the standard ColQwen inference precision), else CPU fp32. Override with
+# COLQWEN_DTYPE=float16|bfloat16|float32 when the hardware disagrees.
+_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
 if torch.cuda.is_available():
     DEVICE, DTYPE = "cuda", torch.bfloat16
 elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-    DEVICE, DTYPE = "mps", torch.float32
+    DEVICE, DTYPE = "mps", torch.float16
 else:
     DEVICE, DTYPE = "cpu", torch.float32
+DTYPE = _DTYPES.get(os.environ.get("COLQWEN_DTYPE", "").strip().lower(), DTYPE)
 
 print(f"[colqwen] loading {MODEL_ID} on {DEVICE} ({DTYPE})", flush=True)
 model = (
