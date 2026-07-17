@@ -334,17 +334,27 @@ org-scoped rebuild; no cross-org bulk in this phase.
 
 ## 10. Phase plan (each: build + tests + conventional commit, no push)
 
+All six phases landed on `claude/priceless-cray-e89074` as incremental
+conventional commits; `cargo clippy --workspace -- -D warnings` and
+`cargo test --workspace --lib` are green.
+
 1. **Design doc** (this file). ✅
-2. **Neo4j infra + client:** compose service; `graph-index-rs/src/neo4j.rs` client +
-   config + constraint/index bootstrap; `neo4rs` dependency. Behind `NEO4J_ENABLED`.
-3. **Dual-write:** mirror hook downstream of `persist_extraction`; idempotent MERGE;
-   ZDR/visibility inherited; non-fatal; metric.
-4. **Cypher + endpoint:** `traverse()` + `POST /v1/graph/traverse` (auth'd, org-pinned,
-   Postgres re-join, Postgres-BFS fallback).
-5. **Fusion:** `arm_graph` + `fuse_arms` graph step; `w_graph` into scoring; trace
-   honesty; mirror `tokio::join!` fan-out.
-6. **Eval + docs reconcile:** GraphRAG smoke/eval; update roadmap/gap/graph-index notes
-   to reflect what landed.
+2. **Neo4j infra + client** ✅ — `neo4j` compose service (org-scoped, auth'd,
+   healthchecked); `graph-index-rs/src/neo4j.rs` (`neo4rs` Bolt client) + config +
+   idempotent constraint/index bootstrap. Behind `NEO4J_ENABLED` (default off);
+   fail-closed on missing secret; boot-retry then Postgres-fallback degrade.
+3. **Dual-write** ✅ — `merge_extraction` batched `UNWIND`/`MERGE` hooked downstream
+   of `persist_extraction`, inheriting the org-visibility + restrictive-ZDR gates;
+   idempotent on the Postgres PKs; non-fatal.
+4. **Cypher + endpoint** ✅ — `neo4j::traverse` (`*1..N`) + `POST /v1/graph/traverse`
+   (auth'd, org-pinned via `require_org`, `store::get_subgraph_visible` provenance
+   re-join, transparent Postgres-BFS fallback).
+5. **Fusion** ✅ — `arm_graph` in the `tokio::join!` fan-out + `fuse_arms` graph step;
+   `w_graph` now drives scoring (closes gap-data §16.1.1); `search/graph.rs::
+   graph_arm_candidates` is the entities→candidates adapter.
+6. **Eval + docs reconcile** ✅ — gated Neo4j roundtrip test
+   (`dual_write_then_traverse_roundtrip_is_org_scoped`, `#[ignore]` on
+   `NEO4J_TEST_URL`); roadmap/gap/graph-index notes updated.
 
 ## 11. Risks & non-goals
 

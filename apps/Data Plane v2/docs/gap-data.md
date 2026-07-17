@@ -717,7 +717,7 @@ These items are intentionally NOT being implemented as the spec described, with 
 
 ### 13.6 Open (deferred — wave 3+)
 
-No items currently rated `high` priority remain open. Wave-3 candidates: `wiki_block_embeddings` write-through (vs. just collection ensure); 4-way scalar blend that actually consumes graph+wiki signals at scoring time; tree-sitter swap-in for code AST.
+No items currently rated `high` priority remain open. Wave-3 candidates: `wiki_block_embeddings` write-through (vs. just collection ensure); ~~4-way scalar blend that actually consumes graph+wiki signals at scoring time~~ (**graph DONE** — the GraphRAG program folds `w_graph` into RRF via the graph arm; wiki was already fused via `w_wiki`; see `docs/graphrag-neo4j-plan.md`); tree-sitter swap-in for code AST.
 
 **Effort scale**: S = ≤1 day, M = 2–4 days, L = ≥1 week.
 
@@ -1092,7 +1092,7 @@ Items derived from the systematic v2.3 audit. None rated `high` for production b
 
 | # | Issue | Fix | Effort |
 |---|---|---|---|
-| 16.1.1 | **`mode_mix` trace lies** — `w_graph`/`w_wiki` recorded but scoring ignores them (still RRF over dense+bm25). Audit endpoint shows weights that weren't applied. | Fold graph + wiki signals into a single scalar score path, OR relabel trace as "intended weights" with a separate `mode_mix_applied` column. | M |
+| 16.1.1 | **`mode_mix` trace lies** — `w_graph`/`w_wiki` recorded but scoring ignores them (still RRF over dense+bm25). Audit endpoint shows weights that weren't applied. | Fold graph + wiki signals into a single scalar score path, OR relabel trace as "intended weights" with a separate `mode_mix_applied` column. | **DONE** — `w_graph` now folded into RRF by the GraphRAG graph arm (`fuse_arms` graph step + `arm_graph`); `w_wiki`/`w_visual` were already fused. Scoring and the persisted `mode_mix` agree. See `docs/graphrag-neo4j-plan.md`. |
 | 16.1.2 | **JWT only on HTTP** — gRPC interceptor still checks `INTERNAL_API_KEY` only. Asymmetric trust boundary. | Move JWT verification into `ApiKeyInterceptor` (Bearer-header alternative). | S |
 | 16.1.3 | **`zdr_mode` captures requested, not applied** — a `restricted` doc is filtered even in `zdr_mode=disabled`. | Add `zdr_actions_applied JSONB` column to `retrieval_runs`. | S |
 | 16.1.4 | **No per-org `retrievalConfig` table** — Data Plane has request-side hook, Model Plane has no `agent_id → weights` mapping. | Either add `agent_retrieval_configs` table here OR formalize an `X-Agent-Retrieval-Config` header from Model Plane. | M |

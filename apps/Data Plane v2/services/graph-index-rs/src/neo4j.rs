@@ -8,8 +8,8 @@
 //! plane (see `docs/graphrag-neo4j-plan.md` §5.2). Every statement is scoped by
 //! an `org_id` predicate so cross-org traversal is impossible by construction.
 //!
-//! Phase 2 provides connection + idempotent schema bootstrap. The dual-write
-//! (Phase 3) and multi-hop traversal (Phase 4) land in later phases.
+//! Surface: connection + idempotent schema bootstrap, the ZDR-inherited
+//! `merge_extraction` dual-write, and `traverse` (native multi-hop Cypher).
 
 use std::collections::HashMap;
 
@@ -328,5 +328,88 @@ mod tests {
         assert!(c.contains("LIMIT $max_entities"));
         // No string-interpolated org — org travels as a bound param.
         assert!(!c.contains("format!"));
+    }
+
+    // ── Live Neo4j roundtrip (GraphRAG eval) ────────────────────────────────
+    // Gated on NEO4J_TEST_URL + NEO4J_TEST_PASSWORD pointing at a DISPOSABLE
+    // Neo4j, and #[ignore] by default (mirrors the disposable-Postgres tests).
+    // Proves the Phase-3 dual-write and Phase-4 multi-hop traverse roundtrip and
+    // that traversal is org-isolated.
+    async fn connect_test(url: &str, user: &str, pass: &str) -> anyhow::Result<Neo4jClient> {
+        use neo4rs::{ConfigBuilder, Graph};
+        let config = ConfigBuilder::default()
+            .uri(url)
+            .user(user)
+            .password(pass)
+            .db("neo4j")
+            .build()?;
+        Ok(Neo4jClient {
+            graph: Graph::connect(config).await?,
+        })
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NEO4J_TEST_URL + NEO4J_TEST_PASSWORD pointing to disposable Neo4j"]
+    async fn dual_write_then_traverse_roundtrip_is_org_scoped() {
+        let url = std::env::var("NEO4J_TEST_URL").expect("NEO4J_TEST_URL");
+        let user = std::env::var("NEO4J_TEST_USER").unwrap_or_else(|_| "neo4j".to_string());
+        let pass = std::env::var("NEO4J_TEST_PASSWORD").expect("NEO4J_TEST_PASSWORD");
+        let client = connect_test(&url, &user, &pass).await.expect("connect");
+        client.ensure_schema().await.expect("schema");
+
+        // Unique per-run org so repeated runs don't interfere.
+        let org = format!("org-test-{}", uuid::Uuid::new_v4().simple());
+        let e1 = format!("e1-{}", uuid::Uuid::new_v4().simple());
+        let e2 = format!("e2-{}", uuid::Uuid::new_v4().simple());
+        let rel = format!("r-{}", uuid::Uuid::new_v4().simple());
+
+        let entities = vec![
+            MirrorEntity {
+                entity_id: e1.clone(),
+                entity_type: "Person".into(),
+                entity_text: "Ada".into(),
+                confidence: 0.9,
+            },
+            MirrorEntity {
+                entity_id: e2.clone(),
+                entity_type: "Organization".into(),
+                entity_text: "Analytical Engine Co".into(),
+                confidence: 0.8,
+            },
+        ];
+        let rels = vec![MirrorRelationship {
+            rel_id: rel,
+            entity_a_id: e1.clone(),
+            entity_b_id: e2.clone(),
+            relation_type: "works_at".into(),
+            confidence: 0.85,
+        }];
+
+        // Dual-write is idempotent: running twice must not fork nodes/edges.
+        client
+            .merge_extraction(&org, &entities, &rels)
+            .await
+            .expect("merge 1");
+        client
+            .merge_extraction(&org, &entities, &rels)
+            .await
+            .expect("merge 2");
+
+        // Multi-hop traversal from e1 reaches e2 at hop 1.
+        let reached = client
+            .traverse(&org, std::slice::from_ref(&e1), 2, 10)
+            .await
+            .expect("traverse");
+        assert!(
+            reached.iter().any(|(id, hop)| id == &e2 && *hop == 1),
+            "traverse from e1 must reach e2 at hop 1; got {reached:?}"
+        );
+
+        // Org isolation: the same seed under a different org reaches nothing.
+        let other = client
+            .traverse("org-other-isolated", std::slice::from_ref(&e1), 2, 10)
+            .await
+            .expect("traverse other org");
+        assert!(other.is_empty(), "cross-org traversal must be empty");
     }
 }
