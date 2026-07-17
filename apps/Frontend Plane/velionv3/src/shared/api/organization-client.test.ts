@@ -55,9 +55,9 @@ describe('organization client', () => {
     expect(zdr).toBe(false)
   })
 
-  it('defaults to ZDR-on (privacy-preserving) when no posture is stored', async () => {
+  it('defaults to ZDR-off (product default) when no posture is stored', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ id: 'org_1', name: 'Acme', metadata: {} })))
-    await expect(getOrganizationZdr('org_1')).resolves.toBe(true)
+    await expect(getOrganizationZdr('org_1')).resolves.toBe(false)
   })
 
   it('persists ZDR through the org-admin settings route with a boolean body', async () => {

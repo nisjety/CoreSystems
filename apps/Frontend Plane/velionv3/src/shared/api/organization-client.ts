@@ -45,8 +45,10 @@ export async function switchActiveOrganization(organizationId: string): Promise<
 }
 
 /**
- * Read the organization's interactive Zero-Data-Retention posture. ZDR-on
- * (true) is the privacy-preserving default returned when no posture is stored.
+ * Read the organization's interactive Zero-Data-Retention posture (the org's
+ * selected intent). Returns the product default (false = ZDR off) when no
+ * posture is stored. Note: live token-issue enforcement is owned by auth-core's
+ * managed retention policy and is independent of this stored intent.
  */
 export async function getOrganizationZdr(organizationId: string): Promise<boolean> {
   const payload = await requestJson<unknown>(
@@ -55,7 +57,7 @@ export async function getOrganizationZdr(organizationId: string): Promise<boolea
   const metadata = record(record(payload)?.metadata)
   const interactiveRetention = record(metadata?.interactiveRetention)
   const zdr = interactiveRetention?.zdr
-  return typeof zdr === 'boolean' ? zdr : true
+  return typeof zdr === 'boolean' ? zdr : false
 }
 
 /**

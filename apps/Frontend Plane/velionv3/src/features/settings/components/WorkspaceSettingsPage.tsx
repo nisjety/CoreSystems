@@ -1157,13 +1157,13 @@ function RecentSecurityEvents() {
 }
 
 const ZDR_TOOLTIP =
-  'Zero Data Retention (ZDR) is on by default: interactive AI content is not retained and does not leave the service. Turn it off to let Velion store conversation content so history and memory work across sessions. ZDR-on is enforced by default; turning it off is applied through Velion’s managed, attested retention policy.'
+  'Zero Data Retention (ZDR): when on, interactive AI content is not retained and does not leave the service. Turn it on for maximum privacy (zero retention). Your organization’s posture is applied through Velion’s managed, attested retention policy.'
 
 function OrgSecuritySection() {
   const session = getSession()
   const orgId = () => session.activeOrg?.id ?? null
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
-  const [zdr, setZdr] = createSignal(true)
+  const [zdr, setZdr] = createSignal(false)
   const [zdrLoaded, setZdrLoaded] = createSignal(false)
   const [zdrBusy, setZdrBusy] = createSignal(false)
   const [zdrError, setZdrError] = createSignal<string | null>(null)
@@ -1177,7 +1177,8 @@ function OrgSecuritySection() {
     try {
       setZdr(await getOrganizationZdr(id))
     } catch {
-      // Keep the privacy-preserving default (ZDR on) if the read fails.
+      // Fall back to the product default (off) on read failure; live retention
+      // enforcement stays fail-closed server-side regardless of this toggle.
     } finally {
       setZdrLoaded(true)
     }
