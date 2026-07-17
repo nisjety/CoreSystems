@@ -8,6 +8,7 @@ mod authz;
 mod cache;
 mod config;
 mod context_pack;
+mod context_pins;
 mod db;
 mod embed;
 mod grpc;

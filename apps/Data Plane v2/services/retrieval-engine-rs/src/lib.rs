@@ -9,6 +9,7 @@ pub mod authz;
 pub mod cache;
 pub mod config;
 pub mod context_pack;
+pub mod context_pins;
 pub mod db;
 pub mod embed;
 pub mod grpc;

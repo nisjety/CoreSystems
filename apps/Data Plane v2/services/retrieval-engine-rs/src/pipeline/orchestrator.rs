@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::cache::CacheLayer;
 use crate::config::Config;
-use crate::context_pack::pack_context;
+use crate::context_pack::pack_context_with_pins;
 use crate::embed::EmbeddingClient;
 use crate::pipeline::types::*;
 use crate::search::dense::vector_search;
@@ -983,13 +983,32 @@ impl RetrievalPipeline {
             candidate_count_reranked,
         };
 
-        // 10. Context packing (if budget requested)
+        // 10. Context packing (if budget requested). CAG: the org's pinned
+        // permanent-memory facts pack FIRST (priority order), retrieval
+        // candidates fill the remaining budget. Pins are org-shared reads —
+        // fine under ZDR (no persistence, no egress) — and best-effort: a pin
+        // lookup failure degrades to a retrieval-only pack.
         let context_pack = if let Some(budget) = req.context_budget_tokens {
             let format = req
                 .context_format
                 .clone()
                 .unwrap_or_else(|| "json".to_string());
-            Some(pack_context(&reranked, &sources, budget, &format))
+            let pins = match crate::context_pins::list_pins(
+                &self.pool,
+                &req.org_id,
+                crate::context_pins::MAX_PINS,
+            )
+            .await
+            {
+                Ok(pins) => pins,
+                Err(e) => {
+                    tracing::warn!(error = %e, "context pins lookup failed; packing retrieval-only");
+                    Vec::new()
+                }
+            };
+            Some(pack_context_with_pins(
+                &pins, &reranked, &sources, budget, &format,
+            ))
         } else {
             None
         };
