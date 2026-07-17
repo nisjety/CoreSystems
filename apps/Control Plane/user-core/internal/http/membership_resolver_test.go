@@ -18,7 +18,7 @@ func TestNewServerConfiguresCanonicalMembershipAuthorityAndRejectsRedirects(t *t
 	t.Setenv("ORG_SERVICE_URL", "http://org-core.example.test/")
 	t.Setenv("INTERNAL_API_KEY", "0123456789abcdef0123456789abcdef")
 
-	server := NewServer(nil, nil, nil, "3012")
+	server := NewServer(nil, nil, nil, nil, "3012")
 	if server.authMembershipService != "http://auth-core.example.test" || server.authMembershipToken != testMembershipAuthorityToken {
 		t.Fatalf("membership config = %q/token-present:%v", server.authMembershipService, server.authMembershipToken != "")
 	}
@@ -35,7 +35,7 @@ func TestNewServerUsesFailClosedInternalDefaults(t *testing.T) {
 	t.Setenv("INTERNAL_API_KEY", "")
 	t.Setenv("INTERNAL_SERVICE_SECRET", testMembershipAuthorityToken)
 
-	server := NewServer(nil, nil, nil, "3012")
+	server := NewServer(nil, nil, nil, nil, "3012")
 	if server.authMembershipService != "http://auth-core:3011" || server.orgService != "http://org-core:8080" {
 		t.Fatalf("default services = %q/%q", server.authMembershipService, server.orgService)
 	}

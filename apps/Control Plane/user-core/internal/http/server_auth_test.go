@@ -24,7 +24,7 @@ func newUserAuthProbeRouterWithCredentials(t *testing.T, authHandler http.Handle
 	t.Setenv("USER_CORE_SERVICE_CREDENTIALS", credentials)
 
 	router := gin.New()
-	router.Use(authContextMiddleware())
+	router.Use(authContextMiddleware(nil))
 	router.GET("/admin", func(c *gin.Context) {
 		if !isAdminRequest(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "admin role required"})

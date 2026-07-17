@@ -132,7 +132,7 @@ func TestV2ServiceDelegationRequiresMatchingUserBearerAndRejectsReplay(t *testin
 	}
 
 	router := gin.New()
-	router.Use(authContextMiddleware())
+	router.Use(authContextMiddleware(nil))
 	router.GET("/api/v1/internal/authz/visible", func(c *gin.Context) {
 		if !c.GetBool("delegated_user_proof_verified") {
 			c.Status(http.StatusForbidden)

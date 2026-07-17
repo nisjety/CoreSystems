@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
+	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
@@ -48,7 +50,7 @@ func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClient
 
 // NewServer creates a new HTTP server. aclRepo backs the per-user authz facade
 // (ListVisible/Check) consumed cross-plane by documents-api and retrieval.
-func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedPublisher *nats.SharedPublisher, port string) *Server {
+func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedPublisher *nats.SharedPublisher, cache *rediscache.Client, port string) *Server {
 	router := gin.New()
 
 	// Global middleware
@@ -56,7 +58,7 @@ func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedP
 	router.Use(correlationMiddleware())
 	router.Use(loggerMiddleware())
 	router.Use(corsMiddleware())
-	router.Use(authContextMiddleware())
+	router.Use(authContextMiddleware(cache))
 
 	s := &Server{
 		router:      router,
@@ -438,6 +440,51 @@ type bearerIdentity struct {
 	role   string
 }
 
+// bearerIdentityCacheTTL bounds how long a resolved Bearer identity is served
+// from cache before re-validating with Auth Core. Kept short (matches the
+// control-session aggregate tolerance) so a revoked/expired token is rejected
+// within the window; a token change is never cached beyond it.
+const bearerIdentityCacheTTL = 30 * time.Second
+
+// cachedIdentity is the on-cache shape (bearerIdentity has unexported fields
+// that JSON cannot marshal). Keys are short to keep the Dragonfly value small.
+type cachedIdentity struct {
+	U string `json:"u"`
+	E string `json:"e"`
+	N string `json:"n"`
+	A string `json:"a"`
+	R string `json:"r"`
+}
+
+// resolveIdentityCached wraps resolveIdentityFromBearer with a Dragonfly
+// cache keyed by a SHA-256 of the token (the raw token is never stored). Only
+// successful resolutions are cached, and only for a short TTL, so this removes
+// the per-request (and, on /users/me, double) Auth Core round-trip on the hot
+// path without weakening verification. Cache-less and cache-error paths fall
+// straight through to the authoritative resolve — never fail closed on cache.
+func resolveIdentityCached(ctx context.Context, cache *rediscache.Client, token, authURL string) bearerIdentity {
+	if cache == nil {
+		return resolveIdentityFromBearer(ctx, token, authURL)
+	}
+	sum := sha256.Sum256([]byte(token))
+	key := "usercore:authid:" + hex.EncodeToString(sum[:])
+	if raw, err := cache.Get(ctx, key); err == nil && raw != "" {
+		var ci cachedIdentity
+		if json.Unmarshal([]byte(raw), &ci) == nil && ci.U != "" {
+			return bearerIdentity{userID: ci.U, email: ci.E, name: ci.N, avatar: ci.A, role: ci.R}
+		}
+	}
+	identity := resolveIdentityFromBearer(ctx, token, authURL)
+	if identity.userID != "" {
+		if b, err := json.Marshal(cachedIdentity{
+			U: identity.userID, E: identity.email, N: identity.name, A: identity.avatar, R: identity.role,
+		}); err == nil {
+			_ = cache.Set(ctx, key, string(b), bearerIdentityCacheTTL)
+		}
+	}
+	return identity
+}
+
 // resolveIdentityFromBearer validates a Bearer token with the auth-service and returns
 // the associated user identity. Returns empty fields if the token is invalid/expired.
 func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string) bearerIdentity {
@@ -487,7 +534,7 @@ func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string
 	}
 }
 
-func authContextMiddleware() gin.HandlerFunc {
+func authContextMiddleware(cache *rediscache.Client) gin.HandlerFunc {
 	serviceCredentials, credentialErr := parseServiceCredentials(os.Getenv("USER_CORE_SERVICE_CREDENTIALS"))
 	if credentialErr != nil {
 		log.Error().Err(credentialErr).Msg("Auth middleware: invalid service credential registry")
@@ -536,7 +583,7 @@ func authContextMiddleware() gin.HandlerFunc {
 			if authURL == "" {
 				authURL = "http://auth-service:3011"
 			}
-			if identity := resolveIdentityFromBearer(c.Request.Context(), bearer, authURL); identity.userID != "" {
+			if identity := resolveIdentityCached(c.Request.Context(), cache, bearer, authURL); identity.userID != "" {
 				log.Debug().Str("auth_method", "bearer").Msg("Auth middleware: resolved user from Bearer")
 				c.Set("auth_method", "bearer")
 				c.Set("user_id", identity.userID)

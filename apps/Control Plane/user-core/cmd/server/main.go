@@ -352,7 +352,7 @@ func main() {
 	// Per-user authz facade (ListVisible/Check) is served over HTTP so Data
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
-	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, httpPort)
+	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
 	httpServer.SetAuthInternalCredential(serviceCredential)
 
 	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
