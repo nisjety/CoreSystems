@@ -94,6 +94,7 @@ func main() {
 	w.RegisterWorkflow(workflows.SkillPromotionWorkflow)
 	w.RegisterWorkflow(workflows.FeedbackPromotionWorkflow)
 	w.RegisterWorkflow(workflows.WideResearchWorkflow)
+	w.RegisterWorkflow(workflows.EvaluatorOptimizerWorkflow)
 
 	w.RegisterActivity(a.StartRunActivity)
 	w.RegisterActivity(a.ExecuteStepLoopActivity)
@@ -106,6 +107,7 @@ func main() {
 	w.RegisterActivity(a.RunPromotionGateActivity)
 	w.RegisterActivity(a.UpdateRegistryActivity)
 	w.RegisterActivity(a.AggregateFeedbackActivity)
+	w.RegisterActivity(a.EvaluatorOptimizerActivity)
 
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
@@ -113,7 +115,9 @@ func main() {
 		}
 	}()
 
-	// Optional NATS compat adapter (skip cleanly if NATS_URL unset or dial fails)
+	// NATS publishes current v1 lifecycle events. The legacy compatibility
+	// adapter is a distinct opt-in path; production Compose keeps it disabled so
+	// this principal never receives legacy wildcard permissions.
 	var pub *natsx.Publisher
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
 		nc, nerr := nats.Connect(natsURL, natsAuthOptions()...)
@@ -125,26 +129,30 @@ func main() {
 			mode := natsx.ReadCompatModeFromEnv()
 			pub = natsx.NewPublisher(adapter, mode)
 			a.SetPublisher(pub)
-			compatSub := compat.NewSubscriber(pub, logger)
+			if compatAdapterEnabled() {
+				compatSub := compat.NewSubscriber(pub, logger)
 
-			handler := func(subject string, data []byte) {
-				if herr := compatSub.HandleLegacyMessage(context.Background(), subject, data); herr != nil {
-					slog.Error("compat handler error", "subject", subject, "error", herr)
+				handler := func(subject string, data []byte) {
+					if herr := compatSub.HandleLegacyMessage(context.Background(), subject, data); herr != nil {
+						slog.Error("compat handler error", "subject", subject, "error", herr)
+					}
 				}
-			}
 
-			for _, subj := range []string{
-				natsx.LegacyRunEventsWildcard,
-				natsx.LegacySessionCommandWildcard,
-				natsx.LegacyAqenciaWildcard,
-			} {
-				if _, serr := adapter.Subscribe(subj, handler); serr != nil {
-					slog.Error("compat subscribe failed", "subject", subj, "error", serr)
-				} else {
-					slog.Info("compat subscription active", "subject", subj, "mode", mode)
+				for _, subj := range []string{
+					natsx.LegacyRunEventsWildcard,
+					natsx.LegacySessionCommandWildcard,
+					natsx.LegacyAqenciaWildcard,
+				} {
+					if _, serr := adapter.Subscribe(subj, handler); serr != nil {
+						slog.Error("compat subscribe failed", "subject", subj, "error", serr)
+					} else {
+						slog.Info("compat subscription active", "subject", subj, "mode", mode)
+					}
 				}
+				slog.Info("NATS legacy compatibility adapter online", "mode", mode)
+			} else {
+				slog.Info("NATS legacy compatibility adapter disabled")
 			}
-			slog.Info("NATS compat adapter online", "mode", mode)
 
 			orchPersister := orchestration.NewLoggingPersister(logger)
 			orchSub := orchestration.NewSubscriber(orchPersister, logger)
@@ -213,7 +221,7 @@ func main() {
 }
 
 func natsAuthOptions() []nats.Option {
-	options := []nats.Option{nats.CustomInboxPrefix("_INBOX.MODEL_RUNTIME")}
+	options := []nats.Option{nats.CustomInboxPrefix("_INBOX.ORCHESTRATOR_CORE_RUNTIME")}
 	user := strings.TrimSpace(os.Getenv("NATS_USER"))
 	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
 	if user != "" || password != "" {
@@ -224,4 +232,8 @@ func natsAuthOptions() []nats.Option {
 		return options
 	}
 	return append(options, nats.Token(token))
+}
+
+func compatAdapterEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("ENABLE_COMPAT_ADAPTER")), "true")
 }
