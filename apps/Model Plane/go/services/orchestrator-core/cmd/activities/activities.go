@@ -54,6 +54,18 @@ type StepLoopOutput struct {
 	Completed bool
 	Summary   string
 }
+
+// StepInput is one durable turn of the step loop for ExecuteStepActivity. The
+// workflow-owned per-turn driver supplies StepIndex deterministically
+// (0..MaxTurns-1); it is echoed onto the returned StepResult so the turn's
+// ordinal matches what the legacy in-activity loop assigned. OrgID (tenant) and
+// UserID (viewer) carry the same scoping semantics as StepLoopInput.
+type StepInput struct {
+	RunID     string
+	OrgID     string
+	UserID    string
+	StepIndex int
+}
 type CompletionInput struct{ RunID, OrgID, UserID, Summary string }
 type FailureInput struct{ RunID, OrgID, UserID, Reason string }
 type MemoryQueryInput struct {
@@ -168,7 +180,7 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 	return RunMetadata{RunID: resp.RunId, ThreadID: threadID, OrgID: orgID, UserID: userID, StartedAt: time.Now().UTC()}, nil
 }
 
-// ── Activity 2: ExecuteStepLoopActivity ──────────────────────────────────────
+// ── Activity 2: ExecuteStepLoopActivity + ExecuteStepActivity ────────────────
 
 // executeStepRequest builds the ExecuteStep RPC request from the loop input.
 // OrgID (tenant) and UserID (viewer) are threaded so execution-core scopes
@@ -182,10 +194,47 @@ func executeStepRequest(input StepLoopInput) *mpv1.ExecuteStepRequest {
 	}
 }
 
+// executeOneStep performs a single ExecuteStep RPC and maps the response to a
+// StepResult. It is the one source of truth for the per-turn fallback/error
+// policy shared by the legacy in-activity loop (ExecuteStepLoopActivity) and
+// the durable per-turn driver (ExecuteStepActivity): a nil client or an
+// Unavailable execution-core yields a non-fatal "pending" step so the caller
+// advances to the next turn, while any other error is fatal and returned.
+func (a *Activities) executeOneStep(ctx context.Context, req *mpv1.ExecuteStepRequest, stepIndex int) (StepResult, error) {
+	pending := StepResult{StepIndex: stepIndex, ToolName: "pending", Completed: false}
+	if a.clients == nil || a.clients.ExecutionCore == nil {
+		return pending, nil
+	}
+	resp, err := mpv1.NewExecutionCoreClient(a.clients.ExecutionCore).ExecuteStep(ctx, req)
+	if err != nil {
+		if status.Code(err) == codes.Unavailable {
+			a.logger.Warn("ExecutionCore unavailable", "method", "ExecuteStep")
+			return pending, nil
+		}
+		return StepResult{}, err
+	}
+	return StepResult{
+		StepIndex:     stepIndex,
+		Output:        resp.Output,
+		Completed:     resp.Status == "completed",
+		NeedsApproval: resp.Status == "awaiting_approval",
+	}, nil
+}
+
+// ExecuteStepLoopActivity runs the entire MaxTurns step loop inside ONE
+// activity.
+//
+// It is NOT resume-safe: a worker crash mid-loop restarts the run from turn 0,
+// losing every completed turn and re-spending its work. The durable replacement
+// is the workflow-owned per-turn driver (executeStepLoop in cmd/workflows),
+// where each turn is its own ExecuteStepActivity checkpoint. This activity stays
+// registered so histories recorded before that migration (gated by
+// workflow.GetVersion at DefaultVersion) keep replaying deterministically.
 func (a *Activities) ExecuteStepLoopActivity(ctx context.Context, input StepLoopInput) (StepLoopOutput, error) {
 	if input.MaxTurns <= 0 {
 		input.MaxTurns = 10
 	}
+	req := executeStepRequest(input)
 	var steps []StepResult
 	for i := range input.MaxTurns {
 		select {
@@ -193,23 +242,9 @@ func (a *Activities) ExecuteStepLoopActivity(ctx context.Context, input StepLoop
 			return StepLoopOutput{Steps: steps, Completed: false}, ctx.Err()
 		default:
 		}
-		step := StepResult{StepIndex: i, ToolName: "pending", Completed: false}
-		if a.clients != nil && a.clients.ExecutionCore != nil {
-			resp, err := mpv1.NewExecutionCoreClient(a.clients.ExecutionCore).ExecuteStep(ctx, executeStepRequest(input))
-			if err != nil {
-				if status.Code(err) == codes.Unavailable {
-					a.logger.Warn("ExecutionCore unavailable", "method", "ExecuteStep")
-				} else {
-					return StepLoopOutput{Steps: steps, Completed: false}, err
-				}
-			} else {
-				step = StepResult{
-					StepIndex:     i,
-					Output:        resp.Output,
-					Completed:     resp.Status == "completed",
-					NeedsApproval: resp.Status == "awaiting_approval",
-				}
-			}
+		step, err := a.executeOneStep(ctx, req, i)
+		if err != nil {
+			return StepLoopOutput{Steps: steps, Completed: false}, err
 		}
 		steps = append(steps, step)
 		if step.Completed || step.NeedsApproval {
@@ -221,6 +256,17 @@ func (a *Activities) ExecuteStepLoopActivity(ctx context.Context, input StepLoop
 		Completed: len(steps) > 0 && steps[len(steps)-1].Completed,
 		Summary:   fmt.Sprintf("executed %d steps for run %s", len(steps), input.RunID),
 	}, nil
+}
+
+// ExecuteStepActivity performs exactly ONE turn of the step loop against
+// execution-core — the durable per-turn checkpoint dispatched once per turn by
+// the resume-safe workflow driver (executeStepLoop). Because each turn is its
+// own activity, a completed turn is recorded in Temporal event history; a worker
+// crash mid-loop replays completed turns and resumes at the interrupted turn
+// instead of restarting from turn 0.
+func (a *Activities) ExecuteStepActivity(ctx context.Context, in StepInput) (StepResult, error) {
+	req := &mpv1.ExecuteStepRequest{RunId: in.RunID, OrgId: in.OrgID, UserId: in.UserID}
+	return a.executeOneStep(ctx, req, in.StepIndex)
 }
 
 func summarizeMemoryEntries(entries []MemoryEntry) []MemoryEntry {

@@ -107,11 +107,7 @@ func AutoresearchWorkflow(ctx workflow.Context, cfg AutoresearchConfig) (Autores
 			UserID:   cfg.UserID,
 		}
 
-		var planOutput activities.StepLoopOutput
-		err := workflow.ExecuteActivity(actCtx,
-			"ExecuteStepLoopActivity",
-			planInput,
-		).Get(ctx, &planOutput)
+		planOutput, err := runStepLoop(actCtx, planInput)
 		if err != nil {
 			return buildReport(keptArtifacts, discardedCount, i, totalCost,
 				fmt.Sprintf("plan generation failed at iteration %d: %v", i, err),
@@ -145,11 +141,7 @@ func AutoresearchWorkflow(ctx workflow.Context, cfg AutoresearchConfig) (Autores
 			UserID:   cfg.UserID,
 		}
 
-		var execOutput activities.StepLoopOutput
-		err = workflow.ExecuteActivity(actCtx,
-			"ExecuteStepLoopActivity",
-			execInput,
-		).Get(ctx, &execOutput)
+		execOutput, err := runStepLoop(actCtx, execInput)
 		if err != nil {
 			return buildReport(keptArtifacts, discardedCount, i, totalCost,
 				fmt.Sprintf("experiment execution failed at iteration %d: %v", i, err),
@@ -167,11 +159,7 @@ func AutoresearchWorkflow(ctx workflow.Context, cfg AutoresearchConfig) (Autores
 			UserID:   cfg.UserID,
 		}
 
-		var evalOutput activities.StepLoopOutput
-		err = workflow.ExecuteActivity(actCtx,
-			"ExecuteStepLoopActivity",
-			evalInput,
-		).Get(ctx, &evalOutput)
+		evalOutput, err := runStepLoop(actCtx, evalInput)
 		if err != nil {
 			return buildReport(keptArtifacts, discardedCount, i, totalCost,
 				fmt.Sprintf("evaluation failed at iteration %d: %v", i, err),

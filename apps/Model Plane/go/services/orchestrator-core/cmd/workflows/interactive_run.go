@@ -90,11 +90,7 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 		UserID:   input.UserID,
 	}
 
-	var stepOutput activities.StepLoopOutput
-	err = workflow.ExecuteActivity(actCtx,
-		"ExecuteStepLoopActivity",
-		stepInput,
-	).Get(ctx, &stepOutput)
+	stepOutput, err := runStepLoop(actCtx, stepInput)
 	if err != nil {
 		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("step loop: %v", err))
 	}
@@ -119,10 +115,7 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 		}
 
 		// Resume step loop after approval.
-		err = workflow.ExecuteActivity(actCtx,
-			"ExecuteStepLoopActivity",
-			stepInput,
-		).Get(ctx, &stepOutput)
+		stepOutput, err = runStepLoop(actCtx, stepInput)
 		if err != nil {
 			return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("resumed step loop: %v", err))
 		}

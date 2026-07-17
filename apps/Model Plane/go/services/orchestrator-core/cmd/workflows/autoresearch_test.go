@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -14,9 +15,10 @@ import (
 	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/activities"
 )
 
-// newAutoresearchEnv builds a Temporal test workflow environment configured
-// for the AutoresearchWorkflow. It registers the ExecuteStepLoopActivity
-// by name so string-based lookups resolve correctly.
+// newAutoresearchEnv builds a Temporal test workflow environment configured for
+// the AutoresearchWorkflow. New runs drive the step loop per turn via
+// ExecuteStepActivity; the legacy ExecuteStepLoopActivity stays registered for
+// old-history replay. Both are registered by name so string lookups resolve.
 func newAutoresearchEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
@@ -25,25 +27,31 @@ func newAutoresearchEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := activities.NewActivities(logger, nil)
 	env.RegisterActivityWithOptions(a.ExecuteStepLoopActivity, activity.RegisterOptions{Name: "ExecuteStepLoopActivity"})
+	env.RegisterActivityWithOptions(a.ExecuteStepActivity, activity.RegisterOptions{Name: "ExecuteStepActivity"})
 
 	return env
 }
 
-// stepOutput builds an activities.StepLoopOutput with N steps.
-// If completed is true the last step is marked Completed.
-func stepOutput(nSteps int, completed bool, summary string) activities.StepLoopOutput {
-	steps := make([]activities.StepResult, nSteps)
-	for i := range steps {
-		steps[i] = activities.StepResult{StepIndex: i, ToolName: "stub"}
-	}
-	if completed && len(steps) > 0 {
-		steps[len(steps)-1].Completed = true
-	}
-	return activities.StepLoopOutput{
-		Steps:     steps,
-		Completed: completed,
-		Summary:   summary,
-	}
+// completedResult ends a per-turn step loop after its first turn (Completed set
+// on turn 0 → a 1-step loop). Used for plan/exec loops — the plan loop's step
+// count drives the $0.10/iteration cost estimate — and for eval loops that
+// should decide "keep".
+func completedResult() activities.StepResult {
+	return activities.StepResult{ToolName: "stub", Completed: true}
+}
+
+// pendingResult never terminates the loop, so it runs to its MaxTurns cap with
+// no Completed turn. Used for eval loops that should decide "discard".
+func pendingResult() activities.StepResult {
+	return activities.StepResult{ToolName: "stub"}
+}
+
+// onStep mocks ExecuteStepActivity for one phase's step loop (matched by RunID)
+// to return res on every turn of that loop.
+func onStep(env *testsuite.TestWorkflowEnvironment, runID string, res activities.StepResult) {
+	env.OnActivity("ExecuteStepActivity", mock.Anything, mock.MatchedBy(func(in activities.StepInput) bool {
+		return in.RunID == runID
+	})).Return(res, nil)
 }
 
 func TestAutoresearchWorkflow(t *testing.T) {
@@ -69,45 +77,18 @@ func TestAutoresearchWorkflow(t *testing.T) {
 				RunID:          "run-auto-1",
 			},
 			setupMocks: func(env *testsuite.TestWorkflowEnvironment) {
-				// Each iteration invokes 3 activities: plan, exec, eval.
-				// Iteration 0: plan(1 step) + exec(2 steps) + eval(completed=true → keep)
-				// Iteration 1: plan(1 step) + exec(2 steps) + eval(completed=false → discard)
-				// Iteration 2: plan(1 step) + exec(2 steps) + eval(completed=true → keep)
-				call0Plan := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-plan-0"
-				})).Return(stepOutput(1, true, "plan-0"), nil).Once()
-
-				call0Exec := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-exec-0"
-				})).Return(stepOutput(2, true, "exec-result-0"), nil).NotBefore(call0Plan).Once()
-
-				call0Eval := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-eval-0"
-				})).Return(stepOutput(1, true, "keep"), nil).NotBefore(call0Exec).Once()
-
-				call1Plan := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-plan-1"
-				})).Return(stepOutput(1, true, "plan-1"), nil).NotBefore(call0Eval).Once()
-
-				call1Exec := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-exec-1"
-				})).Return(stepOutput(2, true, "exec-result-1"), nil).NotBefore(call1Plan).Once()
-
-				call1Eval := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-eval-1"
-				})).Return(stepOutput(1, false, "discard"), nil).NotBefore(call1Exec).Once()
-
-				call2Plan := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-plan-2"
-				})).Return(stepOutput(1, true, "plan-2"), nil).NotBefore(call1Eval).Once()
-
-				call2Exec := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-exec-2"
-				})).Return(stepOutput(2, true, "exec-result-2"), nil).NotBefore(call2Plan).Once()
-
-				env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-auto-1-eval-2"
-				})).Return(stepOutput(1, true, "keep"), nil).NotBefore(call2Exec).Once()
+				// Each iteration runs 3 per-turn step loops: plan, exec, eval.
+				// plan/exec complete on turn 0 (→ 1 step; plan's step count sets the
+				// $0.10 cost). eval decides keep when its loop completes, discard
+				// when it runs to the turn cap with no completed turn.
+				// Iter 0: eval → keep. Iter 1: eval → discard. Iter 2: eval → keep.
+				for _, iter := range []int{0, 1, 2} {
+					onStep(env, fmt.Sprintf("run-auto-1-plan-%d", iter), completedResult())
+					onStep(env, fmt.Sprintf("run-auto-1-exec-%d", iter), completedResult())
+				}
+				onStep(env, "run-auto-1-eval-0", completedResult())
+				onStep(env, "run-auto-1-eval-1", pendingResult())
+				onStep(env, "run-auto-1-eval-2", completedResult())
 			},
 			wantErr:        false,
 			wantKept:       2,
@@ -127,23 +108,13 @@ func TestAutoresearchWorkflow(t *testing.T) {
 				RunID:          "run-budget",
 			},
 			setupMocks: func(env *testsuite.TestWorkflowEnvironment) {
-				// Iteration 0: plan(1 step, cost $0.10) + exec + eval → fits in budget
-				call0Plan := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-budget-plan-0"
-				})).Return(stepOutput(1, true, "plan-0"), nil).Once()
-
-				call0Exec := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-budget-exec-0"
-				})).Return(stepOutput(1, true, "exec-0"), nil).NotBefore(call0Plan).Once()
-
-				call0Eval := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-budget-eval-0"
-				})).Return(stepOutput(1, true, "keep"), nil).NotBefore(call0Exec).Once()
-
-				// Iteration 1: plan(1 step, cost $0.10) → totalCost would be $0.20 > $0.15 → stops.
-				env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-budget-plan-1"
-				})).Return(stepOutput(1, true, "plan-1"), nil).NotBefore(call0Eval).Once()
+				// Iteration 0: plan(1 step, cost $0.10) + exec + eval → fits in budget.
+				onStep(env, "run-budget-plan-0", completedResult())
+				onStep(env, "run-budget-exec-0", completedResult())
+				onStep(env, "run-budget-eval-0", completedResult()) // keep
+				// Iteration 1: plan(1 step, cost $0.10) → total $0.20 > $0.15 → stops
+				// before exec-1/eval-1 ever run.
+				onStep(env, "run-budget-plan-1", completedResult())
 			},
 			wantErr:        false,
 			wantKept:       1,
@@ -163,17 +134,9 @@ func TestAutoresearchWorkflow(t *testing.T) {
 				RunID:          "run-maxiter",
 			},
 			setupMocks: func(env *testsuite.TestWorkflowEnvironment) {
-				callPlan := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-maxiter-plan-0"
-				})).Return(stepOutput(1, true, "plan-0"), nil).Once()
-
-				callExec := env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-maxiter-exec-0"
-				})).Return(stepOutput(1, true, "exec-0"), nil).NotBefore(callPlan).Once()
-
-				env.OnActivity("ExecuteStepLoopActivity", mock.Anything, mock.MatchedBy(func(in activities.StepLoopInput) bool {
-					return in.RunID == "run-maxiter-eval-0"
-				})).Return(stepOutput(1, true, "keep"), nil).NotBefore(callExec).Once()
+				onStep(env, "run-maxiter-plan-0", completedResult())
+				onStep(env, "run-maxiter-exec-0", completedResult())
+				onStep(env, "run-maxiter-eval-0", completedResult()) // keep
 			},
 			wantErr:        false,
 			wantKept:       1,

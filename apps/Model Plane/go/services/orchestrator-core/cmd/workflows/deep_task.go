@@ -74,11 +74,7 @@ func DeepTaskWorkflow(ctx workflow.Context, input DeepTaskInput) (DeepTaskOutput
 			UserID:   input.UserID,
 		}
 
-		var output activities.StepLoopOutput
-		err := workflow.ExecuteActivity(actCtx,
-			"ExecuteStepLoopActivity",
-			stepInput,
-		).Get(ctx, &output)
+		output, err := runStepLoop(actCtx, stepInput)
 		if err != nil {
 			return DeepTaskOutput{
 				StepOutputs: stepOutputs,

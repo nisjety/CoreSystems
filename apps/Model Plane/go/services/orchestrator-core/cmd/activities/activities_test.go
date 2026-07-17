@@ -126,6 +126,30 @@ func TestExecuteStepLoopActivity_ContextCancelled_ReturnsCtxErr(t *testing.T) {
 	assert.False(t, out.Completed)
 }
 
+// ── ExecuteStepActivity ─────────────────────────────────────────────────────
+
+// TestExecuteStepActivity_NilClients_ReturnsPendingStep verifies the durable
+// per-turn activity honors the same fallback as the legacy loop: with no
+// execution-core wired it returns a non-fatal "pending" step (no error) so the
+// workflow-side driver advances to the next turn, echoing the supplied
+// StepIndex.
+func TestExecuteStepActivity_NilClients_ReturnsPendingStep(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+
+	step, err := a.ExecuteStepActivity(context.Background(), activities.StepInput{
+		RunID:     "r1",
+		OrgID:     "o1",
+		UserID:    "u1",
+		StepIndex: 4,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 4, step.StepIndex)
+	assert.Equal(t, "pending", step.ToolName)
+	assert.False(t, step.Completed)
+	assert.False(t, step.NeedsApproval)
+}
+
 // ── CompleteRunActivity ─────────────────────────────────────────────────────
 
 func TestCompleteRunActivity_PublishesRunCompletedEnvelope(t *testing.T) {
