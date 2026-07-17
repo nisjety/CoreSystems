@@ -628,6 +628,8 @@ services:
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-dataplane}
       NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      GRAPH_MAX_HOPS: ${GRAPH_MAX_HOPS:-3}
+      GRAPH_TRAVERSE_MAX_ENTITIES: ${GRAPH_TRAVERSE_MAX_ENTITIES:-100}
     volumes:
       - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
       - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:?INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/index-events.pub:ro

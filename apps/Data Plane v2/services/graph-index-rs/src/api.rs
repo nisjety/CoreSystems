@@ -12,10 +12,19 @@ use serde::Deserialize;
 
 use crate::{
     auth::{bearer_from_http, AuthError, JwtVerifier, Principal},
+    neo4j::{self, Neo4jClient},
     store::GraphStore,
 };
 
 type AppState = Arc<GraphStore>;
+
+/// Request-scoped, config-derived bounds for multi-hop traversal. Injected as an
+/// `Extension` so both the Neo4j and Postgres-fallback paths clamp identically.
+#[derive(Clone, Copy)]
+pub struct GraphLimits {
+    pub max_hops: u8,
+    pub max_entities: i64,
+}
 
 async fn require_verified_principal(
     verifier: Arc<JwtVerifier>,
@@ -55,7 +64,12 @@ fn store_failure(operation: &'static str, error: impl std::fmt::Display) -> Stat
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
-pub fn router(store: Arc<GraphStore>, verifier: Arc<JwtVerifier>) -> Router {
+pub fn router(
+    store: Arc<GraphStore>,
+    verifier: Arc<JwtVerifier>,
+    neo4j: Option<Arc<Neo4jClient>>,
+    limits: GraphLimits,
+) -> Router {
     let public = Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readyz));
@@ -72,9 +86,13 @@ pub fn router(store: Arc<GraphStore>, verifier: Arc<JwtVerifier>) -> Router {
         .route("/v1/graph/claims", get(get_claims))
         .route("/v1/graph/contradictions", get(get_contradictions))
         .route("/v1/graph/expand", post(expand_graph))
+        // GraphRAG multi-hop traversal (Neo4j read-model, Postgres fallback).
+        .route("/v1/graph/traverse", post(traverse_graph))
         // §16.1.5 — graph_exports endpoint. Formats: json (default),
         // graphml, markdown.
         .route("/v1/graph/exports", post(create_export))
+        .layer(Extension(neo4j))
+        .layer(Extension(limits))
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let verifier = verifier.clone();
             async move { require_verified_principal(verifier, req, next).await }
@@ -428,6 +446,122 @@ async fn expand_graph(
     }
 }
 
+#[derive(Deserialize)]
+struct TraverseRequest {
+    org_id: String,
+    #[serde(default)]
+    seed_entity_ids: Vec<String>,
+    #[serde(default)]
+    max_hops: Option<u8>,
+    #[serde(default)]
+    max_entities: Option<u32>,
+}
+
+/// GraphRAG multi-hop traversal. Resolves connected entities from seeds via the
+/// Neo4j read-model (native `*1..N` Cypher), then re-joins Postgres to enforce
+/// provenance/org-visibility and attach chunk source_refs. Falls back to the
+/// Postgres BFS (`get_graph_expansion`) when Neo4j is disabled/unreachable, so
+/// the endpoint is always available; Neo4j only changes traversal speed.
+async fn traverse_graph(
+    State(store): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(neo4j): Extension<Option<Arc<Neo4jClient>>>,
+    Extension(limits): Extension<GraphLimits>,
+    Json(req): Json<TraverseRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Pin org from the verified principal; reject a body/bearer org mismatch.
+    let org_id = require_org(&principal, &req.org_id)?;
+
+    if req.seed_entity_ids.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "entities": [],
+            "relationships": [],
+            "backend": "none",
+            "hops": 0,
+        })));
+    }
+
+    let max_hops = neo4j::clamp_hops(req.max_hops.unwrap_or(limits.max_hops), limits.max_hops);
+    let max_entities = req
+        .max_entities
+        .map(i64::from)
+        .unwrap_or(limits.max_entities)
+        .clamp(1, limits.max_entities);
+
+    // Neo4j path: native multi-hop, then Postgres provenance/visibility re-join.
+    if let Some(client) = neo4j.as_ref() {
+        match client
+            .traverse(org_id, &req.seed_entity_ids, max_hops, max_entities)
+            .await
+        {
+            Ok(reached) => {
+                let ids: Vec<String> = reached.iter().map(|(id, _)| id.clone()).collect();
+                let hop_by_id: std::collections::HashMap<&str, u8> =
+                    reached.iter().map(|(id, h)| (id.as_str(), *h)).collect();
+                match store.get_subgraph_visible(org_id, &ids).await {
+                    Ok((entities, rels)) => {
+                        return Ok(Json(serde_json::json!({
+                            "entities": entities_with_hops(&entities, &hop_by_id),
+                            "relationships": rels,
+                            "backend": "neo4j",
+                            "hops": max_hops,
+                        })));
+                    }
+                    Err(e) => return Err(store_failure("get_subgraph_visible", e)),
+                }
+            }
+            Err(e) => {
+                // Non-fatal: fall through to the Postgres BFS so a Neo4j hiccup
+                // never fails graph retrieval.
+                tracing::warn!(err = %e, "neo4j traverse failed; falling back to postgres BFS");
+            }
+        }
+    }
+
+    // Postgres BFS fallback (also the path when Neo4j is disabled). Already
+    // org-visible; hop distance is not tracked here, so callers treat it as 1.
+    match store
+        .get_graph_expansion(
+            org_id,
+            &req.seed_entity_ids,
+            i32::from(max_hops),
+            max_entities.clamp(0, i64::from(i32::MAX)) as i32,
+        )
+        .await
+    {
+        Ok((entities, rels)) => Ok(Json(serde_json::json!({
+            "entities": entities_with_hops(&entities, &std::collections::HashMap::new()),
+            "relationships": rels,
+            "backend": "postgres",
+            "hops": max_hops,
+        }))),
+        Err(e) => Err(store_failure("graph_traverse_fallback", e)),
+    }
+}
+
+/// Serializes entities with an attached `hops` distance. Missing hops (Postgres
+/// fallback, which does not track per-entity distance) default to 1.
+fn entities_with_hops(
+    entities: &[crate::model::Entity],
+    hop_by_id: &std::collections::HashMap<&str, u8>,
+) -> Vec<serde_json::Value> {
+    entities
+        .iter()
+        .map(|e| {
+            let hops = hop_by_id.get(e.entity_id.as_str()).copied().unwrap_or(1);
+            serde_json::json!({
+                "entity_id": e.entity_id,
+                "org_id": e.org_id,
+                "entity_type": e.entity_type,
+                "entity_text": e.entity_text,
+                "confidence": e.confidence,
+                "source_refs": e.source_refs,
+                "hops": hops,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod auth_tests {
     use std::{sync::OnceLock, time::Duration};
@@ -547,6 +681,11 @@ mod auth_tests {
         } else {
             r#"{"org_id":"org-b","entity_ids":["entity-1"]}"#
         };
+        let traverse_body = if org_id == "org-a" {
+            r#"{"org_id":"org-a","seed_entity_ids":["entity-1"]}"#
+        } else {
+            r#"{"org_id":"org-b","seed_entity_ids":["entity-1"]}"#
+        };
         let export_body = if org_id == "org-a" {
             r#"{"org_id":"org-a","format":"json"}"#
         } else {
@@ -591,6 +730,11 @@ mod auth_tests {
             },
             RouteCase {
                 method: Method::POST,
+                uri: "/v1/graph/traverse",
+                body: Some(traverse_body),
+            },
+            RouteCase {
+                method: Method::POST,
                 uri: "/v1/graph/exports",
                 body: Some(export_body),
             },
@@ -605,6 +749,11 @@ mod auth_tests {
         router(
             Arc::new(GraphStore::new(pool)),
             test_auth().verifier.clone(),
+            None,
+            GraphLimits {
+                max_hops: 3,
+                max_entities: 100,
+            },
         )
     }
 

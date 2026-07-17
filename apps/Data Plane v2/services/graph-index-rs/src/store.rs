@@ -681,6 +681,93 @@ impl GraphStore {
 
         Ok((all_entities, all_rels))
     }
+
+    /// Re-joins a set of entity ids (e.g. from a Neo4j traversal) against the
+    /// canonical Postgres graph, returning only entities that are live and
+    /// org-visible, plus the relationships whose BOTH endpoints are in the
+    /// visible set. This is the security-critical gate that makes Neo4j a pure
+    /// topology accelerator: even a stale or over-broad read-model cannot leak,
+    /// because provenance/visibility is enforced here from canonical Postgres.
+    pub async fn get_subgraph_visible(
+        &self,
+        org_id: &str,
+        entity_ids: &[String],
+    ) -> anyhow::Result<(Vec<Entity>, Vec<Relationship>)> {
+        if entity_ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let entity_rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
+            "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
+             FROM graph_entities AS ge
+             WHERE ge.org_id = $1 AND ge.entity_id = ANY($2)
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
+        )
+        .bind(org_id)
+        .bind(entity_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let entities: Vec<Entity> = entity_rows
+            .into_iter()
+            .map(|(eid, oid, etype, etext, conf, prov, refs)| Entity {
+                entity_id: eid,
+                org_id: oid,
+                entity_type: etype,
+                entity_text: etext,
+                confidence: conf,
+                provenance: prov,
+                source_refs: serde_json::from_value(refs).unwrap_or_default(),
+            })
+            .collect();
+
+        // Only entities that survived the visibility gate may anchor an edge.
+        let visible_ids: std::collections::HashSet<&str> =
+            entities.iter().map(|e| e.entity_id.as_str()).collect();
+
+        let rel_rows = sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
+            "SELECT gr.rel_id, gr.org_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type, COALESCE(gr.confidence, 0), COALESCE(gr.provenance, ''), COALESCE(gr.source_refs, '[]')
+             FROM graph_relationships AS gr
+             WHERE gr.org_id = $1 AND gr.entity_a_id = ANY($2) AND gr.entity_b_id = ANY($2)
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
+        )
+        .bind(org_id)
+        .bind(entity_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let relationships: Vec<Relationship> = rel_rows
+            .into_iter()
+            .map(|(rid, oid, a, b, rt, conf, prov, refs)| Relationship {
+                rel_id: rid,
+                org_id: oid,
+                entity_a_id: a,
+                entity_b_id: b,
+                relation_type: rt,
+                confidence: conf,
+                provenance: prov,
+                source_refs: serde_json::from_value(refs).unwrap_or_default(),
+            })
+            .filter(|r| {
+                visible_ids.contains(r.entity_a_id.as_str())
+                    && visible_ids.contains(r.entity_b_id.as_str())
+            })
+            .collect();
+
+        Ok((entities, relationships))
+    }
 }
 
 #[cfg(test)]

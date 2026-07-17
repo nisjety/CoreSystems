@@ -75,6 +75,12 @@ pub struct Config {
     pub neo4j_password: String,
     #[serde(default = "default_neo4j_database")]
     pub neo4j_database: String,
+    // Multi-hop traversal bounds (Phase 4). Requests are clamped to these; the
+    // hop count is additionally ceilinged at `neo4j::MAX_HOPS_CEILING`.
+    #[serde(default = "default_graph_max_hops")]
+    pub graph_max_hops: u8,
+    #[serde(default = "default_graph_traverse_max_entities")]
+    pub graph_traverse_max_entities: usize,
 
     #[serde(default)]
     pub embedding_event_public_key_path: String,
@@ -169,6 +175,14 @@ fn default_neo4j_user() -> String {
 
 fn default_neo4j_database() -> String {
     "neo4j".into()
+}
+
+fn default_graph_max_hops() -> u8 {
+    3
+}
+
+fn default_graph_traverse_max_entities() -> usize {
+    100
 }
 
 #[cfg(test)]

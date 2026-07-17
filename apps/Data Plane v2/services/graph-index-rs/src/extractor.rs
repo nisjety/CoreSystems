@@ -330,6 +330,8 @@ mod tests {
             neo4j_user: "neo4j".to_string(),
             neo4j_password: String::new(),
             neo4j_database: "neo4j".to_string(),
+            graph_max_hops: 3,
+            graph_traverse_max_entities: 100,
             embedding_event_public_key_path: String::new(),
             index_event_public_key_path: String::new(),
             event_auth_audience: "dataplane-events".to_string(),

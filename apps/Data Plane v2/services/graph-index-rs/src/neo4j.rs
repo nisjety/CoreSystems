@@ -61,6 +61,33 @@ fn entity_row(e: &MirrorEntity) -> BoltType {
     m.into()
 }
 
+/// Hard ceiling on traversal depth, independent of request/config. A
+/// variable-length Cypher pattern's upper bound must be a literal, so the
+/// clamped value is formatted into the query — clamping keeps that
+/// interpolation injection-safe and traversals bounded.
+pub const MAX_HOPS_CEILING: u8 = 5;
+
+/// Clamps a requested hop count into `[1, min(cap, MAX_HOPS_CEILING)]`.
+pub fn clamp_hops(requested: u8, cap: u8) -> u8 {
+    let ceiling = cap.clamp(1, MAX_HOPS_CEILING);
+    requested.clamp(1, ceiling)
+}
+
+/// Builds the org-scoped multi-hop traversal Cypher for a given (already
+/// clamped) hop bound. Returns reached entities with their minimum hop
+/// distance from any seed. `org_id` predicates the seed, every traversed edge,
+/// and the reached node so a traversal can never cross tenants.
+fn traverse_cypher(max_hops: u8) -> String {
+    format!(
+        "MATCH (seed:Entity) WHERE seed.entity_id IN $seed_ids AND seed.org_id = $org_id \
+         MATCH (seed)-[rels:REL*1..{max_hops}]-(reached:Entity) \
+         WHERE reached.org_id = $org_id AND all(x IN rels WHERE x.org_id = $org_id) \
+         RETURN reached.entity_id AS entity_id, min(length(rels)) AS hops \
+         ORDER BY hops ASC, entity_id ASC \
+         LIMIT $max_entities"
+    )
+}
+
 /// Shapes one relationship as a Bolt map for the `UNWIND $rels` batch.
 fn rel_row(r: &MirrorRelationship) -> BoltType {
     let mut m: HashMap<String, BoltType> = HashMap::new();
@@ -148,6 +175,44 @@ impl Neo4jClient {
                 .context("neo4j merge relationships")?;
         }
         Ok(())
+    }
+
+    /// Native multi-hop traversal from `seed_ids` within `org_id`. Returns the
+    /// reached entity ids paired with their minimum hop distance from any seed.
+    ///
+    /// This is a topology accelerator only — the caller MUST re-join Postgres to
+    /// enforce provenance/org-visibility and to resolve chunk source_refs before
+    /// anything leaves the plane (Neo4j is never an authorization source). Both
+    /// `max_hops` (clamped, then formatted as the pattern's literal upper bound)
+    /// and `max_entities` bound the traversal.
+    pub async fn traverse(
+        &self,
+        org_id: &str,
+        seed_ids: &[String],
+        max_hops: u8,
+        max_entities: i64,
+    ) -> anyhow::Result<Vec<(String, u8)>> {
+        if seed_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cypher = traverse_cypher(clamp_hops(max_hops, MAX_HOPS_CEILING));
+        let mut rows = self
+            .graph
+            .execute(
+                query(&cypher)
+                    .param("org_id", org_id)
+                    .param("seed_ids", seed_ids.to_vec())
+                    .param("max_entities", max_entities.max(1)),
+            )
+            .await
+            .context("neo4j traverse")?;
+        let mut reached = Vec::new();
+        while let Some(row) = rows.next().await.context("neo4j traverse row")? {
+            let entity_id: String = row.get("entity_id").context("traverse entity_id")?;
+            let hops: i64 = row.get("hops").unwrap_or(1);
+            reached.push((entity_id, hops.clamp(1, u8::MAX as i64) as u8));
+        }
+        Ok(reached)
     }
 }
 
@@ -242,5 +307,26 @@ mod tests {
             }
             other => panic!("rel_row must produce a Bolt map, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clamp_hops_bounds_request_and_ceiling() {
+        assert_eq!(clamp_hops(0, 3), 1); // below floor
+        assert_eq!(clamp_hops(2, 3), 2); // within
+        assert_eq!(clamp_hops(9, 3), 3); // above config cap
+        assert_eq!(clamp_hops(9, 99), MAX_HOPS_CEILING); // config cap ceilinged
+        assert_eq!(clamp_hops(3, 0), 1); // cap floored to 1
+    }
+
+    #[test]
+    fn traverse_cypher_is_org_scoped_on_seed_edges_and_reached() {
+        let c = traverse_cypher(3);
+        assert!(c.contains("*1..3"), "hop bound must be the literal: {c}");
+        assert!(c.contains("seed.org_id = $org_id"));
+        assert!(c.contains("reached.org_id = $org_id"));
+        assert!(c.contains("all(x IN rels WHERE x.org_id = $org_id)"));
+        assert!(c.contains("LIMIT $max_entities"));
+        // No string-interpolated org — org travels as a bound param.
+        assert!(!c.contains("format!"));
     }
 }

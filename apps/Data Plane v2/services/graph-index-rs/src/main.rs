@@ -147,7 +147,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let app = api::router(store.clone(), jwt_verifier.clone());
+    let graph_limits = api::GraphLimits {
+        max_hops: cfg.graph_max_hops,
+        max_entities: cfg.graph_traverse_max_entities as i64,
+    };
+    let app = api::router(
+        store.clone(),
+        jwt_verifier.clone(),
+        neo4j.clone(),
+        graph_limits,
+    );
     let addr = format!("0.0.0.0:{}", cfg.admin_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("graph-index HTTP on {addr}");
