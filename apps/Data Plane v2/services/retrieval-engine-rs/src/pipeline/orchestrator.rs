@@ -130,8 +130,11 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
 ///      sparse arm ran (`sparse = Some`) AND dense is routed; sparse-only when
 ///      the sparse arm ran but dense isn't routed; dense-only with NO RRF when
 ///      the sparse arm didn't run (`sparse = None`).
-///   2. wiki RRF (k=60, `w_wiki`) when `w_wiki > 0` and the wiki arm returned hits.
-///   3. visual RRF (k=60, `w_visual`) when `w_visual > 0` and the visual arm
+///   2. graph RRF (k=60, `w_graph`) when `w_graph > 0` and the graph arm returned
+///      hits. This is the signal §16.1.1 flagged as recorded-but-never-scored —
+///      it now drives fusion, so the `mode_mix` trace no longer lies.
+///   3. wiki RRF (k=60, `w_wiki`) when `w_wiki > 0` and the wiki arm returned hits.
+///   4. visual RRF (k=60, `w_visual`) when `w_visual > 0` and the visual arm
 ///      returned hits.
 ///
 /// Returns the fused list plus the sparse candidate count for the trace. The
@@ -141,6 +144,7 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
 fn fuse_arms(
     dense: Vec<ScoredCandidate>,
     sparse: Option<Vec<ScoredCandidate>>,
+    graph: Vec<ScoredCandidate>,
     wiki: Vec<ScoredCandidate>,
     visual: Vec<ScoredCandidate>,
     mix: &ResolvedWeights,
@@ -170,6 +174,13 @@ fn fuse_arms(
         }
         None => (dense, 0),
     };
+
+    // Graph arm — fold graph-grounded candidates by w_graph (peer of wiki/visual,
+    // additive RRF). Closes §16.1.1: w_graph now affects scoring, not just the
+    // trace.
+    if mix.w_graph > 0.0 && !graph.is_empty() {
+        fused = reciprocal_rank_fusion(&fused, &graph, 60.0, mix.w_graph);
+    }
 
     // Step 5 — wiki 4-way merge by its w_wiki share.
     if mix.w_wiki > 0.0 && !wiki.is_empty() {
@@ -327,6 +338,35 @@ impl RetrievalPipeline {
             Ok(_) => Vec::new(),
             Err(e) => {
                 tracing::warn!(error = %e, "wiki ANN arm failed; skipping");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Graph arm — org-scoped graph-neighbourhood grounding: chunks of entities
+    /// matching the query PLUS chunks of their 1-hop relationship neighbours,
+    /// mapped back to candidates (the "entities → candidates" shape adapter).
+    /// Gated on `w_graph > 0`. Uses the query TEXT (no embedding), so it runs
+    /// regardless of the dense route and needs no query vector. NON-FATAL: any
+    /// error yields an empty arm, exactly like the wiki/visual arms. The graph
+    /// is built only from `visibility = 'org'` provenance and the step-6
+    /// canonical gate still re-filters, so this arm cannot leak.
+    async fn arm_graph(
+        &self,
+        query: &str,
+        org_id: &str,
+        w_graph: f32,
+        top_k: usize,
+    ) -> Vec<ScoredCandidate> {
+        if w_graph <= 0.0 {
+            return Vec::new();
+        }
+        match crate::search::graph::graph_arm_candidates(&self.pool, query, org_id, top_k as i64)
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                tracing::warn!(error = %e, "graph arm failed; skipping");
                 Vec::new()
             }
         }
@@ -554,9 +594,10 @@ impl RetrievalPipeline {
         // arm exactly as the sequential code did with `qv.clone()`. The sparse
         // weight for RRF is the captured `w_bm25` (renormalized over dense+bm25).
         let arms_start = Instant::now();
-        let (dense_res, sparse_res, wiki_candidates, visual_candidates) = tokio::join!(
+        let (dense_res, sparse_res, graph_candidates, wiki_candidates, visual_candidates) = tokio::join!(
             self.arm_dense(&query_vector, &req.org_id, conditions, top_k),
             self.arm_sparse(&req.query, &req.org_id, top_k, route.sparse),
+            self.arm_graph(&req.query, &req.org_id, mix_for_scoring.w_graph, top_k),
             self.arm_wiki(&query_vector, &req.org_id, mix_for_scoring.w_wiki, top_k),
             self.arm_visual(
                 &req.query,
@@ -575,14 +616,15 @@ impl RetrievalPipeline {
         // `dense_ms` now measures the concurrent arm phase (all four overlap).
         let dense_ms = arms_start.elapsed().as_millis() as u64;
 
-        // Fuse the gathered arms sequentially in the SAME order and with the
-        // SAME weights as before: RRF(dense, sparse) with renormalized
-        // bm25_share (or sparse-only / dense-only per route), then RRF(_, wiki)
-        // by w_wiki, then RRF(_, visual) by w_visual.
+        // Fuse the gathered arms sequentially: RRF(dense, sparse) with
+        // renormalized bm25_share (or sparse-only / dense-only per route), then
+        // RRF(_, graph) by w_graph, then RRF(_, wiki) by w_wiki, then
+        // RRF(_, visual) by w_visual.
         let fusion_start = Instant::now();
         let (fused_candidates, candidate_count_sparse) = fuse_arms(
             dense_candidates,
             sparse_opt,
+            graph_candidates,
             wiki_candidates,
             visual_candidates,
             &mix_for_scoring,
@@ -1239,6 +1281,7 @@ mod tests {
             Some(sparse.clone()),
             vec![],
             vec![],
+            vec![],
             &m,
             true,
         );
@@ -1263,6 +1306,7 @@ mod tests {
         let (got, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             wiki.clone(),
             vec![],
             &m,
@@ -1287,6 +1331,7 @@ mod tests {
         let (got, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             wiki.clone(),
             visual.clone(),
             &m,
@@ -1309,6 +1354,7 @@ mod tests {
             Some(sparse.clone()),
             vec![],
             vec![],
+            vec![],
             &m,
             false,
         );
@@ -1323,7 +1369,7 @@ mod tests {
         let m = mix(1.0, 0.0, 0.0, 0.0);
 
         // sparse = None (route off): dense returned raw, count 0, no RRF.
-        let (got, sparse_count) = fuse_arms(dense.clone(), None, vec![], vec![], &m, true);
+        let (got, sparse_count) = fuse_arms(dense.clone(), None, vec![], vec![], vec![], &m, true);
         assert_eq!(sparse_count, 0);
         assert_eq!(project(&got), project(&dense));
 
@@ -1331,8 +1377,15 @@ mod tests {
         // re-weighting dense — proving the Option distinction is load-bearing.
         let m2 = mix(0.7, 0.3, 0.0, 0.0);
         let expected_empty_rrf = reciprocal_rank_fusion(&dense, &[], 60.0, bm25_share(&m2));
-        let (got_empty, count_empty) =
-            fuse_arms(dense.clone(), Some(vec![]), vec![], vec![], &m2, true);
+        let (got_empty, count_empty) = fuse_arms(
+            dense.clone(),
+            Some(vec![]),
+            vec![],
+            vec![],
+            vec![],
+            &m2,
+            true,
+        );
         assert_eq!(count_empty, 0);
         assert_eq!(project(&got_empty), project(&expected_empty_rrf));
         assert_ne!(project(&got_empty), project(&dense));
@@ -1349,6 +1402,7 @@ mod tests {
         let (got_weight_off, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             vec![cand("k-w1", "doc-w1", 0.9)],
             vec![],
             &base_mix,
@@ -1364,9 +1418,83 @@ mod tests {
             Some(sparse.clone()),
             vec![],
             vec![],
+            vec![],
             &m,
             true,
         );
         assert_eq!(project(&got_empty_arms), project(&expected_empty_arms));
+    }
+
+    fn mix_graph(w_dense: f32, w_bm25: f32, w_graph: f32) -> ResolvedWeights {
+        ResolvedWeights {
+            w_dense,
+            w_bm25,
+            w_graph,
+            w_wiki: 0.0,
+            w_visual: 0.0,
+            rerank: true,
+        }
+    }
+
+    #[test]
+    fn fuse_layers_graph_after_dense_sparse() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let graph = vec![
+            cand("k-g1", "doc-g1", 0.9),
+            cand("k-shared", "doc-shared", 0.5),
+        ];
+        let m = mix_graph(0.6, 0.2, 0.4);
+
+        // Oracle: dense+sparse RRF, THEN graph RRF by w_graph (peer position,
+        // before the empty wiki/visual arms).
+        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let expected = reciprocal_rank_fusion(&base, &graph, 60.0, m.w_graph);
+
+        let (got, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            graph.clone(),
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+
+        assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_skips_graph_when_weight_zero_or_empty() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+
+        // w_graph = 0 but a graph list IS supplied → graph must be ignored.
+        let base_mix = mix(0.7, 0.3, 0.0, 0.0);
+        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&base_mix));
+        let (got_weight_off, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![cand("k-g1", "doc-g1", 0.9)],
+            vec![],
+            vec![],
+            &base_mix,
+            true,
+        );
+        assert_eq!(project(&got_weight_off), project(&expected));
+
+        // w_graph > 0 but the graph arm returned nothing → skipped.
+        let m = mix_graph(0.6, 0.2, 0.4);
+        let expected_empty = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let (got_empty, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+        assert_eq!(project(&got_empty), project(&expected_empty));
     }
 }

@@ -1,4 +1,88 @@
+use std::collections::HashMap;
+
 use sqlx::PgPool;
+
+use crate::pipeline::types::ScoredCandidate;
+
+/// SQL for the fused graph ARM: unlike `graph_expansion_search` (which returns
+/// entity/relationship/claim objects for the standalone `/v1/retrieve/graph`
+/// endpoint), this returns **chunk candidates** grounded in the graph so the
+/// arm can be RRF-fused with dense/sparse/wiki/visual (the "entities → candidates
+/// shape adapter"). It surfaces chunks of entities matching the query (hop 0)
+/// AND chunks of their 1-hop relationship neighbours (hop 1) — the graph's
+/// value-add over pure text match. Ordered hop-then-rank so direct hits precede
+/// connected ones. Org-scoped throughout; only `visibility = 'org'` provenance
+/// (the only content the graph is built from) is eligible, and the pipeline's
+/// step-6 canonical gate still re-filters every candidate afterwards.
+const GRAPH_ARM_SQL: &str = "WITH matched AS (
+        SELECT ge.entity_id,
+               ts_rank_cd(to_tsvector('english', ge.entity_text), plainto_tsquery('english', $2)) AS rank
+        FROM graph_entities ge
+        WHERE ge.org_id = $1
+          AND to_tsvector('english', ge.entity_text) @@ plainto_tsquery('english', $2)
+        ORDER BY rank DESC
+        LIMIT 25
+     ),
+     connected AS (
+        SELECT entity_id, rank, 0 AS hop FROM matched
+        UNION
+        SELECT CASE WHEN gr.entity_a_id = m.entity_id THEN gr.entity_b_id ELSE gr.entity_a_id END AS entity_id,
+               m.rank, 1 AS hop
+        FROM matched m
+        JOIN graph_relationships gr
+          ON gr.org_id = $1 AND (gr.entity_a_id = m.entity_id OR gr.entity_b_id = m.entity_id)
+     ),
+     ranked AS (
+        SELECT ku.knowledge_id, ku.document_id, ku.text,
+               MIN(c.hop) AS hop, MAX(c.rank) AS rank
+        FROM connected c
+        JOIN graph_text_units gtu ON gtu.entity_id = c.entity_id AND gtu.org_id = $1
+        JOIN knowledge_units ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = $1
+        JOIN documents d ON d.document_id = ku.document_id AND d.org_id = $1
+        WHERE d.deleted_at IS NULL AND d.visibility = 'org'
+        GROUP BY ku.knowledge_id, ku.document_id, ku.text
+     )
+     SELECT knowledge_id, document_id, text
+     FROM ranked
+     ORDER BY hop ASC, rank DESC
+     LIMIT $3";
+
+fn graph_arm_sql() -> &'static str {
+    GRAPH_ARM_SQL
+}
+
+/// Graph retrieval ARM for RRF fusion. Returns chunk candidates grounded in the
+/// query-matching graph neighbourhood, ordered best-first. RRF consumes the
+/// order (not the raw scores), so scores are left at 0 and set during fusion.
+/// Non-fatal by contract: the orchestrator logs + skips on error.
+pub async fn graph_arm_candidates(
+    pool: &PgPool,
+    query: &str,
+    org_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<ScoredCandidate>> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(graph_arm_sql())
+        .bind(org_id)
+        .bind(query)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(knowledge_id, document_id, text)| ScoredCandidate {
+            knowledge_id,
+            document_id,
+            text,
+            dense_score: 0.0,
+            sparse_score: 0.0,
+            rerank_score: 0.0,
+            final_score: 0.0,
+            chunk_index: 0,
+            metadata: HashMap::new(),
+        })
+        .collect())
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GraphExpansionResult {
@@ -296,5 +380,24 @@ mod tests {
         let community_sql = community_summary_sql();
         assert!(community_sql.contains("jsonb_array_elements_text"));
         assert!(community_sql.contains("NOT (member.entity_id = ANY($3))"));
+    }
+
+    #[test]
+    fn graph_arm_sql_is_org_scoped_and_grounds_via_graph_neighbourhood() {
+        let sql = graph_arm_sql();
+        // Org scoping on every graph table it touches.
+        assert!(sql.contains("ge.org_id = $1"));
+        assert!(sql.contains("gr.org_id = $1"));
+        assert!(sql.contains("gtu.org_id = $1"));
+        assert!(sql.contains("ku.org_id = $1"));
+        assert!(sql.contains("d.org_id = $1"));
+        // Only org-visible, live provenance is eligible.
+        assert!(sql.contains("d.visibility = 'org'"));
+        assert!(sql.contains("d.deleted_at IS NULL"));
+        // Grounds candidates through the graph (entities + 1-hop neighbours),
+        // not just a text match — that is the arm's reason to exist.
+        assert!(sql.contains("graph_relationships"));
+        assert!(sql.contains("graph_text_units"));
+        assert!(sql.contains("LIMIT $3"));
     }
 }
