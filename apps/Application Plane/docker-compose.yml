@@ -414,6 +414,8 @@ services:
       CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
       CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID must match the integration-corev2 verifier key ring}
     depends_on:
+      jetstream-provisioner:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       application-postgres:
@@ -518,6 +520,8 @@ services:
       TIKTOK_API_BASE_URL: ${TIKTOK_API_BASE_URL:-https://open.tiktokapis.com}
       SNAPCHAT_API_BASE_URL: ${SNAPCHAT_API_BASE_URL:-https://adsapi.snapchat.com/v1}
     depends_on:
+      jetstream-provisioner:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       application-postgres:
@@ -599,6 +603,8 @@ services:
     ports:
       - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INSIGHT_CORE_HOST_PORT:-3163}:3163"
     depends_on:
+      jetstream-provisioner:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       application-postgres:
@@ -658,6 +664,8 @@ services:
     ports:
       - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
     depends_on:
+      jetstream-provisioner:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       application-postgres:
@@ -746,6 +754,8 @@ services:
       NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
       NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
     depends_on:
+      jetstream-provisioner:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       application-postgres:
@@ -819,6 +829,34 @@ services:
       timeout: 5s
       retries: 5
       start_period: 5s
+
+  # ==============================================
+  # JetStream provisioner (one-shot). App cores use BindProvisioned = bind to
+  # pre-existing streams + durable push consumers; they never create them. This
+  # runs after app-nats is healthy on every `up`, idempotently creating the
+  # VELION_* streams + consumers. Consumer/publisher cores depend on it
+  # completing (service_completed_successfully) so a clean bring-up has the
+  # topology before they bind. Manual equivalent: scripts/provision-jetstream.sh.
+  # ==============================================
+  jetstream-provisioner:
+    image: natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
+    container_name: app-jetstream-provisioner
+    restart: "no"
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      APPLICATION_NATS_PROVISIONER_PASSWORD: ${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}
+    entrypoint: ["sh", "/provision.sh"]
+    volumes:
+      - ./scripts/jetstream-provision-entrypoint.sh:/provision.sh:ro
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ==============================================
   # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
