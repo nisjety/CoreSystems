@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use event_envelope_rs::EventSigner;
+use qdrant_client::qdrant::Condition;
 use qdrant_client::Qdrant;
 use sqlx::PgPool;
 
@@ -122,6 +123,67 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
     }
 }
 
+/// Pure fusion chain extracted from `retrieve()` so it is unit-testable and so
+/// the concurrently-gathered arms fuse in EXACTLY the original sequential order:
+///
+///   1. dense + sparse RRF (k=60) with the renormalized `bm25_share` when the
+///      sparse arm ran (`sparse = Some`) AND dense is routed; sparse-only when
+///      the sparse arm ran but dense isn't routed; dense-only with NO RRF when
+///      the sparse arm didn't run (`sparse = None`).
+///   2. wiki RRF (k=60, `w_wiki`) when `w_wiki > 0` and the wiki arm returned hits.
+///   3. visual RRF (k=60, `w_visual`) when `w_visual > 0` and the visual arm
+///      returned hits.
+///
+/// Returns the fused list plus the sparse candidate count for the trace. The
+/// `Option` on `sparse` is load-bearing: `None` (route off) yields the raw dense
+/// list, whereas `Some(empty)` (route on, zero hits) still runs RRF and thus
+/// re-weights the dense scores — the two are NOT interchangeable.
+fn fuse_arms(
+    dense: Vec<ScoredCandidate>,
+    sparse: Option<Vec<ScoredCandidate>>,
+    wiki: Vec<ScoredCandidate>,
+    visual: Vec<ScoredCandidate>,
+    mix: &ResolvedWeights,
+    route_dense: bool,
+) -> (Vec<ScoredCandidate>, usize) {
+    // Step 4 — dense + sparse.
+    let (mut fused, sparse_count) = match sparse {
+        Some(sparse_candidates) => {
+            let sparse_count = sparse_candidates.len();
+            if route_dense {
+                // Renormalize dense+bm25 sub-mix so RRF gets a [0,1] weight on
+                // the BM25 list.
+                let bm25_share = {
+                    let d = mix.w_dense;
+                    let b = mix.w_bm25;
+                    let sum = (d + b).max(f32::EPSILON);
+                    b / sum
+                };
+                (
+                    reciprocal_rank_fusion(&dense, &sparse_candidates, 60.0, bm25_share),
+                    sparse_count,
+                )
+            } else {
+                // Sparse-only route: no dense list to fuse against.
+                (sparse_candidates, sparse_count)
+            }
+        }
+        None => (dense, 0),
+    };
+
+    // Step 5 — wiki 4-way merge by its w_wiki share.
+    if mix.w_wiki > 0.0 && !wiki.is_empty() {
+        fused = reciprocal_rank_fusion(&fused, &wiki, 60.0, mix.w_wiki);
+    }
+
+    // Visual arm — layer Embed v4 page-image hits by w_visual (purely additive).
+    if mix.w_visual > 0.0 && !visual.is_empty() {
+        fused = reciprocal_rank_fusion(&fused, &visual, 60.0, mix.w_visual);
+    }
+
+    (fused, sparse_count)
+}
+
 impl RetrievalPipeline {
     /// ColQwen visual reranker: reorder the page-image candidates in `fused` by
     /// ColQwen late-interaction (MaxSim) relevance to `query`. Only the order
@@ -187,6 +249,144 @@ impl RetrievalPipeline {
         }
         tracing::info!(reranked = urls.len(), "visual reranker (ColQwen) applied");
         fused
+    }
+
+    /// Dense arm — main-collection ANN over the query embedding. Gated on the
+    /// dense route (a present `query_vector`); returns an empty list when dense
+    /// wasn't routed (embed skipped). FATAL: a Qdrant error propagates via `?`.
+    async fn arm_dense(
+        &self,
+        query_vector: &Option<Vec<f32>>,
+        org_id: &str,
+        conditions: Vec<Condition>,
+        top_k: usize,
+    ) -> anyhow::Result<Vec<ScoredCandidate>> {
+        if let Some(ref qv) = query_vector {
+            vector_search(
+                &self.qdrant,
+                &self.config.qdrant_collection,
+                qv.clone(),
+                org_id,
+                conditions,
+                top_k,
+            )
+            .await
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Sparse arm — lexical/BM25 search. Gated on `routed` (`route.sparse`):
+    /// `Ok(None)` when sparse isn't routed (so no scan runs), `Ok(Some(..))`
+    /// when it ran. FATAL: a backend error propagates via `?`. The `Option`
+    /// preserves the route-off vs ran-empty distinction that fusion depends on.
+    async fn arm_sparse(
+        &self,
+        query: &str,
+        org_id: &str,
+        top_k: usize,
+        routed: bool,
+    ) -> anyhow::Result<Option<Vec<ScoredCandidate>>> {
+        if routed {
+            Ok(Some(
+                self.sparse_backend.search(query, org_id, top_k).await?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Wiki ANN arm — WIKI_COLLECTION ANN over the (reused) query embedding.
+    /// Gated on `w_wiki > 0` AND a present query vector. NON-FATAL: on skip, a
+    /// Qdrant error, or an empty result it returns an empty list (the request
+    /// never fails). Emits the same `warn!` as the sequential path on error.
+    async fn arm_wiki(
+        &self,
+        query_vector: &Option<Vec<f32>>,
+        org_id: &str,
+        w_wiki: f32,
+        top_k: usize,
+    ) -> Vec<ScoredCandidate> {
+        if w_wiki <= 0.0 {
+            return Vec::new();
+        }
+        let Some(ref qv) = query_vector else {
+            return Vec::new();
+        };
+        match vector_search(
+            &self.qdrant,
+            WIKI_COLLECTION,
+            qv.clone(),
+            org_id,
+            Vec::new(),
+            top_k,
+        )
+        .await
+        {
+            Ok(wiki) if !wiki.is_empty() => wiki,
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "wiki ANN arm failed; skipping");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Visual arm — Cohere Embed v4 query embedding + visual-collection ANN.
+    /// Gated on `w_visual > 0` AND a configured `visual_embedder`. NON-FATAL: on
+    /// skip, a dim mismatch, an embed error, a Qdrant error, or an empty result
+    /// it returns an empty list. Emits the same `warn!`s as the sequential path.
+    async fn arm_visual(
+        &self,
+        query: &str,
+        org_id: &str,
+        w_visual: f32,
+        embed_zdr: bool,
+        top_k: usize,
+    ) -> Vec<ScoredCandidate> {
+        if w_visual <= 0.0 {
+            return Vec::new();
+        }
+        let Some(ref ve) = self.visual_embedder else {
+            return Vec::new();
+        };
+        match ve.embed_query(query, embed_zdr).await {
+            // Guard the visual query vector against the configured visual
+            // dimension — a misconfigured Embed v4 deployment returning a
+            // different dim than the collection would otherwise error per
+            // candidate; skip the arm cleanly instead.
+            Ok(visual_vec) if visual_vec.len() == self.config.visual_embedding_dimension => {
+                match vector_search(
+                    &self.qdrant,
+                    &self.config.qdrant_visual_collection,
+                    visual_vec,
+                    org_id,
+                    Vec::new(),
+                    top_k,
+                )
+                .await
+                {
+                    Ok(visual) if !visual.is_empty() => visual,
+                    Ok(_) => Vec::new(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "visual ANN arm failed; skipping");
+                        Vec::new()
+                    }
+                }
+            }
+            Ok(visual_vec) => {
+                tracing::warn!(
+                    got = visual_vec.len(),
+                    want = self.config.visual_embedding_dimension,
+                    "visual query embedding dim mismatch; skipping visual arm"
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "visual query embed skipped; skipping visual arm");
+                Vec::new()
+            }
+        }
     }
 
     #[tracing::instrument(
@@ -341,152 +541,53 @@ impl RetrievalPipeline {
         };
         let conditions = filters.to_qdrant_conditions();
 
-        // 3. Dense vector search (only when routed).
-        let dense_start = Instant::now();
-        let dense_candidates = if let Some(ref qv) = query_vector {
-            vector_search(
-                &self.qdrant,
-                &self.config.qdrant_collection,
-                qv.clone(),
+        // 3-4. Independent search arms run CONCURRENTLY, then fuse sequentially.
+        // Dense (main collection), sparse (BM25/lexical), wiki ANN, and visual
+        // (Embed v4 query + ANN) are mutually independent I/O. `tokio::join!`
+        // schedules them on one task so their round-trips overlap; ONLY the
+        // scheduling changes. Gating, error semantics, and the fusion order are
+        // identical to the prior sequential path:
+        //   - dense + sparse errors are FATAL (propagated via `?`);
+        //   - wiki + visual are NON-FATAL (any error/mismatch logs the same
+        //     `warn!` and yields an empty arm, skipped in fusion).
+        // `conditions` moves into the dense arm; `query_vector` is cloned per
+        // arm exactly as the sequential code did with `qv.clone()`. The sparse
+        // weight for RRF is the captured `w_bm25` (renormalized over dense+bm25).
+        let arms_start = Instant::now();
+        let (dense_res, sparse_res, wiki_candidates, visual_candidates) = tokio::join!(
+            self.arm_dense(&query_vector, &req.org_id, conditions, top_k),
+            self.arm_sparse(&req.query, &req.org_id, top_k, route.sparse),
+            self.arm_wiki(&query_vector, &req.org_id, mix_for_scoring.w_wiki, top_k),
+            self.arm_visual(
+                &req.query,
                 &req.org_id,
-                conditions,
+                mix_for_scoring.w_visual,
+                embed_zdr,
                 top_k,
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
-        let dense_ms = dense_start.elapsed().as_millis() as u64;
+            ),
+        );
+        // Dense + sparse are fatal — surface their errors just as the sequential
+        // `?` did. `sparse_res` is `Ok(None)` when the sparse route was off and
+        // `Ok(Some(..))` when it ran; that distinction drives fusion.
+        let dense_candidates = dense_res?;
         let candidate_count_dense = dense_candidates.len();
+        let sparse_opt = sparse_res?;
+        // `dense_ms` now measures the concurrent arm phase (all four overlap).
+        let dense_ms = arms_start.elapsed().as_millis() as u64;
 
-        // 4. Sparse/BM25 search + fusion (only when routed).
-        // Sparse weight passed to RRF is the captured `w_bm25` from the
-        // resolved mix (renormalized over dense+bm25). w_graph/w_wiki are
-        // captured for the trace but not yet folded into this RRF pass —
-        // their scoring lives in dedicated `/v1/retrieve/graph` and
-        // `/v1/retrieve/wiki` endpoints. Wave-3 will merge them into a
-        // single 4-way score after wiki_block_embeddings ANN is populated.
-        let sparse_start = Instant::now();
-        let (fused_candidates, candidate_count_sparse) = if route.sparse {
-            let sparse_candidates = self
-                .sparse_backend
-                .search(&req.query, &req.org_id, top_k)
-                .await?;
-            let sparse_count = sparse_candidates.len();
-            if route.dense {
-                // Renormalize dense+bm25 sub-mix so RRF gets a [0,1] weight on
-                // the BM25 list (the legacy `bm25_weight` config remains as the
-                // backwards-compat fallback when callers don't send mode_mix).
-                let bm25_share = {
-                    let d = mix_for_scoring.w_dense;
-                    let b = mix_for_scoring.w_bm25;
-                    let sum = (d + b).max(f32::EPSILON);
-                    b / sum
-                };
-                let fused =
-                    reciprocal_rank_fusion(&dense_candidates, &sparse_candidates, 60.0, bm25_share);
-                (fused, sparse_count)
-            } else {
-                // Sparse-only route: no dense list to fuse against.
-                (sparse_candidates, sparse_count)
-            }
-        } else {
-            (dense_candidates, 0)
-        };
-
-        // Wave-3 — 4-way merge: layer the wiki ANN arm into the fused list by
-        // its w_wiki share, now that wiki_block_embeddings is populated (durable
-        // embedding-engine wiki subscriber writes text+source_type+ids there).
-        // Reuses the query embedding; skipped on a purely-lexical route.
-        let fused_candidates = if mix_for_scoring.w_wiki > 0.0 {
-            if let Some(ref qv) = query_vector {
-                match vector_search(
-                    &self.qdrant,
-                    WIKI_COLLECTION,
-                    qv.clone(),
-                    &req.org_id,
-                    Vec::new(),
-                    top_k,
-                )
-                .await
-                {
-                    Ok(wiki) if !wiki.is_empty() => reciprocal_rank_fusion(
-                        &fused_candidates,
-                        &wiki,
-                        60.0,
-                        mix_for_scoring.w_wiki,
-                    ),
-                    Ok(_) => fused_candidates,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "wiki ANN arm failed; skipping");
-                        fused_candidates
-                    }
-                }
-            } else {
-                fused_candidates
-            }
-        } else {
-            fused_candidates
-        };
-
-        // Visual arm — layer Cohere Embed v4 page-image hits into the fused list
-        // by `w_visual`. Embeds the TEXT query into Embed v4's multimodal space
-        // (`input_type=query`) and ANN-searches `qdrant_visual_collection`.
-        // Skipped when `w_visual`≈0, the visual embedder isn't configured, the
-        // query is ZDR (embedder fails closed), or the arm returns nothing/errors
-        // (e.g. collection not yet populated) — visual is purely additive.
-        let fused_candidates = if mix_for_scoring.w_visual > 0.0 {
-            if let Some(ref ve) = self.visual_embedder {
-                match ve.embed_query(&req.query, embed_zdr).await {
-                    // Guard the visual query vector against the configured visual
-                    // dimension — a misconfigured Embed v4 deployment returning a
-                    // different dim than the collection would otherwise error per
-                    // candidate; skip the arm cleanly instead.
-                    Ok(visual_vec)
-                        if visual_vec.len() == self.config.visual_embedding_dimension =>
-                    {
-                        match vector_search(
-                            &self.qdrant,
-                            &self.config.qdrant_visual_collection,
-                            visual_vec,
-                            &req.org_id,
-                            Vec::new(),
-                            top_k,
-                        )
-                        .await
-                        {
-                            Ok(visual) if !visual.is_empty() => reciprocal_rank_fusion(
-                                &fused_candidates,
-                                &visual,
-                                60.0,
-                                mix_for_scoring.w_visual,
-                            ),
-                            Ok(_) => fused_candidates,
-                            Err(e) => {
-                                tracing::warn!(error = %e, "visual ANN arm failed; skipping");
-                                fused_candidates
-                            }
-                        }
-                    }
-                    Ok(visual_vec) => {
-                        tracing::warn!(
-                            got = visual_vec.len(),
-                            want = self.config.visual_embedding_dimension,
-                            "visual query embedding dim mismatch; skipping visual arm"
-                        );
-                        fused_candidates
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "visual query embed skipped; skipping visual arm");
-                        fused_candidates
-                    }
-                }
-            } else {
-                fused_candidates
-            }
-        } else {
-            fused_candidates
-        };
+        // Fuse the gathered arms sequentially in the SAME order and with the
+        // SAME weights as before: RRF(dense, sparse) with renormalized
+        // bm25_share (or sparse-only / dense-only per route), then RRF(_, wiki)
+        // by w_wiki, then RRF(_, visual) by w_visual.
+        let fusion_start = Instant::now();
+        let (fused_candidates, candidate_count_sparse) = fuse_arms(
+            dense_candidates,
+            sparse_opt,
+            wiki_candidates,
+            visual_candidates,
+            &mix_for_scoring,
+            route.dense,
+        );
 
         // Visual rerank (ColQwen late-interaction / MaxSim). Reorders the
         // page-image candidates among themselves by ColQwen relevance, on top of
@@ -498,7 +599,8 @@ impl RetrievalPipeline {
         } else {
             fused_candidates
         };
-        let sparse_ms = sparse_start.elapsed().as_millis() as u64;
+        // `sparse_ms` now measures the sequential fusion + visual-rerank phase.
+        let sparse_ms = fusion_start.elapsed().as_millis() as u64;
         let candidate_count_fused = fused_candidates.len();
 
         // Over-fetch when a viewer is present so the step-6 ownership gate has
@@ -971,8 +1073,8 @@ struct SourceRow {
 #[cfg(test)]
 mod tests {
     use super::{
-        embed_zdr_for_mode, embedding_cache_allowed, encode_cost_event, text_rerank_allowed,
-        ZdrMode,
+        embed_zdr_for_mode, embedding_cache_allowed, encode_cost_event, fuse_arms,
+        reciprocal_rank_fusion, text_rerank_allowed, ResolvedWeights, ScoredCandidate, ZdrMode,
     };
     use event_envelope_rs::{EventSigner, EventVerifier};
     use rsa::{
@@ -1062,5 +1164,209 @@ mod tests {
         )
         .expect("restricted event result")
         .is_none());
+    }
+
+    // --- fuse_arms: proves the concurrent arms fuse in the same order/gating
+    // as the original sequential chain. Fixtures are built directly; the
+    // "oracle" is the same `reciprocal_rank_fusion` composed by hand in order.
+
+    fn cand(knowledge_id: &str, document_id: &str, score: f32) -> ScoredCandidate {
+        ScoredCandidate {
+            knowledge_id: knowledge_id.to_string(),
+            document_id: document_id.to_string(),
+            text: String::new(),
+            dense_score: score,
+            sparse_score: 0.0,
+            rerank_score: 0.0,
+            final_score: score,
+            chunk_index: 0,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    fn mix(w_dense: f32, w_bm25: f32, w_wiki: f32, w_visual: f32) -> ResolvedWeights {
+        ResolvedWeights {
+            w_dense,
+            w_bm25,
+            w_graph: 0.0,
+            w_wiki,
+            w_visual,
+            rerank: true,
+        }
+    }
+
+    /// Compare two candidate lists by the fields fusion actually determines:
+    /// identity order and final score. (ScoredCandidate has no PartialEq and
+    /// carries an opaque metadata map, so we project to a comparable shape.)
+    fn project(v: &[ScoredCandidate]) -> Vec<(String, f32)> {
+        v.iter()
+            .map(|c| (c.knowledge_id.clone(), c.final_score))
+            .collect()
+    }
+
+    fn bm25_share(m: &ResolvedWeights) -> f32 {
+        let d = m.w_dense;
+        let b = m.w_bm25;
+        let sum = (d + b).max(f32::EPSILON);
+        b / sum
+    }
+
+    fn dense_fixture() -> Vec<ScoredCandidate> {
+        vec![
+            cand("k-d1", "doc-d1", 0.90),
+            cand("k-d2", "doc-d2", 0.50),
+            cand("k-shared", "doc-shared", 0.30),
+        ]
+    }
+
+    fn sparse_fixture() -> Vec<ScoredCandidate> {
+        vec![
+            cand("k-s1", "doc-s1", 4.0),
+            cand("k-shared", "doc-shared", 3.0),
+            cand("k-s2", "doc-s2", 2.0),
+        ]
+    }
+
+    #[test]
+    fn fuse_dense_and_sparse_matches_sequential_rrf() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let m = mix(0.7, 0.3, 0.0, 0.0);
+        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+
+        let (got, sparse_count) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+
+        assert_eq!(sparse_count, sparse.len());
+        assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_layers_wiki_after_dense_sparse() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let wiki = vec![
+            cand("k-w1", "doc-w1", 0.8),
+            cand("k-shared", "doc-shared", 0.7),
+        ];
+        let m = mix(0.7, 0.3, 0.5, 0.0);
+
+        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let expected = reciprocal_rank_fusion(&base, &wiki, 60.0, m.w_wiki);
+
+        let (got, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            wiki.clone(),
+            vec![],
+            &m,
+            true,
+        );
+
+        assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_layers_visual_after_wiki() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let wiki = vec![cand("k-w1", "doc-w1", 0.8)];
+        let visual = vec![cand("k-v1", "doc-v1", 0.6)];
+        let m = mix(0.6, 0.2, 0.4, 0.3);
+
+        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let with_wiki = reciprocal_rank_fusion(&base, &wiki, 60.0, m.w_wiki);
+        let expected = reciprocal_rank_fusion(&with_wiki, &visual, 60.0, m.w_visual);
+
+        let (got, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            wiki.clone(),
+            visual.clone(),
+            &m,
+            true,
+        );
+
+        assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_sparse_only_route_returns_sparse_unchanged() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        // Sparse-only route (route_dense = false): sparse list is returned raw,
+        // with no RRF re-weighting.
+        let m = mix(0.0, 1.0, 0.0, 0.0);
+
+        let (got, sparse_count) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            &m,
+            false,
+        );
+
+        assert_eq!(sparse_count, sparse.len());
+        assert_eq!(project(&got), project(&sparse));
+    }
+
+    #[test]
+    fn fuse_dense_only_when_sparse_arm_did_not_run() {
+        let dense = dense_fixture();
+        let m = mix(1.0, 0.0, 0.0, 0.0);
+
+        // sparse = None (route off): dense returned raw, count 0, no RRF.
+        let (got, sparse_count) = fuse_arms(dense.clone(), None, vec![], vec![], &m, true);
+        assert_eq!(sparse_count, 0);
+        assert_eq!(project(&got), project(&dense));
+
+        // Contrast: sparse = Some(empty) (route on, zero hits) STILL runs RRF,
+        // re-weighting dense — proving the Option distinction is load-bearing.
+        let m2 = mix(0.7, 0.3, 0.0, 0.0);
+        let expected_empty_rrf = reciprocal_rank_fusion(&dense, &[], 60.0, bm25_share(&m2));
+        let (got_empty, count_empty) =
+            fuse_arms(dense.clone(), Some(vec![]), vec![], vec![], &m2, true);
+        assert_eq!(count_empty, 0);
+        assert_eq!(project(&got_empty), project(&expected_empty_rrf));
+        assert_ne!(project(&got_empty), project(&dense));
+    }
+
+    #[test]
+    fn fuse_skips_wiki_and_visual_when_gated_off_or_empty() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let base_mix = mix(0.7, 0.3, 0.0, 0.0);
+        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&base_mix));
+
+        // w_wiki = 0 but a wiki list IS supplied → wiki must be ignored.
+        let (got_weight_off, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![cand("k-w1", "doc-w1", 0.9)],
+            vec![],
+            &base_mix,
+            true,
+        );
+        assert_eq!(project(&got_weight_off), project(&expected));
+
+        // w_wiki/w_visual > 0 but the arms returned nothing → both skipped.
+        let m = mix(0.6, 0.2, 0.5, 0.3);
+        let expected_empty_arms = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let (got_empty_arms, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+        assert_eq!(project(&got_empty_arms), project(&expected_empty_arms));
     }
 }
