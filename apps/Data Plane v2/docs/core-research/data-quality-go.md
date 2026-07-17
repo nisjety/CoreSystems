@@ -200,3 +200,8 @@ atomically resumes pending and expired-running work across replicas. Full race,
 vet, build, and govulncheck pass. The source-only eval profile is 26.7%
 (recovery 69.2%); expanded PostgreSQL recovery integration/coverage remains
 pending after the isolated auth runtime pass.
+
+
+## 2026-07-17 optimization-program reconciliation
+
+Verified against current code: the `/v1/evals/retrieval/{evalID}` "hardcoded stub" and `/v1/quality/lint` 500-on-`wiki_pages.deleted_at`-drift caveats are STALE — `GetEval` returns persisted results with tenant-scoped 404, `lint.go` queries `deleted_at IS NULL`, and migration `20260710090000_reconcile_wiki_runtime_schema.sql` adds the column.

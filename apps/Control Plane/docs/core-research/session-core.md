@@ -328,3 +328,8 @@ Housekeeping (new, 2026-07-10):
 - gRPC infrastructure without registered services
 - partial invalidation for org-only events
 - residual legacy route surface during transition
+
+
+## 2026-07-17 optimization-program reconciliation
+
+The "org-only event, no user index — relying on TTL" gap is closed: an org→users reverse index (`control:sess:org:<orgID>`) is maintained alongside each snapshot write, so org-scoped upstream events now invalidate exactly the affected users' snapshots immediately instead of waiting the 30s TTL. Best-effort (TTL backstop preserved). Commit `b101f708`.

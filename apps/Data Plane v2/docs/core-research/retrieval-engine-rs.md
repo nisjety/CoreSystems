@@ -341,3 +341,8 @@ bus dependency. Provider errors retain status only. The library suite passes
 isolated cryptographic authority fixture now proves the 200 authorized and 403
 cross-tenant HTTP path; a real Auth Core/User Core authorized-user journey is
 still required.
+
+
+## 2026-07-17 optimization-program reconciliation
+
+The four retrieval arms (dense / sparse / wiki-ANN / visual) now run CONCURRENTLY via `tokio::join!` then fuse sequentially (pure, tested `fuse_arms`), replacing the prior sequential `.await` chain — commit `c44854bb`. Gating, RRF order/weights (60.0, bm25_share), error fatality (dense/sparse fatal; wiki/visual skip), and everything after fusion are unchanged.

@@ -241,3 +241,8 @@ Keep: no other core-local docs require action in the current tree.
 ## Bottom Line
 
 `user-core` is a real, production-shaped service with broad HTTP and real gRPC business behavior, live-healthy today. Since the 2026-06-07 pass, the document-ACL shared-bus gap closed and an admin-role gate landed on the `:id` route — but that gate inherits a header-trust weakness shared with the rest of the fleet's internal-key auth path (self-declared `X-User-Role` is accepted at face value). The uncommitted working-tree diff is a legitimate, well-built onboarding-draft-retention feature (migration + code are consistent, not yet deployed) — but it is not the fix for either of the two audit gaps it might be mistaken for: case-insensitive email lookup and delayed-event revision/tombstone protection are both still open, and the case-insensitive gap is now live-reproducible end-to-end against the running service. The three original service-level TODOs (block/suspension activity logging, suspension expiry) also remain untouched.
+
+
+## 2026-07-17 optimization-program reconciliation
+
+The per-request Auth Core `get-session` bearer resolution (and the double call on `/users/me`) is now cached on Dragonfly (`resolveIdentityCached`, SHA-256 token key, success-only, 30s TTL, nil/error-safe passthrough), commit `f6fa26a4`.

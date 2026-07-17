@@ -229,3 +229,8 @@ No delete-ready core-local text docs were identified beyond ordinary metadata no
 - cross-core plan-change/event semantics that deserve clearer contract ownership (unchanged)
 - past-due (vs. canceled) organizations are not yet gated by the new entitlement check — may be intentional, but should be a documented decision rather than an implicit gap
 - Nexi is confirmed live with test-mode credentials (memory note claiming "awaiting vendor creds" is stale as of this pass); Lago is confirmed live and healthy as a usage-metering dependency, distinct from the payment provider
+
+
+## 2026-07-17 optimization-program reconciliation
+
+`CanUseFeature` now gates `past_due`: a past-due subscription keeps access for a 60-day grace window (`PastDueGracePeriod`) then is suspended (access denied). Grace clock tracked in account metadata (`past_due_since`), stamped/cleared on durable save; missing marker fails open. Commit `21212d76`. DB pool bounds (org-core + billing-core) are now env-tunable (`DB_MAX_CONNS`/`DB_MIN_CONNS`, same safe 5/2 default).

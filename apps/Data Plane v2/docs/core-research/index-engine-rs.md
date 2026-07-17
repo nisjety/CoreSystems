@@ -217,3 +217,8 @@ rows. Deletion progression uses a transactional signed outbox and stable broker
 message ID. Focused tests pass (26 passed, 2 explicit disposable-PostgreSQL
 ignores) with strict clippy; runtime broker/database proof remains pending after
 the isolated startup pass.
+
+
+## 2026-07-17 optimization-program reconciliation
+
+The two per-chunk ingest queries (COUNT skip-if-exists + near-duplicate embedding-reuse) were PROVABLY DEAD (they ran after the per-document DELETE in the same tx → always empty) and are removed; chunk identity is now computed in-memory (`chunk_identity`), commit `e5846a52` — no behavior change. FOLLOW-UP (spawned task): the near-dup embedding-reuse is inert in prod (re-embeds every chunk on re-crawl); making it live needs its own design.

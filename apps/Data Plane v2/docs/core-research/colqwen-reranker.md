@@ -271,3 +271,8 @@ the actual reranking logic (`orchestrator.rs::visual_rerank()` or `app.py`) — 
 URL-parsing is unit-tested. None of this affects the live plane today (the feature
 is off everywhere), but it does mean the feature is further from "ready to flip on"
 than the code's overall polish suggests.
+
+
+## 2026-07-17 optimization-program reconciliation
+
+STALE notes corrected: `_fetch_image` no longer fetches sequentially — `/rerank` now fetches candidate images concurrently via a pooled `httpx.Client` + bounded `ThreadPoolExecutor` (order preserved, fail-on-error kept), commit `4d4d1b58`. The "retrieval still embedding query text in ephemeral mode" ZDR concern is also stale: `retrieval-engine-rs` orchestrator gates the query-embedding cache on `embed_zdr` (get + set skipped for ephemeral), verified in code.
