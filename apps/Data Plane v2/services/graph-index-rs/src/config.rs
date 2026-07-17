@@ -61,6 +61,21 @@ pub struct Config {
     #[allow(dead_code)] // consumed by detect_communities once that path is wired
     pub community_min_size: usize,
 
+    // Neo4j graph read-model (Phase 2). Disabled by default so the change is
+    // additive: when off, graph traversal falls back to the Postgres BFS path.
+    // When `neo4j_enabled` is true, `main` fails startup closed if the password
+    // is empty (secret must be deployment-supplied).
+    #[serde(default)]
+    pub neo4j_enabled: bool,
+    #[serde(default = "default_neo4j_url")]
+    pub neo4j_url: String,
+    #[serde(default = "default_neo4j_user")]
+    pub neo4j_user: String,
+    #[serde(default)]
+    pub neo4j_password: String,
+    #[serde(default = "default_neo4j_database")]
+    pub neo4j_database: String,
+
     #[serde(default)]
     pub embedding_event_public_key_path: String,
     #[serde(default)]
@@ -144,6 +159,18 @@ fn default_event_auth_audience() -> String {
     "dataplane-events".into()
 }
 
+fn default_neo4j_url() -> String {
+    "bolt://neo4j:7687".into()
+}
+
+fn default_neo4j_user() -> String {
+    "neo4j".into()
+}
+
+fn default_neo4j_database() -> String {
+    "neo4j".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::Config;
@@ -162,5 +189,31 @@ mod tests {
             envy::from_iter([("EXTRACTION_PROVIDER".to_owned(), "azure_openai".to_owned())])
                 .expect("legacy config");
         assert_eq!(legacy.extraction_provider, "azure_openai");
+    }
+
+    #[test]
+    fn neo4j_defaults_off_with_internal_connection_defaults() {
+        let cfg: Config = envy::from_iter([]).expect("config");
+        assert!(
+            !cfg.neo4j_enabled,
+            "neo4j must be off by default (additive)"
+        );
+        assert_eq!(cfg.neo4j_url, "bolt://neo4j:7687");
+        assert_eq!(cfg.neo4j_user, "neo4j");
+        assert_eq!(cfg.neo4j_database, "neo4j");
+        assert!(cfg.neo4j_password.is_empty());
+    }
+
+    #[test]
+    fn neo4j_enabled_parses_from_env_bool() {
+        let cfg: Config = envy::from_iter([
+            ("NEO4J_ENABLED".to_owned(), "true".to_owned()),
+            ("NEO4J_URL".to_owned(), "bolt://neo4j-test:7687".to_owned()),
+            ("NEO4J_PASSWORD".to_owned(), "secret".to_owned()),
+        ])
+        .expect("config");
+        assert!(cfg.neo4j_enabled);
+        assert_eq!(cfg.neo4j_url, "bolt://neo4j-test:7687");
+        assert_eq!(cfg.neo4j_password, "secret");
     }
 }

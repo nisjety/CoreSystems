@@ -26,6 +26,9 @@ jsonwebtoken.workspace = true
 uuid = { version = "1", features = ["v4"] }
 chrono.workspace = true
 event-envelope-rs = { path = "../event-envelope-rs" }
+# Neo4j Bolt driver for the rebuildable, org-scoped graph read-model
+# (native multi-hop Cypher traversal). Postgres stays canonical.
+neo4rs = "0.8"
 # gRPC server (graph_v1.proto)
 tonic.workspace = true
 prost.workspace = true

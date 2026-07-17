@@ -154,6 +154,48 @@ services:
       start_period: 10s
       retries: 10
 
+  # Neo4j graph read-model (GraphRAG). Rebuildable, org-scoped mirror of the
+  # canonical Postgres graph, used only for native multi-hop Cypher traversal.
+  # Off in the app by default (NEO4J_ENABLED); the core graph-index service does
+  # NOT depend on it (it degrades to the Postgres BFS fallback), so a Neo4j
+  # outage never takes down extraction/query.
+  neo4j:
+    <<: *infra-observability
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    init: true
+    expose:
+      - "7687"
+      - "7474"
+    ports:
+      # Loopback-only Bolt + HTTP browser for local inspection; cross-plane
+      # traffic uses the private network.
+      - "127.0.0.1:${NEO4J_BOLT_HOST_PORT:-7688}:7687"
+      - "127.0.0.1:${NEO4J_HTTP_HOST_PORT:-7475}:7474"
+    networks:
+      - dpv2-net
+    volumes:
+      - dpv2_neo4j:/data
+    environment:
+      # Auth is ALWAYS on. The password is deployment-owned; the app fails
+      # closed when NEO4J_ENABLED=true and no password is supplied.
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-dataplane}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-256m}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    healthcheck:
+      # neo4j image ships bash; verify the Bolt port (7687) accepts connections
+      # — the readiness signal the graph-index client connects on.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/7687' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 15
+
   nats:
     <<: *infra-observability
     image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
@@ -576,6 +618,16 @@ services:
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       EVENT_AUTH_AUDIENCE: dataplane-events
+      # Neo4j graph read-model (Phase 2). Off by default; when enabled the
+      # dual-write + multi-hop traverse path mirrors the canonical Postgres
+      # graph. Startup fails closed if enabled without a password. graph-index
+      # intentionally has no `depends_on: neo4j` — it connects with a boot
+      # retry and degrades to the Postgres graph path if Neo4j is unavailable.
+      NEO4J_ENABLED: ${NEO4J_ENABLED:-false}
+      NEO4J_URL: ${NEO4J_URL:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-dataplane}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
     volumes:
       - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:?EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/embedding-events.pub:ro
       - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:?INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH is required}:/run/event-keys/index-events.pub:ro
@@ -895,6 +947,7 @@ volumes:
   dpv2_postgres:
   dpv2_dragonfly:
   dpv2_qdrant:
+  dpv2_neo4j:
   dpv2_nats:
   dpv2_minio:
   dpv2_quickwit_cache:
