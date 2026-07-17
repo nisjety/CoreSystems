@@ -379,6 +379,8 @@ services:
       retries: 5
 
   conversation-core-go:
+    env_file:
+      - ./conversation-core/.env
     <<: *service-hardening
     build:
       context: ./conversation-core/conversation-core-go
@@ -441,6 +443,8 @@ services:
       start_period: 20s
 
   conversation-ingest-rs:
+    env_file:
+      - ./conversation-core/.env
     <<: *service-hardening
     build:
       context: ./conversation-core/conversation-ingest-rs
@@ -485,6 +489,8 @@ services:
       start_period: 20s
 
   social-core:
+    env_file:
+      - ./social-core/.env
     <<: *service-hardening
     build:
       context: ./social-core
@@ -541,6 +547,8 @@ services:
       start_period: 20s
 
   insight-core:
+    env_file:
+      - ./insight-core/.env
     <<: *service-hardening
     build:
       context: ./insight-core
@@ -618,6 +626,8 @@ services:
       start_period: 20s
 
   leads-core:
+    env_file:
+      - ./leads-core/.env
     <<: *service-hardening
     build:
       context: ./leads-core
@@ -675,6 +685,8 @@ services:
       start_period: 20s
 
   information-core:
+    env_file:
+      - ./information-core/.env
     <<: *service-hardening
     build:
       context: ./information-core
