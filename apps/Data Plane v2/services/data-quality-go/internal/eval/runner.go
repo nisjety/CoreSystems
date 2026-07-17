@@ -18,6 +18,7 @@ import (
 type Runner struct {
 	store  EvalStore
 	traces TraceSource
+	golden GoldenSource
 }
 
 // Recover claims persisted pending evaluations and requeues executions whose
@@ -44,11 +45,21 @@ func (r *Runner) Recover(ctx context.Context, staleAfter time.Duration) error {
 }
 
 func NewRunner(pool *pgxpool.Pool) *Runner {
-	return NewRunnerWithStores(NewPostgresEvalStore(pool), NewPostgresTraceSource(pool))
+	return NewRunnerWithAllStores(
+		NewPostgresEvalStore(pool),
+		NewPostgresTraceSource(pool),
+		NewPostgresGoldenStore(pool),
+	)
 }
 
+// NewRunnerWithStores keeps the legacy two-store construction: every query
+// scores via the (labeled) proxy path.
 func NewRunnerWithStores(store EvalStore, traces TraceSource) *Runner {
-	return &Runner{store: store, traces: traces}
+	return NewRunnerWithAllStores(store, traces, noGolden{})
+}
+
+func NewRunnerWithAllStores(store EvalStore, traces TraceSource, golden GoldenSource) *Runner {
+	return &Runner{store: store, traces: traces, golden: golden}
 }
 
 func (r *Runner) CreateEval(ctx context.Context, input model.CreateEvalInput) (*model.EvalRun, bool, error) {
@@ -89,7 +100,16 @@ func (r *Runner) RunEval(ctx context.Context, orgID, evalID string) error {
 		return nil
 	}
 
-	scorecard := score(run.Strategy, traces)
+	golden, err := r.golden.Load(ctx, orgID)
+	if err != nil {
+		message := "fetch golden judgments: " + err.Error()
+		if _, persistErr := r.store.Fail(ctx, orgID, evalID, message); persistErr != nil {
+			return fmt.Errorf("%s; persist failure: %w", message, persistErr)
+		}
+		return fmt.Errorf("%s", message)
+	}
+
+	scorecard := score(run.Strategy, traces, golden)
 	data, err := json.Marshal(scorecard)
 	if err != nil {
 		message := "encode scorecard: " + err.Error()
@@ -175,20 +195,34 @@ func (r *Runner) RunCompare(ctx context.Context, input model.CompareEvalInput) (
 	return &model.CompareResult{ScorecardA: scA, ScorecardB: scB, Diffs: diffs, Winner: winner}, nil
 }
 
-func score(strategy string, traces []RetrievalTrace) model.Scorecard {
+// score computes the scorecard. Queries with a golden judgment score REAL
+// recall@10/nDCG@10/MRR against the trace's persisted top-10 candidates;
+// unjudged queries keep the candidate-count proxy — each row is labeled
+// (`metric_source`: "golden" | "proxy") so aggregates are never mistaken for
+// judged quality when no golden set exists.
+func score(strategy string, traces []RetrievalTrace, golden map[string][]string) model.Scorecard {
 	results := make([]model.QueryResult, 0, len(traces))
 	var sumRecall, sumNDCG, sumMRR, sumLatency float64
+	goldenQueries := 0
 	latencies := make([]float64, 0, len(traces))
 	for _, trace := range traces {
-		recall := math.Min(float64(trace.Candidates)/10.0, 1.0)
-		ndcg := recall * 0.9
-		mrr := 0.0
-		if trace.Candidates > 0 {
-			mrr = 1.0
+		var recall, ndcg, mrr float64
+		source := model.MetricSourceProxy
+		if relevant, judged := golden[NormalizeQuery(trace.Query)]; judged {
+			recall, ndcg, mrr = goldenMetrics(trace.Retrieved, relevant)
+			source = model.MetricSourceGolden
+			goldenQueries++
+		} else {
+			recall = math.Min(float64(trace.Candidates)/10.0, 1.0)
+			ndcg = recall * 0.9
+			if trace.Candidates > 0 {
+				mrr = 1.0
+			}
 		}
 		result := model.QueryResult{
 			Query: trace.Query, RecallAt10: recall, NDCGAt10: ndcg, MRR: mrr,
 			LatencyMs: float64(trace.TotalMS), Candidates: trace.Candidates,
+			MetricSource: source,
 		}
 		results = append(results, result)
 		sumRecall += recall
@@ -201,8 +235,9 @@ func score(strategy string, traces []RetrievalTrace) model.Scorecard {
 	p95Idx := int(math.Ceil(0.95*float64(len(latencies)))) - 1
 	n := float64(len(results))
 	return model.Scorecard{
-		Strategy: strategy, QueriesRun: len(results), MeanRecall: sumRecall / n,
-		MeanNDCG: sumNDCG / n, MeanMRR: sumMRR / n, MeanLatency: sumLatency / n,
+		Strategy: strategy, QueriesRun: len(results), GoldenQueries: goldenQueries,
+		MeanRecall: sumRecall / n,
+		MeanNDCG:   sumNDCG / n, MeanMRR: sumMRR / n, MeanLatency: sumLatency / n,
 		P95Latency: latencies[p95Idx], Details: results,
 	}
 }

@@ -29,24 +29,36 @@ type EvalRun struct {
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
+// MetricSource labels how a QueryResult's quality metrics were computed:
+// "golden" = judged against a golden set (real recall/nDCG/MRR);
+// "proxy"  = candidate-count heuristic (no judgment exists for the query).
+const (
+	MetricSourceGolden = "golden"
+	MetricSourceProxy  = "proxy"
+)
+
 type Scorecard struct {
-	Strategy    string        `json:"strategy"`
-	QueriesRun  int           `json:"queries_run"`
-	MeanRecall  float64       `json:"mean_recall_at_10"`
-	MeanNDCG    float64       `json:"mean_ndcg_at_10"`
-	MeanMRR     float64       `json:"mean_mrr"`
-	MeanLatency float64       `json:"mean_latency_ms"`
-	P95Latency  float64       `json:"p95_latency_ms"`
-	Details     []QueryResult `json:"details,omitempty"`
+	Strategy   string `json:"strategy"`
+	QueriesRun int    `json:"queries_run"`
+	// GoldenQueries counts how many of QueriesRun were judged against a
+	// golden set — 0 means every aggregate below is proxy-derived.
+	GoldenQueries int           `json:"golden_queries"`
+	MeanRecall    float64       `json:"mean_recall_at_10"`
+	MeanNDCG      float64       `json:"mean_ndcg_at_10"`
+	MeanMRR       float64       `json:"mean_mrr"`
+	MeanLatency   float64       `json:"mean_latency_ms"`
+	P95Latency    float64       `json:"p95_latency_ms"`
+	Details       []QueryResult `json:"details,omitempty"`
 }
 
 type QueryResult struct {
-	Query      string  `json:"query"`
-	RecallAt10 float64 `json:"recall_at_10"`
-	NDCGAt10   float64 `json:"ndcg_at_10"`
-	MRR        float64 `json:"mrr"`
-	LatencyMs  float64 `json:"latency_ms"`
-	Candidates int     `json:"candidates_returned"`
+	Query        string  `json:"query"`
+	RecallAt10   float64 `json:"recall_at_10"`
+	NDCGAt10     float64 `json:"ndcg_at_10"`
+	MRR          float64 `json:"mrr"`
+	LatencyMs    float64 `json:"latency_ms"`
+	Candidates   int     `json:"candidates_returned"`
+	MetricSource string  `json:"metric_source,omitempty"`
 }
 
 type CreateEvalInput struct {

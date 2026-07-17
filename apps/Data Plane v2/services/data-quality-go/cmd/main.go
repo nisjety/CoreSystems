@@ -82,7 +82,8 @@ func main() {
 	checker := gates.NewChecker(pool)
 	linter := lint.NewLinter(pool)
 	costQuery := cost.NewQuery(pool)
-	qualityHandler := handler.NewQualityHandler(runner, scorer, checker, linter, costQuery)
+	goldenStore := eval.NewPostgresGoldenStore(pool)
+	qualityHandler := handler.NewQualityHandler(runner, goldenStore, scorer, checker, linter, costQuery)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)

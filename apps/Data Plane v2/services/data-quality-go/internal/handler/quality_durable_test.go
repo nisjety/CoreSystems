@@ -49,7 +49,7 @@ func (*fakeEvalRunner) RunCompare(context.Context, model.CompareEvalInput) (*mod
 
 func qualityTestRouter(runner EvalRunner) http.Handler {
 	router := chi.NewRouter()
-	h := NewQualityHandler(runner, nil, nil, nil, nil)
+	h := NewQualityHandler(runner, nil, nil, nil, nil, nil)
 	MountProtectedRoutes(router, authctx.Middleware(routeTestVerifier{}), h)
 	return router
 }
