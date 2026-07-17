@@ -27,6 +27,14 @@ var OrchestrationEventsPublishedTotal metric.Int64Counter
 // from NATS, labelled by event type and outcome.
 var OrchestrationEventsConsumedTotal metric.Int64Counter
 
+// EvaluatorOptimizerRunsTotal counts evaluator-optimizer loop runs, labelled by
+// stop_reason (passed, max_rounds, budget_exhausted, error) and passed.
+var EvaluatorOptimizerRunsTotal metric.Int64Counter
+
+// EvaluatorOptimizerRoundsTotal counts generator→judge rounds executed across
+// all evaluator-optimizer runs.
+var EvaluatorOptimizerRoundsTotal metric.Int64Counter
+
 func init() {
 	m := otel.Meter(MeterName)
 
@@ -52,6 +60,18 @@ func init() {
 	if OrchestrationEventsConsumedTotal, err = m.Int64Counter(
 		"orchestrator_core_orchestration_events_consumed_total",
 		metric.WithDescription("Total orchestration events consumed from NATS by orchestrator-core."),
+	); err != nil {
+		panic(err)
+	}
+	if EvaluatorOptimizerRunsTotal, err = m.Int64Counter(
+		"orchestrator_core_evaluator_optimizer_runs_total",
+		metric.WithDescription("Total evaluator-optimizer loop runs, labelled by stop_reason and passed."),
+	); err != nil {
+		panic(err)
+	}
+	if EvaluatorOptimizerRoundsTotal, err = m.Int64Counter(
+		"orchestrator_core_evaluator_optimizer_rounds_total",
+		metric.WithDescription("Total generator-judge rounds executed across evaluator-optimizer runs."),
 	); err != nil {
 		panic(err)
 	}

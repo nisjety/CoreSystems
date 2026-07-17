@@ -42,6 +42,9 @@ const (
 	// StopBudgetExhausted: the cumulative token budget was reached before a
 	// passing attempt, so the loop stopped cleanly and returned best-effort.
 	StopBudgetExhausted = "budget_exhausted"
+	// StopError: a model invocation failed and the run was aborted. Reported
+	// alongside a non-nil error and the best-effort partial transcript.
+	StopError = "error"
 )
 
 // Message is a single chat turn passed to a model.
@@ -245,7 +248,7 @@ func RunLoop(ctx context.Context, cfg Config, inv ModelInvoker) (Outcome, error)
 		// --- Generator leg ---
 		genRes, err := inv.Invoke(ctx, cfg.generatorRequest(prev))
 		if err != nil {
-			return finalize(rounds, best, haveBest, StopBudgetExhausted, spent),
+			return finalize(rounds, best, haveBest, StopError, spent),
 				fmt.Errorf("evaloptimizer: generator round %d: %w", round, err)
 		}
 		spent += genRes.TotalTokens()
@@ -253,7 +256,7 @@ func RunLoop(ctx context.Context, cfg Config, inv ModelInvoker) (Outcome, error)
 		// --- Judge leg (distinct invocation, never self-grading) ---
 		judgeRes, err := inv.Invoke(ctx, cfg.judgeRequest(genRes.Content))
 		if err != nil {
-			return finalize(rounds, best, haveBest, StopBudgetExhausted, spent),
+			return finalize(rounds, best, haveBest, StopError, spent),
 				fmt.Errorf("evaloptimizer: judge round %d: %w", round, err)
 		}
 		spent += judgeRes.TotalTokens()
