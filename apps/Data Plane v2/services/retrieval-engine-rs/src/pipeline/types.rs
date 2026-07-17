@@ -59,8 +59,11 @@ pub struct RetrievalRequest {
     /// `skip_deserializing` makes a body-supplied `user_id` impossible (anti-spoof).
     #[serde(skip_deserializing)]
     pub user_id: Option<String>,
-    /// Verified request proof used only for the Control grant lookup. It is
-    /// boundary-injected and excluded from request/trace serialization.
+    /// Verified request proof, boundary-injected and excluded from
+    /// request/trace serialization. Forwarded to exactly two same-plane
+    /// verifiers: the Control grant lookup (visibility client) and
+    /// graph-index's `/v1/graph/traverse` (deep graph arm) — both re-verify it
+    /// independently and pin the org themselves.
     #[serde(skip)]
     pub verified_bearer: Option<String>,
     pub query_expansion: Option<String>,

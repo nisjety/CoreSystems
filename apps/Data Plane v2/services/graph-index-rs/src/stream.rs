@@ -6,6 +6,7 @@ use event_envelope_rs::{EventClaims, EventVerifier};
 use futures::StreamExt;
 
 use crate::extractor::GraphExtractor;
+use crate::neo4j::Neo4jClient;
 use crate::store::GraphStore;
 
 // Each engine owns disjoint subjects in JetStream. graph-index owns only
@@ -208,6 +209,11 @@ pub async fn run_consumer(
     extractor: Arc<GraphExtractor>,
     nats: async_nats::Client,
     event_verifier: Option<Arc<EventVerifier>>,
+    // Optional Neo4j read-model mirror. `None` disables the mirror; the
+    // canonical Postgres graph is written regardless.
+    neo4j: Option<Arc<Neo4jClient>>,
+    // Minimum member count for a derived community (config `community_min_size`).
+    community_min_size: usize,
 ) -> anyhow::Result<()> {
     loop {
         let mut messages = consumer
@@ -285,16 +291,41 @@ pub async fn run_consumer(
             for (kid, text) in &chunks {
                 match extractor.extract(text, &org_id, claims.zdr).await {
                     Ok(result) => match store.persist_extraction(&org_id, kid, &result).await {
-                        Ok((eids, rids, cids)) => {
+                        Ok(persisted) => {
                             if let Err(e) = store
-                                .persist_text_unit_mappings(&org_id, kid, &eids, &rids, &cids)
+                                .persist_text_unit_mappings(
+                                    &org_id,
+                                    kid,
+                                    &persisted.entity_ids,
+                                    &persisted.rel_ids,
+                                    &persisted.claim_ids,
+                                )
                                 .await
                             {
                                 tracing::error!(err = %e, knowledge_id = kid, "persist text_unit mappings failed");
                             }
-                            total_entities += eids.len();
-                            total_rels += rids.len();
-                            total_claims += cids.len();
+                            // Mirror to the Neo4j read-model. Best-effort and
+                            // non-fatal — Postgres is canonical, the read-model
+                            // is rebuildable. This runs ONLY on org-visible,
+                            // non-restrictive-ZDR content: restrictive events
+                            // are dropped above (claims.zdr) and non-visible
+                            // chunks yield an empty PersistedExtraction, so the
+                            // mirror inherits both gates.
+                            if let Some(neo4j) = neo4j.as_ref() {
+                                if let Err(e) = neo4j
+                                    .merge_extraction(
+                                        &org_id,
+                                        &persisted.mirror_entities,
+                                        &persisted.mirror_relationships,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(err = %e, knowledge_id = kid, "neo4j mirror write failed (non-fatal; postgres canonical)");
+                                }
+                            }
+                            total_entities += persisted.entity_ids.len();
+                            total_rels += persisted.rel_ids.len();
+                            total_claims += persisted.claim_ids.len();
                         }
                         Err(e) => {
                             tracing::error!(err = %e, knowledge_id = kid, "persist extraction failed")
@@ -339,7 +370,26 @@ pub async fn run_consumer(
                 "graph extraction complete"
             );
 
+            // Ack BEFORE the community refresh: the refresh is a whole-org
+            // recompute (two bulk queries + a replace tx), so running it inside
+            // the ack window would extend the JetStream deadline under bulk
+            // ingest and risk redelivery. Post-ack keeps the message settled;
+            // the per-org advisory lock in `replace_communities` serializes any
+            // concurrent recompute so overlapping runs can't duplicate rows.
             let _ = msg.ack().await;
+
+            // Refresh the org's derived communities when this document added
+            // relationships. Best-effort: a failure is logged, never retried
+            // here (the message is already acked), and detect_communities only
+            // replaces rows AFTER a successful listing — a transient DB error
+            // cannot wipe existing communities.
+            if total_rels > 0 {
+                if let Err(e) =
+                    crate::community::detect_communities(&store, &org_id, community_min_size).await
+                {
+                    tracing::warn!(err = %e, org_id, "community refresh failed (non-fatal)");
+                }
+            }
         }
     }
 }

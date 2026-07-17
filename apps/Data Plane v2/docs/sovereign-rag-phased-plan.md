@@ -203,6 +203,13 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
 - **Files:** `pipeline/orchestrator.rs`, `pipeline/types.rs`, `config.rs`, new
   `search/keyword.rs`, infra (Meilisearch).
 - **Risk:** MEDIUM. **Complexity:** MEDIUM. **Depends on:** Phase 1 (new arm must be org-gated).
+- **Status:** **graph-in-fusion ✅** — the GraphRAG program folded the graph arm
+  into the fused RRF path: `search/graph.rs::graph_arm_candidates` is the
+  entities→candidates shape adapter, `arm_graph` joins the concurrent
+  `tokio::join!` fan-out, and `fuse_arms` applies `w_graph` (closes gap-data
+  §16.1.1). It also added a Neo4j-backed native multi-hop read-model
+  (`POST /v1/graph/traverse`) behind `NEO4J_ENABLED`. See
+  `docs/graphrag-neo4j-plan.md`. **Meilisearch keyword arm still pending.**
 
 ### Phase 5 — Erasure completeness for the new stores (GDPR Art. 17)
 - **Goal:** the purge cascade covers every store the blueprint adds.

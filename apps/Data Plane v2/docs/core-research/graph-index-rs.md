@@ -6,6 +6,31 @@ Prior flagged-but-unverified pass: 2026-07-10 earlier same-day plane audit (`app
 
 Scope: `apps/Data Plane v2/services/graph-index-rs` (Rust, container `dpv2-graph-index`, HTTP `:9203`, gRPC `:50053`)
 
+## 2026-07-17 Neo4j GraphRAG read-model + graph-in-fusion delta
+
+Landed the GraphRAG program (design: `docs/graphrag-neo4j-plan.md`). Decision:
+**extend `graph-index-rs`** rather than add a new service — Neo4j is a
+rebuildable, org-scoped **graph read-model** (same role as Qdrant/Quickwit),
+Postgres stays canonical.
+
+- **Infra/client:** `neo4j` compose service (org-scoped auth, healthcheck,
+  `dpv2_neo4j` volume) + `src/neo4j.rs` (`neo4rs` Bolt). Behind `NEO4J_ENABLED`
+  (default off), fail-closed on missing secret, boot-retry then degrade to the
+  Postgres path — the core service has **no** `depends_on: neo4j`.
+- **Dual-write:** `merge_extraction` (batched `UNWIND`/`MERGE`, idempotent on the
+  Postgres PKs) runs downstream of `persist_extraction`, inheriting the
+  org-visibility + restrictive-ZDR gates; non-fatal.
+- **Traverse:** `POST /v1/graph/traverse` — native `*1..N` Cypher (org_id on
+  seed, every edge, reached node), org-pinned via the verified `Principal`,
+  `store::get_subgraph_visible` Postgres provenance re-join (Neo4j is never an
+  authz source), transparent Postgres-BFS fallback.
+- **Fusion:** retrieval-engine `arm_graph` folds `w_graph` into the fused RRF
+  path (`search/graph.rs::graph_arm_candidates` adapter) — closes gap-data
+  §16.1.1 and the Sovereign-plan Phase-4 "graph-in-fusion" step.
+- **Tests:** unit (client, Cypher org-scoping, clamp, mirror shaping, fusion
+  order) + a gated `#[ignore]` live-Neo4j roundtrip. Workspace clippy
+  `-D warnings` + lib tests green. Not yet run against a live Neo4j deployment.
+
 ## 2026-07-15 final isolated acceptance delta
 
 The final rebuilt service passed HTTP 401/401/200/403 and all six GraphService

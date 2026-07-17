@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::cache::CacheLayer;
 use crate::config::Config;
-use crate::context_pack::pack_context;
+use crate::context_pack::pack_context_with_pins;
 use crate::embed::EmbeddingClient;
 use crate::pipeline::types::*;
 use crate::search::dense::vector_search;
@@ -106,6 +106,11 @@ pub struct RetrievalPipeline {
     /// Embed-v4's page-image candidates by ColQwen late-interaction (MaxSim)
     /// relevance; any failure degrades to the Embed-v4 order (non-fatal).
     pub colqwen: Option<crate::search::colqwen::ColqwenClient>,
+    /// Deep multi-hop graph traversal client (graph-index's `/v1/graph/traverse`,
+    /// Neo4j read-model). `None` when `GRAPH_INDEX_URL` is empty. Used by the
+    /// fused graph arm only when the request carries a verified bearer to
+    /// forward; otherwise the arm's in-process 1-hop grounding serves alone.
+    pub graph_remote: Option<crate::search::graph_remote::GraphTraverseClient>,
 }
 
 /// A page-image candidate's fetchable `image_url`, read from its raw Qdrant
@@ -123,6 +128,79 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
     }
 }
 
+/// Pure placement of ColQwen (late-interaction MaxSim) scores into the fused
+/// candidate list — extracted from `visual_rerank` so both modes are
+/// unit-testable without a live ColQwen server.
+///
+/// - **Band mode** (`joint = false`, the historical behavior): the visual
+///   candidates are reordered *among themselves* by ColQwen relevance but keep
+///   the fused-score band they already occupy — a visual hit can never
+///   leapfrog a text hit.
+/// - **Joint mode** (`joint = true`, default): ColQwen scores are min-max
+///   mapped onto the fused list's global score range and the whole list is
+///   re-sorted — true joint text-vs-image ordering, where a strongly relevant
+///   page image CAN outrank weaker text candidates (and a weak one can sink).
+///   Degenerate spreads (all ColQwen scores equal, or a flat fused range)
+///   fall back to band mode rather than fabricate an ordering.
+///
+/// `idxs[k]` is the fused-list slot of the visual candidate scored `scores[k]`.
+fn apply_colqwen_scores(
+    mut fused: Vec<ScoredCandidate>,
+    idxs: &[usize],
+    scores: &[f32],
+    joint: bool,
+) -> Vec<ScoredCandidate> {
+    if idxs.is_empty() || idxs.len() != scores.len() {
+        return fused;
+    }
+
+    let cq_min = scores.iter().copied().fold(f32::INFINITY, f32::min);
+    let cq_max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let g_min = fused
+        .iter()
+        .map(|c| c.final_score)
+        .fold(f32::INFINITY, f32::min);
+    let g_max = fused
+        .iter()
+        .map(|c| c.final_score)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    if joint && cq_max > cq_min && g_max > g_min {
+        // Joint text-vs-image: map each ColQwen score onto the global fused
+        // score range, then re-sort the whole list.
+        for (k, &slot) in idxs.iter().enumerate() {
+            let mapped = g_min + (scores[k] - cq_min) / (cq_max - cq_min) * (g_max - g_min);
+            fused[slot].rerank_score = scores[k];
+            fused[slot].final_score = mapped;
+        }
+        fused.sort_by(|a, b| {
+            b.final_score
+                .partial_cmp(&a.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return fused;
+    }
+
+    // Band mode: pair each visual candidate with its ColQwen score, sort
+    // best-first, and write them back into the visual slots by descending band
+    // score — only the order among the visual candidates changes.
+    let mut ranked: Vec<(ScoredCandidate, f32)> = idxs
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| (fused[i].clone(), scores[k]))
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut band: Vec<f32> = idxs.iter().map(|&i| fused[i].final_score).collect();
+    band.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    for (rank, &slot) in idxs.iter().enumerate() {
+        let (mut cand, cq) = ranked[rank].clone();
+        cand.rerank_score = cq;
+        cand.final_score = band[rank];
+        fused[slot] = cand;
+    }
+    fused
+}
+
 /// Pure fusion chain extracted from `retrieve()` so it is unit-testable and so
 /// the concurrently-gathered arms fuse in EXACTLY the original sequential order:
 ///
@@ -130,8 +208,11 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
 ///      sparse arm ran (`sparse = Some`) AND dense is routed; sparse-only when
 ///      the sparse arm ran but dense isn't routed; dense-only with NO RRF when
 ///      the sparse arm didn't run (`sparse = None`).
-///   2. wiki RRF (k=60, `w_wiki`) when `w_wiki > 0` and the wiki arm returned hits.
-///   3. visual RRF (k=60, `w_visual`) when `w_visual > 0` and the visual arm
+///   2. graph RRF (k=60, `w_graph`) when `w_graph > 0` and the graph arm returned
+///      hits. This is the signal §16.1.1 flagged as recorded-but-never-scored —
+///      it now drives fusion, so the `mode_mix` trace no longer lies.
+///   3. wiki RRF (k=60, `w_wiki`) when `w_wiki > 0` and the wiki arm returned hits.
+///   4. visual RRF (k=60, `w_visual`) when `w_visual > 0` and the visual arm
 ///      returned hits.
 ///
 /// Returns the fused list plus the sparse candidate count for the trace. The
@@ -141,6 +222,7 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
 fn fuse_arms(
     dense: Vec<ScoredCandidate>,
     sparse: Option<Vec<ScoredCandidate>>,
+    graph: Vec<ScoredCandidate>,
     wiki: Vec<ScoredCandidate>,
     visual: Vec<ScoredCandidate>,
     mix: &ResolvedWeights,
@@ -171,6 +253,13 @@ fn fuse_arms(
         None => (dense, 0),
     };
 
+    // Graph arm — fold graph-grounded candidates by w_graph (peer of wiki/visual,
+    // additive RRF). Closes §16.1.1: w_graph now affects scoring, not just the
+    // trace.
+    if mix.w_graph > 0.0 && !graph.is_empty() {
+        fused = reciprocal_rank_fusion(&fused, &graph, 60.0, mix.w_graph);
+    }
+
     // Step 5 — wiki 4-way merge by its w_wiki share.
     if mix.w_wiki > 0.0 && !wiki.is_empty() {
         fused = reciprocal_rank_fusion(&fused, &wiki, 60.0, mix.w_wiki);
@@ -193,7 +282,7 @@ impl RetrievalPipeline {
     async fn visual_rerank(
         &self,
         query: &str,
-        mut fused: Vec<ScoredCandidate>,
+        fused: Vec<ScoredCandidate>,
         embed_zdr: bool,
     ) -> Vec<ScoredCandidate> {
         let Some(ref client) = self.colqwen else {
@@ -228,26 +317,13 @@ impl RetrievalPipeline {
                 return fused;
             }
         };
-        // Pair each visual candidate with its ColQwen score and sort best-first.
-        let mut ranked: Vec<(ScoredCandidate, f32)> = idxs
-            .iter()
-            .enumerate()
-            .map(|(k, &i)| (fused[i].clone(), scores[k]))
-            .collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        // The score band the visual candidates currently occupy (desc), reused so
-        // the reordered subset interleaves with text candidates exactly as before.
-        let mut band: Vec<f32> = idxs.iter().map(|&i| fused[i].final_score).collect();
-        band.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        // Write the best ColQwen candidate into the earliest visual slot with the
-        // highest band score, and so on — reorders the subset in place.
-        for (rank, &slot) in idxs.iter().enumerate() {
-            let (mut cand, cq) = ranked[rank].clone();
-            cand.rerank_score = cq;
-            cand.final_score = band[rank];
-            fused[slot] = cand;
-        }
-        tracing::info!(reranked = urls.len(), "visual reranker (ColQwen) applied");
+        let joint = self.config.joint_multimodal_rerank;
+        let fused = apply_colqwen_scores(fused, &idxs, &scores, joint);
+        tracing::info!(
+            reranked = urls.len(),
+            joint,
+            "visual reranker (ColQwen) applied"
+        );
         fused
     }
 
@@ -327,6 +403,100 @@ impl RetrievalPipeline {
             Ok(_) => Vec::new(),
             Err(e) => {
                 tracing::warn!(error = %e, "wiki ANN arm failed; skipping");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Graph arm — org-scoped graph-neighbourhood grounding, in two tiers:
+    ///
+    ///   1. **Deep multi-hop (remote):** when `graph_remote` is configured AND
+    ///      the request carries a verified bearer, resolve seed entities from
+    ///      the query text and call graph-index's `POST /v1/graph/traverse`
+    ///      (Neo4j read-model, server-side Postgres fallback) forwarding that
+    ///      bearer — graph-index independently re-verifies it and pins the org.
+    ///      The traversed `(entity, hop)` set is grounded back to org-visible
+    ///      chunks nearest-hop-first (the "entities → candidates" adapter).
+    ///   2. **In-process 1-hop (fallback):** the local SQL grounding (entities
+    ///      matching the query + their 1-hop neighbours). Also the only tier on
+    ///      bearer-less internal calls.
+    ///
+    /// Gated on `w_graph > 0`. Uses the query TEXT (no embedding), so it runs
+    /// regardless of the dense route. NON-FATAL at every step: remote errors
+    /// degrade to tier 2; tier-2 errors yield an empty arm, exactly like the
+    /// wiki/visual arms. The graph is built only from `visibility = 'org'`
+    /// provenance and the step-6 canonical gate still re-filters, so this arm
+    /// cannot leak.
+    async fn arm_graph(
+        &self,
+        query: &str,
+        org_id: &str,
+        bearer: Option<&str>,
+        w_graph: f32,
+        top_k: usize,
+    ) -> Vec<ScoredCandidate> {
+        if w_graph <= 0.0 {
+            return Vec::new();
+        }
+
+        // Tier 1 — deep multi-hop via graph-index's traverse endpoint.
+        if let (Some(remote), Some(bearer)) = (self.graph_remote.as_ref(), bearer) {
+            match crate::search::graph::seed_entities_for_query(&self.pool, query, org_id, 8).await
+            {
+                Ok(seeds) if !seeds.is_empty() => {
+                    match remote
+                        .traverse(
+                            bearer,
+                            org_id,
+                            &seeds,
+                            self.config.graph_remote_max_hops,
+                            top_k as u32,
+                        )
+                        .await
+                    {
+                        Ok(reached) => {
+                            // Seeds are the direct query matches (hop 0); the
+                            // traversal contributes the connected facts.
+                            let mut entities: Vec<(String, u8)> =
+                                seeds.into_iter().map(|id| (id, 0)).collect();
+                            entities.extend(reached);
+                            match crate::search::graph::chunks_for_entities(
+                                &self.pool,
+                                org_id,
+                                &entities,
+                                top_k as i64,
+                            )
+                            .await
+                            {
+                                Ok(candidates) => return candidates,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "graph arm chunk grounding failed; falling back to 1-hop")
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "graph traverse (remote) failed; falling back to 1-hop")
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // No seed entities match the query — the 1-hop SQL would
+                    // find nothing either (same match predicate); skip cleanly.
+                    return Vec::new();
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "graph seed resolution failed; falling back to 1-hop")
+                }
+            }
+        }
+
+        // Tier 2 — in-process 1-hop grounding.
+        match crate::search::graph::graph_arm_candidates(&self.pool, query, org_id, top_k as i64)
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(e) => {
+                tracing::warn!(error = %e, "graph arm failed; skipping");
                 Vec::new()
             }
         }
@@ -431,18 +601,40 @@ impl RetrievalPipeline {
         // `agent_id` AND a row exists for (org_id, agent_id), the row's
         // `weights` becomes the default; any explicit per-request
         // `mode_mix` still overrides. Cohort precedence:
-        //   per-request mode_mix > agent default > global config
+        //   per-request mode_mix > agent default > smart hybrid > global config
         let agent_default = if let Some(agent_id) = req.agent_id.as_deref() {
             crate::agent_config::lookup(&self.pool, &req.org_id, agent_id).await
         } else {
             None
         };
-        let starting_mix = req.mode_mix.clone().unwrap_or_else(|| {
-            agent_default
-                .as_ref()
-                .and_then(|c| serde_json::from_value::<ModeMixWeights>(c.weights.clone()).ok())
-                .unwrap_or_default()
-        });
+        let starting_mix = req
+            .mode_mix
+            .clone()
+            .or_else(|| {
+                agent_default
+                    .as_ref()
+                    .and_then(|c| serde_json::from_value::<ModeMixWeights>(c.weights.clone()).ok())
+            })
+            .or_else(|| {
+                // Smart hybrid — query-adaptive weight suggestion. Only when
+                // neither the caller nor the agent config expressed a blend;
+                // a neutral query yields all-None (static defaults apply).
+                // The resolved mix lands on the trace either way (auditable).
+                if self.config.smart_hybrid_enabled {
+                    let smart = crate::pipeline::smart_mix::smart_mode_mix(&req.query);
+                    tracing::debug!(
+                        w_dense = ?smart.w_dense,
+                        w_bm25 = ?smart.w_bm25,
+                        w_graph = ?smart.w_graph,
+                        w_visual = ?smart.w_visual,
+                        "smart hybrid mode-mix suggestion"
+                    );
+                    Some(smart)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
         let mix_for_scoring = starting_mix.resolve(
             self.config.w_dense,
             self.config.w_bm25,
@@ -554,9 +746,16 @@ impl RetrievalPipeline {
         // arm exactly as the sequential code did with `qv.clone()`. The sparse
         // weight for RRF is the captured `w_bm25` (renormalized over dense+bm25).
         let arms_start = Instant::now();
-        let (dense_res, sparse_res, wiki_candidates, visual_candidates) = tokio::join!(
+        let (dense_res, sparse_res, graph_candidates, wiki_candidates, visual_candidates) = tokio::join!(
             self.arm_dense(&query_vector, &req.org_id, conditions, top_k),
             self.arm_sparse(&req.query, &req.org_id, top_k, route.sparse),
+            self.arm_graph(
+                &req.query,
+                &req.org_id,
+                req.verified_bearer.as_deref(),
+                mix_for_scoring.w_graph,
+                top_k,
+            ),
             self.arm_wiki(&query_vector, &req.org_id, mix_for_scoring.w_wiki, top_k),
             self.arm_visual(
                 &req.query,
@@ -575,14 +774,15 @@ impl RetrievalPipeline {
         // `dense_ms` now measures the concurrent arm phase (all four overlap).
         let dense_ms = arms_start.elapsed().as_millis() as u64;
 
-        // Fuse the gathered arms sequentially in the SAME order and with the
-        // SAME weights as before: RRF(dense, sparse) with renormalized
-        // bm25_share (or sparse-only / dense-only per route), then RRF(_, wiki)
-        // by w_wiki, then RRF(_, visual) by w_visual.
+        // Fuse the gathered arms sequentially: RRF(dense, sparse) with
+        // renormalized bm25_share (or sparse-only / dense-only per route), then
+        // RRF(_, graph) by w_graph, then RRF(_, wiki) by w_wiki, then
+        // RRF(_, visual) by w_visual.
         let fusion_start = Instant::now();
         let (fused_candidates, candidate_count_sparse) = fuse_arms(
             dense_candidates,
             sparse_opt,
+            graph_candidates,
             wiki_candidates,
             visual_candidates,
             &mix_for_scoring,
@@ -783,13 +983,32 @@ impl RetrievalPipeline {
             candidate_count_reranked,
         };
 
-        // 10. Context packing (if budget requested)
+        // 10. Context packing (if budget requested). CAG: the org's pinned
+        // permanent-memory facts pack FIRST (priority order), retrieval
+        // candidates fill the remaining budget. Pins are org-shared reads —
+        // fine under ZDR (no persistence, no egress) — and best-effort: a pin
+        // lookup failure degrades to a retrieval-only pack.
         let context_pack = if let Some(budget) = req.context_budget_tokens {
             let format = req
                 .context_format
                 .clone()
                 .unwrap_or_else(|| "json".to_string());
-            Some(pack_context(&reranked, &sources, budget, &format))
+            let pins = match crate::context_pins::list_pins(
+                &self.pool,
+                &req.org_id,
+                crate::context_pins::MAX_PINS,
+            )
+            .await
+            {
+                Ok(pins) => pins,
+                Err(e) => {
+                    tracing::warn!(error = %e, "context pins lookup failed; packing retrieval-only");
+                    Vec::new()
+                }
+            };
+            Some(pack_context_with_pins(
+                &pins, &reranked, &sources, budget, &format,
+            ))
         } else {
             None
         };
@@ -1239,6 +1458,7 @@ mod tests {
             Some(sparse.clone()),
             vec![],
             vec![],
+            vec![],
             &m,
             true,
         );
@@ -1263,6 +1483,7 @@ mod tests {
         let (got, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             wiki.clone(),
             vec![],
             &m,
@@ -1287,6 +1508,7 @@ mod tests {
         let (got, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             wiki.clone(),
             visual.clone(),
             &m,
@@ -1309,6 +1531,7 @@ mod tests {
             Some(sparse.clone()),
             vec![],
             vec![],
+            vec![],
             &m,
             false,
         );
@@ -1323,7 +1546,7 @@ mod tests {
         let m = mix(1.0, 0.0, 0.0, 0.0);
 
         // sparse = None (route off): dense returned raw, count 0, no RRF.
-        let (got, sparse_count) = fuse_arms(dense.clone(), None, vec![], vec![], &m, true);
+        let (got, sparse_count) = fuse_arms(dense.clone(), None, vec![], vec![], vec![], &m, true);
         assert_eq!(sparse_count, 0);
         assert_eq!(project(&got), project(&dense));
 
@@ -1331,8 +1554,15 @@ mod tests {
         // re-weighting dense — proving the Option distinction is load-bearing.
         let m2 = mix(0.7, 0.3, 0.0, 0.0);
         let expected_empty_rrf = reciprocal_rank_fusion(&dense, &[], 60.0, bm25_share(&m2));
-        let (got_empty, count_empty) =
-            fuse_arms(dense.clone(), Some(vec![]), vec![], vec![], &m2, true);
+        let (got_empty, count_empty) = fuse_arms(
+            dense.clone(),
+            Some(vec![]),
+            vec![],
+            vec![],
+            vec![],
+            &m2,
+            true,
+        );
         assert_eq!(count_empty, 0);
         assert_eq!(project(&got_empty), project(&expected_empty_rrf));
         assert_ne!(project(&got_empty), project(&dense));
@@ -1349,6 +1579,7 @@ mod tests {
         let (got_weight_off, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             vec![cand("k-w1", "doc-w1", 0.9)],
             vec![],
             &base_mix,
@@ -1364,9 +1595,143 @@ mod tests {
             Some(sparse.clone()),
             vec![],
             vec![],
+            vec![],
             &m,
             true,
         );
         assert_eq!(project(&got_empty_arms), project(&expected_empty_arms));
+    }
+
+    fn mix_graph(w_dense: f32, w_bm25: f32, w_graph: f32) -> ResolvedWeights {
+        ResolvedWeights {
+            w_dense,
+            w_bm25,
+            w_graph,
+            w_wiki: 0.0,
+            w_visual: 0.0,
+            rerank: true,
+        }
+    }
+
+    #[test]
+    fn fuse_layers_graph_after_dense_sparse() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let graph = vec![
+            cand("k-g1", "doc-g1", 0.9),
+            cand("k-shared", "doc-shared", 0.5),
+        ];
+        let m = mix_graph(0.6, 0.2, 0.4);
+
+        // Oracle: dense+sparse RRF, THEN graph RRF by w_graph (peer position,
+        // before the empty wiki/visual arms).
+        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let expected = reciprocal_rank_fusion(&base, &graph, 60.0, m.w_graph);
+
+        let (got, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            graph.clone(),
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+
+        assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_skips_graph_when_weight_zero_or_empty() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+
+        // w_graph = 0 but a graph list IS supplied → graph must be ignored.
+        let base_mix = mix(0.7, 0.3, 0.0, 0.0);
+        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&base_mix));
+        let (got_weight_off, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![cand("k-g1", "doc-g1", 0.9)],
+            vec![],
+            vec![],
+            &base_mix,
+            true,
+        );
+        assert_eq!(project(&got_weight_off), project(&expected));
+
+        // w_graph > 0 but the graph arm returned nothing → skipped.
+        let m = mix_graph(0.6, 0.2, 0.4);
+        let expected_empty = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let (got_empty, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+        assert_eq!(project(&got_empty), project(&expected_empty));
+    }
+
+    // --- apply_colqwen_scores: joint (text-vs-image) vs band-preserving modes.
+
+    use super::apply_colqwen_scores;
+
+    /// fused = [text 0.9, visual 0.5, text 0.4, visual 0.2] (already desc).
+    fn multimodal_fixture() -> Vec<ScoredCandidate> {
+        vec![
+            cand("t1", "doc-t1", 0.9),
+            cand("v1", "doc-v1", 0.5),
+            cand("t2", "doc-t2", 0.4),
+            cand("v2", "doc-v2", 0.2),
+        ]
+    }
+
+    fn ids(v: &[ScoredCandidate]) -> Vec<&str> {
+        v.iter().map(|c| c.knowledge_id.as_str()).collect()
+    }
+
+    #[test]
+    fn joint_mode_lets_strong_visual_leapfrog_text() {
+        // v2 (slot 3, weakest fused score) gets the strongest ColQwen score:
+        // in joint mode it maps to the global max (0.9) and must leapfrog t2.
+        let got = apply_colqwen_scores(multimodal_fixture(), &[1, 3], &[2.0, 10.0], true);
+        assert_eq!(ids(&got), vec!["t1", "v2", "t2", "v1"]);
+        // Raw ColQwen scores are preserved on rerank_score for the trace.
+        let v2 = got.iter().find(|c| c.knowledge_id == "v2").unwrap();
+        assert_eq!(v2.rerank_score, 10.0);
+        assert!((v2.final_score - 0.9).abs() < 1e-6);
+        let v1 = got.iter().find(|c| c.knowledge_id == "v1").unwrap();
+        assert!((v1.final_score - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn band_mode_reorders_visuals_within_their_band_only() {
+        // Same ColQwen scores, band mode: v2 takes v1's band slot (0.5) and
+        // vice versa — but neither crosses a text candidate.
+        let got = apply_colqwen_scores(multimodal_fixture(), &[1, 3], &[2.0, 10.0], false);
+        assert_eq!(ids(&got), vec!["t1", "v2", "t2", "v1"]);
+        let scores: Vec<f32> = got.iter().map(|c| c.final_score).collect();
+        assert_eq!(scores, vec![0.9, 0.5, 0.4, 0.2]);
+    }
+
+    #[test]
+    fn joint_mode_degenerate_scores_fall_back_to_band() {
+        // All ColQwen scores equal → no honest joint ordering exists; keep the
+        // band behavior instead of fabricating one.
+        let got = apply_colqwen_scores(multimodal_fixture(), &[1, 3], &[5.0, 5.0], true);
+        let scores: Vec<f32> = got.iter().map(|c| c.final_score).collect();
+        assert_eq!(scores, vec![0.9, 0.5, 0.4, 0.2]);
+    }
+
+    #[test]
+    fn colqwen_placement_ignores_mismatched_inputs() {
+        let fused = multimodal_fixture();
+        let got = apply_colqwen_scores(fused.clone(), &[1, 3], &[1.0], true);
+        assert_eq!(project(&got), project(&fused));
+        let got_empty = apply_colqwen_scores(fused.clone(), &[], &[], true);
+        assert_eq!(project(&got_empty), project(&fused));
     }
 }

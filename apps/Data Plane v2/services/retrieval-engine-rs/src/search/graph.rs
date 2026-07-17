@@ -1,4 +1,176 @@
+use std::collections::HashMap;
+
 use sqlx::PgPool;
+
+use crate::pipeline::types::ScoredCandidate;
+
+/// SQL for the fused graph ARM: unlike `graph_expansion_search` (which returns
+/// entity/relationship/claim objects for the standalone `/v1/retrieve/graph`
+/// endpoint), this returns **chunk candidates** grounded in the graph so the
+/// arm can be RRF-fused with dense/sparse/wiki/visual (the "entities → candidates
+/// shape adapter"). It surfaces chunks of entities matching the query (hop 0)
+/// AND chunks of their 1-hop relationship neighbours (hop 1) — the graph's
+/// value-add over pure text match. Ordered hop-then-rank so direct hits precede
+/// connected ones. Org-scoped throughout; only `visibility = 'org'` provenance
+/// (the only content the graph is built from) is eligible, and the pipeline's
+/// step-6 canonical gate still re-filters every candidate afterwards.
+const GRAPH_ARM_SQL: &str = "WITH matched AS (
+        SELECT ge.entity_id,
+               ts_rank_cd(to_tsvector('english', ge.entity_text), plainto_tsquery('english', $2)) AS rank
+        FROM graph_entities ge
+        WHERE ge.org_id = $1
+          AND to_tsvector('english', ge.entity_text) @@ plainto_tsquery('english', $2)
+        ORDER BY rank DESC
+        LIMIT 25
+     ),
+     connected AS (
+        SELECT entity_id, rank, 0 AS hop FROM matched
+        UNION
+        SELECT CASE WHEN gr.entity_a_id = m.entity_id THEN gr.entity_b_id ELSE gr.entity_a_id END AS entity_id,
+               m.rank, 1 AS hop
+        FROM matched m
+        JOIN graph_relationships gr
+          ON gr.org_id = $1 AND (gr.entity_a_id = m.entity_id OR gr.entity_b_id = m.entity_id)
+     ),
+     ranked AS (
+        SELECT ku.knowledge_id, ku.document_id, ku.text,
+               MIN(c.hop) AS hop, MAX(c.rank) AS rank
+        FROM connected c
+        JOIN graph_text_units gtu ON gtu.entity_id = c.entity_id AND gtu.org_id = $1
+        JOIN knowledge_units ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = $1
+        JOIN documents d ON d.document_id = ku.document_id AND d.org_id = $1
+        WHERE d.deleted_at IS NULL AND d.visibility = 'org'
+        GROUP BY ku.knowledge_id, ku.document_id, ku.text
+     )
+     SELECT knowledge_id, document_id, text
+     FROM ranked
+     ORDER BY hop ASC, rank DESC
+     LIMIT $3";
+
+fn graph_arm_sql() -> &'static str {
+    GRAPH_ARM_SQL
+}
+
+/// Seed-entity resolution for the REMOTE (deep multi-hop) graph arm: the
+/// org-scoped entities whose text matches the query, best-first. These ids seed
+/// graph-index's `/v1/graph/traverse`.
+const SEED_ENTITY_SQL: &str = "SELECT ge.entity_id
+     FROM graph_entities ge
+     WHERE ge.org_id = $1
+       AND to_tsvector('english', ge.entity_text) @@ plainto_tsquery('english', $2)
+     ORDER BY ts_rank_cd(to_tsvector('english', ge.entity_text), plainto_tsquery('english', $2)) DESC
+     LIMIT $3";
+
+/// Entities → chunks grounding for the remote arm. Takes the traversed
+/// `(entity_id, hop)` pairs and maps them to org-visible, live chunks via
+/// `graph_text_units`, keeping each chunk's MINIMUM hop so direct matches
+/// (hop 0 seeds) outrank distant neighbours. Same visibility posture as
+/// `GRAPH_ARM_SQL`: only `visibility = 'org'` provenance is eligible, and the
+/// pipeline's step-6 canonical gate re-filters afterwards.
+const CHUNKS_FOR_ENTITIES_SQL: &str =
+    "SELECT ku.knowledge_id, ku.document_id, ku.text, MIN(e.hop)::int AS hop
+     FROM UNNEST($2::text[], $3::int[]) AS e(entity_id, hop)
+     JOIN graph_text_units gtu ON gtu.entity_id = e.entity_id AND gtu.org_id = $1
+     JOIN knowledge_units ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = $1
+     JOIN documents d ON d.document_id = ku.document_id AND d.org_id = $1
+     WHERE d.deleted_at IS NULL AND d.visibility = 'org'
+     GROUP BY ku.knowledge_id, ku.document_id, ku.text
+     ORDER BY MIN(e.hop) ASC
+     LIMIT $4";
+
+fn seed_entity_sql() -> &'static str {
+    SEED_ENTITY_SQL
+}
+
+fn chunks_for_entities_sql() -> &'static str {
+    CHUNKS_FOR_ENTITIES_SQL
+}
+
+/// Resolves the query's seed entity ids (org-scoped, best-first) for the remote
+/// multi-hop traversal.
+pub async fn seed_entities_for_query(
+    pool: &PgPool,
+    query: &str,
+    org_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<String>> {
+    let rows = sqlx::query_as::<_, (String,)>(seed_entity_sql())
+        .bind(org_id)
+        .bind(query)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Grounds traversed `(entity_id, hop)` pairs back to chunk candidates,
+/// ordered nearest-hop-first. RRF consumes the order; scores stay 0.
+pub async fn chunks_for_entities(
+    pool: &PgPool,
+    org_id: &str,
+    entities: &[(String, u8)],
+    limit: i64,
+) -> anyhow::Result<Vec<ScoredCandidate>> {
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<String> = entities.iter().map(|(id, _)| id.clone()).collect();
+    let hops: Vec<i32> = entities.iter().map(|(_, h)| i32::from(*h)).collect();
+    let rows = sqlx::query_as::<_, (String, String, String, i32)>(chunks_for_entities_sql())
+        .bind(org_id)
+        .bind(&ids)
+        .bind(&hops)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(knowledge_id, document_id, text, _hop)| ScoredCandidate {
+            knowledge_id,
+            document_id,
+            text,
+            dense_score: 0.0,
+            sparse_score: 0.0,
+            rerank_score: 0.0,
+            final_score: 0.0,
+            chunk_index: 0,
+            metadata: HashMap::new(),
+        })
+        .collect())
+}
+
+/// Graph retrieval ARM for RRF fusion. Returns chunk candidates grounded in the
+/// query-matching graph neighbourhood, ordered best-first. RRF consumes the
+/// order (not the raw scores), so scores are left at 0 and set during fusion.
+/// Non-fatal by contract: the orchestrator logs + skips on error.
+pub async fn graph_arm_candidates(
+    pool: &PgPool,
+    query: &str,
+    org_id: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<ScoredCandidate>> {
+    let rows = sqlx::query_as::<_, (String, String, String)>(graph_arm_sql())
+        .bind(org_id)
+        .bind(query)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(knowledge_id, document_id, text)| ScoredCandidate {
+            knowledge_id,
+            document_id,
+            text,
+            dense_score: 0.0,
+            sparse_score: 0.0,
+            rerank_score: 0.0,
+            final_score: 0.0,
+            chunk_index: 0,
+            metadata: HashMap::new(),
+        })
+        .collect())
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GraphExpansionResult {
@@ -296,5 +468,44 @@ mod tests {
         let community_sql = community_summary_sql();
         assert!(community_sql.contains("jsonb_array_elements_text"));
         assert!(community_sql.contains("NOT (member.entity_id = ANY($3))"));
+    }
+
+    #[test]
+    fn graph_arm_sql_is_org_scoped_and_grounds_via_graph_neighbourhood() {
+        let sql = graph_arm_sql();
+        // Org scoping on every graph table it touches.
+        assert!(sql.contains("ge.org_id = $1"));
+        assert!(sql.contains("gr.org_id = $1"));
+        assert!(sql.contains("gtu.org_id = $1"));
+        assert!(sql.contains("ku.org_id = $1"));
+        assert!(sql.contains("d.org_id = $1"));
+        // Only org-visible, live provenance is eligible.
+        assert!(sql.contains("d.visibility = 'org'"));
+        assert!(sql.contains("d.deleted_at IS NULL"));
+        // Grounds candidates through the graph (entities + 1-hop neighbours),
+        // not just a text match — that is the arm's reason to exist.
+        assert!(sql.contains("graph_relationships"));
+        assert!(sql.contains("graph_text_units"));
+        assert!(sql.contains("LIMIT $3"));
+    }
+
+    #[test]
+    fn remote_arm_queries_are_org_scoped_and_hop_ordered() {
+        let seed = seed_entity_sql();
+        assert!(seed.contains("ge.org_id = $1"));
+        assert!(seed.contains("LIMIT $3"));
+
+        let chunks = chunks_for_entities_sql();
+        // Org scoping on every joined table.
+        assert!(chunks.contains("gtu.org_id = $1"));
+        assert!(chunks.contains("ku.org_id = $1"));
+        assert!(chunks.contains("d.org_id = $1"));
+        // Only org-visible, live provenance.
+        assert!(chunks.contains("d.visibility = 'org'"));
+        assert!(chunks.contains("d.deleted_at IS NULL"));
+        // Nearest-hop-first ordering (min hop per chunk).
+        assert!(chunks.contains("MIN(e.hop)"));
+        assert!(chunks.contains("ORDER BY MIN(e.hop) ASC"));
+        assert!(chunks.contains("LIMIT $4"));
     }
 }

@@ -90,19 +90,19 @@ pub async fn persist_trace(
         ))
     };
 
-    // §16.1.1 — mode_mix vs mode_mix_applied. The current scorer is RRF
-    // over (dense, bm25) only; graph + wiki weights are recorded but
-    // ignored until the 4-way fold-in lands in v2.5. So we surface
-    // honesty: requested → mode_mix; actually-used → mode_mix_applied
-    // with w_graph/w_wiki zeroed out.
+    // §16.1.1 — mode_mix vs mode_mix_applied. Since the 5-arm fold-in
+    // (graph/wiki/visual all drive fused scoring), the applied mix IS the
+    // resolved mix — the column stays so historical rows (which recorded
+    // zeroed graph/wiki with the old scorer) remain interpretable.
     let mode_mix_applied_json = mode_mix.map(|w| {
         serde_json::json!({
             "w_dense": w.w_dense,
             "w_bm25":  w.w_bm25,
-            "w_graph": 0.0_f32,
-            "w_wiki":  0.0_f32,
+            "w_graph": w.w_graph,
+            "w_wiki":  w.w_wiki,
+            "w_visual": w.w_visual,
             "rerank":  w.rerank,
-            "note":    "graph+wiki weights ignored by current RRF scorer; see §16.1.1",
+            "note":    "all arm weights applied by the fused RRF scorer",
         })
     });
 

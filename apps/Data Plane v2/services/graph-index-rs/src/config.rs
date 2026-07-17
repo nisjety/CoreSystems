@@ -57,9 +57,36 @@ pub struct Config {
     #[serde(default = "default_max_entities_per_chunk")]
     pub max_entities_per_chunk: usize,
 
+    // Minimum member count for a derived community. Consumed by the
+    // post-extraction refresh and the /v1/graph/communities/rebuild endpoint.
     #[serde(default = "default_community_min_size")]
-    #[allow(dead_code)] // consumed by detect_communities once that path is wired
     pub community_min_size: usize,
+
+    // Neo4j graph read-model (Phase 2). Disabled by default so the change is
+    // additive: when off, graph traversal falls back to the Postgres BFS path.
+    // When `neo4j_enabled` is true, `main` fails startup closed if the password
+    // is empty (secret must be deployment-supplied).
+    #[serde(default)]
+    pub neo4j_enabled: bool,
+    #[serde(default = "default_neo4j_url")]
+    pub neo4j_url: String,
+    #[serde(default = "default_neo4j_user")]
+    pub neo4j_user: String,
+    #[serde(default)]
+    pub neo4j_password: String,
+    #[serde(default = "default_neo4j_database")]
+    pub neo4j_database: String,
+    // Boot connect retry count (3s apart). Must outlast a Neo4j cold start so
+    // NEO4J_ENABLED=true doesn't silently lose the startup race. Default 30
+    // (≈90s). Env: NEO4J_BOOT_ATTEMPTS.
+    #[serde(default = "default_neo4j_boot_attempts")]
+    pub neo4j_boot_attempts: u32,
+    // Multi-hop traversal bounds (Phase 4). Requests are clamped to these; the
+    // hop count is additionally ceilinged at `neo4j::MAX_HOPS_CEILING`.
+    #[serde(default = "default_graph_max_hops")]
+    pub graph_max_hops: u8,
+    #[serde(default = "default_graph_traverse_max_entities")]
+    pub graph_traverse_max_entities: usize,
 
     #[serde(default)]
     pub embedding_event_public_key_path: String,
@@ -136,12 +163,35 @@ fn default_max_entities_per_chunk() -> usize {
     20
 }
 
+fn default_neo4j_boot_attempts() -> u32 {
+    30
+}
 fn default_community_min_size() -> usize {
     3
 }
 
 fn default_event_auth_audience() -> String {
     "dataplane-events".into()
+}
+
+fn default_neo4j_url() -> String {
+    "bolt://neo4j:7687".into()
+}
+
+fn default_neo4j_user() -> String {
+    "neo4j".into()
+}
+
+fn default_neo4j_database() -> String {
+    "neo4j".into()
+}
+
+fn default_graph_max_hops() -> u8 {
+    3
+}
+
+fn default_graph_traverse_max_entities() -> usize {
+    100
 }
 
 #[cfg(test)]
@@ -162,5 +212,31 @@ mod tests {
             envy::from_iter([("EXTRACTION_PROVIDER".to_owned(), "azure_openai".to_owned())])
                 .expect("legacy config");
         assert_eq!(legacy.extraction_provider, "azure_openai");
+    }
+
+    #[test]
+    fn neo4j_defaults_off_with_internal_connection_defaults() {
+        let cfg: Config = envy::from_iter([]).expect("config");
+        assert!(
+            !cfg.neo4j_enabled,
+            "neo4j must be off by default (additive)"
+        );
+        assert_eq!(cfg.neo4j_url, "bolt://neo4j:7687");
+        assert_eq!(cfg.neo4j_user, "neo4j");
+        assert_eq!(cfg.neo4j_database, "neo4j");
+        assert!(cfg.neo4j_password.is_empty());
+    }
+
+    #[test]
+    fn neo4j_enabled_parses_from_env_bool() {
+        let cfg: Config = envy::from_iter([
+            ("NEO4J_ENABLED".to_owned(), "true".to_owned()),
+            ("NEO4J_URL".to_owned(), "bolt://neo4j-test:7687".to_owned()),
+            ("NEO4J_PASSWORD".to_owned(), "secret".to_owned()),
+        ])
+        .expect("config");
+        assert!(cfg.neo4j_enabled);
+        assert_eq!(cfg.neo4j_url, "bolt://neo4j-test:7687");
+        assert_eq!(cfg.neo4j_password, "secret");
     }
 }

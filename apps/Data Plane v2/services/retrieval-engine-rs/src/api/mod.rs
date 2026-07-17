@@ -567,6 +567,17 @@ fn router_inner(
         .route("/v1/cache/semantic/search", post(semantic_cache_search))
         .route("/v1/cache/semantic/store", post(semantic_cache_store))
         .route("/v1/cache/semantic/prune", post(semantic_cache_prune))
+        // CAG — pinned permanent-memory context (org-scoped; packs first into
+        // every budgeted context pack; preload = the no-retrieval path).
+        .route(
+            "/v1/context/pins",
+            get(list_context_pins).post(upsert_context_pin),
+        )
+        .route(
+            "/v1/context/pins/{pin_id}",
+            axum::routing::delete(delete_context_pin),
+        )
+        .route("/v1/context/preload", post(context_preload))
         // §16.5.1 — per-org rate limit applied AFTER auth_middleware runs,
         // so the limiter key resolves against the authenticated org_id.
         // `route_layer` order: bottom layer runs innermost, so we put rate
@@ -1225,6 +1236,139 @@ async fn retrieve_freshness(
         .collect();
 
     Ok(Json(serde_json::json!({"freshness": freshness})))
+}
+
+// ── CAG: pinned permanent-memory context ────────────────────────────────────
+
+/// Upper bound for a single pin's content — a pin is a standing fact, not a
+/// document dump (documents belong in ingest, where they get chunked/embedded).
+const MAX_PIN_CONTENT_BYTES: usize = 16 * 1024;
+/// Preload budget bounds (tokens).
+const MAX_PRELOAD_BUDGET: usize = 200_000;
+
+#[derive(serde::Deserialize)]
+struct PinsQuery {
+    org_id: String,
+}
+
+async fn list_context_pins(
+    State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    axum::extract::Query(mut q): axum::extract::Query<PinsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut q.org_id)?;
+    let pins =
+        crate::context_pins::list_pins(&pipeline.pool, &q.org_id, crate::context_pins::MAX_PINS)
+            .await?;
+    Ok(Json(serde_json::json!({"pins": pins})))
+}
+
+#[derive(serde::Deserialize)]
+struct UpsertPinRequest {
+    org_id: String,
+    /// Present = update that pin; absent = create with a fresh id.
+    pin_id: Option<String>,
+    #[serde(default)]
+    title: String,
+    content: String,
+    #[serde(default = "default_pin_priority")]
+    priority: i32,
+}
+
+fn default_pin_priority() -> i32 {
+    100
+}
+
+async fn upsert_context_pin(
+    State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<UpsertPinRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    if req.content.trim().is_empty() {
+        return Err(AppError::bad_request("pin content must not be empty"));
+    }
+    if req.content.len() > MAX_PIN_CONTENT_BYTES {
+        return Err(AppError::bad_request(
+            "pin content exceeds the 16 KiB limit — ingest large content as a document instead",
+        ));
+    }
+    let pin_id = req
+        .pin_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let pinned_by = auth.as_ref().and_then(|ext| ext.user_id.clone());
+    let saved = crate::context_pins::upsert_pin(
+        &pipeline.pool,
+        &req.org_id,
+        &pin_id,
+        &req.title,
+        &req.content,
+        req.priority.clamp(0, 10_000),
+        pinned_by.as_deref(),
+    )
+    .await?;
+    if !saved {
+        // The pin_id exists under a different org — the conflict-update arm's
+        // org guard made it a no-op. Report the conflict rather than a
+        // misleading 200 (caller should retry with a server-generated id).
+        return Err(AppError::conflict(
+            "pin_id belongs to another tenant; omit pin_id to create a new pin",
+        ));
+    }
+    Ok(Json(serde_json::json!({"pin_id": pin_id})))
+}
+
+async fn delete_context_pin(
+    State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Path(pin_id): Path<String>,
+    axum::extract::Query(mut q): axum::extract::Query<PinsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut q.org_id)?;
+    let deleted = crate::context_pins::delete_pin(&pipeline.pool, &q.org_id, &pin_id).await?;
+    if !deleted {
+        return Err(AppError {
+            error: anyhow::anyhow!("pin not found"),
+            status: StatusCode::NOT_FOUND,
+        });
+    }
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+#[derive(serde::Deserialize)]
+struct PreloadRequest {
+    org_id: String,
+    #[serde(default = "default_preload_budget")]
+    budget_tokens: usize,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+fn default_preload_budget() -> usize {
+    8_000
+}
+
+/// CAG preload — the no-retrieval-loop context path: returns the org's pinned
+/// permanent memory as a token-budgeted context pack. Callers (Model Plane)
+/// preload this once per session instead of retrieving per turn.
+async fn context_preload(
+    State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    Json(mut req): Json<PreloadRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    let budget = req.budget_tokens.clamp(100, MAX_PRELOAD_BUDGET);
+    let format = req.format.unwrap_or_else(|| "json".to_string());
+    let pins =
+        crate::context_pins::list_pins(&pipeline.pool, &req.org_id, crate::context_pins::MAX_PINS)
+            .await?;
+    let pack = crate::context_pack::pack_context_with_pins(&pins, &[], &[], budget, &format);
+    Ok(Json(serde_json::json!({
+        "context_pack": pack,
+        "pins_total": pins.len(),
+        "pins_packed": pack.facts.len(),
+    })))
 }
 
 // D7: Index versions

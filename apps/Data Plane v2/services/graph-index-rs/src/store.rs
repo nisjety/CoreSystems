@@ -1,7 +1,10 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::model::{Claim, Community, Entity, ExtractionResult, Relationship};
+use crate::model::{
+    Claim, Community, Entity, ExtractionResult, MirrorEntity, MirrorRelationship,
+    PersistedExtraction, Relationship,
+};
 
 pub struct GraphStore {
     pool: PgPool,
@@ -60,16 +63,20 @@ impl GraphStore {
         org_id: &str,
         knowledge_id: &str,
         result: &ExtractionResult,
-    ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    ) -> anyhow::Result<PersistedExtraction> {
         if !self
             .knowledge_unit_is_org_visible(org_id, knowledge_id)
             .await?
         {
-            return Ok((Vec::new(), Vec::new(), Vec::new()));
+            // Not org-visible → persist nothing. The empty result means the
+            // Neo4j mirror is a no-op too, so the read-model inherits this gate
+            // (and the upstream restrictive-ZDR drop) with no extra code.
+            return Ok(PersistedExtraction::default());
         }
         let source_ref = serde_json::json!([knowledge_id]);
 
         let mut entity_ids = Vec::new();
+        let mut mirror_entities = Vec::new();
         for e in &result.entities {
             let id = Uuid::new_v4().to_string();
             sqlx::query(
@@ -85,6 +92,12 @@ impl GraphStore {
             .bind(&source_ref)
             .execute(&self.pool)
             .await?;
+            mirror_entities.push(MirrorEntity {
+                entity_id: id.clone(),
+                entity_type: e.entity_type.clone(),
+                entity_text: e.entity_text.clone(),
+                confidence: e.confidence,
+            });
             entity_ids.push(id);
         }
 
@@ -96,6 +109,7 @@ impl GraphStore {
             .collect();
 
         let mut rel_ids = Vec::new();
+        let mut mirror_relationships = Vec::new();
         for r in &result.relationships {
             let a_id = entity_map
                 .get(r.source_entity.as_str())
@@ -123,6 +137,13 @@ impl GraphStore {
             .bind(&source_ref)
             .execute(&self.pool)
             .await?;
+            mirror_relationships.push(MirrorRelationship {
+                rel_id: id.clone(),
+                entity_a_id: a_id.to_string(),
+                entity_b_id: b_id.to_string(),
+                relation_type: r.relation_type.clone(),
+                confidence: r.confidence,
+            });
             rel_ids.push(id);
         }
 
@@ -150,7 +171,13 @@ impl GraphStore {
             claim_ids.push(id);
         }
 
-        Ok((entity_ids, rel_ids, claim_ids))
+        Ok(PersistedExtraction {
+            entity_ids,
+            rel_ids,
+            claim_ids,
+            mirror_entities,
+            mirror_relationships,
+        })
     }
 
     pub async fn persist_text_unit_mappings(
@@ -607,11 +634,95 @@ impl GraphStore {
         Ok((claims, count))
     }
 
-    #[allow(dead_code)] // called by detect_communities; that entry point lands in a later phase
-    pub async fn save_community(&self, _community: &Community) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "community persistence disabled until communities carry canonical document provenance"
+    /// All org entity ids whose provenance is live + org-visible (the same
+    /// `graph_text_units` → `documents` gate every read uses). One bulk query —
+    /// community detection must not do a per-entity N+1.
+    pub async fn list_visible_entity_ids(&self, org_id: &str) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT ge.entity_id FROM graph_entities AS ge
+             WHERE ge.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             LIMIT 10000",
         )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// All org relationship endpoint pairs with live + org-visible provenance.
+    /// One bulk query backing the community adjacency build.
+    pub async fn list_visible_relationship_pairs(
+        &self,
+        org_id: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        Ok(sqlx::query_as::<_, (String, String)>(
+            "SELECT gr.entity_a_id, gr.entity_b_id FROM graph_relationships AS gr
+             WHERE gr.org_id = $1
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )
+             LIMIT 50000",
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Atomically replaces the org's derived communities with a fresh detection
+    /// run (communities are a derived artifact — delete-and-replace inside one
+    /// transaction keeps re-detection idempotent at the set level and never
+    /// leaves a half-written state). Membership provenance is inherited: every
+    /// member entity id comes from the visibility-gated listing above, and the
+    /// read side additionally requires the queried entity set to cover the
+    /// community (`retrieval-engine` COMMUNITY_SUMMARY_SQL subset check).
+    pub async fn replace_communities(
+        &self,
+        org_id: &str,
+        communities: &[Community],
+    ) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        // Per-org transaction advisory lock: serializes concurrent recomputes
+        // (post-extraction consumer + rebuild endpoint, possibly across
+        // replicas). Without it the default READ COMMITTED DELETE-then-INSERT
+        // races — each run mints fresh UUID community_ids so nothing conflicts,
+        // and a run whose snapshot predates a concurrent commit fails to delete
+        // the other run's just-inserted rows, leaving duplicated communities.
+        // The lock releases on commit/rollback. hashtextextended keeps the key
+        // stable across sessions.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM graph_communities WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?;
+        for c in communities {
+            sqlx::query(
+                "INSERT INTO graph_communities (community_id, org_id, entity_ids, summary, level)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(&c.community_id)
+            .bind(org_id)
+            .bind(serde_json::json!(c.entity_ids))
+            .bind(&c.summary)
+            .bind(c.level)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn get_graph_expansion(
@@ -653,6 +764,93 @@ impl GraphStore {
         }
 
         Ok((all_entities, all_rels))
+    }
+
+    /// Re-joins a set of entity ids (e.g. from a Neo4j traversal) against the
+    /// canonical Postgres graph, returning only entities that are live and
+    /// org-visible, plus the relationships whose BOTH endpoints are in the
+    /// visible set. This is the security-critical gate that makes Neo4j a pure
+    /// topology accelerator: even a stale or over-broad read-model cannot leak,
+    /// because provenance/visibility is enforced here from canonical Postgres.
+    pub async fn get_subgraph_visible(
+        &self,
+        org_id: &str,
+        entity_ids: &[String],
+    ) -> anyhow::Result<(Vec<Entity>, Vec<Relationship>)> {
+        if entity_ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let entity_rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
+            "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
+             FROM graph_entities AS ge
+             WHERE ge.org_id = $1 AND ge.entity_id = ANY($2)
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.entity_id = ge.entity_id AND gtu.org_id = ge.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
+        )
+        .bind(org_id)
+        .bind(entity_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let entities: Vec<Entity> = entity_rows
+            .into_iter()
+            .map(|(eid, oid, etype, etext, conf, prov, refs)| Entity {
+                entity_id: eid,
+                org_id: oid,
+                entity_type: etype,
+                entity_text: etext,
+                confidence: conf,
+                provenance: prov,
+                source_refs: serde_json::from_value(refs).unwrap_or_default(),
+            })
+            .collect();
+
+        // Only entities that survived the visibility gate may anchor an edge.
+        let visible_ids: std::collections::HashSet<&str> =
+            entities.iter().map(|e| e.entity_id.as_str()).collect();
+
+        let rel_rows = sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
+            "SELECT gr.rel_id, gr.org_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type, COALESCE(gr.confidence, 0), COALESCE(gr.provenance, ''), COALESCE(gr.source_refs, '[]')
+             FROM graph_relationships AS gr
+             WHERE gr.org_id = $1 AND gr.entity_a_id = ANY($2) AND gr.entity_b_id = ANY($2)
+               AND EXISTS (
+                 SELECT 1 FROM graph_text_units AS gtu
+                 JOIN knowledge_units AS ku ON ku.knowledge_id = gtu.knowledge_id AND ku.org_id = gtu.org_id
+                 JOIN documents AS d ON d.document_id = ku.document_id AND d.org_id = ku.org_id
+                 WHERE gtu.rel_id = gr.rel_id AND gtu.org_id = gr.org_id
+                   AND d.visibility = 'org' AND d.deleted_at IS NULL
+               )"
+        )
+        .bind(org_id)
+        .bind(entity_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let relationships: Vec<Relationship> = rel_rows
+            .into_iter()
+            .map(|(rid, oid, a, b, rt, conf, prov, refs)| Relationship {
+                rel_id: rid,
+                org_id: oid,
+                entity_a_id: a,
+                entity_b_id: b,
+                relation_type: rt,
+                confidence: conf,
+                provenance: prov,
+                source_refs: serde_json::from_value(refs).unwrap_or_default(),
+            })
+            .filter(|r| {
+                visible_ids.contains(r.entity_a_id.as_str())
+                    && visible_ids.contains(r.entity_b_id.as_str())
+            })
+            .collect();
+
+        Ok((entities, relationships))
     }
 }
 

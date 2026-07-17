@@ -154,6 +154,48 @@ services:
       start_period: 10s
       retries: 10
 
+  # Neo4j graph read-model (GraphRAG). Rebuildable, org-scoped mirror of the
+  # canonical Postgres graph, used only for native multi-hop Cypher traversal.
+  # ON by default in the composed stack (NEO4J_ENABLED); the core graph-index
+  # service does NOT depend on it (it degrades to the Postgres BFS fallback),
+  # so a Neo4j outage never takes down extraction/query.
+  neo4j:
+    <<: *infra-observability
+    image: neo4j:5.26-community
+    restart: unless-stopped
+    init: true
+    expose:
+      - "7687"
+      - "7474"
+    ports:
+      # Loopback-only Bolt + HTTP browser for local inspection; cross-plane
+      # traffic uses the private network.
+      - "127.0.0.1:${NEO4J_BOLT_HOST_PORT:-7688}:7687"
+      - "127.0.0.1:${NEO4J_HTTP_HOST_PORT:-7475}:7474"
+    networks:
+      - dpv2-net
+    volumes:
+      - dpv2_neo4j:/data
+    environment:
+      # Auth is ALWAYS on. The password is deployment-owned; the app fails
+      # closed when NEO4J_ENABLED=true and no password is supplied.
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-dataplane}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-256m}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    healthcheck:
+      # neo4j image ships bash; verify the Bolt port (7687) accepts connections
+      # — the readiness signal the graph-index client connects on.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/7687' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 15
+
   nats:
     <<: *infra-observability
     image: nats:2.12.12-alpine3.22@sha256:2ca98656a279b2d88cfdf2b8c3f0d5d7f3941ae9dc2ab12ebaa92d83e0f4ccdb
@@ -281,10 +323,12 @@ services:
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
       HTTP_PORT: "8004"
       GRPC_PORT: "50052"
-      # Semantic response cache (vector tier for the Model Plane gateway). Opt-in:
-      # SEMANTIC_CACHE_ENABLED=true serves /v1/cache/semantic/* via this service's
-      # embeddings + Qdrant. Off by default.
-      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-false}
+      # Semantic response cache (CAG read path; vector tier for the Model Plane
+      # gateway). ON by default — the scope-key fail-closed gate still governs
+      # cross-principal sharing.
+      SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-true}
+      # Smart hybrid — query-adaptive mode-mix (request > agent > smart > static).
+      SMART_HYBRID_ENABLED: ${SMART_HYBRID_ENABLED:-true}
       # Query embedding routes through the Model Plane (gRPC → inference-core),
       # NOT direct Azure: no-independent-embeddings-outside-Model-Plane, and the
       # direct-Azure path fails closed on ZDR/restricted content (it is a
@@ -306,23 +350,33 @@ services:
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-3072}
       COHERE_API_KEY: ${COHERE_API_KEY:-}
-      # Phase-2 visual RAG — Cohere Embed v4 query embedder + fused visual arm.
-      # `W_VISUAL` > 0 activates the page-image arm in the RRF fusion (was 0/shadow);
-      # the query embedder reuses the core-ai-rg key (deployed model `embed-v-4-0`).
+      # Visual RAG — Cohere Embed v4 query embedder + fused visual arm. ON by
+      # default (W_VISUAL 0.05); the arm no-op-skips when the Embed v4 endpoint
+      # is unset, so text-only deployments are unaffected. The query embedder
+      # reuses the core-ai-rg key (deployed model `embed-v-4-0`).
       COHERE_EMBED_V4_ENDPOINT: ${COHERE_EMBED_V4_ENDPOINT:-}
       COHERE_EMBED_V4_API_KEY: ${COHERE_API_KEY:-}
       COHERE_EMBED_V4_DEPLOYMENT: ${COHERE_EMBED_V4_DEPLOYMENT:-embed-v-4-0}
       COHERE_EMBED_V4_API_VERSION: ${COHERE_EMBED_V4_API_VERSION:-2024-05-01-preview}
       QDRANT_VISUAL_COLLECTION: ${QDRANT_VISUAL_COLLECTION:-dataplane_page_images}
       VISUAL_EMBEDDING_DIMENSION: ${VISUAL_EMBEDDING_DIMENSION:-1536}
-      W_VISUAL: ${W_VISUAL:-0}
-      # ColQwen visual reranker (services/colqwen-reranker). OFF by default — the
-      # model runs as a separate GPU server (local MPS for verification,
-      # Hetzner/Azure for prod). Flip VISUAL_RERANK_ENABLED=true and point
-      # COLQWEN_ENDPOINT_URL at it (e.g. http://host.docker.internal:8090 locally).
-      VISUAL_RERANK_ENABLED: ${VISUAL_RERANK_ENABLED:-false}
+      W_VISUAL: ${W_VISUAL:-0.05}
+      # ColQwen visual reranker (services/colqwen-reranker). ON by default but a
+      # no-op until COLQWEN_ENDPOINT_URL points at the GPU server (local MPS for
+      # verification, Hetzner/Azure for prod — e.g. http://host.docker.internal:8090).
+      VISUAL_RERANK_ENABLED: ${VISUAL_RERANK_ENABLED:-true}
       COLQWEN_ENDPOINT_URL: ${COLQWEN_ENDPOINT_URL:-}
       VISUAL_RERANK_TOP_K: ${VISUAL_RERANK_TOP_K:-20}
+      # Joint text-vs-image scoring: ColQwen scores mapped onto the fused score
+      # range so page images interleave with text by relevance (false = legacy
+      # band-preserving order).
+      JOINT_MULTIMODAL_RERANK: ${JOINT_MULTIMODAL_RERANK:-true}
+      # Deep multi-hop graph arm — graph-index's /v1/graph/traverse (Neo4j
+      # read-model, server-side Postgres fallback). The caller's verified
+      # bearer is forwarded; graph-index re-verifies + org-pins it itself.
+      GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://graph-index:9203}
+      GRAPH_REMOTE_TIMEOUT_MS: ${GRAPH_REMOTE_TIMEOUT_MS:-800}
+      GRAPH_REMOTE_MAX_HOPS: ${GRAPH_REMOTE_MAX_HOPS:-3}
       # Text cross-encoder rerank endpoint. Empty = public Cohere (api.cohere.ai,
       # Bearer). Set to an Azure AI Foundry serverless Cohere rerank URL +
       # RERANK_USE_API_KEY=true to use the in-EU deployment.
@@ -583,6 +637,21 @@ services:
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       EVENT_AUTH_AUDIENCE: dataplane-events
+      # Neo4j graph read-model. ON by default in the composed stack; the
+      # dual-write + multi-hop traverse path mirrors the canonical Postgres
+      # graph. Startup fails closed if enabled without a password. graph-index
+      # intentionally has no `depends_on: neo4j` — it connects with a boot
+      # retry and degrades to the Postgres graph path if Neo4j is unavailable.
+      NEO4J_ENABLED: ${NEO4J_ENABLED:-true}
+      NEO4J_URL: ${NEO4J_URL:-bolt://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-dataplane}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+      # Boot connect retry (3s apart) must outlast a Neo4j cold start so the
+      # default-ON mirror doesn't silently lose the startup race. 30 ≈ 90s.
+      NEO4J_BOOT_ATTEMPTS: ${NEO4J_BOOT_ATTEMPTS:-30}
+      GRAPH_MAX_HOPS: ${GRAPH_MAX_HOPS:-3}
+      GRAPH_TRAVERSE_MAX_ENTITIES: ${GRAPH_TRAVERSE_MAX_ENTITIES:-100}
     volumes:
       # A public verification key is local configuration, not a live Auth Core
       # dependency. This lets graph-index bind while Auth Core is offline; each
@@ -916,6 +985,7 @@ volumes:
   dpv2_postgres:
   dpv2_dragonfly:
   dpv2_qdrant:
+  dpv2_neo4j:
   dpv2_nats:
   dpv2_minio:
   dpv2_quickwit_cache:

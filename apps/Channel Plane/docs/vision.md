@@ -186,6 +186,13 @@ Example:
 
 Channel Plane should be built as a new capability on top of Velion, not as a reason to rewrite the current architecture.
 
+## Related Future Scope
+
+- [Meeting Intelligence](./meeting-intelligence.md) — capturing Teams/Zoom/Meet
+  meetings as a source type (transcribe + document + search), processed entirely
+  on-prem/open-source so meeting content never leaves the company. Capture is a
+  channel adapter; processing and storage reuse the existing planes.
+
 That is the main advantage of this plan:
 
 - Velion can move forward now

@@ -6,6 +6,7 @@ mod extractor;
 mod grpc;
 mod inference_auth;
 mod model;
+mod neo4j;
 mod store;
 mod stream;
 
@@ -35,6 +36,56 @@ async fn main() -> anyhow::Result<()> {
 
     let store = Arc::new(store::GraphStore::new(pool.clone()));
     let extractor = Arc::new(extractor::GraphExtractor::new(&cfg)?);
+
+    // Neo4j graph read-model (Phase 2). Fail closed on a missing secret when
+    // enabled; degrade (not crash) on a connectivity/schema error so the
+    // service still serves the Postgres-backed graph path. Threaded into the
+    // dual-write consumer + traverse endpoint in later phases.
+    if cfg.neo4j_enabled && cfg.neo4j_password.trim().is_empty() {
+        anyhow::bail!("NEO4J_ENABLED=true requires NEO4J_PASSWORD (fail closed on missing secret)");
+    }
+    // The core graph service (Postgres extraction/query) must NOT depend on the
+    // optional read-model, so there is no compose `depends_on: neo4j`. Instead
+    // we connect with a bounded boot retry (handles the startup race) and then
+    // degrade to the Postgres fallback rather than blocking or crashing.
+    // The window must outlast a Neo4j 5 (JVM) COLD start — 20-60s, longer on
+    // first run when the image is still being pulled — else NEO4J_ENABLED=true
+    // silently loses the race and the mirror stays off for the whole process
+    // lifetime. Default ≈ 90s (30 × 3s), env-tunable via NEO4J_BOOT_ATTEMPTS.
+    let neo4j: Option<Arc<neo4j::Neo4jClient>> = if cfg.neo4j_enabled {
+        let attempts = cfg.neo4j_boot_attempts.max(1);
+        let mut connected = None;
+        for attempt in 1..=attempts {
+            match neo4j::Neo4jClient::connect(&cfg).await {
+                Ok(client) => match client.ensure_schema().await {
+                    Ok(()) => {
+                        tracing::info!(attempt, "neo4j graph read-model connected; schema ensured");
+                        connected = Some(Arc::new(client));
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(attempt, attempts, err = %e, "neo4j schema bootstrap failed; retrying")
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(attempt, attempts, err = %e, "neo4j connect failed; retrying")
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        if connected.is_none() {
+            tracing::error!(
+                attempts,
+                "neo4j unavailable after boot retries; degrading to postgres graph fallback \
+                 (POST /v1/graph/rebuild can backfill the mirror once neo4j is reachable)"
+            );
+        }
+        connected
+    } else {
+        tracing::info!("neo4j graph read-model disabled (NEO4J_ENABLED unset)");
+        None
+    };
+    tracing::info!(neo4j_read_model = neo4j.is_some(), "graph read-model state");
 
     let signed_events_enabled = signed_event_consumers_enabled(
         std::env::var("ENABLE_SIGNED_EVENT_CONSUMERS")
@@ -105,7 +156,16 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let app = api::router(store.clone(), jwt_verifier.clone());
+    let graph_limits = api::GraphLimits {
+        max_hops: cfg.graph_max_hops,
+        max_entities: cfg.graph_traverse_max_entities as i64,
+    };
+    let app = api::router(
+        store.clone(),
+        jwt_verifier.clone(),
+        neo4j.clone(),
+        graph_limits,
+    );
     let addr = format!("0.0.0.0:{}", cfg.admin_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("graph-index HTTP on {addr}");
@@ -119,11 +179,20 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("graph-index gRPC on {grpc_addr}");
 
+    let consumer_neo4j = neo4j.clone();
+    let community_min_size = cfg.community_min_size;
     let consumer_task = async move {
         match event_runtime {
             Some((consumer, cleanup_consumer, nats, verifier, cleanup_verifier, _)) => {
-                let extraction =
-                    stream::run_consumer(consumer, store.clone(), extractor, nats, verifier);
+                let extraction = stream::run_consumer(
+                    consumer,
+                    store.clone(),
+                    extractor,
+                    nats,
+                    verifier,
+                    consumer_neo4j,
+                    community_min_size,
+                );
                 let cleanup =
                     stream::run_cleanup_consumer(cleanup_consumer, store, cleanup_verifier);
                 tokio::try_join!(extraction, cleanup).map(|_| ())
