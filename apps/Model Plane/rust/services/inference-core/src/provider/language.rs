@@ -202,7 +202,7 @@ impl AzureLanguageProvider {
             .or_else(|| env_nonempty("AZURE_LANGUAGE_API_VERSION"))
             .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_owned());
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             endpoint,
             api_key,
             api_version,
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn azure_analyze_url_uses_language_endpoint() {
         let provider = AzureLanguageProvider {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             endpoint: "https://example.cognitiveservices.azure.com/".to_owned(),
             api_key: "key".to_owned(),
             api_version: "2024-11-15-preview".to_owned(),

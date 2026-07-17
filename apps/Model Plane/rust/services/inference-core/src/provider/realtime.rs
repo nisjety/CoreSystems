@@ -153,7 +153,7 @@ impl OpenAiRealtimeProvider {
             "gpt-4o-mini-realtime-preview".to_owned(),
         );
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             api_base,
             websocket_base,
@@ -291,7 +291,7 @@ impl AzureRealtimeProvider {
             });
 
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             sessions_url,
             websocket_url,

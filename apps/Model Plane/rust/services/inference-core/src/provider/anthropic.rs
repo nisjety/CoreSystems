@@ -67,7 +67,7 @@ impl AnthropicProvider {
         }
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             flavor: AnthropicFlavor::Direct,
         })
@@ -100,7 +100,7 @@ impl AnthropicProvider {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             flavor: AnthropicFlavor::Azure { endpoint, models },
         })

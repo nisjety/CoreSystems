@@ -61,7 +61,7 @@ impl OpenAiProvider {
             .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             flavor: OpenAiFlavor::OpenAi { api_base },
             chat_models: vec!["gpt-4o-mini".to_owned(), "gpt-5-mini".to_owned()],
@@ -108,7 +108,7 @@ impl OpenAiProvider {
         };
 
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             flavor: OpenAiFlavor::Azure {
                 endpoint,

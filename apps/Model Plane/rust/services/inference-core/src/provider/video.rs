@@ -245,7 +245,7 @@ impl AzureOpenAiVideoProvider {
         let mut model_catalog = split_csv_env("AZURE_OPENAI_VIDEO_MODELS");
         push_unique(&mut model_catalog, default_model.clone());
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             endpoint,
             api_key,
             api_version,

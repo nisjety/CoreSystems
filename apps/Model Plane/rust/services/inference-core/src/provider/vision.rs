@@ -255,7 +255,7 @@ impl OpenAiVisionProvider {
         let image_models = csv_env("OPENAI_IMAGE_MODELS", &[DEFAULT_IMAGE_MODEL]);
         let vision_models = csv_env("OPENAI_VISION_MODELS", &[DEFAULT_VISION_MODEL]);
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             flavor: OpenAiVisionFlavor::OpenAi { api_base },
             image_models,
@@ -283,7 +283,7 @@ impl OpenAiVisionProvider {
         );
 
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key,
             flavor: OpenAiVisionFlavor::Azure {
                 endpoint,
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn openai_image_url_uses_images_generation_endpoint() {
         let provider = OpenAiVisionProvider {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key: "key".to_owned(),
             flavor: OpenAiVisionFlavor::OpenAi {
                 api_base: "https://api.openai.com/v1/".to_owned(),
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn azure_image_url_uses_deployment_endpoint() {
         let provider = OpenAiVisionProvider {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key: "key".to_owned(),
             flavor: OpenAiVisionFlavor::Azure {
                 endpoint: "https://example.openai.azure.com/".to_owned(),
@@ -703,7 +703,7 @@ mod tests {
     #[test]
     fn azure_gpt_image_url_uses_current_v1_endpoint() {
         let provider = OpenAiVisionProvider {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             api_key: "key".to_owned(),
             flavor: OpenAiVisionFlavor::Azure {
                 endpoint: "https://example.openai.azure.com/".to_owned(),

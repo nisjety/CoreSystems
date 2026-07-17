@@ -905,7 +905,7 @@ fn speech_http_client() -> reqwest::Client {
         // body). reqwest sends none by default, so set one explicitly.
         .user_agent("velion-model-plane/1.0")
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+        .unwrap_or_else(|_| crate::provider::provider_http_client())
 }
 
 fn env_nonempty(key: &str) -> Option<String> {

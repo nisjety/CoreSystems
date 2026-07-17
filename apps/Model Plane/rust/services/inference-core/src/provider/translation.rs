@@ -426,7 +426,7 @@ impl AzureTranslatorProvider {
             endpoint,
             api_key,
             region: env_nonempty("AZURE_TRANSLATOR_REGION").unwrap_or_default(),
-            http: reqwest::Client::new(),
+            http: crate::provider::provider_http_client(),
         })
     }
 

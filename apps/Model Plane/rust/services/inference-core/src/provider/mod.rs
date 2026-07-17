@@ -21,6 +21,40 @@ pub use artifact_ref::{ArtifactRef, ArtifactStore};
 
 use tokio::sync::mpsc;
 
+/// Shared HTTP client for outbound provider calls, with bounded timeouts.
+///
+/// Uses a connect timeout plus a READ (inactivity) timeout rather than a total
+/// deadline: a connected-but-unresponsive upstream stops sending bytes and is
+/// dropped within the read window — freeing the retry/fallback chain to advance
+/// to the next provider — while a slow-but-progressing (e.g. streaming or
+/// long-generation) response keeps resetting the read timer and is never
+/// falsely killed. Previously every provider built `reqwest::Client::new()` with
+/// no timeout, so a hung upstream blocked the request indefinitely.
+///
+/// Both bounds are env-tunable; falls back to a default client if the builder
+/// ever fails (so a misconfig can never take the process down).
+#[must_use]
+pub(crate) fn provider_http_client() -> reqwest::Client {
+    fn env_secs(key: &str, default: u64) -> u64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(default)
+    }
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(env_secs(
+            "INFERENCE_PROVIDER_CONNECT_TIMEOUT_SECS",
+            10,
+        )))
+        .read_timeout(std::time::Duration::from_secs(env_secs(
+            "INFERENCE_PROVIDER_READ_TIMEOUT_SECS",
+            120,
+        )))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// Narrow an `f64` (e.g. a JSON confidence score or embedding value) to `f32`.
 ///
 /// The precision loss is intentional and inherent to `f64 -> f32`; there is no

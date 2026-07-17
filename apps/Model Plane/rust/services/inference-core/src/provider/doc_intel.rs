@@ -132,7 +132,7 @@ impl AzureDocIntelProvider {
         let api_version = env_nonempty("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION")
             .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_owned());
         Some(Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             endpoint,
             api_key,
             api_version,
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn azure_analyze_url_includes_model_and_filters() {
         let provider = AzureDocIntelProvider {
-            client: reqwest::Client::new(),
+            client: crate::provider::provider_http_client(),
             endpoint: "https://example.cognitiveservices.azure.com/".to_owned(),
             api_key: "key".to_owned(),
             api_version: "2024-11-30".to_owned(),
