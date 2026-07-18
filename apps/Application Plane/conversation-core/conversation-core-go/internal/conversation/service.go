@@ -946,11 +946,22 @@ func normalizeInboundEvent(event InboundEvent, now func() time.Time) InboundEven
 	if event.Direction == "" {
 		event.Direction = DirectionInbound
 	}
-	event.Subject = strings.TrimSpace(event.Subject)
-	event.BodyText = strings.TrimSpace(event.BodyText)
-	event.BodyHTML = strings.TrimSpace(event.BodyHTML)
-	event.From.Name = strings.TrimSpace(event.From.Name)
-	event.From.Email = strings.ToLower(strings.TrimSpace(event.From.Email))
+	// Postgres TEXT columns reject the NUL byte (0x00) with SQLSTATE 22021
+	// ("invalid byte sequence for encoding UTF8: 0x00"), and other C0 control
+	// bytes corrupt rendering. Real provider payloads carry them routinely —
+	// Outlook/Graph HTML bodies, quoted-printable email, some Slack/Teams
+	// blocks — so a single such message would otherwise 500 the ingest and
+	// stall the poller's cursor forever (it retries the same message every
+	// cycle). Strip storage-unsafe runes at this one chokepoint, which every
+	// inbound path (email bridge + webhook consumer) funnels through.
+	event.Subject = sanitizeStorableText(event.Subject)
+	event.BodyText = sanitizeStorableText(event.BodyText)
+	event.BodyHTML = sanitizeStorableText(event.BodyHTML)
+	event.ProviderEventID = sanitizeStorableText(event.ProviderEventID)
+	event.ProviderMessageID = sanitizeStorableText(event.ProviderMessageID)
+	event.ProviderThreadID = sanitizeStorableText(event.ProviderThreadID)
+	event.From.Name = sanitizeStorableText(event.From.Name)
+	event.From.Email = strings.ToLower(sanitizeStorableText(event.From.Email))
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = now().UTC()
 	} else {
@@ -961,6 +972,39 @@ func normalizeInboundEvent(event InboundEvent, now func() time.Time) InboundEven
 		event.IDempotencyKey = strings.Join(parts, ":")
 	}
 	return event
+}
+
+// sanitizeStorableText trims the value and removes runes that Postgres TEXT
+// columns cannot store or that corrupt display: the NUL byte (0x00, rejected
+// with SQLSTATE 22021) and other C0/C1 control characters, keeping only the
+// whitespace controls tab, newline, and carriage return. The Unicode
+// replacement char (U+FFFD) from earlier lossy decoding is also dropped. This
+// is deliberately conservative — it never rewrites otherwise-valid content.
+func sanitizeStorableText(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if !strings.ContainsFunc(trimmed, isStorageUnsafeRune) {
+		return trimmed
+	}
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	for _, r := range trimmed {
+		if isStorageUnsafeRune(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func isStorageUnsafeRune(r rune) bool {
+	switch r {
+	case '\t', '\n', '\r':
+		return false
+	case '�':
+		return true
+	}
+	// C0 controls (incl. NUL) and C1 controls.
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f)
 }
 
 func validateInboundEvent(event InboundEvent) error {

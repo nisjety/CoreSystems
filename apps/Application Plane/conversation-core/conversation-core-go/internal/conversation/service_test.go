@@ -582,6 +582,56 @@ func TestIngestEventNormalizesAndPublishesOnce(t *testing.T) {
 	}
 }
 
+func TestSanitizeStorableText(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "hello world", "hello world"},
+		{"trims", "  hi  ", "hi"},
+		{"strips nul", "hello\x00world", "helloworld"},
+		{"keeps tab/newline", "line1\n\tline2", "line1\n\tline2"},
+		{"strips c0 controls", "a\x01b\x1fc", "abc"},
+		{"strips c1 controls", "abc", "abc"},
+		{"strips replacement char", "a�b", "ab"},
+		{"trims after strip", "\x00  spaced  \x00", "spaced"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeStorableText(tc.in); got != tc.want {
+				t.Fatalf("sanitizeStorableText(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// A message body carrying a NUL byte (routine in Outlook/Graph HTML) must not
+// 500 the ingest and stall the poller — Postgres rejects 0x00 in TEXT. The
+// stored message is sanitized instead.
+func TestIngestEventStripsControlBytesFromBody(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	result, err := service.IngestEvent(context.Background(), InboundEvent{
+		OrgID:             "org_1",
+		Provider:          "microsoft",
+		ProviderEventID:   "evt_nul",
+		ProviderMessageID: "m_nul",
+		Subject:           "Re: report\x00",
+		From:              ParticipantInput{Name: "Ada\x00", Email: "ada@example.com"},
+		BodyText:          "before\x00after",
+		BodyHTML:          "<p>hi\x00</p>",
+	})
+	if err != nil {
+		t.Fatalf("IngestEvent() error = %v, want nil", err)
+	}
+	if strings.ContainsRune(result.Message.BodyText, 0) || strings.ContainsRune(result.Message.BodyHTML, 0) {
+		t.Fatalf("stored message still contains NUL: text=%q html=%q", result.Message.BodyText, result.Message.BodyHTML)
+	}
+	if result.Message.BodyText != "beforeafter" {
+		t.Fatalf("body_text = %q, want beforeafter", result.Message.BodyText)
+	}
+}
+
 func TestIngestEventRejectsMissingBody(t *testing.T) {
 	service := NewService(newFakeRepository(), nil)
 	_, err := service.IngestEvent(context.Background(), InboundEvent{
