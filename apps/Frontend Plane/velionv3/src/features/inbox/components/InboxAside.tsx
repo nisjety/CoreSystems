@@ -172,13 +172,13 @@ function DetailsPanel(props: {
               </Show>
             </AccordionSection>
 
-            <AccordionSection icon={<MessageCircle class="size-4" />} title={`Recent conversations${props.recent.length ? ` (${props.recent.length})` : ''}`}>
+            <AccordionSection icon={<MessageCircle class="size-4" />} title={`Recent conversations${(props.recent?.length ?? 0) ? ` (${props.recent!.length})` : ''}`}>
               <Show
-                when={props.recent.length}
+                when={(props.recent?.length ?? 0) > 0}
                 fallback={<p class="velion-inbox-muted">No other conversations from this contact.</p>}
               >
                 <ul class="velion-inbox-recent-list">
-                  <For each={props.recent}>
+                  <For each={props.recent ?? []}>
                     {(item) => (
                       <li>
                         <button type="button" onClick={() => props.onSelectRecent(item.conversationId)}>
