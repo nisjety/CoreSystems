@@ -75,13 +75,21 @@ type InboxSidebarGroup = {
   items: InboxSidebarItem[]
 }
 
+// Channel values MUST match conversation-core's channelForProvider output
+// (conversation-core-go/internal/conversation/repository.go): email/microsoft/
+// google collapse to "email"; every other provider is its own channel key —
+// slack, teams, discord, whatsapp, messenger, instagram, and "x" (the provider
+// key for Twitter/X — a channel value of "twitter" never exists upstream).
 const inboxChannels: InboxSidebarSubItem[] = [
   { id: 'all', label: 'All messages', href: '/inbox?view=mine&channel=all' },
   { id: 'messenger', label: 'Messenger', href: '/inbox?view=mine&channel=messenger' },
   { id: 'instagram', label: 'Instagram', href: '/inbox?view=mine&channel=instagram' },
   { id: 'whatsapp', label: 'WhatsApp', href: '/inbox?view=mine&channel=whatsapp' },
   { id: 'email', label: 'Email', href: '/inbox?view=mine&channel=email' },
-  { id: 'twitter', label: 'Twitter / X', href: '/inbox?view=mine&channel=twitter' },
+  { id: 'slack', label: 'Slack', href: '/inbox?view=mine&channel=slack' },
+  { id: 'teams', label: 'Microsoft Teams', href: '/inbox?view=mine&channel=teams' },
+  { id: 'discord', label: 'Discord', href: '/inbox?view=mine&channel=discord' },
+  { id: 'twitter', label: 'Twitter / X', href: '/inbox?view=mine&channel=x' },
   { id: 'sms', label: 'SMS', href: '/inbox?view=mine&channel=sms' },
 ]
 

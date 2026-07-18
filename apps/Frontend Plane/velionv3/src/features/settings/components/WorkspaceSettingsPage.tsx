@@ -1339,9 +1339,22 @@ function IntegrationsSection() {
         setNotice(`${row.name} connected.`)
       } else if (action === 'reconnect' && row.connection) {
         await prepareMetaSdkLogin(row.provider)
+        // Reconnect === re-run the provider connect-session with the FULL bundle.
+        // There is no /connections/:id/reconnect-session route (gateway + v2
+        // integration-core only expose /providers/:provider/{connect,reconnect}-
+        // session), and the OAuth callback reuses the existing org+provider
+        // connection (FindActiveConnection) and upgrades its scopes in place — so
+        // this both fixes the prior 404 AND upgrades a minimal onboarding-created
+        // connection (profile-only) to inbox/publishing scopes. Sending an empty
+        // body previously resolved to the onboarding bundle, silently keeping the
+        // connection at profile-only.
         const session = await requestJson<ConnectSessionResult>(
-          `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}/reconnect-session`,
-          { method: 'POST', body: JSON.stringify({}), headers: integrationHeaders(orgId()) },
+          `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ bundles: connectBundlesFor(row.provider) }),
+            headers: integrationHeaders(orgId()),
+          },
         )
         await runSettingsOAuth(session)
         setNotice(`${row.name} reconnected.`)
@@ -1724,7 +1737,16 @@ function isSocialIntegrationRow(row: IntegrationSettingsRow): boolean {
 }
 
 function connectBundlesFor(provider: IntegrationSettingsProvider): string[] {
-  return provider.category === 'social' ? ['full'] : ['knowledge']
+  // Request the provider's FULL capability set so a connection made from the
+  // workspace integrations page is inbox- AND publishing-ready in one grant:
+  // Instagram DM / Messenger / WhatsApp (Meta social.inbox/messenger/whatsapp),
+  // Outlook & Gmail mail (microsoft/google inbox), docs, ads, etc. Every catalog
+  // provider except billing-only "stripe" defines a "full" bundle; requesting it
+  // for stripe harmlessly falls back to onboarding. The onboarding flow keeps the
+  // minimal "onboarding" bundle by design — this is the deliberate, user-initiated
+  // "connect everything" path. integration-core's ResolveCapabilities ignores
+  // bundle keys a provider does not define, so this is safe for all categories.
+  return ['full']
 }
 
 function buildSocialIntegrationStats(summary: IntegrationSettingsSummary | null) {

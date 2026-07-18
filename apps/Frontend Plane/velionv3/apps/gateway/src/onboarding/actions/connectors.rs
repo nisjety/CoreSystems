@@ -221,6 +221,12 @@ pub(crate) async fn cleanup_source(
     .await
 }
 
+// integration-core v2 has no /api/v1/providers/{provider}/sharepoint/discovery/warm
+// (that v1 warm path returned the 404 the SPA surfaced during onboarding). v2
+// exposes discovery per connection: GET /api/v1/connections/{id}/discovery, which
+// also warms the provider-side discovery cache. Resolve the Microsoft connection
+// and trigger it; warming is a best-effort onboarding hint, so a missing
+// connection is a benign success (nothing to warm yet) rather than an error.
 pub(crate) async fn warm_sharepoint_discovery(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -236,24 +242,48 @@ pub(crate) async fn warm_sharepoint_discovery(
         Some(&headers),
         state.allow_dev_actor_headers,
     );
-    let body = json!({
-        "organizationId": org_id,
-        "workspaceId": org_id,
-    });
 
-    proxy_json(
+    let connection_id = match resolve_connection_id(&state, &actor, &org_id, "microsoft").await {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "data": { "warmed": false, "reason": "no active microsoft connection" }
+                })),
+            )
+        }
+    };
+
+    let (status, Json(body)) = proxy_json(
         &state,
-        Method::POST,
+        Method::GET,
         &format!(
-            "{}/api/v1/providers/microsoft/sharepoint/discovery/warm",
-            state.integration_core_url
+            "{}/api/v1/connections/{}/discovery",
+            state.integration_core_url,
+            urlencoding::encode(&connection_id)
         ),
-        Some(body),
+        None,
         Some(&org_id),
         Some(&actor),
-        Some("application/json"),
+        None,
     )
-    .await
+    .await;
+    if !status.is_success() {
+        return (status, Json(body));
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": true,
+            "data": {
+                "id": connection_id,
+                "warmed": true,
+                "discovery": body.pointer("/data").cloned().unwrap_or(Value::Null),
+            }
+        })),
+    )
 }
 
 // integration-core v2 has no /api/v1/providers/{provider}/sync (v1 path — the
