@@ -141,9 +141,16 @@ export function resolveInboxRouteFilter(searchParams: URLSearchParams): InboxRou
   }
 
   if (channel) {
+    // Channel lanes show every conversation in the channel, not only those
+    // assigned to the current user. Incoming provider messages (email, Slack,
+    // Teams, WhatsApp, …) arrive UNASSIGNED, so filtering to 'mine' here hid
+    // the entire shared queue — a fresh workspace saw an empty inbox on every
+    // lane despite real messages. This matches the equivalent 'view-*' channel
+    // views below, which already use assigned: 'all'. Personal scoping lives in
+    // the dedicated 'Uten eier' (unassigned) / assignment filters.
     return {
       activeTab: channel === 'all' ? 'all' : 'open',
-      assigned: 'mine',
+      assigned: 'all',
       channel,
       label: channel === 'all' ? 'All messages' : capitalize(channel.replace(/-/g, ' ')),
     }
