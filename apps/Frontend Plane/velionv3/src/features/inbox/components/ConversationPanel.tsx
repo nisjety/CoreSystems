@@ -2,21 +2,17 @@ import {
   CheckCheck,
   ChevronDown,
   Clock3,
-  Image as ImageIcon,
   Link2,
   Mail,
   Megaphone,
   MessageCircle,
-  Paperclip,
   PenLine,
   Plus,
-  Search,
   Sparkles,
   Star,
   Tag,
   TicketCheck,
   X,
-  Zap,
   type LucideProps,
 } from 'lucide-solid'
 import { createEffect, createSignal, For, Show, type Component, type JSX } from 'solid-js'
@@ -400,7 +396,6 @@ function ConversationReplyComposer(props: {
           selectedTicket={props.selectedTicket}
           setIsInternal={props.setIsInternal}
         />
-        <MacroSearchButton onOpenModal={props.onOpenModal} />
         <textarea
           rows={4}
           value={props.replyText}
@@ -447,26 +442,6 @@ function ConversationReplyComposerHeader(props: {
   )
 }
 
-function MacroSearchButton(props: { onOpenModal: (modal: InboxModalRequest) => void }) {
-  return (
-    <button
-      type="button"
-      onClick={() => props.onOpenModal({
-        type: 'work',
-        title: 'Macros',
-        description: 'Search, preview, and execute macros inside the inbox composer. Backend should return executable macro steps and required approvals here.',
-        primaryAction: 'Run macro',
-      })}
-      class="velion-inbox-macro-search"
-    >
-      <Zap class="size-4" />
-      <Search class="size-4" />
-      <span>Search macros by name, tags or body...</span>
-      <ChevronDown class="size-4" />
-    </button>
-  )
-}
-
 function ConversationReplyComposerFooter(props: {
   isInternal: boolean
   onOpenModal: (modal: InboxModalRequest) => void
@@ -479,17 +454,14 @@ function ConversationReplyComposerFooter(props: {
 }) {
   return (
     <div class="velion-inbox-composer__footer">
-      <SuggestedMacroChips onOpenModal={props.onOpenModal} />
       <div class="velion-inbox-composer__footer-row">
         <div class="velion-inbox-composer__tool-row">
-          <IconButton label="AI assist" onClick={props.onSuggestReply}>
+          <IconButton label="Draft with Velion" onClick={props.onSuggestReply}>
             <Sparkles class="size-4" />
           </IconButton>
           <IconButton label="Create social follow-up" onClick={props.onCreateSocialFollowUp}>
             <Megaphone class="size-4" />
           </IconButton>
-          <ComposerToolButtons onOpenModal={props.onOpenModal} />
-          <span>Use Cmd+K for shortcuts</span>
         </div>
         <div class="velion-inbox-composer__send-row">
           <button
@@ -517,68 +489,6 @@ function ConversationReplyComposerFooter(props: {
   )
 }
 
-function SuggestedMacroChips(props: { onOpenModal: (modal: InboxModalRequest) => void }) {
-  return (
-    <div class="velion-inbox-suggested-macros">
-      <span>Suggested macros</span>
-      <For each={['Generic: Sign Off', 'Refund', 'Shipping update']}>
-        {(macro) => (
-          <button
-            type="button"
-            onClick={() => props.onOpenModal({
-              type: 'work',
-              title: macro,
-              description: `Preview and execute the ${macro} macro without leaving this conversation.`,
-              primaryAction: 'Run macro',
-            })}
-          >
-            {macro}
-          </button>
-        )}
-      </For>
-    </div>
-  )
-}
-
-function ComposerToolButtons(props: { onOpenModal: (modal: InboxModalRequest) => void }) {
-  return (
-    <>
-      <IconButton
-        label="Attach file"
-        onClick={() => props.onOpenModal({
-          type: 'work',
-          title: 'Attach file',
-          description: 'Attach files to this reply while preserving the current conversation state.',
-          primaryAction: 'Attach',
-        })}
-      >
-        <Paperclip class="size-4" />
-      </IconButton>
-      <IconButton
-        label="Attach image"
-        onClick={() => props.onOpenModal({
-          type: 'work',
-          title: 'Attach image',
-          description: 'Attach images or screenshots to this reply without changing pages.',
-          primaryAction: 'Attach image',
-        })}
-      >
-        <ImageIcon class="size-4" />
-      </IconButton>
-      <IconButton
-        label="Insert link"
-        onClick={() => props.onOpenModal({
-          type: 'work',
-          title: 'Insert link',
-          description: 'Add a source, order, tracker, or knowledge-base link directly into the composer.',
-          primaryAction: 'Insert link',
-        })}
-      >
-        <Link2 class="size-4" />
-      </IconButton>
-    </>
-  )
-}
 
 function ArticleBubble(props: { article: ZammadArticle; ticket: ZammadTicket }) {
   const agentMessage = () => props.article.sender?.toLowerCase() === 'agent'

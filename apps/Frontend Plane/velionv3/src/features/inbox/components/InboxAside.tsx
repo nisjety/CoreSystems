@@ -11,7 +11,6 @@ import {
   Plus,
   RefreshCw,
   Send,
-  Settings,
   Sparkles,
   UserRound,
 } from 'lucide-solid'
@@ -74,20 +73,6 @@ export function InboxAside(props: {
             )}
           </For>
         </div>
-        <button
-          type="button"
-          onClick={() => props.onOpenModal({
-            type: 'work',
-            title: 'Inbox side panel',
-            description: 'Configure which AI tools, customer systems, calendar resources, and activity streams appear in this right rail.',
-            primaryAction: 'Save panel',
-          })}
-          aria-label="Open side panel settings"
-          title="Open side panel settings"
-          class="velion-inbox-icon-button"
-        >
-          <Settings class="size-4" />
-        </button>
       </div>
 
       <Show when={activeTab() === 'details'}>
