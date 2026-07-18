@@ -14,6 +14,7 @@ import {
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
 import { runAssist } from '@/features/inbox/lib/inbox-ai'
+import { createInboxLayout } from '@/features/inbox/lib/inbox-layout'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
   addConversationTag,
@@ -64,6 +65,7 @@ export default function InboxPage() {
 
   const [ctx] = createResource(loadInboxContext)
   const orgId = createMemo(() => ctx()?.orgId ?? '')
+  const layout = createInboxLayout()
 
   // Broad load (client-side filtering below handles tab/queue/channel/search).
   const [ticketsRes, { mutate: mutateTickets }] = createResource(orgId, (id) =>
@@ -388,7 +390,15 @@ export default function InboxPage() {
 
   return (
     <div class="velion-inbox-page">
-      <div class="velion-inbox-workspace">
+      <div class="velion-inbox-workspace" style={{ '--inbox-list-w': `${layout.listWidth()}px` }}>
+        <div
+          class="velion-inbox-resize-handle velion-inbox-resize-handle--list"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize conversation list"
+          onPointerDown={layout.startListResize}
+          onDblClick={layout.resetWidths}
+        />
         <TicketQueue
           activeTab={activeTab()}
           error={ticketsRes.error instanceof Error ? ticketsRes.error.message : null}
@@ -403,7 +413,15 @@ export default function InboxPage() {
           tickets={filteredTickets()}
         />
 
-        <div class="velion-inbox-detail-grid">
+        <div class="velion-inbox-detail-grid" style={{ '--inbox-aside-w': `${layout.asideWidth()}px` }}>
+          <div
+            class="velion-inbox-resize-handle velion-inbox-resize-handle--aside"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize context panel"
+            onPointerDown={layout.startAsideResize}
+            onDblClick={layout.resetWidths}
+          />
           <ConversationPanel
             agents={agents()}
             articles={articles()}

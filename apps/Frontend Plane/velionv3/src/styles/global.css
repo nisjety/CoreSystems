@@ -28068,19 +28068,62 @@ textarea:focus-visible {
 }
 
 .velion-inbox-workspace {
+  position: relative;
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-columns: var(--inbox-list-w, 340px) minmax(0, 1fr);
   gap: 8px;
   min-height: 100%;
   padding: 8px;
 }
 
 .velion-inbox-detail-grid {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) var(--inbox-aside-w, 360px);
   gap: 8px;
   min-width: 0;
   min-height: 0;
+}
+
+/* Draggable column dividers (widths persisted per-user in localStorage). The
+   handle floats over the grid gap so it never changes the grid child count. */
+.velion-inbox-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+.velion-inbox-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.velion-inbox-resize-handle:hover::after,
+.velion-inbox-resize-handle:active::after {
+  background: var(--velion-accent, #b0532b);
+}
+
+.velion-inbox-resize-handle--list {
+  left: calc(var(--inbox-list-w, 340px) + 8px);
+  transform: translateX(-50%);
+}
+
+.velion-inbox-resize-handle--aside {
+  right: calc(var(--inbox-aside-w, 360px) + 8px);
+  transform: translateX(50%);
 }
 
 .velion-inbox-queue,
