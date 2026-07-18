@@ -108,6 +108,10 @@ function SafeEmailFrame(props: { html: string }) {
     doc.querySelectorAll('img').forEach((img) => {
       if (!(img as HTMLImageElement).complete) img.addEventListener('load', measure, { once: true })
     })
+    // onLoad fires again whenever srcdoc changes (navigating between
+    // conversations reuses this iframe); disconnect the previous observer so it
+    // doesn't leak and keep firing against the replaced document body.
+    observer?.disconnect()
     if ('ResizeObserver' in window && doc.body) {
       observer = new ResizeObserver(() => measure())
       observer.observe(doc.body)
