@@ -41,13 +41,17 @@ import {
   type CalendarEvent,
   type CalendarNote,
   type Macro,
+  type ZammadArticle,
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
+import { runAssist, type AssistMessage, type AssistMode, type AssistSource } from '@/features/inbox/lib/inbox-ai'
 import { cn } from '@/shared/lib/cn'
 
 type AsideTab = 'details' | 'velion' | 'calendar' | 'activity'
 
 export function InboxAside(props: {
+  orgId: string
+  articles: ZammadArticle[]
   onInsertQuickReply: (text: string) => void
   onMacroExecuted: () => void
   onOpenModal: (modal: InboxModalRequest) => void
@@ -93,6 +97,8 @@ export function InboxAside(props: {
       </Show>
       <Show when={activeTab() === 'velion'}>
         <VelionPanel
+          orgId={props.orgId}
+          articles={props.articles}
           onInsertQuickReply={props.onInsertQuickReply}
           onMacroExecuted={props.onMacroExecuted}
           onOpenModal={props.onOpenModal}
@@ -228,32 +234,96 @@ function DetailsPanel(props: {
 }
 
 function VelionPanel(props: {
+  orgId: string
+  articles: ZammadArticle[]
   onInsertQuickReply: (text: string) => void
   onMacroExecuted: () => void
   onOpenModal: (modal: InboxModalRequest) => void
   selectedTicket: ZammadTicket | null
 }) {
-  const [quickReplies, setQuickReplies] = createSignal<string[]>([])
-  const [quickLoading, setQuickLoading] = createSignal(false)
+  const [draft, setDraft] = createSignal<string | null>(null)
+  const [draftLoading, setDraftLoading] = createSignal(false)
   const [summary, setSummary] = createSignal<string | null>(null)
   const [summaryLoading, setSummaryLoading] = createSignal(false)
+  const [answer, setAnswer] = createSignal<string | null>(null)
+  const [answerLoading, setAnswerLoading] = createSignal(false)
+  const [sources, setSources] = createSignal<AssistSource[]>([])
+  const [error, setError] = createSignal<string | null>(null)
   const [question, setQuestion] = createSignal('')
+  const [runningCard, setRunningCard] = createSignal<string | null>(null)
 
-  const generateQuickReplies = () => {
-    if (!props.selectedTicket || quickLoading()) return
-    // Quick-reply generation requires the model gateway, which is not wired into
-    // this panel yet — surface an honest empty result, never canned replies.
-    setQuickLoading(true)
-    setQuickReplies([])
-    setQuickLoading(false)
+  const transcript = createMemo<AssistMessage[]>(() =>
+    props.articles.map((a) => ({
+      agent: a.sender?.toLowerCase() === 'agent',
+      from: a.from,
+      body: a.bodyText || stripToText(a.body ?? ''),
+    })),
+  )
+  const customer = () => (props.selectedTicket ? customerName(props.selectedTicket) : undefined)
+  const ready = () => Boolean(props.selectedTicket && props.orgId)
+  const applySources = (next: AssistSource[]) => {
+    if (next.length) setSources(next)
   }
 
-  const generateSummary = () => {
-    if (!props.selectedTicket || summaryLoading()) return
-    // No model-gateway summary wiring yet: honest empty result, never a fabricated summary.
+  const generateDraft = async (instruction?: string) => {
+    if (!ready() || draftLoading()) return
+    setDraftLoading(true)
+    setError(null)
+    try {
+      const res = await runAssist(props.orgId, 'draft', transcript(), { instruction, customer: customer() })
+      setDraft(res.text || 'Velion returned an empty reply.')
+      applySources(res.sources)
+    } catch {
+      setError('Velion could not generate a reply. Try again.')
+    } finally {
+      setDraftLoading(false)
+    }
+  }
+
+  const generateSummary = async () => {
+    if (!ready() || summaryLoading()) return
     setSummaryLoading(true)
-    setSummary(null)
-    setSummaryLoading(false)
+    setError(null)
+    try {
+      const res = await runAssist(props.orgId, 'summarize', transcript(), { customer: customer() })
+      setSummary(res.text || 'No summary available.')
+    } catch {
+      setError('Velion could not summarize. Try again.')
+    } finally {
+      setSummaryLoading(false)
+    }
+  }
+
+  const runCard = async (id: string, mode: AssistMode, instruction?: string) => {
+    if (!ready() || runningCard()) return
+    setRunningCard(id)
+    setError(null)
+    try {
+      const res = await runAssist(props.orgId, mode, transcript(), { instruction, customer: customer() })
+      applySources(res.sources)
+      if (mode === 'draft') setDraft(res.text)
+      else setAnswer(res.text)
+    } catch {
+      setError('Velion action failed. Try again.')
+    } finally {
+      setRunningCard(null)
+    }
+  }
+
+  const askVelion = async () => {
+    const q = question().trim()
+    if (!q || !ready() || answerLoading()) return
+    setAnswerLoading(true)
+    setError(null)
+    try {
+      const res = await runAssist(props.orgId, 'ask', transcript(), { question: q, customer: customer() })
+      setAnswer(res.text || 'Velion had no answer.')
+      applySources(res.sources)
+    } catch {
+      setError('Velion could not answer. Try again.')
+    } finally {
+      setAnswerLoading(false)
+    }
   }
 
   return (
@@ -270,6 +340,12 @@ function VelionPanel(props: {
           }
         >
           <div class="velion-inbox-card-stack">
+            <Show when={error()}>
+              <div class="velion-inbox-aside-card velion-inbox-aside-card--error" role="alert">
+                {error()}
+              </div>
+            </Show>
+
             <section class="velion-inbox-aside-card">
               <div class="velion-inbox-card-heading">
                 <Bot class="size-4" />
@@ -277,23 +353,50 @@ function VelionPanel(props: {
               </div>
               <ActionSuggestion
                 title="Confirm intent"
-                body="Customer is asking for resolution timing and next step clarity."
-                actionLabel="Run"
-                onRun={() => props.onOpenModal({ type: 'velion', prompt: 'Confirm customer intent, draft the next reply, and add a private action note.' })}
+                body="Detect the customer's primary intent and the best next action."
+                actionLabel={runningCard() === 'intent' ? 'Running…' : 'Run'}
+                onRun={() => void runCard('intent', 'intent')}
               />
               <ActionSuggestion
-                title="Use source-backed reply"
-                body="Insert policy excerpts only when a connected source supports the answer."
-                actionLabel="Run"
-                onRun={() => props.onOpenModal({ type: 'velion', prompt: 'Draft a source-backed reply and keep the evidence in the audit stream.' })}
+                title="Source-backed reply"
+                body="Draft a reply grounded only in facts supported by the conversation."
+                actionLabel={runningCard() === 'source' ? 'Running…' : 'Run'}
+                onRun={() =>
+                  void runCard(
+                    'source',
+                    'draft',
+                    'Only assert facts supported by the transcript; do not invent policy or promises.',
+                  )
+                }
               />
               <ActionSuggestion
-                title="Route if overdue"
-                body="If SLA risk is high, assign to the owning support queue before replying."
-                actionLabel="Run"
-                onRun={() => props.onOpenModal({ type: 'velion', prompt: 'Check SLA risk, raise priority if needed, and route this conversation to the right queue.' })}
+                title="Assess & route"
+                body="Recommend whether to escalate or route, based on urgency and status."
+                actionLabel={runningCard() === 'route' ? 'Running…' : 'Run'}
+                onRun={() =>
+                  void runCard(
+                    'route',
+                    'ask',
+                    undefined,
+                  )
+                }
               />
             </section>
+
+            <Show when={answer()}>
+              <section class="velion-inbox-aside-card velion-inbox-aside-card--answer">
+                <div class="velion-inbox-card-heading velion-inbox-card-heading--between">
+                  <div>
+                    <Bot class="size-4" />
+                    <h2>Velion</h2>
+                  </div>
+                  <button type="button" onClick={() => setAnswer(null)} aria-label="Dismiss answer">
+                    Clear
+                  </button>
+                </div>
+                <p class="velion-inbox-ai-text">{answer()}</p>
+              </section>
+            </Show>
 
             <section class="velion-inbox-aside-card velion-inbox-aside-card--soft">
               <div class="velion-inbox-card-heading velion-inbox-card-heading--between">
@@ -301,13 +404,13 @@ function VelionPanel(props: {
                   <Sparkles class="size-4" />
                   <h2>Reply assistance</h2>
                 </div>
-                <button type="button" disabled={quickLoading()} onClick={generateQuickReplies}>
-                  <RefreshCw class={cn('size-3.5', quickLoading() && 'velion-inbox-spin')} />
-                  Generate
+                <button type="button" disabled={draftLoading()} onClick={() => void generateDraft()}>
+                  <RefreshCw class={cn('size-3.5', draftLoading() && 'velion-inbox-spin')} />
+                  {draftLoading() ? 'Drafting…' : 'Generate'}
                 </button>
               </div>
               <Show
-                when={!quickLoading()}
+                when={!draftLoading()}
                 fallback={
                   <div class="velion-inbox-reply-skeleton">
                     <span />
@@ -315,15 +418,15 @@ function VelionPanel(props: {
                   </div>
                 }
               >
-                <Show when={quickReplies().length} fallback={<p>Generate quick reply options for this conversation.</p>}>
-                  <div class="velion-inbox-quick-replies">
-                    <For each={quickReplies()}>
-                      {(reply) => (
-                        <button type="button" onClick={() => props.onInsertQuickReply(reply)}>
-                          {reply}
-                        </button>
-                      )}
-                    </For>
+                <Show when={draft()} fallback={<p>Generate a suggested reply grounded in this conversation.</p>}>
+                  <p class="velion-inbox-ai-text">{draft()}</p>
+                  <div class="velion-inbox-draft-actions">
+                    <button type="button" class="velion-inbox-btn-primary" onClick={() => props.onInsertQuickReply(draft() ?? '')}>
+                      Insert into reply
+                    </button>
+                    <button type="button" onClick={() => void generateDraft('Rewrite this differently.')}>
+                      Regenerate
+                    </button>
                   </div>
                 </Show>
               </Show>
@@ -332,18 +435,27 @@ function VelionPanel(props: {
             <section class="velion-inbox-aside-card">
               <div class="velion-inbox-card-heading velion-inbox-card-heading--between">
                 <h2>Conversation summary</h2>
-                <button type="button" onClick={generateSummary}>Summarize</button>
+                <button type="button" disabled={summaryLoading()} onClick={() => void generateSummary()}>
+                  {summaryLoading() ? 'Summarizing…' : 'Summarize'}
+                </button>
               </div>
-              <p>{summaryLoading() ? 'Generating summary...' : summary() ?? 'Ask Velion to summarize the conversation and extract the customer intent.'}</p>
+              <p class="velion-inbox-ai-text">
+                {summaryLoading()
+                  ? 'Generating summary…'
+                  : summary() ?? 'Summarize the conversation and extract the customer intent.'}
+              </p>
             </section>
 
             <section class="velion-inbox-aside-card">
               <h2>Relevant sources</h2>
-              <div class="velion-inbox-source-stack">
-                <SourceRow title="Refund policy" />
-                <SourceRow title="Shipping and SLA runbook" />
-                <SourceRow title="Macro: polite follow-up" />
-              </div>
+              <Show
+                when={sources().length}
+                fallback={<p class="velion-inbox-muted">Sources appear here when Velion grounds an answer in your knowledge base.</p>}
+              >
+                <div class="velion-inbox-source-stack">
+                  <For each={sources()}>{(s) => <SourceRow title={s.title || s.uri || 'Source'} />}</For>
+                </div>
+              </Show>
             </section>
 
             <MacrosPanel onMacroExecuted={props.onMacroExecuted} selectedTicket={props.selectedTicket} />
@@ -356,16 +468,31 @@ function VelionPanel(props: {
           <input
             value={question()}
             onInput={(event) => setQuestion(event.currentTarget.value)}
-            placeholder="Ask Velion"
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void askVelion()
+            }}
+            placeholder="Ask Velion about this conversation"
             aria-label="Ask Velion a question"
+            disabled={!ready()}
           />
-          <button type="button" onClick={() => props.onOpenModal({ type: 'velion', prompt: question() })} aria-label="Send Velion question">
-            <Send class="size-3.5" />
+          <button type="button" disabled={answerLoading() || !ready()} onClick={() => void askVelion()} aria-label="Send Velion question">
+            <Send class={cn('size-3.5', answerLoading() && 'velion-inbox-spin')} />
           </button>
         </div>
       </div>
     </div>
   )
+}
+
+// Lightweight HTML→text for building the AI prompt from an article whose only
+// body is HTML (the visible transcript uses the sandboxed EmailBody renderer).
+function stripToText(value: string): string {
+  return value
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {

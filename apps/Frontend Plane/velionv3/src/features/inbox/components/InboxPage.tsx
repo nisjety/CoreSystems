@@ -13,6 +13,7 @@ import {
   type ZammadArticle,
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
+import { runAssist } from '@/features/inbox/lib/inbox-ai'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
   addConversationTag,
@@ -289,11 +290,25 @@ export default function InboxPage() {
     }
   }
 
-  const suggestReply = () => {
-    if (!selectedTicket()) return
-    // No model-gateway reply suggestion is wired yet: clear to an honest empty
-    // draft instead of injecting a fabricated canned reply.
-    setReplyText('')
+  const [suggesting, setSuggesting] = createSignal(false)
+  const suggestReply = async () => {
+    const ticket = selectedTicket()
+    if (!ticket || !orgId() || suggesting()) return
+    setSuggesting(true)
+    try {
+      const messages = articles().map((a) => ({
+        agent: a.sender?.toLowerCase() === 'agent',
+        from: a.from,
+        body: a.bodyText || a.body || '',
+      }))
+      const res = await runAssist(orgId(), 'draft', messages, { customer: customerName(ticket) })
+      if (res.text) setReplyText(res.text)
+      else setNotice('Velion returned an empty draft.')
+    } catch {
+      setNotice('Velion could not draft a reply. Try again.')
+    } finally {
+      setSuggesting(false)
+    }
   }
 
   const createSocialFollowUp = async () => {
@@ -395,6 +410,8 @@ export default function InboxPage() {
             setReplyText={setReplyText}
           />
           <InboxAside
+            orgId={orgId()}
+            articles={articles()}
             onInsertQuickReply={setReplyText}
             onMacroExecuted={() => setNotice('Macro executed.')}
             onOpenModal={setModal}

@@ -29350,6 +29350,53 @@ textarea:focus-visible {
   font-style: italic;
 }
 
+/* Velion AI tab — generated text, drafts, answers, errors. */
+.velion-inbox-ai-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.velion-inbox-draft-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.velion-inbox-btn-primary {
+  background: var(--velion-accent, #b0532b);
+  color: #fff;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.velion-inbox-btn-primary:hover {
+  filter: brightness(0.95);
+}
+
+.velion-inbox-aside-card--answer {
+  border-left: 2px solid var(--velion-accent, #b0532b);
+}
+
+.velion-inbox-aside-card--error {
+  color: var(--semantic-error, #c41c1c);
+  background: color-mix(in srgb, var(--semantic-error, #c41c1c) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--semantic-error, #c41c1c) 24%, transparent);
+  font-size: 13px;
+}
+
+.velion-inbox-muted {
+  color: var(--velion-text-soft);
+  font-size: 13px;
+}
+
 .velion-inbox-article__internal {
   display: inline-flex;
   margin-top: 8px;
