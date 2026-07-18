@@ -132,8 +132,9 @@ export function resolveInboxRouteFilter(searchParams: URLSearchParams): InboxRou
   const channel = searchParams.get('channel') || undefined
 
   if (view === 'mentions') {
+    // Mentions default shows ALL mentions (every status), not just open ones.
     return {
-      activeTab: 'open',
+      activeTab: 'all',
       queue: 'mentions',
       channel,
       label: channel ? `Mentions · ${capitalize(channel.replace(/-/g, ' '))}` : 'Mentions',
@@ -187,7 +188,12 @@ export function resolveInboxRouteFilter(searchParams: URLSearchParams): InboxRou
       return { activeTab: 'all', queue: 'manage', label: 'Manage' }
     case 'mine':
     default:
-      return { activeTab: 'open', assigned: 'mine', label: 'Your inbox' }
+      // The default landing tab ("Your inbox") is tied to the ALL filter so it
+      // shows every conversation in the workspace, not an empty personal queue.
+      // Incoming provider messages arrive unassigned, so an assigned:'mine'
+      // default rendered empty on first open. Personal scoping stays available
+      // via the dedicated 'Unassigned' and assignment filters.
+      return { activeTab: 'all', assigned: 'all', label: 'Your inbox' }
   }
 }
 

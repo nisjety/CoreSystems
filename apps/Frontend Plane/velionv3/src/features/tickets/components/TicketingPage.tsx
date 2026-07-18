@@ -9,6 +9,7 @@ import {
   FileText,
   Inbox,
   Link2,
+  List,
   ListChecks,
   MessageSquare,
   Search,
@@ -48,6 +49,7 @@ import {
 import { cn } from '@/shared/lib/cn'
 
 const ticketQueues = [
+  { id: 'all', label: 'All tickets', icon: List },
   { id: 'suggested', label: 'Suggested by AI', icon: Bot },
   { id: 'my', label: 'My tickets', icon: UserRound },
   { id: 'unassigned', label: 'Unassigned', icon: Inbox },
@@ -98,7 +100,9 @@ export default function TicketingPage() {
 
   const activeQueue = createMemo<TicketQueueId>(() => {
     const value = new URLSearchParams(location.search).get('queue') as TicketQueueId | null
-    return ticketQueues.some((queue) => queue.id === value) ? value! : 'my'
+    // Default to the "All tickets" queue so the Ticketing page opens populated
+    // rather than on an empty "My tickets" (assigned-to-me) view.
+    return ticketQueues.some((queue) => queue.id === value) ? value! : 'all'
   })
   const activeParams = createMemo(() => new URLSearchParams(location.search))
   const activeStatus = createMemo(() => activeParams().get('status') ?? undefined)
@@ -136,7 +140,8 @@ export default function TicketingPage() {
     (source) => {
       if (!source.orgId || source.queue === 'rules') return Promise.resolve([] as SupportTicket[])
       return optionalTicketResource(() => listTickets(source.orgId, {
-        queue: source.queue,
+        // 'all' sends no queue filter (backend $4='' returns every ticket).
+        queue: source.queue === 'all' ? undefined : source.queue,
         assigned: source.queue === 'my' ? source.userId : undefined,
         status: source.status,
         team: source.team,
