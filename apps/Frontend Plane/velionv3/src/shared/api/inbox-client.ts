@@ -152,7 +152,10 @@ export function toArticle(message: ConversationMessage): ZammadArticle {
     type: message.internal ? 'note' : 'email',
     internal: message.internal,
     body: message.body_html || message.body_text,
+    bodyHtml: message.body_html,
+    bodyText: message.body_text,
     from: message.sender_name || message.sender_email || (agentMessage ? 'Velion Support' : 'Customer'),
+    fromEmail: message.sender_email,
     sender: agentMessage ? 'Agent' : 'Customer',
     created_at: message.occurred_at || message.created_at,
   }

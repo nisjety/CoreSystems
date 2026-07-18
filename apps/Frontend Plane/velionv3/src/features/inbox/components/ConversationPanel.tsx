@@ -22,6 +22,7 @@ import {
 import { createEffect, createSignal, For, Show, type Component, type JSX } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
 import { AiActionReviewPanel } from '@/features/inbox/components/AiActionReviewPanel'
+import { EmailBody } from '@/features/inbox/components/EmailBody'
 import { SentimentBadge } from '@/features/inbox/components/SentimentBadge'
 import type { InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import {
@@ -30,7 +31,6 @@ import {
   formatDate,
   formatRelativeTime,
   formatTimestamp,
-  stripHtml,
   titleCase,
   type Agent,
   type Group,
@@ -582,7 +582,8 @@ function ComposerToolButtons(props: { onOpenModal: (modal: InboxModalRequest) =>
 
 function ArticleBubble(props: { article: ZammadArticle; ticket: ZammadTicket }) {
   const agentMessage = () => props.article.sender?.toLowerCase() === 'agent'
-  const body = () => stripHtml(props.article.body ?? '')
+  const senderName = () => props.article.from || (agentMessage() ? 'Velion Support' : customerName(props.ticket))
+  const senderEmail = () => props.article.fromEmail
 
   return (
     <article class="velion-inbox-article">
@@ -591,14 +592,15 @@ function ArticleBubble(props: { article: ZammadArticle; ticket: ZammadTicket }) 
       </div>
       <div class="velion-inbox-article__body">
         <div class="velion-inbox-article__meta">
-          <span classList={{ 'velion-inbox-article__agent-name': agentMessage() }}>
-            {props.article.from || (agentMessage() ? 'Velion Support' : customerName(props.ticket))}
-          </span>
+          <span classList={{ 'velion-inbox-article__agent-name': agentMessage() }}>{senderName()}</span>
+          <Show when={senderEmail() && senderEmail() !== senderName()}>
+            <span class="velion-inbox-article__email">&lt;{senderEmail()}&gt;</span>
+          </Show>
           <Mail class="size-3.5" />
           <time>{formatTimestamp(props.article.created_at)}</time>
         </div>
         <div class={cn('velion-inbox-article__bubble', props.article.internal && 'velion-inbox-article__bubble--internal', agentMessage() && !props.article.internal && 'velion-inbox-article__bubble--agent')}>
-          {body() || 'No message body.'}
+          <EmailBody html={props.article.bodyHtml ?? props.article.body} text={props.article.bodyText} />
         </div>
         <Show when={props.article.internal}>
           <span class="velion-inbox-article__internal">Internal note</span>

@@ -51,7 +51,10 @@ export type ZammadArticle = {
   type?: string
   internal?: boolean
   body?: string
+  bodyHtml?: string
+  bodyText?: string
   from?: string
+  fromEmail?: string
   sender?: string
   created_at: string
 }

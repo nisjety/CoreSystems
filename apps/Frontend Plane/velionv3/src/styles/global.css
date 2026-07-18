@@ -29319,6 +29319,37 @@ textarea:focus-visible {
   border: 1px solid var(--velion-bg-apricot);
 }
 
+/* Email rendering: sandboxed HTML frame (Gmail/Outlook style) + plain fallback. */
+.velion-inbox-email-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color-scheme: light dark;
+  transition: height 120ms ease;
+}
+
+.velion-inbox-email-plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.velion-inbox-email-plain a {
+  color: var(--velion-accent, #b0532b);
+  text-decoration: underline;
+}
+
+.velion-inbox-article__email {
+  color: var(--velion-text-soft);
+  font-size: 12px;
+}
+
+.velion-inbox-article__empty {
+  color: var(--velion-text-soft);
+  font-style: italic;
+}
+
 .velion-inbox-article__internal {
   display: inline-flex;
   margin-top: 8px;
