@@ -1,5 +1,6 @@
 // email-worker polls connected Gmail (Google) and Outlook (Microsoft)
-// mailboxes for new inbound messages and forwards them to the
+// mailboxes — plus Microsoft Teams, Slack, X direct messages, and Discord
+// guild channels — for new inbound messages and forwards them to the
 // conversation-ingest-rs bridge, which lands them in the Velion Inbox.
 // It is the caller side of the /internal/ingest/email pathway.
 package main
@@ -76,6 +77,10 @@ func main() {
 		},
 		Gmail:          &emailsync.GmailFetcher{HTTP: providerHTTP},
 		Graph:          &emailsync.GraphFetcher{BaseURL: strings.TrimRight(cfg.MicrosoftGraphBaseURL, "/") + "/v1.0", HTTP: providerHTTP},
+		Teams:          &emailsync.TeamsFetcher{BaseURL: strings.TrimRight(cfg.MicrosoftGraphBaseURL, "/") + "/v1.0", HTTP: providerHTTP},
+		Slack:          &emailsync.SlackFetcher{BaseURL: cfg.SlackAPIBaseURL, HTTP: providerHTTP},
+		XDM:            &emailsync.XDMFetcher{BaseURL: cfg.XAPIBaseURL, HTTP: providerHTTP},
+		Discord:        &emailsync.DiscordFetcher{BaseURL: cfg.DiscordAPIBaseURL, BotToken: cfg.DiscordBotToken, HTTP: providerHTTP},
 		Logger:         &logger,
 		PollInterval:   cfg.EmailSyncInterval,
 		BackfillWindow: cfg.EmailSyncBackfillWindow,

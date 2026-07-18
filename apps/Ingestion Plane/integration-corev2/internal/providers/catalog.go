@@ -215,6 +215,13 @@ func Microsoft() Provider {
 				Scopes:      []string{"Team.ReadBasic.All", "Channel.ReadBasic.All"},
 			},
 			{
+				Key:         "teams.messages.read",
+				Label:       "Teams messages",
+				Description: "Read Teams channel messages and chats for the unified inbox (delegated Graph delta sync).",
+				Scopes:      []string{"ChannelMessage.Read.All", "Chat.Read"},
+				Sensitive:   true,
+			},
+			{
 				Key:         "mail.read",
 				Label:       "Outlook read",
 				Description: "Read mailbox messages for shared inbox and AI drafts.",
@@ -252,14 +259,14 @@ func Microsoft() Provider {
 			{
 				Key:          "inbox",
 				Label:        "Inbox automation",
-				Description:  "Read and send Outlook mail through Velion-controlled workflows.",
-				Capabilities: []string{"profile.read", "mail.read", "mail.send"},
+				Description:  "Read and send Outlook mail plus Teams messages through Velion-controlled workflows.",
+				Capabilities: []string{"profile.read", "mail.read", "mail.send", "teams.read", "teams.messages.read"},
 			},
 			{
 				Key:          "full",
 				Label:        "Full Microsoft workspace",
-				Description:  "Knowledge, Teams metadata, Outlook, and calendar capabilities.",
-				Capabilities: []string{"profile.read", "sharepoint.read", "teams.read", "mail.read", "mail.send", "calendar.read"},
+				Description:  "Knowledge, Teams metadata and messages, Outlook, and calendar capabilities.",
+				Capabilities: []string{"profile.read", "sharepoint.read", "teams.read", "teams.messages.read", "mail.read", "mail.send", "calendar.read"},
 			},
 		},
 	}
@@ -314,6 +321,13 @@ func Slack() Provider {
 				Sensitive:   true,
 			},
 			{
+				Key:         "messages.read",
+				Label:       "Direct message history",
+				Description: "Read bot direct messages and group DMs for the unified inbox.",
+				Scopes:      []string{"im:read", "im:history", "mpim:read", "mpim:history"},
+				Sensitive:   true,
+			},
+			{
 				Key:         "messages.write",
 				Label:       "Post messages",
 				Description: "Post Velion-approved replies or workflow messages.",
@@ -327,6 +341,12 @@ func Slack() Provider {
 				Label:        "Safe onboarding preview",
 				Description:  "Workspace, member, and public channel metadata only.",
 				Capabilities: []string{"workspace.read", "users.read", "channels.read"},
+			},
+			{
+				Key:          "inbox",
+				Label:        "Unified inbox",
+				Description:  "Channel history plus bot DMs for the shared inbox.",
+				Capabilities: []string{"workspace.read", "users.read", "channels.read", "channels.history", "messages.read"},
 			},
 			{
 				Key:          "knowledge",
@@ -343,8 +363,8 @@ func Slack() Provider {
 			{
 				Key:          "full",
 				Label:        "Full Slack workspace",
-				Description:  "Knowledge sync plus approved message actions and private metadata consent.",
-				Capabilities: []string{"workspace.read", "users.read", "channels.read", "channels.history", "private_channels.read", "files.read", "messages.write"},
+				Description:  "Knowledge sync, unified inbox, approved message actions, and private metadata consent.",
+				Capabilities: []string{"workspace.read", "users.read", "channels.read", "channels.history", "private_channels.read", "files.read", "messages.read", "messages.write"},
 			},
 		},
 	}
@@ -921,6 +941,13 @@ func X() Provider {
 				Description: "Read status and engagement metadata for published posts.",
 				Sensitive:   true,
 			},
+			{
+				Key:         "social.inbox.read",
+				Label:       "Direct messages",
+				Description: "Read account direct messages for the unified inbox (requires X API Pro tier or above).",
+				Scopes:      []string{"dm.read"},
+				Sensitive:   true,
+			},
 		},
 		Bundles: []Bundle{
 			{
@@ -936,10 +963,16 @@ func X() Provider {
 				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload"},
 			},
 			{
+				Key:          "inbox",
+				Label:        "Unified inbox",
+				Description:  "Direct messages for the shared inbox.",
+				Capabilities: []string{"social.profile.read", "social.inbox.read"},
+			},
+			{
 				Key:          "full",
-				Label:        "Publishing and analytics",
-				Description:  "Publishing plus performance reporting.",
-				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read"},
+				Label:        "Publishing, inbox, and analytics",
+				Description:  "Publishing, direct messages, and performance reporting.",
+				Capabilities: []string{"social.profile.read", "social.post.write", "social.media.upload", "social.analytics.read", "social.inbox.read"},
 			},
 		},
 	}
@@ -1223,6 +1256,13 @@ func Discord() Provider {
 				Description: "Read the servers (guilds) the connecting user belongs to.",
 				Scopes:      []string{"guilds"},
 			},
+			{
+				Key:         "messages.read",
+				Label:       "Server messages",
+				Description: "Install the Velion bot into the selected server so channel messages reach the unified inbox via the Gateway (requires the Message Content privileged intent on the Discord app).",
+				Scopes:      []string{"bot"},
+				Sensitive:   true,
+			},
 		},
 		Bundles: []Bundle{
 			{
@@ -1232,10 +1272,16 @@ func Discord() Provider {
 				Capabilities: []string{"profile.read"},
 			},
 			{
+				Key:          "inbox",
+				Label:        "Unified inbox",
+				Description:  "Bot install for server message ingestion.",
+				Capabilities: []string{"profile.read", "workspace.read", "messages.read"},
+			},
+			{
 				Key:          "full",
-				Label:        "Identity and servers",
-				Description:  "User identity plus server membership.",
-				Capabilities: []string{"profile.read", "workspace.read"},
+				Label:        "Identity, servers, and inbox",
+				Description:  "User identity, server membership, and bot message ingestion.",
+				Capabilities: []string{"profile.read", "workspace.read", "messages.read"},
 			},
 		},
 	}

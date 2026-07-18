@@ -160,6 +160,10 @@ type Config struct {
 	DiscordAuthorizationURL string
 	DiscordTokenURL         string
 	DiscordAPIBaseURL       string
+	// DiscordBotToken is the app-level bot token the inbound message worker
+	// reads guild channels with (the OAuth connection only proves the
+	// install). Optional: without it the Discord inbox source stays off.
+	DiscordBotToken string
 	// GoogleAdsDeveloperToken is the Google Ads API developer token (sent as a
 	// `developer-token` header on Ads API calls — separate from OAuth). Ads
 	// capability is offered without it, but API calls require it.
@@ -337,6 +341,7 @@ func Load() (Config, error) {
 		DiscordAuthorizationURL: envOr("DISCORD_AUTHORIZATION_URL", "https://discord.com/oauth2/authorize"),
 		DiscordTokenURL:         envOr("DISCORD_TOKEN_URL", "https://discord.com/api/oauth2/token"),
 		DiscordAPIBaseURL:       envOr("DISCORD_API_BASE_URL", "https://discord.com/api/v10"),
+		DiscordBotToken:         strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")),
 		GoogleAdsDeveloperToken: strings.TrimSpace(os.Getenv("GOOGLE_ADS_DEVELOPER_TOKEN")),
 		OktaDomain:              strings.TrimRight(strings.TrimSpace(os.Getenv("OKTA_DOMAIN")), "/"),
 		OktaClientID:            strings.TrimSpace(os.Getenv("OKTA_CLIENT_ID")),

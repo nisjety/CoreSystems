@@ -401,3 +401,27 @@ func TestValidateProviderRequiresProviderSpecificCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadReadsOptionalDiscordBotToken(t *testing.T) {
+	t.Setenv("INTEGRATION_CREDENTIALS_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012")))
+	t.Setenv("DISCORD_BOT_TOKEN", "  bot-token-value  ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.DiscordBotToken != "bot-token-value" {
+		t.Fatalf("DiscordBotToken = %q, want trimmed token", cfg.DiscordBotToken)
+	}
+
+	// The Discord inbox source is optional: the email worker runtime must
+	// validate without DISCORD_BOT_TOKEN.
+	workerCfg := Config{
+		DatabaseURL:                    "postgres://test",
+		EncryptionKey:                  []byte("12345678901234567890123456789012"),
+		ConversationIngestURL:          "http://conversation-ingest-rs:3161",
+		ConversationIngestServiceToken: "integration-email-worker-test-secret-at-least-32-bytes",
+	}
+	if err := workerCfg.ValidateEmailWorkerRuntime(); err != nil {
+		t.Fatalf("ValidateEmailWorkerRuntime() error = %v, want DISCORD_BOT_TOKEN to stay optional", err)
+	}
+}

@@ -17,6 +17,13 @@
 // are documented as hints only — history/delta remains the source of truth),
 // so this worker is complete without webhook push; push endpoints can later
 // trigger an immediate RunOnce without changing any of this logic.
+//
+// The same loop also polls chat sources into the unified inbox: Microsoft
+// Teams chats/channels (teams.go), Slack conversations (slack.go), X direct
+// messages (xdm.go), and Discord guild channels (discord.go). Each chat plan
+// keeps its own cursor row (conn.ID + ":" + suffix) and stamps its channel
+// provider on delivered events so conversation-core routes them into the
+// matching inbox channel.
 package emailsync
 
 import (
@@ -77,13 +84,30 @@ type FetchResult struct {
 	NextCursor string
 }
 
-// Fetcher is one provider's mailbox reader (Gmail or Graph).
+// Fetcher is one provider's inbound message reader (mailbox or chat source).
 type Fetcher interface {
 	// Fetch returns inbox messages newer than cursor. An empty cursor means
 	// bootstrap: establish a fresh cursor and backfill at most maxMessages
 	// from the backfill window. Implementations return ErrCursorExpired
 	// (possibly wrapped) when the provider rejects the stored cursor.
 	Fetch(ctx context.Context, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error)
+}
+
+// ConnectionFetcher is an optional Fetcher upgrade for sources that need
+// connection identity beyond the access token (Discord resolves the guild to
+// poll from the connection's provider context). Fetchers that do not need it
+// keep the plain Fetch signature.
+type ConnectionFetcher interface {
+	FetchConnection(ctx context.Context, conn store.Connection, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error)
+}
+
+// fetchWith dispatches to FetchConnection when the fetcher wants the
+// connection, and to plain Fetch otherwise.
+func fetchWith(ctx context.Context, fetcher Fetcher, conn store.Connection, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error) {
+	if cf, ok := fetcher.(ConnectionFetcher); ok {
+		return cf.FetchConnection(ctx, conn, accessToken, cursor, backfill, maxMessages)
+	}
+	return fetcher.Fetch(ctx, accessToken, cursor, backfill, maxMessages)
 }
 
 // ConnectionSource is the store subset the worker needs.
@@ -282,30 +306,72 @@ func validServiceToken(token string) bool {
 		!strings.HasPrefix(lower, "replace-with")
 }
 
-// Worker drives one poll loop over all email-capable connections.
+// Worker drives one poll loop over all inbox-capable connections (email
+// mailboxes plus the chat sources: Teams, Slack, X DMs, Discord).
 type Worker struct {
-	Store  ConnectionSource
-	Tokens TokenSource
-	Ingest Ingestor
-	Gmail  Fetcher
-	Graph  Fetcher
-	Logger *zerolog.Logger
+	Store   ConnectionSource
+	Tokens  TokenSource
+	Ingest  Ingestor
+	Gmail   Fetcher
+	Graph   Fetcher
+	Teams   Fetcher
+	Slack   Fetcher
+	XDM     Fetcher
+	Discord Fetcher
+	Logger  *zerolog.Logger
 
 	PollInterval   time.Duration
 	BackfillWindow time.Duration
 	MaxPerCycle    int
 }
 
-// providerPlans maps provider keys to the capability that authorizes reading
-// mail plus the raw OAuth scope fallback (older connections may predate the
-// capability catalog rows).
-var providerPlans = []struct {
+// providerPlan is one poll source: a provider key plus the capability that
+// authorizes reading it and the raw OAuth scope fallback (older connections
+// may predate the capability catalog rows).
+type providerPlan struct {
 	providerKey string
 	capability  string
 	scope       string
-}{
+	// stateKeySuffix isolates this plan's cursor row: empty keeps the bare
+	// connection id (backward compatible with pre-existing gmail/outlook
+	// rows); non-empty stores under conn.ID + ":" + suffix so several plans
+	// can share one connection (email_sync_state has no FK, so synthetic
+	// keys are safe).
+	stateKeySuffix string
+	// fetcherKey selects a dedicated fetcher; empty keeps the historical
+	// per-provider dispatch (google→Gmail, microsoft→Graph).
+	fetcherKey string
+	// channelProvider overrides the outbound `provider` field stamped on
+	// delivered events so conversation-core routes the thread into the
+	// matching inbox channel; empty keeps the connection's own provider key
+	// ("google"/"microsoft") so replies route through gmail.send/mail.send.
+	channelProvider string
+}
+
+// source names the plan for fetcher dispatch and error messages: the
+// dedicated fetcher key when set, otherwise the provider key.
+func (p providerPlan) source() string {
+	if p.fetcherKey != "" {
+		return p.fetcherKey
+	}
+	return p.providerKey
+}
+
+// stateKey returns the email_sync_state primary key for this plan.
+func (p providerPlan) stateKey(connectionID string) string {
+	if p.stateKeySuffix == "" {
+		return connectionID
+	}
+	return connectionID + ":" + p.stateKeySuffix
+}
+
+var providerPlans = []providerPlan{
 	{providerKey: "google", capability: "gmail.read", scope: "https://www.googleapis.com/auth/gmail.readonly"},
 	{providerKey: "microsoft", capability: "mail.read", scope: "Mail.Read"},
+	{providerKey: "microsoft", capability: "teams.messages.read", scope: "ChannelMessage.Read.All", stateKeySuffix: "teams", fetcherKey: "teams", channelProvider: "teams"},
+	{providerKey: "slack", capability: "channels.history", scope: "channels:history", stateKeySuffix: "slack", fetcherKey: "slack", channelProvider: "slack"},
+	{providerKey: "x", capability: "social.inbox.read", scope: "dm.read", stateKeySuffix: "xdm", fetcherKey: "xdm", channelProvider: "x"},
+	{providerKey: "discord", capability: "messages.read", scope: "bot", stateKeySuffix: "discord", fetcherKey: "discord", channelProvider: "discord"},
 }
 
 func (w Worker) Run(ctx context.Context) error {
@@ -345,7 +411,7 @@ func (w Worker) RunOnce(ctx context.Context) (int, error) {
 			if !connectionEligible(conn, plan.capability, plan.scope) {
 				continue
 			}
-			ingested, err := w.syncConnection(ctx, conn)
+			ingested, err := w.syncConnection(ctx, conn, plan)
 			total += ingested
 			if err != nil {
 				w.logWarn(err, "email sync failed for connection "+conn.ID)
@@ -378,18 +444,22 @@ func connectionEligible(conn store.Connection, capability, scope string) bool {
 	})
 }
 
-func (w Worker) syncConnection(ctx context.Context, conn store.Connection) (int, error) {
-	fetcher := w.fetcherFor(conn.ProviderKey)
+func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan providerPlan) (int, error) {
+	fetcher := w.fetcherFor(plan)
 	if fetcher == nil {
-		return 0, fmt.Errorf("no email fetcher for provider %s", conn.ProviderKey)
+		return 0, fmt.Errorf("no email fetcher for provider %s", plan.source())
 	}
 
-	state, err := w.Store.GetEmailSyncState(ctx, conn.ID)
+	stateKey := plan.stateKey(conn.ID)
+	state, err := w.Store.GetEmailSyncState(ctx, stateKey)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return 0, fmt.Errorf("load sync state for %s: %w", conn.ID, err)
+		return 0, fmt.Errorf("load sync state for %s: %w", stateKey, err)
 	}
-	state.ConnectionID = conn.ID
+	state.ConnectionID = stateKey
 	state.ProviderKey = conn.ProviderKey
+	if plan.channelProvider != "" {
+		state.ProviderKey = plan.channelProvider
+	}
 
 	token, err := w.Tokens.AccessTokenForConnection(ctx, conn.ID)
 	if err != nil {
@@ -405,15 +475,23 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection) (int,
 		backfill = 24 * time.Hour
 	}
 
-	result, err := fetcher.Fetch(ctx, token.AccessToken, state.Cursor, backfill, maxMessages)
+	result, err := fetchWith(ctx, fetcher, conn, token.AccessToken, state.Cursor, backfill, maxMessages)
 	if errors.Is(err, ErrCursorExpired) {
 		// The provider invalidated our cursor (Gmail >~1 week of history,
 		// Graph sync-state reset). Re-bootstrap immediately, once.
 		w.logInfo("cursor expired for connection " + conn.ID + ", re-bootstrapping")
-		result, err = fetcher.Fetch(ctx, token.AccessToken, "", backfill, maxMessages)
+		result, err = fetchWith(ctx, fetcher, conn, token.AccessToken, "", backfill, maxMessages)
 	}
 	if err != nil {
-		return 0, w.recordFailure(ctx, state, fmt.Errorf("fetch %s mailbox: %w", conn.ProviderKey, err))
+		return 0, w.recordFailure(ctx, state, fmt.Errorf("fetch %s mailbox: %w", plan.source(), err))
+	}
+
+	// deliveryConn is what the ingestor sees: chat plans stamp their channel
+	// provider onto the copy so the bridge routes the thread into the
+	// matching inbox channel; email plans pass the connection unchanged.
+	deliveryConn := conn
+	if plan.channelProvider != "" {
+		deliveryConn.ProviderKey = plan.channelProvider
 	}
 
 	ingested := 0
@@ -424,7 +502,7 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection) (int,
 		if msg.From.Email != "" && strings.EqualFold(msg.From.Email, conn.UserEmail) {
 			continue
 		}
-		if err := w.Ingest.Ingest(ctx, conn, msg); err != nil {
+		if err := w.Ingest.Ingest(ctx, deliveryConn, msg); err != nil {
 			// Do not advance the cursor past a failed ingest: the whole batch
 			// re-runs next cycle and conversation-core's idempotency key makes
 			// the already-ingested prefix a no-op.
@@ -438,16 +516,29 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection) (int,
 	state.LastError = ""
 	state.FailureCount = 0
 	if err := w.Store.UpsertEmailSyncState(ctx, state); err != nil {
-		return ingested, fmt.Errorf("persist sync state for %s: %w", conn.ID, err)
+		return ingested, fmt.Errorf("persist sync state for %s: %w", stateKey, err)
 	}
 	if ingested > 0 {
-		w.logInfo(fmt.Sprintf("ingested %d %s message(s) for connection %s", ingested, conn.ProviderKey, conn.ID))
+		w.logInfo(fmt.Sprintf("ingested %d %s message(s) for connection %s", ingested, deliveryConn.ProviderKey, conn.ID))
 	}
 	return ingested, nil
 }
 
-func (w Worker) fetcherFor(providerKey string) Fetcher {
-	switch providerKey {
+func (w Worker) fetcherFor(plan providerPlan) Fetcher {
+	switch plan.fetcherKey {
+	case "teams":
+		return w.Teams
+	case "slack":
+		return w.Slack
+	case "xdm":
+		return w.XDM
+	case "discord":
+		return w.Discord
+	case "":
+	default:
+		return nil
+	}
+	switch plan.providerKey {
 	case "google":
 		return w.Gmail
 	case "microsoft":

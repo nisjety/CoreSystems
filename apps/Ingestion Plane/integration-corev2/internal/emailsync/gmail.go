@@ -328,11 +328,17 @@ func unwrapOnce(err error) error {
 }
 
 func providerGetJSON(ctx context.Context, client *http.Client, accessToken, fullURL string, out any) error {
+	return providerGetJSONAuth(ctx, client, "Bearer "+accessToken, fullURL, out)
+}
+
+// providerGetJSONAuth is providerGetJSON with a caller-supplied Authorization
+// value (Discord bot calls use "Bot <token>" instead of Bearer).
+func providerGetJSONAuth(ctx context.Context, client *http.Client, authorization, fullURL string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Authorization", authorization)
 	req.Header.Set("Accept", "application/json")
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}

@@ -184,7 +184,17 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			TokenURL:         cfg.DiscordTokenURL,
 			APIBaseURL:       cfg.DiscordAPIBaseURL,
 			ScopeSeparator:   " ",
-			HTTPClient:       httpClient,
+			// When the requested capabilities include messages.read the scope set
+			// carries "bot" (guild bot install). Discord reads the granted bot
+			// permissions from this bitfield: VIEW_CHANNEL (1024) +
+			// READ_MESSAGE_HISTORY (65536) + SEND_MESSAGES (2048) = 68608 — the
+			// minimum for inbox ingestion plus HITL-approved replies. Discord
+			// ignores the parameter for non-bot scope sets, so it is safe to send
+			// unconditionally.
+			ExtraAuthParams: map[string]string{
+				"permissions": "68608",
+			},
+			HTTPClient: httpClient,
 		}),
 	}
 }
