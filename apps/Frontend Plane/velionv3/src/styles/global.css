@@ -29397,6 +29397,64 @@ textarea:focus-visible {
   font-size: 13px;
 }
 
+/* Details tab — tags + recent conversations. */
+.velion-inbox-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.velion-inbox-detail-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  background: var(--auth-field);
+  border: 1px solid var(--velion-border-warm);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.velion-inbox-recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.velion-inbox-recent-list > li > button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.velion-inbox-recent-list > li > button:hover {
+  background: var(--auth-field);
+}
+
+.velion-inbox-recent-list__title {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.velion-inbox-recent-list__meta {
+  color: var(--velion-text-soft);
+  font-size: 12px;
+}
+
 .velion-inbox-article__internal {
   display: inline-flex;
   margin-top: 8px;

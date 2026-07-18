@@ -1,7 +1,7 @@
 import { useLocation, useNavigate } from '@solidjs/router'
 import { createEffect, createMemo, createResource, createSignal } from 'solid-js'
 import { ConversationPanel } from '@/features/inbox/components/ConversationPanel'
-import { InboxAside } from '@/features/inbox/components/InboxAside'
+import { InboxAside, type RecentConversationRef } from '@/features/inbox/components/InboxAside'
 import { InboxWorkModal, type InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import { TicketQueue } from '@/features/inbox/components/TicketQueue'
 import {
@@ -162,6 +162,28 @@ export default function InboxPage() {
   const replaceTicket = (updated: LiveTicket) => {
     mutateTickets((items) => (items ?? []).map((item) => (item.id === updated.id ? updated : item)))
     setSelectedTicket(updated)
+  }
+
+  // Other conversations from the same contact (within the loaded window).
+  const recentConversations = createMemo<RecentConversationRef[]>(() => {
+    const current = selectedTicket()
+    if (!current) return []
+    const email = current.customer?.email?.toLowerCase()
+    if (!email) return []
+    return baseTickets()
+      .filter((t) => t.conversationId !== current.conversationId && t.customer?.email?.toLowerCase() === email)
+      .slice(0, 6)
+      .map((t) => ({
+        conversationId: t.conversationId,
+        title: t.title,
+        channel: t.channel ?? 'email',
+        createdAt: t.created_at,
+      }))
+  })
+
+  const selectRecentConversation = (conversationId: string) => {
+    const target = baseTickets().find((t) => t.conversationId === conversationId)
+    if (target) void loadTicketDetails(target)
   }
 
   const replaceSupportTicket = (ticket: SupportTicket) => {
@@ -412,8 +434,10 @@ export default function InboxPage() {
           <InboxAside
             orgId={orgId()}
             articles={articles()}
+            recent={recentConversations()}
+            onSelectRecent={selectRecentConversation}
             onInsertQuickReply={setReplyText}
-            onMacroExecuted={() => setNotice('Macro executed.')}
+            onMacroExecuted={() => setNotice('Macro applied to reply.')}
             onOpenModal={setModal}
             selectedTicket={selectedTicket()}
           />

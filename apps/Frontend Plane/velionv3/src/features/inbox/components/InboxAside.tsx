@@ -5,22 +5,17 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock3,
-  ExternalLink,
   FileText,
-  Link2,
-  Mail,
   MessageCircle,
-  MoreHorizontal,
   Play,
   Plus,
   RefreshCw,
-  Search,
   Send,
   Settings,
   Sparkles,
   UserRound,
 } from 'lucide-solid'
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import {
   AccordionSection,
   ActivityItem,
@@ -30,7 +25,6 @@ import {
   EmptyAsideState,
   FieldRow,
   HealthRow,
-  LinkRow,
   MiniCalendarGrid,
   SourceRow,
 } from '@/features/inbox/components/InboxAsidePrimitives'
@@ -38,13 +32,15 @@ import type { InboxModalRequest } from '@/features/inbox/components/InboxWorkMod
 import {
   customerName,
   formatDateKey,
+  formatRelativeTime,
+  titleCase,
   type CalendarEvent,
   type CalendarNote,
-  type Macro,
   type ZammadArticle,
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
 import { runAssist, type AssistMessage, type AssistMode, type AssistSource } from '@/features/inbox/lib/inbox-ai'
+import { listTicketMacros, type TicketMacro } from '@/shared/api/tickets-client'
 import { cn } from '@/shared/lib/cn'
 
 type AsideTab = 'details' | 'velion' | 'calendar' | 'activity'
@@ -52,6 +48,8 @@ type AsideTab = 'details' | 'velion' | 'calendar' | 'activity'
 export function InboxAside(props: {
   orgId: string
   articles: ZammadArticle[]
+  recent: RecentConversationRef[]
+  onSelectRecent: (conversationId: string) => void
   onInsertQuickReply: (text: string) => void
   onMacroExecuted: () => void
   onOpenModal: (modal: InboxModalRequest) => void
@@ -93,7 +91,12 @@ export function InboxAside(props: {
       </div>
 
       <Show when={activeTab() === 'details'}>
-        <DetailsPanel onOpenModal={props.onOpenModal} selectedTicket={props.selectedTicket} />
+        <DetailsPanel
+          onOpenModal={props.onOpenModal}
+          onSelectRecent={props.onSelectRecent}
+          recent={props.recent}
+          selectedTicket={props.selectedTicket}
+        />
       </Show>
       <Show when={activeTab() === 'velion'}>
         <VelionPanel
@@ -115,24 +118,28 @@ export function InboxAside(props: {
   )
 }
 
+export type RecentConversationRef = {
+  conversationId: string
+  title: string
+  channel: string
+  createdAt: string
+}
+
 function DetailsPanel(props: {
   onOpenModal: (modal: InboxModalRequest) => void
+  onSelectRecent: (conversationId: string) => void
+  recent: RecentConversationRef[]
   selectedTicket: ZammadTicket | null
 }) {
   return (
     <div class="velion-inbox-aside-scroll">
-      <div class="velion-inbox-aside-search">
-        <Search class="size-4" />
-        <input type="search" aria-label="Search customer context" placeholder="Search customers by email, order, or phone" />
-      </div>
-
       <Show
         when={props.selectedTicket}
         fallback={
           <EmptyAsideState
             icon={<UserRound class="size-6" />}
             title="No customer selected"
-            body="Open a ticket to see customer fields, links, user data, and recent conversations."
+            body="Open a ticket to see customer details, tags, and recent conversations."
           />
         }
       >
@@ -140,92 +147,67 @@ function DetailsPanel(props: {
           <>
             <section class="velion-inbox-customer-card">
               <div class="velion-inbox-customer-card__identity">
-                <div>{ticket().customer?.firstname?.[0] ?? '?'}</div>
+                <div>{(ticket().customer?.firstname?.[0] ?? customerName(ticket())[0] ?? '?').toUpperCase()}</div>
                 <div>
                   <div>
-                    <h2>{ticket().customer?.email ?? customerName(ticket())}</h2>
-                    <button
-                      type="button"
-                      onClick={() => props.onOpenModal({
-                        type: 'work',
-                        title: 'Customer actions',
-                        description: 'Edit customer profile fields, add notes, link orders, and let Velion run customer-context tools in this modal.',
-                        primaryAction: 'Save customer action',
-                      })}
-                      aria-label="Customer actions"
-                      class="velion-inbox-icon-button velion-inbox-icon-button--xs"
-                    >
-                      <MoreHorizontal class="size-4" />
-                    </button>
+                    <h2>{customerName(ticket())}</h2>
                   </div>
-                  <p>{customerName(ticket())}</p>
+                  <Show when={ticket().customer?.email}>
+                    <p>{ticket().customer?.email}</p>
+                  </Show>
                 </div>
               </div>
 
               <div class="velion-inbox-field-stack">
-                <FieldRow label="Assignee" value={ticket().owner ? `${ticket().owner?.firstname} ${ticket().owner?.lastname}` : 'Unassigned'} />
+                <FieldRow label="Channel" value={titleCase(ticket().channel ?? 'email')} />
+                <FieldRow label="Status" value={titleCase(ticket().state?.name ?? 'open')} />
+                <FieldRow label="Priority" value={titleCase(ticket().priority?.name ?? 'normal')} />
+                <FieldRow label="Assignee" value={ticket().owner ? `${ticket().owner?.firstname} ${ticket().owner?.lastname}`.trim() : 'Unassigned'} />
                 <FieldRow label="Team inbox" value={ticket().group?.name ?? 'Support'} />
-                <FieldRow label="Customer type" value="+ Add" muted />
               </div>
             </section>
 
-            <AccordionSection defaultOpen icon={<Link2 class="size-4" />} title="Links">
-              <LinkRow label="Tracker ticket" onOpenModal={props.onOpenModal} />
-              <LinkRow label="Back-office tickets" onOpenModal={props.onOpenModal} />
-              <LinkRow label="Side conversations" onOpenModal={props.onOpenModal} />
-            </AccordionSection>
-
-            <AccordionSection defaultOpen icon={<FileText class="size-4" />} title="Conversation attributes">
-              <FieldRow label="ID" value={String(ticket().id)} />
-              <FieldRow label="Company" value="No company" muted />
-              <FieldRow label="Brand" value="Velion" />
+            <AccordionSection defaultOpen icon={<FileText class="size-4" />} title="Conversation">
+              <FieldRow label="Reference" value={ticket().number} />
               <FieldRow label="Subject" value={ticket().title} />
+              <Show when={ticket().customer?.email}>
+                <FieldRow label="Email" value={ticket().customer!.email} />
+              </Show>
+              <FieldRow label="Opened" value={formatRelativeTime(ticket().created_at)} />
             </AccordionSection>
 
-            <section class="velion-inbox-aside-section">
-              <div class="velion-inbox-aside-section__heading">
-                <h3>Commerce context</h3>
-                <button
-                  type="button"
-                  onClick={() => props.onOpenModal({
-                    type: 'work',
-                    title: 'Commerce context',
-                    description: 'Inspect orders, refunds, subscriptions, shipment state, and linked support evidence inside the inbox.',
-                    primaryAction: 'Open commerce tools',
-                  })}
-                  aria-label="Open commerce context"
-                  class="velion-inbox-icon-button velion-inbox-icon-button--xs"
-                >
-                  <ExternalLink class="size-4" />
-                </button>
-              </div>
-              <p>No Shopify context connected.</p>
-            </section>
+            <AccordionSection defaultOpen icon={<Sparkles class="size-4" />} title="Tags">
+              <Show
+                when={(ticket().tags ?? []).length}
+                fallback={<p class="velion-inbox-muted">No tags on this conversation yet.</p>}
+              >
+                <div class="velion-inbox-detail-tags">
+                  <For each={ticket().tags ?? []}>{(tag) => <span class="velion-inbox-detail-tag">{tag}</span>}</For>
+                </div>
+              </Show>
+            </AccordionSection>
 
-            <AccordionSection icon={<UserRound class="size-4" />} title="User data" />
-            <AccordionSection icon={<MessageCircle class="size-4" />} title="Recent conversations" />
-            <AccordionSection icon={<Mail class="size-4" />} title="User notes" />
-            <AccordionSection icon={<Sparkles class="size-4" />} title="User tags" />
-
-            <section class="velion-inbox-aside-section">
-              <div class="velion-inbox-aside-section__heading">
-                <h3>Stripe</h3>
-                <button
-                  type="button"
-                  onClick={() => props.onOpenModal({
-                    type: 'work',
-                    title: 'Stripe context',
-                    description: 'Review billing state, subscription actions, and payment evidence without leaving the ticket.',
-                    primaryAction: 'Open billing tools',
-                  })}
-                  aria-label="Open Stripe context"
-                  class="velion-inbox-icon-button velion-inbox-icon-button--xs"
-                >
-                  <ExternalLink class="size-4" />
-                </button>
-              </div>
-              <p>No Stripe context connected.</p>
-            </section>
+            <AccordionSection icon={<MessageCircle class="size-4" />} title={`Recent conversations${props.recent.length ? ` (${props.recent.length})` : ''}`}>
+              <Show
+                when={props.recent.length}
+                fallback={<p class="velion-inbox-muted">No other conversations from this contact.</p>}
+              >
+                <ul class="velion-inbox-recent-list">
+                  <For each={props.recent}>
+                    {(item) => (
+                      <li>
+                        <button type="button" onClick={() => props.onSelectRecent(item.conversationId)}>
+                          <span class="velion-inbox-recent-list__title">{item.title || '(no subject)'}</span>
+                          <span class="velion-inbox-recent-list__meta">
+                            {titleCase(item.channel)} · {formatRelativeTime(item.createdAt)}
+                          </span>
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+            </AccordionSection>
           </>
         )}
       </Show>
@@ -458,7 +440,12 @@ function VelionPanel(props: {
               </Show>
             </section>
 
-            <MacrosPanel onMacroExecuted={props.onMacroExecuted} selectedTicket={props.selectedTicket} />
+            <MacrosPanel
+              orgId={props.orgId}
+              onInsertReply={props.onInsertQuickReply}
+              onMacroExecuted={props.onMacroExecuted}
+              selectedTicket={props.selectedTicket}
+            />
           </div>
         </Show>
       </div>
@@ -640,18 +627,50 @@ function ActivityPanel(props: { selectedTicket: ZammadTicket | null }) {
   )
 }
 
-function MacrosPanel(props: { onMacroExecuted: () => void; selectedTicket: ZammadTicket | null }) {
-  const [expanded, setExpanded] = createSignal(false)
-  const [runningMacroId, setRunningMacroId] = createSignal<number | null>(null)
+// Extract canned reply text from a macro's generic `actions` JSON. Macros carry
+// no dedicated reply field, so canned responses ride inside actions under one of
+// several conventional keys (or as an array of {type,value} steps).
+function macroReplyText(macro: TicketMacro): string {
+  const a = macro.actions as Record<string, unknown> | unknown[] | undefined
+  if (!a) return ''
+  const pick = (obj: Record<string, unknown>): string => {
+    for (const key of ['reply', 'reply_text', 'body_text', 'bodyText', 'body', 'text', 'message']) {
+      const v = obj[key]
+      if (typeof v === 'string' && v.trim()) return v
+    }
+    return ''
+  }
+  if (Array.isArray(a)) {
+    for (const step of a) {
+      if (step && typeof step === 'object') {
+        const s = step as Record<string, unknown>
+        const t = typeof s.value === 'string' ? s.value : pick(s)
+        if (t.trim()) return t
+      }
+    }
+    return ''
+  }
+  return pick(a)
+}
 
-  const runMacro = (macroId: number) => {
-    if (!props.selectedTicket || runningMacroId() !== null) return
-    setRunningMacroId(macroId)
-    const onMacroExecuted = props.onMacroExecuted
-    window.setTimeout(() => {
-      onMacroExecuted()
-      setRunningMacroId(null)
-    }, 160)
+function MacrosPanel(props: {
+  orgId: string
+  onInsertReply: (text: string) => void
+  onMacroExecuted: () => void
+  selectedTicket: ZammadTicket | null
+}) {
+  const [expanded, setExpanded] = createSignal(false)
+  const [macrosRes] = createResource(
+    () => (expanded() && props.orgId ? props.orgId : ''),
+    (id) => (id ? listTicketMacros(id).catch(() => [] as TicketMacro[]) : Promise.resolve([] as TicketMacro[])),
+  )
+  const macros = () => (macrosRes() ?? []).filter((macro) => macro.active)
+
+  const applyMacro = (macro: TicketMacro) => {
+    if (!props.selectedTicket) return
+    const text = macroReplyText(macro)
+    if (text) props.onInsertReply(text)
+    props.onMacroExecuted()
   }
 
   return (
@@ -661,19 +680,21 @@ function MacrosPanel(props: { onMacroExecuted: () => void; selectedTicket: Zamma
         <ChevronDown class={cn('size-4', expanded() && 'rotate-180')} />
       </button>
       <Show when={expanded()}>
-        <ul>
-          <For each={[] as Macro[]} fallback={<li class="velion-inbox-macros__empty">No macros configured.</li>}>
-            {(macro) => (
-              <li>
-                <span>{macro.name}</span>
-                <button type="button" disabled={!props.selectedTicket || runningMacroId() === macro.id} onClick={() => runMacro(macro.id)}>
-                  <Play class={cn('size-3', runningMacroId() === macro.id && 'velion-inbox-pulse')} />
-                  {runningMacroId() === macro.id ? 'Running' : 'Run'}
-                </button>
-              </li>
-            )}
-          </For>
-        </ul>
+        <Show when={!macrosRes.loading} fallback={<p class="velion-inbox-macros__empty">Loading macros…</p>}>
+          <ul>
+            <For each={macros()} fallback={<li class="velion-inbox-macros__empty">No macros configured. Create them in Settings → Macros.</li>}>
+              {(macro) => (
+                <li>
+                  <span title={macro.description}>{macro.name}</span>
+                  <button type="button" disabled={!props.selectedTicket} onClick={() => applyMacro(macro)}>
+                    <Play class="size-3" />
+                    Apply
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
       </Show>
     </section>
   )
