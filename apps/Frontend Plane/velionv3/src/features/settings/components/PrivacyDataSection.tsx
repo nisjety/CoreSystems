@@ -10,9 +10,10 @@ import {
 } from '@/shared/api/privacy-client'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { getSession } from '@/shared/session/session-store'
+import { useI18n } from '@/shared/i18n'
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unexpected error'
+function errorMessage(error: unknown, i18n: ReturnType<typeof useI18n>): string {
+  return error instanceof Error ? error.message : i18n.tr('Uventet feil', 'Unexpected error')
 }
 
 /**
@@ -24,6 +25,7 @@ function errorMessage(error: unknown): string {
  * them signed in with a "contact support" message and their account intact.
  */
 export function PrivacyDataSection() {
+  const i18n = useI18n()
   const session = getSession()
   const accountEmail = () => session.user?.email ?? ''
 
@@ -38,7 +40,7 @@ export function PrivacyDataSection() {
     try {
       setExportData(await exportMyData())
     } catch (error) {
-      setExportError(errorMessage(error))
+      setExportError(errorMessage(error, i18n))
     } finally {
       setExporting(false)
     }
@@ -77,7 +79,7 @@ export function PrivacyDataSection() {
       await updatePreferences({ crawlIngestMode: mode })
     } catch (error) {
       setIngestMode(previous) // revert optimistic change on failure
-      setModeError(errorMessage(error))
+      setModeError(errorMessage(error, i18n))
     } finally {
       setSavingMode(false)
     }
@@ -111,7 +113,7 @@ export function PrivacyDataSection() {
     try {
       await signIn({ email: accountEmail(), password: password() })
     } catch {
-      setEraseError('Re-authentication failed. Check your password and try again.')
+      setEraseError(i18n.tr('Re-autentisering mislyktes. Kontroller passordet ditt og prøv igjen.', 'Re-authentication failed. Check your password and try again.'))
       setErasing(false)
       return
     }
@@ -120,7 +122,7 @@ export function PrivacyDataSection() {
     try {
       await eraseMyAccount()
     } catch {
-      setEraseError('Erasure did not complete — your account is unchanged. Please contact support.')
+      setEraseError(i18n.tr('Slettingen ble ikke fullført — kontoen din er uendret. Ta kontakt med support.', 'Erasure did not complete — your account is unchanged. Please contact support.'))
       setErasing(false)
       return
     }
@@ -132,12 +134,15 @@ export function PrivacyDataSection() {
   return (
     <section id="privacy-data" class="velion-settings-section">
       <SectionHeader
-        title="Privacy & data"
-        description="Export or permanently erase the data this workspace's Control Plane holds about your account."
+        title={i18n.tr('Personvern og data', 'Privacy & data')}
+        description={i18n.tr(
+          'Eksporter eller slett permanent dataene dette arbeidsområdets Control Plane har om kontoen din.',
+          "Export or permanently erase the data this workspace's Control Plane holds about your account.",
+        )}
       />
 
       <div class="velion-privacy-disclosure">
-        <p class="velion-privacy-disclosure__title">What this covers</p>
+        <p class="velion-privacy-disclosure__title">{i18n.tr('Hva dette omfatter', 'What this covers')}</p>
         <ul>
           <For each={CONTROL_PLANE_DSAR_DISCLOSURE}>{(note) => <li>{note}</li>}</For>
         </ul>
@@ -145,13 +150,13 @@ export function PrivacyDataSection() {
 
       <div class="velion-privacy-block">
         <div class="velion-privacy-block__head">
-          <h3>Export my data</h3>
+          <h3>{i18n.tr('Eksporter dataene mine', 'Export my data')}</h3>
           <SettingsButton settingsSize="sm" onClick={() => void runExport()} disabled={exporting()}>
             <Show
               when={exporting()}
-              fallback={<><Download size={14} aria-hidden="true" /> Generate export</>}
+              fallback={<><Download size={14} aria-hidden="true" /> {i18n.tr('Generer eksport', 'Generate export')}</>}
             >
-              <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" /> Generating…
+              <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" /> {i18n.tr('Genererer…', 'Generating…')}
             </Show>
           </SettingsButton>
         </div>
@@ -166,14 +171,14 @@ export function PrivacyDataSection() {
           {(data) => (
             <div class="velion-privacy-export">
               <p class="velion-privacy-export__summary">
-                Generated {new Date(data().generated_at).toLocaleString()} ·{' '}
-                {data().org_memberships.length} org membership(s) · {data().api_keys.length} API key(s)
+                {i18n.tr('Generert', 'Generated')} {new Date(data().generated_at).toLocaleString()} ·{' '}
+                {data().org_memberships.length} {i18n.tr('org.-medlemskap', 'org membership(s)')} · {data().api_keys.length} {i18n.tr('API-nøkler', 'API key(s)')}
               </p>
               <ul class="velion-privacy-export__notes">
                 <For each={data().notes}>{(note) => <li>{note}</li>}</For>
               </ul>
               <SettingsButton settingsSize="sm" onClick={downloadExport}>
-                <Download size={14} aria-hidden="true" /> Download JSON
+                <Download size={14} aria-hidden="true" /> {i18n.tr('Last ned JSON', 'Download JSON')}
               </SettingsButton>
             </div>
           )}
@@ -182,25 +187,27 @@ export function PrivacyDataSection() {
 
       <div class="velion-privacy-block">
         <div class="velion-privacy-block__head">
-          <h3>Knowledge ingestion</h3>
+          <h3>{i18n.tr('Kunnskapsinnhenting', 'Knowledge ingestion')}</h3>
           <Show when={savingMode()}>
             <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" />
           </Show>
         </div>
         <p class="velion-privacy-danger__note">
-          Controls whether pages you crawl or scrape are saved to your knowledge base
-          (private to you until you share them). Browsing never saves automatically.
+          {i18n.tr(
+            'Styrer om sider du krabber eller skraper lagres i kunnskapsbasen din (privat for deg helt til du deler dem). Nettlesing lagrer aldri automatisk.',
+            'Controls whether pages you crawl or scrape are saved to your knowledge base (private to you until you share them). Browsing never saves automatically.',
+          )}
         </p>
         <label class="velion-settings-field">
-          <span>Crawl ingestion mode</span>
+          <span>{i18n.tr('Innhentingsmodus for krabbing', 'Crawl ingestion mode')}</span>
           <select
             value={ingestMode()}
             disabled={savingMode()}
             onChange={(event) => void changeIngestMode(event.currentTarget.value as CrawlIngestMode)}
           >
-            <option value="never">Never save — browse only (default)</option>
-            <option value="auto">Always save to my knowledge base</option>
-            <option value="prompt">Ask me after each crawl</option>
+            <option value="never">{i18n.tr('Lagre aldri — kun nettlesing (standard)', 'Never save — browse only (default)')}</option>
+            <option value="auto">{i18n.tr('Lagre alltid til kunnskapsbasen min', 'Always save to my knowledge base')}</option>
+            <option value="prompt">{i18n.tr('Spør meg etter hver krabbing', 'Ask me after each crawl')}</option>
           </select>
         </label>
         <Show when={modeError()}>
@@ -215,22 +222,24 @@ export function PrivacyDataSection() {
       <div class="velion-privacy-danger">
         <div class="velion-privacy-block__head">
           <h3>
-            <ShieldAlert size={15} aria-hidden="true" /> Erase my account
+            <ShieldAlert size={15} aria-hidden="true" /> {i18n.tr('Slett kontoen min', 'Erase my account')}
           </h3>
           <Show when={!showErase()}>
             <SettingsButton settingsSize="sm" danger onClick={() => setShowErase(true)}>
-              <Trash2 size={14} aria-hidden="true" /> Erase…
+              <Trash2 size={14} aria-hidden="true" /> {i18n.tr('Slett…', 'Erase…')}
             </SettingsButton>
           </Show>
         </div>
         <p class="velion-privacy-danger__note">
-          This permanently erases your Control-Plane account data and cannot be undone. Model- and
-          Data-plane data is removed via the separate erasure fan-out noted above.
+          {i18n.tr(
+            'Dette sletter permanent Control-Plane-kontodataene dine og kan ikke angres. Data i Model- og Data-plane fjernes gjennom den separate slettingsprosessen nevnt ovenfor.',
+            'This permanently erases your Control-Plane account data and cannot be undone. Model- and Data-plane data is removed via the separate erasure fan-out noted above.',
+          )}
         </p>
         <Show when={showErase()}>
           <form class="velion-privacy-erase-form" onSubmit={runErase}>
             <label>
-              Type your email (<strong>{accountEmail()}</strong>) to confirm
+              {i18n.tr('Skriv inn e-posten din', 'Type your email')} (<strong>{accountEmail()}</strong>) {i18n.tr('for å bekrefte', 'to confirm')}
               <input
                 type="email"
                 autocomplete="off"
@@ -240,7 +249,7 @@ export function PrivacyDataSection() {
               />
             </label>
             <label>
-              Confirm your password
+              {i18n.tr('Bekreft passordet ditt', 'Confirm your password')}
               <input
                 type="password"
                 autocomplete="current-password"
@@ -257,11 +266,11 @@ export function PrivacyDataSection() {
             </Show>
             <div class="velion-privacy-erase-actions">
               <SettingsButton type="button" settingsSize="sm" onClick={cancelErase} disabled={erasing()}>
-                Cancel
+                {i18n.tr('Avbryt', 'Cancel')}
               </SettingsButton>
               <SettingsButton type="submit" settingsSize="sm" danger disabled={!canErase()}>
-                <Show when={erasing()} fallback={<>Permanently erase my account</>}>
-                  <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" /> Erasing…
+                <Show when={erasing()} fallback={<>{i18n.tr('Slett kontoen min permanent', 'Permanently erase my account')}</>}>
+                  <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" /> {i18n.tr('Sletter…', 'Erasing…')}
                 </Show>
               </SettingsButton>
             </div>

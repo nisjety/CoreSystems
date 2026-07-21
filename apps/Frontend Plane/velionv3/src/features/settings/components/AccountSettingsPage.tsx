@@ -20,6 +20,7 @@ import {
   type UserPreferences,
   type UserProfile,
 } from '@/shared/api/settings-client'
+import { useI18n } from '@/shared/i18n'
 
 type FormState = {
   displayName: string
@@ -60,12 +61,14 @@ const emptyForm: FormState = {
   pushNotifications: true,
 }
 
-const providerRows = [
-  { provider: 'Email and password', detail: 'Primary sign-in method' },
-  { provider: 'Google', detail: 'Available sign-in provider' },
-  { provider: 'Microsoft', detail: 'Available sign-in provider' },
-  { provider: 'Apple', detail: 'Planned for production HTTPS origins' },
-]
+function getProviderRows(i18n: ReturnType<typeof useI18n>) {
+  return [
+    { provider: i18n.tr('E-post og passord', 'Email and password'), detail: i18n.tr('Primær innloggingsmetode', 'Primary sign-in method') },
+    { provider: 'Google', detail: i18n.tr('Tilgjengelig innloggingsleverandør', 'Available sign-in provider') },
+    { provider: 'Microsoft', detail: i18n.tr('Tilgjengelig innloggingsleverandør', 'Available sign-in provider') },
+    { provider: 'Apple', detail: i18n.tr('Planlagt for produksjons-HTTPS-domener', 'Planned for production HTTPS origins') },
+  ]
+}
 
 function splitDisplayName(name: string): { firstName: string; lastName: string } {
   const parts = name.trim().split(/\s+/).filter(Boolean)
@@ -105,6 +108,7 @@ function initials(name: string, email: string): string {
 }
 
 export default function AccountSettingsPage() {
+  const i18n = useI18n()
   const [profile, setProfile] = createSignal<UserProfile | null>(null)
   const [form, setForm] = createSignal<FormState>(emptyForm)
   const [loadState, setLoadState] = createSignal<LoadState>({ type: 'loading' })
@@ -119,7 +123,7 @@ export default function AccountSettingsPage() {
     } catch (error) {
       setLoadState({
         type: 'error',
-        message: error instanceof Error ? error.message : 'Could not load profile.',
+        message: error instanceof Error ? error.message : i18n.tr('Kunne ikke laste profilen.', 'Could not load profile.'),
       })
     }
   }
@@ -166,7 +170,7 @@ export default function AccountSettingsPage() {
     } catch (error) {
       setLoadState({
         type: 'error',
-        message: error instanceof Error ? error.message : 'Could not save profile.',
+        message: error instanceof Error ? error.message : i18n.tr('Kunne ikke lagre profilen.', 'Could not save profile.'),
       })
     }
   }
@@ -186,9 +190,9 @@ export default function AccountSettingsPage() {
   const signals = createMemo(() => {
     const currentProfile = profile()
     return [
-      { label: 'Profile', value: currentProfile?.accountStatus || 'Loading' },
-      { label: 'Email', value: currentProfile?.emailVerified ? 'Verified' : 'Unverified' },
-      { label: 'Scope', value: currentProfile?.id ? 'Control Plane user' : 'Pending' },
+      { label: i18n.tr('Profil', 'Profile'), value: currentProfile?.accountStatus || i18n.tr('Laster', 'Loading') },
+      { label: i18n.tr('E-post', 'Email'), value: currentProfile?.emailVerified ? i18n.tr('Verifisert', 'Verified') : i18n.tr('Ikke verifisert', 'Unverified') },
+      { label: i18n.tr('Omfang', 'Scope'), value: currentProfile?.id ? i18n.tr('Control Plane-bruker', 'Control Plane user') : i18n.tr('Venter', 'Pending') },
     ]
   })
 
@@ -198,21 +202,21 @@ export default function AccountSettingsPage() {
     const currentForm = form()
     const currentProfile = profile()
     return [
-      !currentForm.displayName.trim() ? 'display name' : null,
-      !currentForm.firstName.trim() || !currentForm.lastName.trim() ? 'first and last name' : null,
-      !currentProfile?.avatarUrl ? 'profile image' : null,
-      !currentForm.position.trim() ? 'job title' : null,
-      !currentForm.department.trim() ? 'department' : null,
-      !currentForm.phoneNumber.trim() ? 'phone number' : null,
+      !currentForm.displayName.trim() ? i18n.tr('visningsnavn', 'display name') : null,
+      !currentForm.firstName.trim() || !currentForm.lastName.trim() ? i18n.tr('for- og etternavn', 'first and last name') : null,
+      !currentProfile?.avatarUrl ? i18n.tr('profilbilde', 'profile image') : null,
+      !currentForm.position.trim() ? i18n.tr('stillingstittel', 'job title') : null,
+      !currentForm.department.trim() ? i18n.tr('avdeling', 'department') : null,
+      !currentForm.phoneNumber.trim() ? i18n.tr('telefonnummer', 'phone number') : null,
     ].filter((item): item is string => Boolean(item))
   })
 
   const actionDescription = createMemo(() => {
     const state = loadState()
-    if (state.type === 'saving') return 'Saving your profile and preferences.'
-    if (state.type === 'saved') return 'Profile saved.'
+    if (state.type === 'saving') return i18n.tr('Lagrer profilen og innstillingene dine.', 'Saving your profile and preferences.')
+    if (state.type === 'saved') return i18n.tr('Profil lagret.', 'Profile saved.')
     if (state.type === 'error') return state.message
-    return 'Your personal profile and preferences are saved to your Velion account.'
+    return i18n.tr('Din personlige profil og dine innstillinger lagres på Velion-kontoen din.', 'Your personal profile and preferences are saved to your Velion account.')
   })
 
   return (
@@ -221,7 +225,7 @@ export default function AccountSettingsPage() {
       contentVariant="account"
       scrollAttribute
     >
-      <SettingsHero eyebrow="Account" title="Profile settings" signals={signals()} />
+      <SettingsHero eyebrow={i18n.tr('Konto', 'Account')} title={i18n.tr('Profilinnstillinger', 'Profile settings')} signals={signals()} />
       <Show when={loadState().type === 'error'}>
         <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">
           {(loadState() as Extract<LoadState, { type: 'error' }>).message}
@@ -229,7 +233,7 @@ export default function AccountSettingsPage() {
       </Show>
       <Show when={missingProfileFields().length > 0}>
         <p class="velion-settings-status-message" role="status">
-          Provider data has been applied where available. Add {missingProfileFields().join(', ')} to complete the Velion profile.
+          {i18n.tr('Leverandørdata er brukt der tilgjengelig. Legg til', 'Provider data has been applied where available. Add')} {missingProfileFields().join(', ')} {i18n.tr('for å fullføre Velion-profilen.', 'to complete the Velion profile.')}
         </p>
       </Show>
       <ProfileSection
@@ -251,7 +255,7 @@ export default function AccountSettingsPage() {
       <PrivacyDataSection />
       <SettingsSaveActions
         description={actionDescription()}
-        saveLabel={loadState().type === 'saving' ? 'Saving...' : 'Save profile'}
+        saveLabel={loadState().type === 'saving' ? i18n.tr('Lagrer …', 'Saving...') : i18n.tr('Lagre profil', 'Save profile')}
         saveDisabled={loadState().type === 'loading' || loadState().type === 'saving'}
         onCancel={reset}
         onSave={() => void save()}
@@ -265,19 +269,20 @@ function ProfileSection(props: {
   profile: () => UserProfile | null
   onField: <K extends keyof FormState>(key: K, value: FormState[K]) => void
 }) {
+  const i18n = useI18n()
   const avatarInitials = () => initials(props.form().displayName, props.profile()?.email ?? '')
 
   return (
     <section id="profile" class="velion-settings-section">
       <SectionHeader
-        title="Profile"
-        description="Control how teammates and customers see you across Velion."
+        title={i18n.tr('Profil', 'Profile')}
+        description={i18n.tr('Bestem hvordan kollegaer og kunder ser deg på tvers av Velion.', 'Control how teammates and customers see you across Velion.')}
       />
 
       <div class="velion-settings-avatar-row">
         <button
           type="button"
-          aria-label="Profile avatar"
+          aria-label={i18n.tr('Profilbilde', 'Profile avatar')}
           class="velion-settings-avatar"
           disabled
         >
@@ -286,12 +291,12 @@ function ProfileSection(props: {
           </Show>
         </button>
         <div>
-          <p>{props.form().displayName || props.profile()?.email || 'Loading account details...'}</p>
+          <p>{props.form().displayName || props.profile()?.email || i18n.tr('Laster kontodetaljer …', 'Loading account details...')}</p>
           <div>
             <SettingsButton settingsSize="sm" disabled>
-              {props.profile()?.avatarUrl ? 'Provider photo' : 'Upload photo'}
+              {props.profile()?.avatarUrl ? i18n.tr('Bilde fra leverandør', 'Provider photo') : i18n.tr('Last opp bilde', 'Upload photo')}
             </SettingsButton>
-            <SettingsButton settingsSize="sm" disabled>Remove</SettingsButton>
+            <SettingsButton settingsSize="sm" disabled>{i18n.tr('Fjern', 'Remove')}</SettingsButton>
           </div>
         </div>
       </div>
@@ -299,40 +304,40 @@ function ProfileSection(props: {
       <div class="velion-settings-field-grid">
         <SettingsField
           id="display-name"
-          label="Display name"
+          label={i18n.tr('Visningsnavn', 'Display name')}
           value={props.form().displayName}
           onInput={(event) => props.onField('displayName', event.currentTarget.value)}
         />
         <SettingsField
           id="first-name"
-          label="First name"
+          label={i18n.tr('Fornavn', 'First name')}
           value={props.form().firstName}
           onInput={(event) => props.onField('firstName', event.currentTarget.value)}
         />
         <SettingsField
           id="last-name"
-          label="Last name"
+          label={i18n.tr('Etternavn', 'Last name')}
           value={props.form().lastName}
           onInput={(event) => props.onField('lastName', event.currentTarget.value)}
         />
         <SettingsField
           id="job-title"
-          label="Job title"
+          label={i18n.tr('Stillingstittel', 'Job title')}
           value={props.form().position}
           onInput={(event) => props.onField('position', event.currentTarget.value)}
         />
         <SettingsField
           id="department"
-          label="Department"
+          label={i18n.tr('Avdeling', 'Department')}
           value={props.form().department}
           onInput={(event) => props.onField('department', event.currentTarget.value)}
         />
         <SettingsField
           id="username"
-          label="Account ID"
+          label={i18n.tr('Konto-ID', 'Account ID')}
           value={props.profile()?.id ?? ''}
           readOnly
-          helpText="Read-only account identifier."
+          helpText={i18n.tr('Skrivebeskyttet kontoidentifikator.', 'Read-only account identifier.')}
         />
       </div>
     </section>
@@ -344,18 +349,19 @@ function ContactSection(props: {
   profile: () => UserProfile | null
   onField: <K extends keyof FormState>(key: K, value: FormState[K]) => void
 }) {
-  const emailHelp = () => props.profile()?.emailVerified ? 'Verified.' : 'Not verified.'
+  const i18n = useI18n()
+  const emailHelp = () => props.profile()?.emailVerified ? i18n.tr('Verifisert.', 'Verified.') : i18n.tr('Ikke verifisert.', 'Not verified.')
 
   return (
     <section id="contact" class="velion-settings-section">
       <SectionHeader
-        title="Contact"
-        description="Keep sign-in and teammate contact details current."
+        title={i18n.tr('Kontakt', 'Contact')}
+        description={i18n.tr('Hold innlogging og kontaktinformasjon oppdatert.', 'Keep sign-in and teammate contact details current.')}
       />
       <div class="velion-settings-field-grid">
         <SettingsField
           id="email"
-          label="Primary email"
+          label={i18n.tr('Primær e-post', 'Primary email')}
           type="email"
           value={props.profile()?.email ?? ''}
           readOnly
@@ -363,14 +369,14 @@ function ContactSection(props: {
         />
         <SettingsField
           id="phone"
-          label="Phone number"
+          label={i18n.tr('Telefonnummer', 'Phone number')}
           type="tel"
           value={props.form().phoneNumber}
           onInput={(event) => props.onField('phoneNumber', event.currentTarget.value)}
         />
         <SettingsField
           id="office-location"
-          label="Office location"
+          label={i18n.tr('Kontorsted', 'Office location')}
           value={props.form().officeLocation}
           onInput={(event) => props.onField('officeLocation', event.currentTarget.value)}
         />
@@ -383,28 +389,29 @@ function PreferencesSection(props: {
   form: () => FormState
   onField: <K extends keyof FormState>(key: K, value: FormState[K]) => void
 }) {
+  const i18n = useI18n()
   return (
     <section id="preferences" class="velion-settings-section">
       <SectionHeader
-        title="Preferences"
-        description="Personalize how Velion formats language, appearance, and teammate names."
+        title={i18n.tr('Innstillinger', 'Preferences')}
+        description={i18n.tr('Tilpass hvordan Velion formaterer språk, utseende og kollegers navn.', 'Personalize how Velion formats language, appearance, and teammate names.')}
       />
       <div class="velion-settings-field-grid">
         <SettingsSelect
           id="language"
-          label="Language"
+          label={i18n.tr('Språk', 'Language')}
           value={props.form().language}
           onChange={(event) => props.onField('language', event.currentTarget.value)}
           options={[
-            { value: 'en-US', label: 'English' },
-            { value: 'nb-NO', label: 'Norwegian Bokmal' },
-            { value: 'fr-FR', label: 'French' },
-            { value: 'de-DE', label: 'German' },
+            { value: 'en-US', label: i18n.tr('Engelsk', 'English') },
+            { value: 'nb-NO', label: i18n.tr('Norsk bokmål', 'Norwegian Bokmal') },
+            { value: 'fr-FR', label: i18n.tr('Fransk', 'French') },
+            { value: 'de-DE', label: i18n.tr('Tysk', 'German') },
           ]}
         />
         <SettingsSelect
           id="timezone"
-          label="Time zone"
+          label={i18n.tr('Tidssone', 'Time zone')}
           value={props.form().timezone}
           onChange={(event) => props.onField('timezone', event.currentTarget.value)}
           options={[
@@ -416,13 +423,13 @@ function PreferencesSection(props: {
         />
         <SettingsSelect
           id="theme"
-          label="Theme"
+          label={i18n.tr('Tema', 'Theme')}
           value={props.form().theme}
           onChange={(event) => props.onField('theme', event.currentTarget.value)}
           options={[
-            { value: 'system', label: 'System' },
-            { value: 'light', label: 'Light' },
-            { value: 'dark', label: 'Dark' },
+            { value: 'system', label: i18n.tr('System', 'System') },
+            { value: 'light', label: i18n.tr('Lys', 'Light') },
+            { value: 'dark', label: i18n.tr('Mørk', 'Dark') },
           ]}
         />
       </div>
@@ -434,16 +441,17 @@ function AvailabilitySection(props: {
   form: () => FormState
   onField: <K extends keyof FormState>(key: K, value: FormState[K]) => void
 }) {
+  const i18n = useI18n()
   const supportPreferences = () => [
     {
-      title: 'Email notifications',
-      description: 'Send account and support updates to your primary email.',
+      title: i18n.tr('E-postvarsler', 'Email notifications'),
+      description: i18n.tr('Send konto- og supportoppdateringer til den primære e-posten din.', 'Send account and support updates to your primary email.'),
       enabled: props.form().emailNotifications,
       onChange: (checked: boolean) => props.onField('emailNotifications', checked),
     },
     {
-      title: 'Push notifications',
-      description: 'Show browser notifications for assigned conversations.',
+      title: i18n.tr('Push-varsler', 'Push notifications'),
+      description: i18n.tr('Vis nettleservarsler for samtaler tildelt deg.', 'Show browser notifications for assigned conversations.'),
       enabled: props.form().pushNotifications,
       onChange: (checked: boolean) => props.onField('pushNotifications', checked),
     },
@@ -452,20 +460,20 @@ function AvailabilitySection(props: {
   return (
     <section id="availability" class="velion-settings-section">
       <SectionHeader
-        title="Availability"
-        description="Tune personal helpdesk behavior for conversations assigned to you."
+        title={i18n.tr('Tilgjengelighet', 'Availability')}
+        description={i18n.tr('Juster personlig atferd for support på samtaler tildelt deg.', 'Tune personal helpdesk behavior for conversations assigned to you.')}
       />
       <div class="velion-settings-field-grid">
         <SettingsSelect
           id="availability-status"
-          label="Availability status"
+          label={i18n.tr('Tilgjengelighetsstatus', 'Availability status')}
           value={props.form().status}
           onChange={(event) => props.onField('status', event.currentTarget.value)}
           options={[
-            { value: 'online', label: 'Online' },
-            { value: 'busy', label: 'Busy' },
-            { value: 'away', label: 'Away' },
-            { value: 'offline', label: 'Offline' },
+            { value: 'online', label: i18n.tr('Pålogget', 'Online') },
+            { value: 'busy', label: i18n.tr('Opptatt', 'Busy') },
+            { value: 'away', label: i18n.tr('Borte', 'Away') },
+            { value: 'offline', label: i18n.tr('Avlogget', 'Offline') },
           ]}
         />
       </div>
@@ -481,24 +489,25 @@ function AvailabilitySection(props: {
 function ConnectedAccountsSection(props: {
   profile: () => UserProfile | null
 }) {
+  const i18n = useI18n()
   const connectedProviderRows = createMemo(() => {
     const current = props.profile()
     return [
       {
-        provider: 'Signed-in provider',
+        provider: i18n.tr('Innloggingsleverandør', 'Signed-in provider'),
         detail: current?.avatarUrl
-          ? 'Name, email, and profile image retained from the auth provider.'
-          : 'Name and email retained; add a profile image if the provider did not send one.',
+          ? i18n.tr('Navn, e-post og profilbilde er hentet fra autentiseringsleverandøren.', 'Name, email, and profile image retained from the auth provider.')
+          : i18n.tr('Navn og e-post er hentet; legg til et profilbilde hvis leverandøren ikke sendte ett.', 'Name and email retained; add a profile image if the provider did not send one.'),
       },
-      ...providerRows,
+      ...getProviderRows(i18n),
     ]
   })
 
   return (
     <section id="connected-accounts" class="velion-settings-section">
       <SectionHeader
-        title="Connected accounts"
-        description="Sign-in providers configured for this Velion account."
+        title={i18n.tr('Tilkoblede kontoer', 'Connected accounts')}
+        description={i18n.tr('Innloggingsleverandører konfigurert for denne Velion-kontoen.', 'Sign-in providers configured for this Velion account.')}
       />
       <div class="velion-settings-list-card">
         <For each={connectedProviderRows()}>
@@ -508,7 +517,7 @@ function ConnectedAccountsSection(props: {
                 <p>{account.provider}</p>
                 <span>{account.detail}</span>
               </div>
-              <SettingsButton settingsSize="sm" disabled>Managed</SettingsButton>
+              <SettingsButton settingsSize="sm" disabled>{i18n.tr('Administrert', 'Managed')}</SettingsButton>
             </div>
           )}
         </For>
@@ -518,22 +527,23 @@ function ConnectedAccountsSection(props: {
 }
 
 function PrivacySection() {
+  const i18n = useI18n()
   return (
     <section id="privacy" class="velion-settings-section">
       <SectionHeader
-        title="Privacy"
-        description="Choose how discoverable your account is to other workspaces."
+        title={i18n.tr('Personvern', 'Privacy')}
+        description={i18n.tr('Velg hvor synlig kontoen din er for andre arbeidsområder.', 'Choose how discoverable your account is to other workspaces.')}
       />
       <div class="velion-settings-divided-list">
         <ToggleRow
-          title="Profile visibility"
-          description="Allow people with your email address to see your name and avatar when inviting you."
+          title={i18n.tr('Profilsynlighet', 'Profile visibility')}
+          description={i18n.tr('Tillat personer med e-postadressen din å se navnet og profilbildet ditt når de inviterer deg.', 'Allow people with your email address to see your name and avatar when inviting you.')}
           enabled
           disabled
         />
         <ToggleRow
-          title="Record profile activity"
-          description="Include profile views and contribution history in account activity."
+          title={i18n.tr('Registrer profilaktivitet', 'Record profile activity')}
+          description={i18n.tr('Inkluder profilvisninger og bidragshistorikk i kontoaktivitet.', 'Include profile views and contribution history in account activity.')}
           enabled={false}
           disabled
         />

@@ -4,10 +4,12 @@ import { acceptOrganizationInvitation } from '@/shared/api/auth-client'
 import { ApiError } from '@/shared/api/http'
 import { switchActiveOrganization } from '@/shared/api/organization-client'
 import { getSession, loadSession } from '@/shared/session/session-store'
+import { useI18n } from '@/shared/i18n'
 
 const INVITATION_ID = /^[A-Za-z0-9_-]{1,256}$/
 
 export default function AcceptInvitationPage() {
+  const i18n = useI18n()
   const navigate = useNavigate()
   const params = useParams<{ invitationId: string }>()
   const session = getSession()
@@ -24,7 +26,7 @@ export default function AcceptInvitationPage() {
   const acceptInvitation = async () => {
     if (submitting()) return
     if (!INVITATION_ID.test(invitationId())) {
-      setError('This invitation link is invalid.')
+      setError(i18n.tr('Denne invitasjonslenken er ugyldig.', 'This invitation link is invalid.'))
       return
     }
 
@@ -45,11 +47,11 @@ export default function AcceptInvitationPage() {
         cause instanceof ApiError &&
         cause.code === 'INVITATION_NOT_FOUND'
       ) {
-        setError('This invitation is expired, already accepted, or no longer valid.')
+        setError(i18n.tr('Denne invitasjonen er utløpt, allerede akseptert, eller ikke lenger gyldig.', 'This invitation is expired, already accepted, or no longer valid.'))
       } else if (cause instanceof ApiError && cause.status === 403) {
-        setError('This invitation belongs to a different verified email address.')
+        setError(i18n.tr('Denne invitasjonen tilhører en annen bekreftet e-postadresse.', 'This invitation belongs to a different verified email address.'))
       } else {
-        setError('The invitation could not be accepted. Please try again.')
+        setError(i18n.tr('Invitasjonen kunne ikke aksepteres. Prøv igjen.', 'The invitation could not be accepted. Please try again.'))
       }
     } finally {
       setSubmitting(false)
@@ -59,16 +61,17 @@ export default function AcceptInvitationPage() {
   return (
     <main class="auth-invitation" aria-labelledby="invitation-title">
       <section class="auth-invitation__card">
-        <p class="auth-invitation__eyebrow">Velion workspace</p>
-        <h1 id="invitation-title">Organization invitation</h1>
+        <p class="auth-invitation__eyebrow">{i18n.tr('Velion arbeidsområde', 'Velion workspace')}</p>
+        <h1 id="invitation-title">{i18n.tr('Organisasjonsinvitasjon', 'Organization invitation')}</h1>
         <Switch>
           <Match when={session.status === 'idle' || session.status === 'loading'}>
-            <p role="status">Checking your session…</p>
+            <p role="status">{i18n.tr('Sjekker økten din …', 'Checking your session…')}</p>
           </Match>
           <Match when={session.status === 'authenticated'}>
             <p>
-              Accept this invitation as <strong>{session.user?.email}</strong>. Velion will
-              switch to the invited organization after Auth Core verifies it.
+              {i18n.tr('Aksepter denne invitasjonen som ', 'Accept this invitation as ')}
+              <strong>{session.user?.email}</strong>
+              {i18n.tr('. Velion vil bytte til den inviterte organisasjonen etter at Auth Core har bekreftet den.', '. Velion will switch to the invited organization after Auth Core verifies it.')}
             </p>
             <Show when={error()}>
               <p role="alert">{error()}</p>
@@ -78,7 +81,7 @@ export default function AcceptInvitationPage() {
               disabled={submitting() || !INVITATION_ID.test(invitationId())}
               onClick={() => void acceptInvitation()}
             >
-              {submitting() ? 'Accepting…' : 'Accept invitation'}
+              {submitting() ? i18n.tr('Aksepterer …', 'Accepting…') : i18n.tr('Aksepter invitasjon', 'Accept invitation')}
             </button>
           </Match>
         </Switch>

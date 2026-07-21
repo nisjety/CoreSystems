@@ -31,10 +31,12 @@ import {
   type SocialProviderKey,
 } from '@/shared/api/social-client'
 import { cn } from '@/shared/lib/cn'
+import { useI18n } from '@/shared/i18n'
 
 const pendingDraftKey = 'velion.social.pendingDraft'
 
 export default function SocialCalendarPage() {
+  const i18n = useI18n()
   const location = useLocation()
   const [ctx] = createResource(loadSocialContext)
   const orgId = createMemo(() => ctx()?.orgId ?? '')
@@ -48,8 +50,8 @@ export default function SocialCalendarPage() {
   const [posts, setPosts] = createSignal<SocialPost[]>([])
   const [selectedPostId, setSelectedPostId] = createSignal<string | null>(null)
   const [month, setMonth] = createSignal(new Date('2026-06-15T00:00:00.000Z'))
-  const [draftTitle, setDraftTitle] = createSignal('Customer insight post')
-  const [draftBody, setDraftBody] = createSignal('Turn the strongest support signal into a useful public update.')
+  const [draftTitle, setDraftTitle] = createSignal(i18n.tr('Kundeinnsikts-innlegg', 'Customer insight post'))
+  const [draftBody, setDraftBody] = createSignal(i18n.tr('Gjør det sterkeste supportsignalet om til en nyttig offentlig oppdatering.', 'Turn the strongest support signal into a useful public update.'))
   const [draftPlatforms, setDraftPlatforms] = createSignal<SocialProviderKey[]>(['linkedin', 'x'])
   const [feedback, setFeedback] = createSignal<string | null>(null)
   const [publishResult, setPublishResult] = createSignal<SocialPublishResult | null>(null)
@@ -67,7 +69,7 @@ export default function SocialCalendarPage() {
     setPosts(nextPosts)
     setSelectedPostId((current) => current ?? nextPosts[0]?.id ?? null)
     if (imported) {
-      setFeedback('Inbox conversation converted into a social draft.')
+      setFeedback(i18n.tr('Innbokssamtale konvertert til et sosialt utkast.', 'Inbox conversation converted into a social draft.'))
       clearPendingDraft()
     }
   })
@@ -109,9 +111,9 @@ export default function SocialCalendarPage() {
       })
       setPosts((current) => [result.post, ...current])
       setSelectedPostId(result.post.id)
-      setFeedback('Draft created and added to the calendar queue.')
+      setFeedback(i18n.tr('Utkast opprettet og lagt til i kalenderkøen.', 'Draft created and added to the calendar queue.'))
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : 'Draft could not be created.')
+      setFeedback(reason instanceof Error ? reason.message : i18n.tr('Utkastet kunne ikke opprettes.', 'Draft could not be created.'))
     } finally {
       setBusy(false)
     }
@@ -126,9 +128,9 @@ export default function SocialCalendarPage() {
     try {
       const result = await scheduleSocialPost(orgId(), post.id, window.startsAt)
       setPosts((current) => current.map((candidate) => (candidate.id === post.id ? { ...candidate, ...result.post } : candidate)))
-      setFeedback(`Scheduled for ${window.label}.`)
+      setFeedback(i18n.tr(`Planlagt for ${window.label}.`, `Scheduled for ${window.label}.`))
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : 'Post could not be scheduled.')
+      setFeedback(reason instanceof Error ? reason.message : i18n.tr('Innlegget kunne ikke planlegges.', 'Post could not be scheduled.'))
     } finally {
       setBusy(false)
     }
@@ -144,10 +146,10 @@ export default function SocialCalendarPage() {
       setPosts((current) => current.map((candidate) => (candidate.id === post.id ? { ...candidate, ...result.post } : candidate)))
       setPublishResult(result.result)
       setFeedback(result.result.status === 'blocked'
-        ? 'Publish blocked. Resolve the provider requirements below before queueing.'
-        : 'Publish intent accepted. Provider adapters will handle platform-specific publishing.')
+        ? i18n.tr('Publisering blokkert. Løs kravene fra leverandøren nedenfor før du legger i kø.', 'Publish blocked. Resolve the provider requirements below before queueing.')
+        : i18n.tr('Publiseringsforespørsel akseptert. Leverandøradaptere håndterer plattformspesifikk publisering.', 'Publish intent accepted. Provider adapters will handle platform-specific publishing.'))
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : 'Post could not be published.')
+      setFeedback(reason instanceof Error ? reason.message : i18n.tr('Innlegget kunne ikke publiseres.', 'Post could not be published.'))
     } finally {
       setBusy(false)
     }
@@ -159,26 +161,28 @@ export default function SocialCalendarPage() {
         <div>
           <span class="velion-social-kicker">
             <Sparkles class="size-4" />
-            AI-native social operations
+            {i18n.tr('AI-native sosiale operasjoner', 'AI-native social operations')}
           </span>
-          <h1>Social calendar</h1>
+          <h1>{i18n.tr('Sosial kalender', 'Social calendar')}</h1>
           <p>
-            Plan, draft, approve, schedule, and publish social posts from support signals, knowledge updates,
-            and campaign work without leaving Velion.
+            {i18n.tr(
+              'Planlegg, utkast, godkjenn, planlegg og publiser sosiale innlegg fra supportsignaler, kunnskapsoppdateringer og kampanjearbeid uten å forlate Velion.',
+              'Plan, draft, approve, schedule, and publish social posts from support signals, knowledge updates, and campaign work without leaving Velion.',
+            )}
           </p>
         </div>
         <div class="velion-social-hero__metrics">
-          <Metric label="Drafts" value={stats().draft} />
-          <Metric label="Scheduled" value={stats().scheduled} />
-          <Metric label="Publishing" value={stats().publishing} />
+          <Metric label={i18n.tr('Utkast', 'Drafts')} value={stats().draft} />
+          <Metric label={i18n.tr('Planlagt', 'Scheduled')} value={stats().scheduled} />
+          <Metric label={i18n.tr('Publiserer', 'Publishing')} value={stats().publishing} />
         </div>
       </header>
 
       <Show when={importedFromInbox()}>
         <div class="velion-social-inbox-banner">
           <MessageSquareReply class="size-4" />
-          <span>Inbox context is active. Use the imported draft or create a follow-up post from the selected conversation.</span>
-          <A href="/inbox?view=social">Back to social inbox</A>
+          <span>{i18n.tr('Innbokskontekst er aktiv. Bruk det importerte utkastet eller opprett et oppfølgingsinnlegg fra den valgte samtalen.', 'Inbox context is active. Use the imported draft or create a follow-up post from the selected conversation.')}</span>
+          <A href="/inbox?view=social">{i18n.tr('Tilbake til sosial innboks', 'Back to social inbox')}</A>
         </div>
       </Show>
 
@@ -189,8 +193,8 @@ export default function SocialCalendarPage() {
       <Show when={calendarRes()?.source === 'fallback'}>
         <div class="velion-social-unavailable-banner">
           <AlertCircle class="size-4" />
-          <span>Social calendar is using fallback data because the org-scoped social gateway is unavailable or no organization scope was resolved.</span>
-          <A href="/social/accounts">Check accounts</A>
+          <span>{i18n.tr('Sosial kalender bruker reservedata fordi den org-scopede sosiale gatewayen er utilgjengelig, eller ingen organisasjonsscope ble løst.', 'Social calendar is using fallback data because the org-scoped social gateway is unavailable or no organization scope was resolved.')}</span>
+          <A href="/social/accounts">{i18n.tr('Sjekk kontoer', 'Check accounts')}</A>
         </div>
       </Show>
 
@@ -198,11 +202,11 @@ export default function SocialCalendarPage() {
         <aside class="velion-social-accounts">
           <div class="velion-social-panel-title">
             <Users class="size-4" />
-            <span>Accounts</span>
+            <span>{i18n.tr('Kontoer', 'Accounts')}</span>
           </div>
           <Show
             when={accounts().length > 0}
-            fallback={<EmptyState title="No accounts connected" detail="Connect social providers before scheduling or publishing posts." />}
+            fallback={<EmptyState title={i18n.tr('Ingen kontoer tilkoblet', 'No accounts connected')} detail={i18n.tr('Koble til sosiale leverandører før planlegging eller publisering av innlegg.', 'Connect social providers before scheduling or publishing posts.')} />}
           >
             <For each={accounts()}>
               {(account) => <AccountCard account={account} />}
@@ -210,31 +214,31 @@ export default function SocialCalendarPage() {
           </Show>
           <div class="velion-social-account-note">
             <UploadCloud class="size-4" />
-            Provider OAuth and media publishing are exposed as integration-core capabilities and will run through approved adapters.
+            {i18n.tr('Leverandør-OAuth og mediapublisering eksponeres som integration-core-funksjoner og kjøres gjennom godkjente adaptere.', 'Provider OAuth and media publishing are exposed as integration-core capabilities and will run through approved adapters.')}
           </div>
         </aside>
 
         <main class="velion-social-calendar-panel">
           <div class="velion-social-calendar-toolbar">
             <div>
-              <span>Planner</span>
+              <span>{i18n.tr('Planlegger', 'Planner')}</span>
               <h2>{monthLabel(month())}</h2>
             </div>
             <div class="velion-social-calendar-toolbar__actions">
               <button type="button" onClick={() => setMonth(new Date(Date.UTC(month().getUTCFullYear(), month().getUTCMonth() - 1, 1)))}>
-                Previous
+                {i18n.tr('Forrige', 'Previous')}
               </button>
               <button type="button" onClick={() => setMonth(new Date('2026-06-15T00:00:00.000Z'))}>
-                Today
+                {i18n.tr('I dag', 'Today')}
               </button>
               <button type="button" onClick={() => setMonth(new Date(Date.UTC(month().getUTCFullYear(), month().getUTCMonth() + 1, 1)))}>
-                Next
+                {i18n.tr('Neste', 'Next')}
               </button>
             </div>
           </div>
 
           <div class="velion-social-weekdays">
-            <For each={['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}>
+            <For each={i18n.tr('Man,Tir,Ons,Tor,Fre,Lør,Søn', 'Mon,Tue,Wed,Thu,Fri,Sat,Sun').split(',')}>
               {(day) => <span>{day}</span>}
             </For>
           </div>
@@ -267,21 +271,21 @@ export default function SocialCalendarPage() {
             </For>
           </div>
           <Show when={posts().length === 0}>
-            <EmptyState title="No scheduled social posts" detail="Create a draft or convert an inbox conversation to seed the calendar." />
+            <EmptyState title={i18n.tr('Ingen planlagte sosiale innlegg', 'No scheduled social posts')} detail={i18n.tr('Opprett et utkast eller konverter en innbokssamtale for å fylle kalenderen.', 'Create a draft or convert an inbox conversation to seed the calendar.')} />
           </Show>
         </main>
 
         <aside class="velion-social-composer">
           <div class="velion-social-panel-title">
             <Plus class="size-4" />
-            <span>Compose</span>
+            <span>{i18n.tr('Skriv', 'Compose')}</span>
           </div>
           <label>
-            <span>Title</span>
+            <span>{i18n.tr('Tittel', 'Title')}</span>
             <input value={draftTitle()} onInput={(event) => setDraftTitle(event.currentTarget.value)} />
           </label>
           <label>
-            <span>Post copy</span>
+            <span>{i18n.tr('Innleggstekst', 'Post copy')}</span>
             <textarea rows={7} value={draftBody()} onInput={(event) => setDraftBody(event.currentTarget.value)} />
           </label>
           <div class="velion-social-platform-toggle">
@@ -299,13 +303,13 @@ export default function SocialCalendarPage() {
           </div>
           <button type="button" disabled={!canCreateDraft()} onClick={() => void addDraft()} class="velion-social-primary-button">
             <Send class="size-4" />
-            {busy() ? 'Working...' : 'Create draft'}
+            {busy() ? i18n.tr('Arbeider …', 'Working...') : i18n.tr('Opprett utkast', 'Create draft')}
           </button>
 
           <Show when={selectedPost()}>
             {(post) => (
               <div class="velion-social-selected">
-                <span class="velion-social-selected__eyebrow">Selected post</span>
+                <span class="velion-social-selected__eyebrow">{i18n.tr('Valgt innlegg', 'Selected post')}</span>
                 <h3>{post().title}</h3>
                 <p>{post().body}</p>
                 <div class="velion-social-selected__meta">
@@ -337,7 +341,7 @@ export default function SocialCalendarPage() {
                 <div class="velion-social-window-list">
                   <Show
                     when={windows().length > 0}
-                    fallback={<EmptyState title="No suggested windows" detail="Scheduling suggestions will appear after the calendar endpoint returns them." />}
+                    fallback={<EmptyState title={i18n.tr('Ingen foreslåtte tidsvinduer', 'No suggested windows')} detail={i18n.tr('Planleggingsforslag vises etter at kalenderendepunktet returnerer dem.', 'Scheduling suggestions will appear after the calendar endpoint returns them.')} />}
                   >
                     <For each={windows()}>
                       {(window) => (
@@ -354,13 +358,13 @@ export default function SocialCalendarPage() {
                 </div>
                 <button type="button" disabled={busy()} onClick={() => void publishSelected()} class="velion-social-publish-button">
                   <Rocket class="size-4" />
-                  Publish with approval
+                  {i18n.tr('Publiser med godkjenning', 'Publish with approval')}
                 </button>
                 <Show when={publishResult()}>
                   {(result) => (
                     <div class="velion-social-publish-result">
-                      <strong>Adapter result: {result().status}</strong>
-                      <span>Idempotency key: {result().idempotencyKey}</span>
+                      <strong>{i18n.tr(`Adapterresultat: ${result().status}`, `Adapter result: ${result().status}`)}</strong>
+                      <span>{i18n.tr(`Idempotensnøkkel: ${result().idempotencyKey}`, `Idempotency key: ${result().idempotencyKey}`)}</span>
                       <For each={result().attempts}>
                         {(attempt) => (
                           <article>
@@ -380,7 +384,7 @@ export default function SocialCalendarPage() {
             )}
           </Show>
           <Show when={!selectedPost()}>
-            <EmptyState title="No post selected" detail="Select a post from the calendar or create a new draft." />
+            <EmptyState title={i18n.tr('Ingen innlegg valgt', 'No post selected')} detail={i18n.tr('Velg et innlegg fra kalenderen eller opprett et nytt utkast.', 'Select a post from the calendar or create a new draft.')} />
           </Show>
         </aside>
       </section>

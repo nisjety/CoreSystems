@@ -34,6 +34,7 @@ import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/Kno
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
 import { isGateOpen } from '@/shared/context/ownership-gate'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { executeAction } from '@/shared/actions/action-client'
 import {
   loadKnowledgeSources,
@@ -47,6 +48,13 @@ import {
   type LiveKnowledgeSourceType,
   type LiveKnowledgeWebSource,
 } from '@/shared/api/knowledge-live-client'
+// Crawl-completion signal reused from the Home dashboard's Crawl composer
+// (KnowledgeComposer.tsx) — same SSE run-event stream, same terminal-status
+// detection. Wiring it here closes the gap where a crawl started from THIS
+// page refetched the workspace once at crawl-start (before any page had
+// finished ingesting) and then never again, leaving "Tracked web sources"
+// stuck on stale/empty data until a manual reload.
+import { streamCrawlRunEvents } from '@/shared/api/knowledge-client'
 import {
   generateOperatingMap,
   loadOperatingMap,
@@ -94,20 +102,27 @@ type SharePointCreateResult = {
   syncStarted: boolean
 }
 
+// Matches the gateway's actual /api/v1/knowledge/crawl response shape
+// (apps/gateway/src/domains/knowledge/quarry.rs::start_crawl) — it echoes the
+// normalized job, never the submitted URL, so callers must keep the URL the
+// user typed (the request input) to reference it afterward instead of
+// expecting the response to hand it back.
 type CrawlStartResult = {
-  createdAt: string
   id: string
   status: string
-  target: string
 }
 
-const CONNECT_PROVIDERS = [
-  { id: 'microsoft', label: 'Microsoft 365', detail: 'SharePoint, OneDrive, Teams, Outlook', sources: ['sharepoint', 'onedrive', 'teams', 'outlook'] },
-  { id: 'google', label: 'Google Workspace', detail: 'Drive and docs', sources: ['google_drive', 'documents'] },
-  { id: 'notion', label: 'Notion', detail: 'Pages and databases', sources: ['pages', 'databases'] },
-  { id: 'github', label: 'GitHub', detail: 'Repos, README, issues', sources: ['repos', 'readme', 'issues'] },
-  { id: 'slack', label: 'Slack', detail: 'Channels and thread history', sources: ['channels'] },
-] as const
+// Provider labels are brand names (kept as-is); `detail` copy is localized, so
+// this is built from a `tr` function at render time instead of a static const.
+function buildConnectProviders(tr: (noText: string, enText: string) => string) {
+  return [
+    { id: 'microsoft', label: 'Microsoft 365', detail: tr('SharePoint, OneDrive, Teams, Outlook', 'SharePoint, OneDrive, Teams, Outlook'), sources: ['sharepoint', 'onedrive', 'teams', 'outlook'] },
+    { id: 'google', label: 'Google Workspace', detail: tr('Disk og dokumenter', 'Drive and docs'), sources: ['google_drive', 'documents'] },
+    { id: 'notion', label: 'Notion', detail: tr('Sider og databaser', 'Pages and databases'), sources: ['pages', 'databases'] },
+    { id: 'github', label: 'GitHub', detail: tr('Repos, README og saker', 'Repos, README, issues'), sources: ['repos', 'readme', 'issues'] },
+    { id: 'slack', label: 'Slack', detail: tr('Kanaler og trådhistorikk', 'Channels and thread history'), sources: ['channels'] },
+  ] as const
+}
 
 const sourceTypeIcon: Record<LiveKnowledgeSourceType, KnowledgeIcon> = {
   Docs: FileText,
@@ -206,6 +221,7 @@ function filterKnowledgePayload(
 }
 
 export default function KnowledgePage() {
+  const i18n = useI18n()
   const [activeView, setActiveView] = createSignal<KnowledgeView>('overview')
   const [overviewLayout, setOverviewLayout] = createSignal<KnowledgeLayout>('grid')
   const [selectedCollectionId, setSelectedCollectionId] = createSignal('all')
@@ -224,6 +240,12 @@ export default function KnowledgePage() {
   // reactive UI state, so handlers and the connect-poll can read it freely.
   let activeOrgId = ''
   let activeUserId = ''
+  // Tracks the in-flight crawl-completion SSE subscription (see
+  // handleStartWebsiteCrawl) so it's cancelled if the user navigates away
+  // before the crawl finishes — otherwise the stream would keep running
+  // against an unmounted page.
+  let crawlStatusAbort: AbortController | null = null
+  onCleanup(() => crawlStatusAbort?.abort())
 
   const visibleKnowledge = createMemo(() => {
     const payload = liveKnowledge()
@@ -299,7 +321,7 @@ export default function KnowledgePage() {
       setLiveKnowledge(null)
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Knowledge workspace could not be loaded.',
+        message: translateApiError(error, i18n.tr, { no: 'Kunnskapsområdet kunne ikke lastes.', en: 'Knowledge workspace could not be loaded.' }),
       })
     } finally {
       setLoading(false)
@@ -315,7 +337,7 @@ export default function KnowledgePage() {
       setOperatingMap(null)
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Operating Map could not be loaded.',
+        message: translateApiError(error, i18n.tr, { no: 'Operating Map kunne ikke lastes.', en: 'Operating Map could not be loaded.' }),
       })
     } finally {
       setOperatingMapLoading(false)
@@ -332,17 +354,21 @@ export default function KnowledgePage() {
         headers: { 'x-velion-org-id': activeOrgId },
       })
       const failures = [...result.integrationFailures, ...result.finspoFailures]
+      const startedCount = result.integrationStarted + result.finspoStarted
       setNotice({
         tone: failures.length > 0 ? 'warn' : 'good',
         message: failures.length > 0
-          ? `Started ${result.integrationStarted + result.finspoStarted} syncs, but ${failures.length} sources still need review.`
-          : `Started ${result.integrationStarted + result.finspoStarted} source syncs.`,
+          ? i18n.tr(
+              `Startet ${startedCount} synkroniseringer, men ${failures.length} kilder trenger fortsatt gjennomgang.`,
+              `Started ${startedCount} syncs, but ${failures.length} sources still need review.`,
+            )
+          : i18n.tr(`Startet ${startedCount} kildesynkroniseringer.`, `Started ${startedCount} source syncs.`),
       })
       await loadKnowledgeWorkspace()
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Knowledge sync could not be started.',
+        message: translateApiError(error, i18n.tr, { no: 'Synkroniseringen kunne ikke startes.', en: 'Knowledge sync could not be started.' }),
       })
     } finally {
       setBusyAction(null)
@@ -354,16 +380,20 @@ export default function KnowledgePage() {
     setNotice(null)
     try {
       const result = await uploadKnowledgeFiles(files, activeOrgId)
+      const queuedCount = result.totalItems || files.length
       setNotice({
         tone: 'good',
-        message: `Imports-core queued ${result.totalItems || files.length} file${files.length === 1 ? '' : 's'} for ingestion.`,
+        message: i18n.tr(
+          `Imports-core la ${queuedCount} fil${files.length === 1 ? '' : 'er'} i kø for innhenting.`,
+          `Imports-core queued ${queuedCount} file${files.length === 1 ? '' : 's'} for ingestion.`,
+        ),
       })
       setAddSourceOpen(false)
       await loadKnowledgeWorkspace()
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'File upload could not be started.',
+        message: translateApiError(error, i18n.tr, { no: 'Filopplastingen kunne ikke startes.', en: 'File upload could not be started.' }),
       })
     } finally {
       setBusyAction(null)
@@ -389,15 +419,15 @@ export default function KnowledgePage() {
       setNotice({
         tone: 'good',
         message: result.syncStarted
-          ? 'SharePoint drive registered and sync started in Finspo.'
-          : 'SharePoint drive registered. Sync can be started from Knowledge.',
+          ? i18n.tr('SharePoint-stasjonen er registrert, og synkronisering er startet i Finspo.', 'SharePoint drive registered and sync started in Finspo.')
+          : i18n.tr('SharePoint-stasjonen er registrert. Synkronisering kan startes fra Kunnskap.', 'SharePoint drive registered. Sync can be started from Knowledge.'),
       })
       setAddSourceOpen(false)
       await loadKnowledgeWorkspace()
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'SharePoint source could not be registered.',
+        message: translateApiError(error, i18n.tr, { no: 'SharePoint-kilden kunne ikke registreres.', en: 'SharePoint source could not be registered.' }),
       })
     } finally {
       setBusyAction(null)
@@ -429,7 +459,10 @@ export default function KnowledgePage() {
       if (!authWindow) throw new Error('The authorization window was blocked by the browser.')
       setNotice({
         tone: 'good',
-        message: `${provider.label} authorization opened in a new window. Return here after approval to refresh the workspace.`,
+        message: i18n.tr(
+          `${provider.label}-autorisering ble åpnet i et nytt vindu. Kom tilbake hit etter godkjenning for å oppdatere arbeidsområdet.`,
+          `${provider.label} authorization opened in a new window. Return here after approval to refresh the workspace.`,
+        ),
       })
       setAddSourceOpen(false)
       const closePoll = window.setInterval(() => {
@@ -440,7 +473,7 @@ export default function KnowledgePage() {
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Connection flow could not be started.',
+        message: translateApiError(error, i18n.tr, { no: 'Tilkoblingen kunne ikke startes.', en: 'Connection flow could not be started.' }),
       })
     } finally {
       setBusyAction(null)
@@ -457,14 +490,38 @@ export default function KnowledgePage() {
       })
       setNotice({
         tone: 'good',
-        message: `Started a website crawl for ${result.target}. Track run ${result.id} in Ingestions while pages flow into Knowledge.`,
+        message: i18n.tr(
+          `Startet en gjennomsøking av nettstedet for ${input.url}. Følg kjøring ${result.id} i Innhenting mens sidene flyter inn i Kunnskap.`,
+          `Started a website crawl for ${input.url}. Track run ${result.id} in Ingestions while pages flow into Knowledge.`,
+        ),
       })
       setAddSourceOpen(false)
+      // Immediate refetch only shows that a crawl started — the pipeline
+      // finishes asynchronously in Quarry, well after this call returns, so
+      // it alone left "Tracked web sources" (and everything else on this
+      // page) stuck on stale/empty data until a manual reload. Subscribe to
+      // the same run-event stream the Home dashboard's Crawl composer
+      // already uses and refetch again once the run reaches a terminal
+      // status — no new polling primitive, just reusing the existing SSE
+      // completion signal instead of a blind setInterval.
       await loadKnowledgeWorkspace()
+      crawlStatusAbort?.abort()
+      crawlStatusAbort = new AbortController()
+      void streamCrawlRunEvents(
+        activeOrgId,
+        result.id,
+        { onDone: () => void loadKnowledgeWorkspace() },
+        crawlStatusAbort.signal,
+      ).catch(() => {
+        // Best-effort completion refresh — a stream failure here (e.g. the
+        // job finished before the SSE connection was established) must
+        // never surface as a page-level error. Manual "Sync" and the next
+        // page load remain the fallback refresh paths.
+      })
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'The website crawl could not be started.',
+        message: translateApiError(error, i18n.tr, { no: 'Gjennomsøkingen av nettstedet kunne ikke startes.', en: 'The website crawl could not be started.' }),
       })
     } finally {
       setBusyAction(null)
@@ -474,23 +531,26 @@ export default function KnowledgePage() {
   async function handleGenerateOperatingMap() {
     setBusyAction('operating-map')
     setNotice(null)
-    setOperatingMapEvents(['Generating Operating Map proposal from Knowledge evidence...'])
+    setOperatingMapEvents([i18n.tr('Genererer Operating Map-forslag fra Kunnskap-bevis …', 'Generating Operating Map proposal from Knowledge evidence...')])
     try {
       const result = await generateOperatingMap(activeOrgId)
-      setOperatingMapEvents((events) => [...events, `Proposal ${result.proposal.id} created.`])
+      setOperatingMapEvents((events) => [...events, i18n.tr(`Forslag ${result.proposal.id} opprettet.`, `Proposal ${result.proposal.id} created.`)])
       if (result.runId) {
         await streamOperatingMapRunEvents(activeOrgId, result.runId, {
           onEvent: (event) => setOperatingMapEvents((events) => [...events, event.detail]),
+          onError: (error) => {
+            setOperatingMapEvents((events) => [...events, translateApiError(error, i18n.tr, { no: 'Hendelsesstrømmen for Operating Map feilet.', en: 'Operating Map event stream failed.' })])
+          },
         }).catch((error) => {
-          setOperatingMapEvents((events) => [...events, error instanceof Error ? error.message : 'Operating Map event stream failed.'])
+          setOperatingMapEvents((events) => [...events, translateApiError(error, i18n.tr, { no: 'Hendelsesstrømmen for Operating Map feilet.', en: 'Operating Map event stream failed.' })])
         })
       }
       await loadOperatingMapWorkspace()
-      setNotice({ tone: 'good', message: 'Operating Map proposal is ready for review.' })
+      setNotice({ tone: 'good', message: i18n.tr('Operating Map-forslaget er klart for gjennomgang.', 'Operating Map proposal is ready for review.') })
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Operating Map generation could not be started.',
+        message: translateApiError(error, i18n.tr, { no: 'Generering av Operating Map kunne ikke startes.', en: 'Operating Map generation could not be started.' }),
       })
     } finally {
       setBusyAction(null)
@@ -506,13 +566,13 @@ export default function KnowledgePage() {
       setNotice({
         tone: 'good',
         message: decision === 'accept'
-          ? 'Operating Map accepted and published into Knowledge wiki.'
-          : 'Operating Map proposal rejected.',
+          ? i18n.tr('Operating Map er godkjent og publisert i Kunnskap-wikien.', 'Operating Map accepted and published into Knowledge wiki.')
+          : i18n.tr('Operating Map-forslaget ble avvist.', 'Operating Map proposal rejected.'),
       })
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Operating Map proposal could not be reviewed.',
+        message: translateApiError(error, i18n.tr, { no: 'Forslaget til Operating Map kunne ikke behandles.', en: 'Operating Map proposal could not be reviewed.' }),
       })
     } finally {
       setBusyAction(null)
@@ -544,11 +604,11 @@ export default function KnowledgePage() {
         },
       )
       await loadOperatingMapWorkspace()
-      setNotice({ tone: 'good', message: `${blueprint.name} blueprint suggestion saved for Agents review.` })
+      setNotice({ tone: 'good', message: i18n.tr(`${blueprint.name}-agentmal-forslag lagret for gjennomgang i Agenter.`, `${blueprint.name} blueprint suggestion saved for Agents review.`) })
     } catch (error) {
       setNotice({
         tone: 'warn',
-        message: error instanceof Error ? error.message : 'Agent blueprint could not be queued.',
+        message: translateApiError(error, i18n.tr, { no: 'Agent-malen kunne ikke legges i kø.', en: 'Agent blueprint could not be queued.' }),
       })
     } finally {
       setBusyAction(null)
@@ -578,13 +638,16 @@ export default function KnowledgePage() {
         </Show>
 
         <Show when={loading() && !liveKnowledge()}>
-          <section class="velion-panel knowledge-loading-panel">Loading knowledge workspace...</section>
+          <section class="velion-panel knowledge-loading-panel">{i18n.tr('Laster kunnskapsområdet …', 'Loading knowledge workspace...')}</section>
         </Show>
 
         <Show when={!loading() && !liveKnowledge()}>
           <EmptyPanel
-            title="Knowledge workspace unavailable"
-            description="The page could not load live data from Data Plane v2 and the ingestion services."
+            title={i18n.tr('Kunnskapsområdet er utilgjengelig', 'Knowledge workspace unavailable')}
+            description={i18n.tr(
+              'Siden kunne ikke laste sanntidsdata fra Data Plane v2 og innhentingstjenestene.',
+              'The page could not load live data from Data Plane v2 and the ingestion services.',
+            )}
           />
         </Show>
 
@@ -631,7 +694,7 @@ export default function KnowledgePage() {
       <Show when={addSourceOpen()}>
         <KnowledgeAddSourceModal
           busy={busyAction() !== null}
-          providers={CONNECT_PROVIDERS}
+          providers={buildConnectProviders(i18n.tr)}
           onClose={() => setAddSourceOpen(false)}
           onConnectProvider={handleConnectProvider}
           onRegisterSharePoint={handleRegisterSharePoint}
@@ -657,18 +720,19 @@ function WorkspaceHeader(props: {
   onSearchChange: (query: string) => void
   onSync: () => void
 }) {
+  const i18n = useI18n()
   let collectionSelect: HTMLSelectElement | undefined
 
   return (
     <header class="knowledge-header knowledge-header--docs">
       <div class="knowledge-header__main">
-        <span class="knowledge-header__eyebrow">Knowledge base</span>
+        <span class="knowledge-header__eyebrow">{i18n.tr('Kunnskapsbase', 'Knowledge base')}</span>
         <div class="knowledge-header__title-row">
-          <h1 class="knowledge-header__title">Knowledge</h1>
+          <h1 class="knowledge-header__title">{i18n.tr('Kunnskap', 'Knowledge')}</h1>
           <div class="knowledge-header__select-wrap">
             <VelionSelect
               ref={(element) => { collectionSelect = element }}
-              aria-label="Select knowledge collection"
+              aria-label={i18n.tr('Velg kunnskapssamling', 'Select knowledge collection')}
               value={props.selectedCollectionId}
               onChange={(event) => props.onCollectionChange(event.currentTarget.value)}
               class="knowledge-header__select"
@@ -679,10 +743,13 @@ function WorkspaceHeader(props: {
             </VelionSelect>
             <ChevronDown class="knowledge-header__chevron" strokeWidth={2} />
           </div>
-          <span class="knowledge-header__scope">Workspace library</span>
+          <span class="knowledge-header__scope">{i18n.tr('Arbeidsområdebibliotek', 'Workspace library')}</span>
         </div>
         <p class="knowledge-header__copy">
-          One calm place for source collections, shared files, and the evidence Velion uses to answer.
+          {i18n.tr(
+            'Ett rolig sted for kildesamlinger, delte filer og bevisene Velion bruker for å svare.',
+            'One calm place for source collections, shared files, and the evidence Velion uses to answer.',
+          )}
         </p>
       </div>
 
@@ -690,28 +757,28 @@ function WorkspaceHeader(props: {
         <label class="knowledge-toolbar-search">
           <Search class="size-4" aria-hidden="true" />
           <VelionInput
-            aria-label="Search knowledge base"
+            aria-label={i18n.tr('Søk i kunnskapsbasen', 'Search knowledge base')}
             value={props.searchQuery}
             onInput={(event) => props.onSearchChange(event.currentTarget.value)}
-            placeholder="Search"
+            placeholder={i18n.tr('Søk', 'Search')}
           />
           <kbd>⌘ K</kbd>
         </label>
         <button
           type="button"
           class="knowledge-toolbar-button"
-          aria-label="Filter knowledge"
-          title="Filter by collection"
+          aria-label={i18n.tr('Filtrer kunnskap', 'Filter knowledge')}
+          title={i18n.tr('Filtrer etter samling', 'Filter by collection')}
           onClick={() => collectionSelect?.focus()}
         >
           <Filter class="size-4" />
-          <span>Filter</span>
+          <span>{i18n.tr('Filter', 'Filter')}</span>
         </button>
-        <div class="knowledge-toolbar-view" role="group" aria-label="Knowledge view style">
+        <div class="knowledge-toolbar-view" role="group" aria-label={i18n.tr('Visningsstil for kunnskap', 'Knowledge view style')}>
           <button
             type="button"
             class={cn('knowledge-toolbar-view__button', props.layout === 'grid' && 'knowledge-toolbar-view__button--active')}
-            aria-label="Grid view"
+            aria-label={i18n.tr('Rutenettvisning', 'Grid view')}
             aria-pressed={props.layout === 'grid'}
             onClick={() => props.onLayoutChange('grid')}
           >
@@ -720,7 +787,7 @@ function WorkspaceHeader(props: {
           <button
             type="button"
             class={cn('knowledge-toolbar-view__button', props.layout === 'list' && 'knowledge-toolbar-view__button--active')}
-            aria-label="List view"
+            aria-label={i18n.tr('Listevisning', 'List view')}
             aria-pressed={props.layout === 'list'}
             onClick={() => props.onLayoutChange('list')}
           >
@@ -730,15 +797,15 @@ function WorkspaceHeader(props: {
         <SegmentedView activeView={props.activeView} onActiveViewChange={props.onActiveViewChange} />
         <A href="/ingestions" class="button button--secondary button--md knowledge-link-button">
           <ArrowUpRight class="size-4" />
-          Ingestions
+          {i18n.tr('Innhenting', 'Ingestions')}
         </A>
         <Button size="md" onClick={props.onSync} disabled={props.syncing}>
           <RefreshCw class={cn('size-4', props.syncing && 'knowledge-spin')} />
-          Sync
+          {i18n.tr('Synkroniser', 'Sync')}
         </Button>
         <Button variant="primary" size="md" onClick={props.onAddSource}>
           <FilePlus2 class="size-4" />
-          Add source
+          {i18n.tr('Legg til kilde', 'Add source')}
         </Button>
       </div>
     </header>
@@ -749,11 +816,12 @@ function SegmentedView(props: {
   activeView: KnowledgeView
   onActiveViewChange: (view: KnowledgeView) => void
 }) {
+  const i18n = useI18n()
   const views: Array<{ Icon: KnowledgeIcon; id: KnowledgeView; label: string }> = [
-    { id: 'overview', label: 'Overview', Icon: Grid2X2 },
-    { id: 'operating-map', label: 'AI Map', Icon: MapIcon },
-    { id: 'graph', label: 'Graph', Icon: Network },
-    { id: 'chunks', label: 'Chunks', Icon: Table2 },
+    { id: 'overview', label: i18n.tr('Oversikt', 'Overview'), Icon: Grid2X2 },
+    { id: 'operating-map', label: i18n.tr('AI-kart', 'AI Map'), Icon: MapIcon },
+    { id: 'graph', label: i18n.tr('Graf', 'Graph'), Icon: Network },
+    { id: 'chunks', label: i18n.tr('Utdrag', 'Chunks'), Icon: Table2 },
   ]
 
   return (
@@ -780,7 +848,8 @@ function OverviewCanvas(props: {
   onSearchChange: (query: string) => void
   searchQuery: string
 }) {
-  const collectionCards = createMemo(() => buildKnowledgeCollectionCards(props.liveKnowledge))
+  const i18n = useI18n()
+  const collectionCards = createMemo(() => buildKnowledgeCollectionCards(props.liveKnowledge, i18n.tr))
 
   return (
     <main class={cn('knowledge-main-stack knowledge-dashboard', props.layout === 'list' && 'knowledge-dashboard--list')}>
@@ -788,17 +857,24 @@ function OverviewCanvas(props: {
         <div class="knowledge-dashboard__primary">
           <Show when={props.liveKnowledge.dataPlane.documentsTruncated}>
             <div class="knowledge-muted-copy" role="status">
-              Showing {props.liveKnowledge.dataPlane.loadedDocumentCount ?? props.liveKnowledge.files.length} of{' '}
-              {props.liveKnowledge.dataPlane.documentCount} workspace documents. Use search or a folder to narrow the view.
+              {i18n.tr(
+                `Viser ${props.liveKnowledge.dataPlane.loadedDocumentCount ?? props.liveKnowledge.files.length} av ${props.liveKnowledge.dataPlane.documentCount} dokumenter i arbeidsområdet. Bruk søk eller en mappe for å avgrense visningen.`,
+                `Showing ${props.liveKnowledge.dataPlane.loadedDocumentCount ?? props.liveKnowledge.files.length} of ${props.liveKnowledge.dataPlane.documentCount} workspace documents. Use search or a folder to narrow the view.`,
+              )}
             </div>
           </Show>
 
           <section class="knowledge-dashboard-section knowledge-dashboard-section--collections">
-            <SectionHeader title="Integrations" description="Connected source systems feeding this knowledge space." />
+            <SectionHeader title={i18n.tr('Integrasjoner', 'Integrations')} description={i18n.tr('Tilkoblede kildesystemer som mater dette kunnskapsområdet.', 'Connected source systems feeding this knowledge space.')} />
             <div class="knowledge-doc-card-grid">
               <Show
                 when={collectionCards().length > 0}
-                fallback={<EmptyPanel title="No integrations connected" description="Start a workspace connection from Add source to pull in live knowledge." />}
+                fallback={(
+                  <EmptyPanel
+                    title={i18n.tr('Ingen integrasjoner tilkoblet', 'No integrations connected')}
+                    description={i18n.tr('Start en arbeidsområdetilkobling fra Legg til kilde for å hente inn sanntidskunnskap.', 'Start a workspace connection from Add source to pull in live knowledge.')}
+                  />
+                )}
               >
                 <For each={collectionCards()}>
                   {(collection) => <KnowledgeCollectionCard collection={collection} onConnect={props.onAddSource} />}
@@ -808,11 +884,16 @@ function OverviewCanvas(props: {
           </section>
 
           <section class="knowledge-dashboard-section knowledge-dashboard-section--shortcuts">
-            <SectionHeader title="Folders" description="Shortcuts into the source groups your workspace uses most." />
+            <SectionHeader title={i18n.tr('Mapper', 'Folders')} description={i18n.tr('Snarveier til kildegruppene arbeidsområdet ditt bruker mest.', 'Shortcuts into the source groups your workspace uses most.')} />
             <div class="knowledge-shortcut-grid">
               <Show
                 when={props.liveKnowledge.folders.length > 0}
-                fallback={<EmptyPanel title="No source groups yet" description="Connect an integration or import files to start building grouped knowledge folders." />}
+                fallback={(
+                  <EmptyPanel
+                    title={i18n.tr('Ingen kildegrupper ennå', 'No source groups yet')}
+                    description={i18n.tr('Koble til en integrasjon eller importer filer for å begynne å bygge grupperte kunnskapsmapper.', 'Connect an integration or import files to start building grouped knowledge folders.')}
+                  />
+                )}
               >
                 <For each={props.liveKnowledge.folders}>
                   {(folder) => <FolderCard folder={folder} />}
@@ -840,6 +921,7 @@ function OverviewCanvas(props: {
 }
 
 function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
+  const i18n = useI18n()
   // The document being shared (null = dialog closed). Only the id + visibility
   // are needed; the ShareDialog itself is gated by the honesty gate.
   const [shareTarget, setShareTarget] = createSignal<{
@@ -851,13 +933,22 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
     <section class="velion-panel knowledge-source-inspector">
       <div class="knowledge-source-inspector__header">
         <div>
-          <h2>Source evidence</h2>
-          <p>Documents, chunks, graph links, and source-system sync state from the live knowledge stack.</p>
+          <h2>{i18n.tr('Kildebevis', 'Source evidence')}</h2>
+          <p>{i18n.tr(
+            'Dokumenter, utdrag, graf-koblinger og synkroniseringsstatus for kildesystemer fra den levende kunnskapsstakken.',
+            'Documents, chunks, graph links, and source-system sync state from the live knowledge stack.',
+          )}</p>
         </div>
         <span>
           {props.liveKnowledge.graph.available
-            ? `${props.liveKnowledge.graph.nodeCount} nodes · ${props.liveKnowledge.graph.edgeCount} edges`
-            : `${props.liveKnowledge.dataPlane.documentCount} workspace documents`}
+            ? i18n.tr(
+                `${props.liveKnowledge.graph.nodeCount} noder · ${props.liveKnowledge.graph.edgeCount} kanter`,
+                `${props.liveKnowledge.graph.nodeCount} nodes · ${props.liveKnowledge.graph.edgeCount} edges`,
+              )
+            : i18n.tr(
+                `${props.liveKnowledge.dataPlane.documentCount} dokumenter i arbeidsområdet`,
+                `${props.liveKnowledge.dataPlane.documentCount} workspace documents`,
+              )}
         </span>
       </div>
       <div class="knowledge-source-evidence-grid">
@@ -876,7 +967,7 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
                   {/* Phase 6 freshness chip: 'Indexed' (embedded_at set) → Ready;
                       Pending review / Re-indexing surface as the live indexing state. */}
                   <span class="knowledge-status-chip" data-status={source.status}>
-                    {source.status === 'Indexed' ? 'Ready' : source.status}
+                    {source.status === 'Indexed' ? i18n.tr('Klar', 'Ready') : source.status}
                   </span>
                   <Show when={isGateOpen()}>
                     <button
@@ -886,7 +977,7 @@ function LiveSourceInspector(props: { liveKnowledge: LiveKnowledgePayload }) {
                         setShareTarget({ id: source.id, visibility: source.visibility })
                       }
                     >
-                      Share
+                      {i18n.tr('Del', 'Share')}
                     </button>
                   </Show>
                 </div>
@@ -933,21 +1024,24 @@ type DashboardCollection = {
   tone: 'ink' | 'soft' | 'warm'
 }
 
-function buildKnowledgeCollectionCards(payload: LiveKnowledgePayload): DashboardCollection[] {
+function buildKnowledgeCollectionCards(
+  payload: LiveKnowledgePayload,
+  tr: (noText: string, enText: string) => string,
+): DashboardCollection[] {
   const integrationCards = payload.integrations.map((integration, index) => ({
-    description: integration.detail || `${integration.documents} available to retrieval.`,
+    description: integration.detail || tr(`${integration.documents} tilgjengelig for henting.`, `${integration.documents} available to retrieval.`),
     Icon: providerIcon(integration.providerKey),
     id: integration.id,
     meta: `${integration.documents} · ${integration.freshness}`,
-    actionLabel: 'Manage',
+    actionLabel: tr('Administrer', 'Manage'),
     title: integration.name,
     tone: index % 3 === 1 ? 'soft' : index % 3 === 2 ? 'warm' : 'ink',
   } satisfies DashboardCollection))
   const sourceCards = payload.sources.slice(0, 6).map((source, index) => ({
-    description: source.description || `${source.provider} source connected to Knowledge.`,
+    description: source.description || tr(`${source.provider}-kilde koblet til Kunnskap.`, `${source.provider} source connected to Knowledge.`),
     Icon: sourceTypeIcon[source.type],
     id: source.id,
-    meta: `${source.provider} · ${source.chunks} chunks`,
+    meta: tr(`${source.provider} · ${source.chunks} utdrag`, `${source.provider} · ${source.chunks} chunks`),
     actionLabel: undefined,
     title: source.title,
     tone: index % 3 === 1 ? 'soft' : index % 3 === 2 ? 'warm' : 'ink',
@@ -988,7 +1082,9 @@ function KnowledgeCollectionCard(props: {
 }
 
 function FolderCard(props: { folder: LiveKnowledgeFolder }) {
+  const i18n = useI18n()
   const linkedSources = () => props.folder.connections.length
+  const linkedSourcesLabel = () => i18n.tr(`${linkedSources()} tilknyttede kilder`, `${linkedSources()} linked sources`)
 
   return (
     <article class="knowledge-folder-card">
@@ -1003,7 +1099,7 @@ function FolderCard(props: { folder: LiveKnowledgeFolder }) {
           <span class="knowledge-folder-card__folder-tab" />
           <span class="knowledge-folder-card__folder-face" />
         </div>
-        <div class="knowledge-folder-card__connection-badges" aria-label={`${linkedSources()} linked sources`}>
+        <div class="knowledge-folder-card__connection-badges" aria-label={linkedSourcesLabel()}>
           <For each={props.folder.connections.slice(0, 3)}>
             {(connection) => <span title={connection}>{connection.slice(0, 1).toUpperCase()}</span>}
           </For>
@@ -1030,8 +1126,8 @@ function FolderCard(props: { folder: LiveKnowledgeFolder }) {
           </span>
         </div>
 
-        <div class="knowledge-folder-card__linked-meter" aria-label={`${linkedSources()} linked sources`}>
-          <span>Linked sources</span>
+        <div class="knowledge-folder-card__linked-meter" aria-label={linkedSourcesLabel()}>
+          <span>{i18n.tr('Tilknyttede kilder', 'Linked sources')}</span>
           <div>
             <For each={[0, 1, 2, 3, 4]}>
               {(segment) => <i class={segment < linkedSources() ? 'knowledge-folder-card__meter-segment--active' : ''} />}
@@ -1046,52 +1142,56 @@ function FolderCard(props: { folder: LiveKnowledgeFolder }) {
 function KnowledgePulsePanel(props: {
   dataPlane: LiveKnowledgePayload['dataPlane']
 }) {
+  const i18n = useI18n()
   const coverage = () => {
     if (props.dataPlane.documentCount <= 0) return 0
     return Math.min(100, Math.round((props.dataPlane.indexedCount / props.dataPlane.documentCount) * 100))
   }
 
   return (
-    <section class="knowledge-pulse-grid" aria-label="Knowledge pulse">
+    <section class="knowledge-pulse-grid" aria-label={i18n.tr('Kunnskapspuls', 'Knowledge pulse')}>
       <article class="velion-panel knowledge-pulse-card knowledge-pulse-card--activity">
         <div class="knowledge-pulse-card__header">
           <div>
-            <span class="knowledge-card-eyebrow">Workspace pulse</span>
-            <h2>Documentation engagement</h2>
+            <span class="knowledge-card-eyebrow">{i18n.tr('Arbeidsområdepuls', 'Workspace pulse')}</span>
+            <h2>{i18n.tr('Dokumentasjonsengasjement', 'Documentation engagement')}</h2>
           </div>
-          <span class="knowledge-pulse-card__status"><span /> Live snapshot</span>
+          <span class="knowledge-pulse-card__status"><span /> {i18n.tr('Sanntidsøyeblikksbilde', 'Live snapshot')}</span>
         </div>
         <div class="knowledge-pulse-card__activity">
           <div class="knowledge-pulse-card__activity-copy">
             <strong>{props.dataPlane.indexedCount}</strong>
-            <span>documents ready for retrieval</span>
-            <p>Historical view and edit telemetry will appear here once the activity feed is connected.</p>
+            <span>{i18n.tr('dokumenter klare for henting', 'documents ready for retrieval')}</span>
+            <p>{i18n.tr('Historisk visning og redigeringstelemetri vises her når aktivitetsstrømmen er koblet til.', 'Historical view and edit telemetry will appear here once the activity feed is connected.')}</p>
           </div>
-          <div class="knowledge-pulse-card__empty-graph" aria-label="No activity telemetry available">
-            <span>No activity telemetry yet</span>
+          <div class="knowledge-pulse-card__empty-graph" aria-label={i18n.tr('Ingen aktivitetstelemetri tilgjengelig', 'No activity telemetry available')}>
+            <span>{i18n.tr('Ingen aktivitetstelemetri ennå', 'No activity telemetry yet')}</span>
           </div>
         </div>
         <div class="knowledge-pulse-card__axis" aria-hidden="true">
-          <span>Sources</span><span>Sync</span><span>Index</span><span>Answers</span>
+          <span>{i18n.tr('Kilder', 'Sources')}</span><span>{i18n.tr('Synk', 'Sync')}</span><span>{i18n.tr('Indeks', 'Index')}</span><span>{i18n.tr('Svar', 'Answers')}</span>
         </div>
       </article>
 
       <article class="velion-panel knowledge-pulse-card knowledge-pulse-card--coverage">
         <div class="knowledge-pulse-card__header">
           <div>
-            <span class="knowledge-card-eyebrow">Coverage</span>
-            <h2>Index coverage</h2>
+            <span class="knowledge-card-eyebrow">{i18n.tr('Dekning', 'Coverage')}</span>
+            <h2>{i18n.tr('Indeksdekning', 'Index coverage')}</h2>
           </div>
           <MoreHorizontal class="size-4" aria-hidden="true" />
         </div>
         <div class="knowledge-pulse-donut" style={{ background: `conic-gradient(#171717 ${coverage()}%, #e7e6e1 0)` }}>
           <div>
             <strong>{coverage()}%</strong>
-            <span>indexed</span>
+            <span>{i18n.tr('indeksert', 'indexed')}</span>
           </div>
         </div>
         <p class="knowledge-pulse-card__footnote">
-          {props.dataPlane.indexedCount} of {props.dataPlane.documentCount} documents are ready.
+          {i18n.tr(
+            `${props.dataPlane.indexedCount} av ${props.dataPlane.documentCount} dokumenter er klare.`,
+            `${props.dataPlane.indexedCount} of ${props.dataPlane.documentCount} documents are ready.`,
+          )}
         </p>
       </article>
     </section>
@@ -1099,13 +1199,22 @@ function KnowledgePulsePanel(props: {
 }
 
 function WebSourcesPanel(props: { webSources: LiveKnowledgeWebSource[] }) {
+  const i18n = useI18n()
   return (
     <section>
-      <SectionHeader title="Tracked web sources" description="Quarry-backed website targets that can refresh into the knowledge workspace." />
+      <SectionHeader
+        title={i18n.tr('Sporede nettkilder', 'Tracked web sources')}
+        description={i18n.tr('Quarry-baserte nettstedsmål som kan oppdateres inn i kunnskapsområdet.', 'Quarry-backed website targets that can refresh into the knowledge workspace.')}
+      />
       <div class="knowledge-web-grid">
         <Show
           when={props.webSources.length > 0}
-          fallback={<EmptyPanel title="No tracked websites yet" description="Start a Quarry crawl from Add source to move website content into the ingestion and knowledge stack." />}
+          fallback={(
+            <EmptyPanel
+              title={i18n.tr('Ingen sporede nettsteder ennå', 'No tracked websites yet')}
+              description={i18n.tr('Start en Quarry-gjennomsøking fra Legg til kilde for å flytte nettstedsinnhold inn i innhentings- og kunnskapsstakken.', 'Start a Quarry crawl from Add source to move website content into the ingestion and knowledge stack.')}
+            />
+          )}
         >
           <For each={props.webSources}>
             {(source) => (
@@ -1137,12 +1246,13 @@ function FilesTable(props: {
   onSearchChange: (query: string) => void
   searchQuery: string
 }) {
+  const i18n = useI18n()
   return (
     <section class="velion-panel knowledge-files-panel knowledge-files-panel--archive">
       <div class="knowledge-files-panel__header">
         <div>
-          <h2><span class="sr-only">Files</span><span aria-hidden="true">Sprint Archives</span></h2>
-          <p>Latest files available to retrieval.</p>
+          <h2><span class="sr-only">{i18n.tr('Filer', 'Files')}</span><span aria-hidden="true">{i18n.tr('Sprint-arkiver', 'Sprint Archives')}</span></h2>
+          <p>{i18n.tr('Nyeste filer tilgjengelig for henting.', 'Latest files available to retrieval.')}</p>
         </div>
         <div class="knowledge-archive-actions" aria-hidden="true">
           <span><Bookmark class="size-4" /></span>
@@ -1154,10 +1264,10 @@ function FilesTable(props: {
         <label class="knowledge-files-search">
           <Search class="size-4" />
           <VelionInput
-            aria-label="Search files and sources"
+            aria-label={i18n.tr('Søk i filer og kilder', 'Search files and sources')}
             value={props.searchQuery}
             onInput={(event) => props.onSearchChange(event.currentTarget.value)}
-            placeholder="Search files and sources..."
+            placeholder={i18n.tr('Søk i filer og kilder …', 'Search files and sources...')}
           />
         </label>
       </div>
@@ -1165,7 +1275,7 @@ function FilesTable(props: {
       <div class="knowledge-archive-list">
         <Show
           when={props.files.length > 0}
-          fallback={<p class="knowledge-archive-empty">No retrieval files match the current filters.</p>}
+          fallback={<p class="knowledge-archive-empty">{i18n.tr('Ingen filer for henting samsvarer med gjeldende filtre.', 'No retrieval files match the current filters.')}</p>}
         >
           <For each={props.files}>
             {(file) => {
@@ -1175,8 +1285,8 @@ function FilesTable(props: {
                   <div class="knowledge-archive-file__icon"><Dynamic component={Icon} class="size-4" /></div>
                   <div class="knowledge-archive-file__body">
                     <h3>{file.name}</h3>
-                    <p>Shared by {file.addedBy}</p>
-                    <p>{file.source} · Updated {file.updated}</p>
+                    <p>{i18n.tr(`Delt av ${file.addedBy}`, `Shared by ${file.addedBy}`)}</p>
+                    <p>{i18n.tr(`${file.source} · Oppdatert ${file.updated}`, `${file.source} · Updated ${file.updated}`)}</p>
                   </div>
                   <Clock3 class="knowledge-archive-file__clock size-4" aria-hidden="true" />
                 </article>
@@ -1237,14 +1347,15 @@ function ChunksCanvas(props: {
   sources: LiveKnowledgeSource[]
   onSelectSource: (sourceId: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <main class="knowledge-chunks-layout">
       <section class="velion-panel knowledge-chunks-sources">
-        <h2>Sources</h2>
+        <h2>{i18n.tr('Kilder', 'Sources')}</h2>
         <div>
           <Show
             when={props.sources.length > 0}
-            fallback={<p>No chunk-backed documents yet.</p>}
+            fallback={<p>{i18n.tr('Ingen dokumenter med utdrag ennå.', 'No chunk-backed documents yet.')}</p>}
           >
             <For each={props.sources}>
               {(source) => (
@@ -1272,21 +1383,22 @@ function GraphPanel(props: {
   selectedNode: LiveKnowledgeGraphNode | null
   onSelectNode: (nodeId: string) => void
 }) {
+  const i18n = useI18n()
   const nodeById = createMemo(() => new Map(props.graph.nodes.map((node) => [node.id, node])))
 
   return (
-    <section class="velion-panel knowledge-graph-panel" aria-label="RAGGraph relationship map">
+    <section class="velion-panel knowledge-graph-panel" aria-label={i18n.tr('RAGGraph-relasjonskart', 'RAGGraph relationship map')}>
       <div class="knowledge-graph-panel__header">
         <div>
-          <h2>RAGGraph relationship map</h2>
-          <p>Entity relationships grounded in source chunks from Data Plane v2.</p>
+          <h2>{i18n.tr('RAGGraph-relasjonskart', 'RAGGraph relationship map')}</h2>
+          <p>{i18n.tr('Entitetsrelasjoner forankret i kildeutdrag fra Data Plane v2.', 'Entity relationships grounded in source chunks from Data Plane v2.')}</p>
         </div>
         <GitBranch class="size-5" />
       </div>
 
       <div class="knowledge-graph-canvas">
         <div class="knowledge-graph-grid" aria-hidden="true" />
-        <svg class="knowledge-graph-svg" viewBox="0 0 640 420" role="img" aria-label="Knowledge source graph">
+        <svg class="knowledge-graph-svg" viewBox="0 0 640 420" role="img" aria-label={i18n.tr('Kunnskapskildegraf', 'Knowledge source graph')}>
           <For each={props.graph.links}>
             {(link) => {
               const from = () => nodeById().get(link.from)
@@ -1316,7 +1428,7 @@ function GraphPanel(props: {
               return (
                 <button
                   type="button"
-                  aria-label={`Select ${node.label}`}
+                  aria-label={i18n.tr(`Velg ${node.label}`, `Select ${node.label}`)}
                   onClick={() => props.onSelectNode(node.id)}
                   class={cn('knowledge-graph-node-button', active() && 'knowledge-graph-node-button--active')}
                   style={{
@@ -1342,6 +1454,7 @@ function GraphInspectorPanel(props: {
   relatedSources: LiveKnowledgeSource[]
   selectedNode: LiveKnowledgeGraphNode | null
 }) {
+  const i18n = useI18n()
   const chunkEvidence = () => props.relatedSources
     .flatMap((source) => source.chunksPreview.map((chunk) => ({ ...chunk, sourceTitle: source.title })))
     .slice(0, 4)
@@ -1352,8 +1465,8 @@ function GraphInspectorPanel(props: {
       when={props.selectedNode}
       fallback={(
       <EmptyPanel
-        title="No graph node selected"
-        description="Choose a node in the graph to inspect related retrieval sources and chunk evidence."
+        title={i18n.tr('Ingen grafnode valgt', 'No graph node selected')}
+        description={i18n.tr('Velg en node i grafen for å inspisere relaterte hentekilder og utdragsbevis.', 'Choose a node in the graph to inspect related retrieval sources and chunk evidence.')}
       />
       )}
     >
@@ -1361,13 +1474,16 @@ function GraphInspectorPanel(props: {
         <section class="velion-panel knowledge-graph-inspector">
           <h2>{node.label}</h2>
           <p>
-            {formatGraphGroup(node.group)} · {node.sourceRefs.length} linked chunk reference{node.sourceRefs.length === 1 ? '' : 's'}.
+            {i18n.tr(
+              `${formatGraphGroup(node.group)} · ${node.sourceRefs.length} tilknyttet utdragsreferanse${node.sourceRefs.length === 1 ? '' : 'r'}.`,
+              `${formatGraphGroup(node.group)} · ${node.sourceRefs.length} linked chunk reference${node.sourceRefs.length === 1 ? '' : 's'}.`,
+            )}
           </p>
 
           <div class="knowledge-tag-row">
             <Show
               when={props.relatedSources.length > 0}
-              fallback={<span>No document previews were resolved for this node yet.</span>}
+              fallback={<span>{i18n.tr('Ingen dokumentforhåndsvisninger ble funnet for denne noden ennå.', 'No document previews were resolved for this node yet.')}</span>}
             >
               <For each={props.relatedSources}>
                 {(source) => <span>{source.title}</span>}
@@ -1395,14 +1511,15 @@ function GraphInspectorPanel(props: {
 }
 
 function ChunksPanel(props: { source: LiveKnowledgeSource | null }) {
+  const i18n = useI18n()
   return (
     <Show
       keyed
       when={props.source}
       fallback={(
       <EmptyPanel
-        title="No chunk source selected"
-        description="Choose a document to inspect the chunks currently available to retrieval."
+        title={i18n.tr('Ingen utdragskilde valgt', 'No chunk source selected')}
+        description={i18n.tr('Velg et dokument for å inspisere utdragene som for øyeblikket er tilgjengelige for henting.', 'Choose a document to inspect the chunks currently available to retrieval.')}
       />
       )}
     >

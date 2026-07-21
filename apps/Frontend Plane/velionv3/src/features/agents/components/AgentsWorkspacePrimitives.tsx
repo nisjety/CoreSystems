@@ -23,10 +23,12 @@ import {
   roleInsetClass,
   rolePanelClass,
 } from '@/features/agents/lib/velion-agent-page-styles'
+import { useI18n } from '@/shared/i18n'
 
 export function AgentMetricStrip(props: { metrics: RoleMetric[]; role: AgentBlueprint }) {
+  const i18n = useI18n()
   return (
-    <div class="grid gap-3 sm:grid-cols-3" aria-label="Agent readiness metrics">
+    <div class="grid gap-3 sm:grid-cols-3" aria-label={i18n.tr('Agentens beredskapsmetrikker', 'Agent readiness metrics')}>
       <For each={props.metrics}>
         {(metric) => (
           <div class={cn('velion-agent-panel', rolePanelClass(props.role))}>
@@ -91,15 +93,16 @@ export function AgentFeatureBoard(props: {
   operatingModel: RoleOperatingModel
   role: AgentBlueprint
 }) {
+  const i18n = useI18n()
   const sections = createMemo(() => [
-    { title: 'Knowledge', description: 'What the agent can trust.', items: props.operatingModel.knowledge },
-    { title: 'Actions', description: 'What the agent can safely do.', items: props.operatingModel.actions },
-    { title: 'Channels', description: 'Where the agent can operate.', items: props.operatingModel.channels },
-    { title: 'Guardrails', description: 'How the agent avoids risky behavior.', items: props.operatingModel.guardrails },
+    { title: i18n.tr('Kunnskap', 'Knowledge'), description: i18n.tr('Hva agenten kan stole på.', 'What the agent can trust.'), items: props.operatingModel.knowledge },
+    { title: i18n.tr('Handlinger', 'Actions'), description: i18n.tr('Hva agenten trygt kan gjøre.', 'What the agent can safely do.'), items: props.operatingModel.actions },
+    { title: i18n.tr('Kanaler', 'Channels'), description: i18n.tr('Hvor agenten kan operere.', 'Where the agent can operate.'), items: props.operatingModel.channels },
+    { title: i18n.tr('Sikkerhetsmekanismer', 'Guardrails'), description: i18n.tr('Hvordan agenten unngår risikabel atferd.', 'How the agent avoids risky behavior.'), items: props.operatingModel.guardrails },
   ])
 
   return (
-    <section class="grid gap-3 lg:grid-cols-2" aria-label={`${props.role.shortTitle} configured capabilities`}>
+    <section class="grid gap-3 lg:grid-cols-2" aria-label={i18n.tr(`${props.role.shortTitle} konfigurerte kapabiliteter`, `${props.role.shortTitle} configured capabilities`)}>
       <For each={sections()}>
         {(section) => (
           <div class={cn('velion-agent-panel', rolePanelClass(props.role))}>
@@ -180,12 +183,13 @@ export function RoleConversationPreview(props: {
 }
 
 export function StageReadinessPanel(props: { role: AgentBlueprint; system: StageSystem }) {
+  const i18n = useI18n()
   return (
     <div class={cn('velion-agent-panel velion-agent-panel-strong', rolePanelClass(props.role))}>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p class={cn('velion-agent-eyebrow', roleEyebrowClass(props.role))}>Operational checklist</p>
-          <h2 class="velion-agent-title mt-1">{props.role.shortTitle} readiness</h2>
+          <p class={cn('velion-agent-eyebrow', roleEyebrowClass(props.role))}>{i18n.tr('Driftssjekkliste', 'Operational checklist')}</p>
+          <h2 class="velion-agent-title mt-1">{i18n.tr(`${props.role.shortTitle}-beredskap`, `${props.role.shortTitle} readiness`)}</h2>
           {/* Phase 4 honesty sweep: there is no agent activation/deploy backend
               yet, so the readiness actions below are disabled. */}
           <DesignPreviewBadge class="mt-2" />

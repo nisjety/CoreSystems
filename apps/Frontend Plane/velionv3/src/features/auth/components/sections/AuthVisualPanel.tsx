@@ -4,6 +4,7 @@ import type { Accessor } from 'solid-js'
 import type { AuthCopy } from '@/features/auth/lib/model'
 import { Button } from '@/shared/ui/Button'
 import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
+import { useI18n } from '@/shared/i18n'
 
 type AuthVisualPanelProps = {
   copy: Accessor<AuthCopy>
@@ -12,6 +13,7 @@ type AuthVisualPanelProps = {
 }
 
 export function AuthVisualPanel(props: AuthVisualPanelProps) {
+  const i18n = useI18n()
   return (
     <>
       <div class="auth-visual__image" />
@@ -29,11 +31,11 @@ export function AuthVisualPanel(props: AuthVisualPanelProps) {
 
       <Show when={props.showConsent()}>
         <div class="auth-consent-banner">
-          <VelionIconButton type="button" class="auth-consent-banner__icon" aria-label="Cookie settings">
+          <VelionIconButton type="button" class="auth-consent-banner__icon" aria-label={i18n.tr('Informasjonskapsler', 'Cookie settings')}>
             <span />
           </VelionIconButton>
           <p>{props.copy().cookies}</p>
-          <VelionIconButton type="button" class="auth-consent-banner__prefs" aria-label="Open preferences">
+          <VelionIconButton type="button" class="auth-consent-banner__prefs" aria-label={i18n.tr('Åpne innstillinger', 'Open preferences')}>
             <span />
             <span />
             <span />

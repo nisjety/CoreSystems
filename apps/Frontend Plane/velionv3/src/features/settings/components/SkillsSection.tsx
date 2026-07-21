@@ -7,7 +7,7 @@ import {
   updateSkill,
   type Skill,
 } from '@/shared/api/skills-client'
-import { ApiError } from '@/shared/api/http'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { getSession } from '@/shared/session/session-store'
@@ -31,6 +31,7 @@ function parseKeywords(raw: string): string[] {
 }
 
 export function SkillsSection() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
@@ -85,7 +86,7 @@ export function SkillsSection() {
       await refetch()
     } catch (err) {
       setFormError(
-        err instanceof ApiError ? err.message : 'Kunne ikke opprette ferdigheten.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke opprette ferdigheten.', en: 'Could not create the skill.' }),
       )
     } finally {
       setSubmitting(false)
@@ -102,7 +103,7 @@ export function SkillsSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke oppdatere ferdigheten.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere ferdigheten.', en: 'Could not update the skill.' }),
       )
     } finally {
       setBusySkillId(null)
@@ -125,7 +126,7 @@ export function SkillsSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke slette ferdigheten.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke slette ferdigheten.', en: 'Could not delete the skill.' }),
       )
     } finally {
       setBusySkillId(null)

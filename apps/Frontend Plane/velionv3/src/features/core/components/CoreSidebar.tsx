@@ -38,6 +38,7 @@ import {
 import { TicketingExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarTicketingPanel'
 import type { VelionRoute } from '@/features/core/lib/shell-data'
 import {
+  applyDemoModeNavGate,
   getSidebarSectionForPath,
   isSidebarPathActive,
   sidebarSearchAction,
@@ -66,7 +67,7 @@ export function CoreSidebar(props: {
   const i18n = useI18n()
   const location = useLocation()
   const session = getSession()
-  const visibleSections = () => sidebarSections
+  const visibleSections = () => applyDemoModeNavGate(sidebarSections)
     .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())

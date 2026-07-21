@@ -581,15 +581,25 @@ describe('KnowledgePage', () => {
   })
 
   it('starts a website crawl from the add source modal', async () => {
+    // The mocked response intentionally mirrors the REAL gateway contract
+    // (apps/gateway/src/domains/knowledge/quarry.rs::start_crawl) which never
+    // echoes the submitted URL back — only { id, jobId, runId, kind, status,
+    // acceptedAt, eventStream, upstream }. A mock that fabricated a `target`
+    // field here previously masked a bug where the confirmation message read
+    // `result.target` (always undefined) instead of the URL the user typed.
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url === '/api/v1/knowledge/crawl') {
         return makeFetchResponse({
           data: {
             id: 'crawl-1',
+            jobId: 'crawl-1',
+            runId: null,
+            kind: 'crawl',
             status: 'queued',
-            target: 'https://docs.velion.ai',
-            createdAt: '2026-06-06T12:05:00.000Z',
+            acceptedAt: null,
+            eventStream: '/api/v1/knowledge/jobs/crawl-1/events',
+            upstream: {},
           },
         }, 202)
       }
@@ -609,12 +619,82 @@ describe('KnowledgePage', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /start crawl/i }))
 
-    await waitFor(() => expect(screen.getByText(/started a website crawl for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
-    expect(fetchMock).toHaveBeenCalledWith(
+    // The typed URL must reach the request payload sent to the backend...
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/knowledge/crawl',
       expect.objectContaining({
         method: 'POST',
+        body: JSON.stringify({ url: 'https://docs.velion.ai', maxPages: 16 }),
       }),
-    )
+    ))
+
+    // ...and the confirmation message must display that same URL — not
+    // "undefined" — even though the response never echoes it back.
+    await waitFor(() => expect(screen.getByText(/started a website crawl for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
+    expect(screen.queryByText(/undefined/i)).toBeNull()
+    expect(screen.getByText(/track run crawl-1/i)).toBeTruthy()
+  })
+
+  it('refetches the knowledge workspace once the crawl run-event stream reaches completion', async () => {
+    // Regression test for the "Tracked web sources" staleness bug: previously
+    // the page refetched /api/v1/knowledge/sources exactly ONCE, immediately
+    // after the crawl POST resolved — before the crawl (which runs
+    // asynchronously in Quarry) had ingested a single page. This test proves
+    // a SECOND refetch now happens once the crawl's own run-event SSE stream
+    // reaches a terminal state, without requiring a manual page reload.
+    let sourcesCallCount = 0
+    const encoder = new TextEncoder()
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/knowledge/crawl') {
+        return makeFetchResponse({
+          data: {
+            id: 'crawl-2',
+            jobId: 'crawl-2',
+            runId: null,
+            kind: 'crawl',
+            status: 'queued',
+            acceptedAt: null,
+            eventStream: '/api/v1/knowledge/jobs/crawl-2/events',
+            upstream: {},
+          },
+        }, 202)
+      }
+      if (url.includes('/api/v1/knowledge/jobs/crawl-2/events')) {
+        // Minimal terminal-status SSE stream, then close — mirrors a crawl
+        // that finished ingesting.
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: run_completed\ndata: {"status":"completed"}\n\n'))
+            controller.close()
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      if (url === '/api/v1/knowledge/sources') {
+        sourcesCallCount += 1
+      }
+      return makeFetchResponse(knowledgePayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderKnowledgePage()
+    await screen.findByRole('heading', { name: /^folders$/i })
+    const callsBeforeCrawl = sourcesCallCount
+
+    fireEvent.click(screen.getByRole('button', { name: /add source/i }))
+    fireEvent.input(screen.getByLabelText(/website url/i), {
+      target: { value: 'https://docs.velion.ai' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /start crawl/i }))
+
+    await waitFor(() => expect(screen.getByText(/started a website crawl for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
+
+    // Two refetches are expected: the immediate one right after the crawl
+    // starts, and the completion-triggered one once the SSE stream ends.
+    await waitFor(() => expect(sourcesCallCount).toBeGreaterThanOrEqual(callsBeforeCrawl + 2))
   })
 })

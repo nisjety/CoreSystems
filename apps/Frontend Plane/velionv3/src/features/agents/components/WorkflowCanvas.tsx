@@ -19,8 +19,10 @@ import {
   type WorkflowNode,
   workflowNodes,
 } from '@/features/agents/lib/velion-workflow-builder-data'
+import { useI18n } from '@/shared/i18n'
 
 export function WorkflowTopBar() {
+  const i18n = useI18n()
   return (
     <header class="absolute left-4 right-4 top-4 z-20 flex items-center justify-center lg:right-[354px]">
       <div class="flex min-h-12 w-full max-w-[900px] items-center justify-between gap-3 rounded-full border border-white/78 bg-white/72 px-2.5 py-1.5 shadow-[0_18px_54px_rgba(42,44,50,0.12)] backdrop-blur-xl dark:border-white/10 dark:bg-[#17181C]/76">
@@ -30,11 +32,11 @@ export function WorkflowTopBar() {
           </span>
           <div class="min-w-0">
             <h1 class="truncate text-[14px] font-semibold leading-5 text-[#282A30] dark:text-white">
-              Generate Social Media Post
+              {i18n.tr('Generer innlegg til sosiale medier', 'Generate Social Media Post')}
             </h1>
             <p class="flex items-center gap-1 text-[11px] font-medium text-[#7B808A] dark:text-[#AEB4C0]">
               <Bot class="size-3" strokeWidth={2} />
-              Team project
+              {i18n.tr('Teamprosjekt', 'Team project')}
             </p>
           </div>
         </div>
@@ -58,6 +60,7 @@ export function WorkflowCanvas(props: {
   onNodeSelect: (tool: WorkflowBuilderToolId) => void
   selectedNodeId: CanvasNodeId
 }) {
+  const i18n = useI18n()
   return (
     <div class="absolute inset-0">
       <div class="absolute left-1/2 top-1/2 h-[560px] w-[1040px] origin-center -translate-x-1/2 -translate-y-1/2 scale-[0.62] xl:scale-[0.7] 2xl:scale-[0.88] min-[1800px]:scale-100">
@@ -88,6 +91,7 @@ export function WorkflowCanvas(props: {
               active={props.selectedNodeId === node.id}
               node={node}
               onSelect={() => props.onNodeSelect(node.id)}
+              i18n={i18n}
             />
           )}
         </For>
@@ -100,13 +104,14 @@ function WorkflowCanvasNode(props: {
   active: boolean
   node: WorkflowNode
   onSelect: () => void
+  i18n: ReturnType<typeof useI18n>
 }) {
   const label = () => props.node.title.split('\n').join(' ')
 
   return (
     <button
       type="button"
-      aria-label={`Select ${label()} workflow node`}
+      aria-label={props.i18n.tr(`Velg arbeidsflytnoden ${label()}`, `Select ${label()} workflow node`)}
       onClick={() => props.onSelect()}
       class={cn(
         'absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center text-center transition duration-150 hover:scale-[1.02] focus:outline-none',
@@ -135,25 +140,27 @@ function WorkflowCanvasNode(props: {
 }
 
 export function WorkflowGenerationStatus() {
+  const i18n = useI18n()
   return (
     <div class="absolute bottom-[80px] left-1/2 z-20 hidden w-[300px] -translate-x-1/2 text-[11px] font-medium text-[#8B909A] sm:block lg:left-[calc(50%-169px)]">
       <div class="flex items-center gap-2">
         <Check class="size-3.5" strokeWidth={2} />
-        Searching nodes
+        {i18n.tr('Søker etter noder', 'Searching nodes')}
       </div>
       <div class="mt-2 flex items-center gap-2">
         <Check class="size-3.5" strokeWidth={2} />
-        Adding nodes
+        {i18n.tr('Legger til noder', 'Adding nodes')}
       </div>
       <div class="mt-2 flex items-center gap-2 text-[#555963] dark:text-[#D7DCE4]">
         <Loader2 class="size-3.5 animate-spin" strokeWidth={2} />
-        Validating workflow
+        {i18n.tr('Validerer arbeidsflyt', 'Validating workflow')}
       </div>
     </div>
   )
 }
 
 export function WorkflowPromptComposer() {
+  const i18n = useI18n()
   return (
     <form
       class="absolute bottom-6 left-4 right-4 z-20 mx-auto flex h-12 max-w-[660px] items-center gap-2 rounded-full border border-white/82 bg-white/82 px-3.5 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9),0_18px_48px_rgba(42,44,50,0.13)] backdrop-blur-xl dark:border-white/10 dark:bg-[#17181C]/86"
@@ -163,15 +170,15 @@ export function WorkflowPromptComposer() {
           generation has no backend, so the input + action buttons are disabled
           rather than presenting a "Generate" affordance that does nothing. */}
       <input
-        aria-label="Workflow prompt"
+        aria-label={i18n.tr('Arbeidsflyt-prompt', 'Workflow prompt')}
         disabled
-        placeholder="Workflow generation is a design preview"
+        placeholder={i18n.tr('Arbeidsflytgenerering er en designforhåndsvisning', 'Workflow generation is a design preview')}
         class="min-w-0 flex-1 bg-transparent text-[13px] font-medium text-[#2E3138] outline-none placeholder:text-[#A7ABB3] disabled:cursor-not-allowed dark:text-white dark:placeholder:text-[#797F8A]"
       />
-      <VelionIconButton type="button" size="sm" shape="circle" aria-label="Expand composer" disabled class="shrink-0">
+      <VelionIconButton type="button" size="sm" shape="circle" aria-label={i18n.tr('Utvid komponisten', 'Expand composer')} disabled class="shrink-0">
         <Maximize2 class="size-3.5" strokeWidth={2} />
       </VelionIconButton>
-      <VelionIconButton type="button" size="sm" shape="circle" aria-label="Dictate workflow prompt" disabled class="shrink-0">
+      <VelionIconButton type="button" size="sm" shape="circle" aria-label={i18n.tr('Dikter arbeidsflyt-prompt', 'Dictate workflow prompt')} disabled class="shrink-0">
         <Mic class="size-4" strokeWidth={2} />
       </VelionIconButton>
       <VelionIconButton
@@ -179,7 +186,7 @@ export function WorkflowPromptComposer() {
         size="md"
         tone="primary"
         shape="circle"
-        aria-label="Generate workflow"
+        aria-label={i18n.tr('Generer arbeidsflyt', 'Generate workflow')}
         disabled
         class="shrink-0"
       >

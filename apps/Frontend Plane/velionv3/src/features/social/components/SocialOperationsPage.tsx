@@ -34,6 +34,9 @@ import {
   type SocialTrendSignal,
 } from '@/shared/api/social-client'
 import { cn } from '@/shared/lib/cn'
+import { useI18n } from '@/shared/i18n'
+
+type TrFn = (noText: string, enText: string) => string
 
 export type SocialOperationsSection =
   | 'accounts'
@@ -66,59 +69,62 @@ type SocialOpsCard = {
   title: string
 }
 
-const socialSections: Record<SocialOperationsSection, SocialSectionConfig> = {
-  accounts: {
-    title: 'Accounts',
-    description: 'Channel readiness, OAuth state, capability coverage, and publishing constraints.',
-    icon: Plug,
-    actionHref: '/settings/integrations',
-    actionLabel: 'Manage integrations',
-  },
-  drafts: {
-    title: 'Drafts',
-    description: 'A queue for Studio exports, inbox follow-ups, campaign variants, and platform rewrites.',
-    icon: PenLine,
-    actionHref: '/studio/canvas',
-    actionLabel: 'Open Studio',
-  },
-  approvals: {
-    title: 'Approvals',
-    description: 'Human review queue for scheduled posts, generated media, and auto-action exceptions.',
-    icon: CheckCheck,
-    actionHref: '/social/calendar',
-    actionLabel: 'Open calendar',
-  },
-  campaigns: {
-    title: 'Campaigns',
-    description: 'Social campaign plans with dates, channels, Studio boards, and active work ownership.',
-    icon: Megaphone,
-    actionHref: '/studio/campaigns',
-    actionLabel: 'Plan in Studio',
-  },
-  competitors: {
-    title: 'Competitor watch',
-    description: 'Track accounts, breakout posts, creative patterns, and messages worth remixing.',
-    icon: Telescope,
-    actionHref: '/social/trends',
-    actionLabel: 'Open trends',
-  },
-  trends: {
-    title: 'Trends',
-    description: 'Virals, saved hooks, reusable formats, channel timing, and Studio remix entry points.',
-    icon: TrendingUp,
-    actionHref: '/studio/canvas',
-    actionLabel: 'Remix in Studio',
-  },
-  evergreen: {
-    title: 'Evergreen queue',
-    description: 'Reusable posts, recurring campaigns, active workflow links, and republish guardrails.',
-    icon: Repeat2,
-    actionHref: '/agents',
-    actionLabel: 'Open workflows',
-  },
+function socialSections(tr: TrFn): Record<SocialOperationsSection, SocialSectionConfig> {
+  return {
+    accounts: {
+      title: tr('Kontoer', 'Accounts'),
+      description: tr('Kanalberedskap, OAuth-status, funksjonsdekning og publiseringsbegrensninger.', 'Channel readiness, OAuth state, capability coverage, and publishing constraints.'),
+      icon: Plug,
+      actionHref: '/settings/integrations',
+      actionLabel: tr('Administrer integrasjoner', 'Manage integrations'),
+    },
+    drafts: {
+      title: tr('Utkast', 'Drafts'),
+      description: tr('En kø for Studio-eksporter, innboksoppfølginger, kampanjevarianter og plattformomskrivinger.', 'A queue for Studio exports, inbox follow-ups, campaign variants, and platform rewrites.'),
+      icon: PenLine,
+      actionHref: '/studio/canvas',
+      actionLabel: tr('Åpne Studio', 'Open Studio'),
+    },
+    approvals: {
+      title: tr('Godkjenninger', 'Approvals'),
+      description: tr('Manuell gjennomgangskø for planlagte innlegg, generert media og unntak for automatiske handlinger.', 'Human review queue for scheduled posts, generated media, and auto-action exceptions.'),
+      icon: CheckCheck,
+      actionHref: '/social/calendar',
+      actionLabel: tr('Åpne kalender', 'Open calendar'),
+    },
+    campaigns: {
+      title: tr('Kampanjer', 'Campaigns'),
+      description: tr('Sosiale kampanjeplaner med datoer, kanaler, Studio-tavler og aktivt arbeidseierskap.', 'Social campaign plans with dates, channels, Studio boards, and active work ownership.'),
+      icon: Megaphone,
+      actionHref: '/studio/campaigns',
+      actionLabel: tr('Planlegg i Studio', 'Plan in Studio'),
+    },
+    competitors: {
+      title: tr('Konkurrentovervåking', 'Competitor watch'),
+      description: tr('Spor kontoer, gjennombruddsinnlegg, kreative mønstre og meldinger verdt å gjenbruke.', 'Track accounts, breakout posts, creative patterns, and messages worth remixing.'),
+      icon: Telescope,
+      actionHref: '/social/trends',
+      actionLabel: tr('Åpne trender', 'Open trends'),
+    },
+    trends: {
+      title: tr('Trender', 'Trends'),
+      description: tr('Virale innlegg, lagrede kroker, gjenbrukbare formater, kanaltiming og Studio-remiks-innganger.', 'Virals, saved hooks, reusable formats, channel timing, and Studio remix entry points.'),
+      icon: TrendingUp,
+      actionHref: '/studio/canvas',
+      actionLabel: tr('Remiks i Studio', 'Remix in Studio'),
+    },
+    evergreen: {
+      title: tr('Eviggrønn kø', 'Evergreen queue'),
+      description: tr('Gjenbrukbare innlegg, tilbakevendende kampanjer, aktive arbeidsflytlenker og republiseringssperrer.', 'Reusable posts, recurring campaigns, active workflow links, and republish guardrails.'),
+      icon: Repeat2,
+      actionHref: '/agents',
+      actionLabel: tr('Åpne arbeidsflyter', 'Open workflows'),
+    },
+  }
 }
 
 export default function SocialOperationsPage(props: { section: SocialOperationsSection }) {
+  const i18n = useI18n()
   const [workspace] = createResource(loadSocialWorkspace)
   const fallbackWorkspace = createMemo(() => fallbackSocialWorkspace())
   const currentWorkspace = createMemo(() => workspace() ?? fallbackWorkspace())
@@ -139,13 +145,13 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       resources: { ...base.resources, campaigns: 'live' },
     }
   })
-  const config = createMemo(() => socialSections[props.section])
+  const config = createMemo(() => socialSections(i18n.tr)[props.section])
   const resourceSource = createMemo(() => sourceForSection(props.section, effectiveWorkspace()))
   const sectionUsesDerivedData = createMemo(
     () => resourceSource() === 'fallback' && workspace()?.source !== 'fallback',
   )
-  const metrics = createMemo(() => buildSectionMetrics(props.section, effectiveWorkspace()))
-  const cards = createMemo(() => buildSectionCards(props.section, effectiveWorkspace()))
+  const metrics = createMemo(() => buildSectionMetrics(props.section, effectiveWorkspace(), i18n.tr))
+  const cards = createMemo(() => buildSectionCards(props.section, effectiveWorkspace(), i18n.tr))
 
   const createCampaign = async (event: SubmitEvent) => {
     event.preventDefault()
@@ -154,11 +160,11 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
     const orgId = currentWorkspace().context.orgId
     const name = campaignName().trim()
     if (!orgId) {
-      setCampaignFeedback('Campaign creation needs an organization-scoped social session.')
+      setCampaignFeedback(i18n.tr('Kampanjeoppretting krever en organisasjonsscopet sosial økt.', 'Campaign creation needs an organization-scoped social session.'))
       return
     }
     if (!name) {
-      setCampaignFeedback('Campaign name is required.')
+      setCampaignFeedback(i18n.tr('Kampanjenavn er påkrevd.', 'Campaign name is required.'))
       return
     }
 
@@ -176,9 +182,9 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       setCampaignName('')
       setCampaignGoal('')
       setCampaignBrief('')
-      setCampaignFeedback('Campaign created.')
+      setCampaignFeedback(i18n.tr('Kampanje opprettet.', 'Campaign created.'))
     } catch (reason) {
-      setCampaignFeedback(reason instanceof Error ? reason.message : 'Campaign could not be created.')
+      setCampaignFeedback(reason instanceof Error ? reason.message : i18n.tr('Kampanjen kunne ikke opprettes.', 'Campaign could not be created.'))
     } finally {
       setCampaignBusy(false)
     }
@@ -190,7 +196,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
         <div>
           <span class="velion-social-kicker">
             <Dynamic component={config().icon} size={14} />
-            Social operations
+            {i18n.tr('Sosiale operasjoner', 'Social operations')}
           </span>
           <h1>{config().title}</h1>
           <p>{config().description}</p>
@@ -201,25 +207,25 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       <Show when={!workspace()}>
         <p class="velion-social-ops-state">
           <Clock3 size={16} />
-          Loading organization-scoped social workspace...
+          {i18n.tr('Laster organisasjonsscopet sosialt arbeidsområde …', 'Loading organization-scoped social workspace...')}
         </p>
       </Show>
 
       <Show when={workspace()?.source === 'fallback'}>
         <p class="velion-social-ops-state velion-social-ops-state--warning">
           <AlertCircle size={16} />
-          Social records are unavailable because the org-scoped social gateway is unavailable or no organization scope was resolved.
+          {i18n.tr('Sosiale poster er utilgjengelige fordi den org-scopede sosiale gatewayen er utilgjengelig, eller ingen organisasjonsscope ble løst.', 'Social records are unavailable because the org-scoped social gateway is unavailable or no organization scope was resolved.')}
         </p>
       </Show>
 
       <Show when={sectionUsesDerivedData()}>
         <p class="velion-social-ops-state velion-social-ops-state--warning">
           <AlertCircle size={16} />
-          No database-backed {config().title.toLowerCase()} records were loaded because the dedicated social endpoint is unavailable.
+          {i18n.tr(`Ingen databaseforankrede ${config().title.toLowerCase()}-poster ble lastet fordi det dedikerte sosiale endepunktet er utilgjengelig.`, `No database-backed ${config().title.toLowerCase()} records were loaded because the dedicated social endpoint is unavailable.`)}
         </p>
       </Show>
 
-      <section class="velion-social-ops-metrics" aria-label={`${config().title} metrics`}>
+      <section class="velion-social-ops-metrics" aria-label={i18n.tr(`${config().title} nøkkeltall`, `${config().title} metrics`)}>
         <For each={metrics()}>
           {(metric) => (
             <article>
@@ -233,15 +239,15 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       <Show when={props.section === 'campaigns'}>
         <form class="velion-social-ops-create" onSubmit={(event) => void createCampaign(event)}>
           <div>
-            <h2>Create campaign</h2>
-            <p>Draft campaign</p>
+            <h2>{i18n.tr('Opprett kampanje', 'Create campaign')}</h2>
+            <p>{i18n.tr('Utkastkampanje', 'Draft campaign')}</p>
           </div>
           <label>
-            <span>Name</span>
+            <span>{i18n.tr('Navn', 'Name')}</span>
             <input value={campaignName()} onInput={(event) => setCampaignName(event.currentTarget.value)} />
           </label>
           <label>
-            <span>Goal</span>
+            <span>{i18n.tr('Mål', 'Goal')}</span>
             <input value={campaignGoal()} onInput={(event) => setCampaignGoal(event.currentTarget.value)} />
           </label>
           <label>
@@ -249,7 +255,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
             <textarea rows={3} value={campaignBrief()} onInput={(event) => setCampaignBrief(event.currentTarget.value)} />
           </label>
           <button type="submit" disabled={campaignBusy()}>
-            {campaignBusy() ? 'Creating...' : 'Create'}
+            {campaignBusy() ? i18n.tr('Oppretter …', 'Creating...') : i18n.tr('Opprett', 'Create')}
           </button>
           <Show when={campaignFeedback()}>
             {(message) => <p class="velion-social-ops-create__feedback">{message()}</p>}
@@ -257,7 +263,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
         </form>
       </Show>
 
-      <section class="velion-social-ops-grid" aria-label={`${config().title} workspace`}>
+      <section class="velion-social-ops-grid" aria-label={i18n.tr(`${config().title} arbeidsområde`, `${config().title} workspace`)}>
         <For each={cards()}>
           {(card) => (
             <article class="velion-social-ops-card">
@@ -272,7 +278,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
                   {(status) => <StatusPill status={status()} />}
                 </Show>
                 <Show when={card.actionHref}>
-                  {(href) => <A href={href()}>{card.actionLabel ?? 'Open'}</A>}
+                  {(href) => <A href={href()}>{card.actionLabel ?? i18n.tr('Åpne', 'Open')}</A>}
                 </Show>
               </footer>
             </article>
@@ -283,10 +289,12 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
       <section class="velion-social-ops-next">
         <Sparkles size={18} />
         <div>
-          <h2>System link</h2>
+          <h2>{i18n.tr('Systemlenke', 'System link')}</h2>
           <p>
-            Accounts and posts are loaded from the org-scoped social API. Studio creates, Social schedules,
-            Inbox converts conversations, Agents will automate evergreen workflows, and Insights measures outcomes.
+            {i18n.tr(
+              'Kontoer og innlegg lastes fra det org-scopede sosiale API-et. Studio oppretter, Sosial planlegger, Innboks konverterer samtaler, Agenter vil automatisere eviggrønne arbeidsflyter, og Innsikt måler resultater.',
+              'Accounts and posts are loaded from the org-scoped social API. Studio creates, Social schedules, Inbox converts conversations, Agents will automate evergreen workflows, and Insights measures outcomes.',
+            )}
           </p>
         </div>
       </section>
@@ -297,6 +305,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
 function buildSectionMetrics(
   section: SocialOperationsSection,
   workspace: SocialWorkspace,
+  tr: TrFn,
 ): SocialOpsMetric[] {
   const accounts = workspace.calendar.accounts
   const posts = workspace.calendar.posts
@@ -311,45 +320,45 @@ function buildSectionMetrics(
   switch (section) {
     case 'accounts':
       return [
-        { label: 'Tracked providers', value: String(accounts.length) },
-        { label: 'Connected', value: String(connectedAccounts) },
-        { label: 'Publish capable', value: String(publishCapableAccounts) },
+        { label: tr('Sporede leverandører', 'Tracked providers'), value: String(accounts.length) },
+        { label: tr('Tilkoblet', 'Connected'), value: String(connectedAccounts) },
+        { label: tr('Kan publisere', 'Publish capable'), value: String(publishCapableAccounts) },
       ]
     case 'drafts':
       return [
-        { label: 'Drafts', value: String(draftPosts.length) },
-        { label: 'From inbox', value: String(posts.filter((post) => post.source.kind === 'inbox' && post.status === 'draft').length) },
-        { label: 'Needs media', value: String(draftPosts.filter((post) => postNeedsMedia(post, adapters)).length) },
+        { label: tr('Utkast', 'Drafts'), value: String(draftPosts.length) },
+        { label: tr('Fra innboks', 'From inbox'), value: String(posts.filter((post) => post.source.kind === 'inbox' && post.status === 'draft').length) },
+        { label: tr('Trenger media', 'Needs media'), value: String(draftPosts.filter((post) => postNeedsMedia(post, adapters)).length) },
       ]
     case 'approvals':
       return [
-        { label: 'Waiting', value: String(waitingApprovals) },
-        { label: 'Approved', value: String(workspace.approvals.filter((approval) => approval.state === 'approved').length) },
-        { label: 'Blocked', value: String(workspace.approvals.filter((approval) => approval.state === 'blocked').length) },
+        { label: tr('Venter', 'Waiting'), value: String(waitingApprovals) },
+        { label: tr('Godkjent', 'Approved'), value: String(workspace.approvals.filter((approval) => approval.state === 'approved').length) },
+        { label: tr('Blokkert', 'Blocked'), value: String(workspace.approvals.filter((approval) => approval.state === 'blocked').length) },
       ]
     case 'campaigns':
       return [
-        { label: 'Campaigns', value: String(workspace.campaigns.length) },
-        { label: 'Active', value: String(workspace.campaigns.filter((campaign) => campaign.status === 'active').length) },
-        { label: 'Draft', value: String(workspace.campaigns.filter((campaign) => campaign.status === 'draft').length) },
+        { label: tr('Kampanjer', 'Campaigns'), value: String(workspace.campaigns.length) },
+        { label: tr('Aktive', 'Active'), value: String(workspace.campaigns.filter((campaign) => campaign.status === 'active').length) },
+        { label: tr('Utkast', 'Draft'), value: String(workspace.campaigns.filter((campaign) => campaign.status === 'draft').length) },
       ]
     case 'competitors':
       return [
-        { label: 'Watchlists', value: String(workspace.competitors.length) },
-        { label: 'Endpoint', value: workspace.resources.competitors === 'live' ? 'Live' : 'Pending' },
-        { label: 'Ready channels', value: String(connectedAccounts) },
+        { label: tr('Overvåkningslister', 'Watchlists'), value: String(workspace.competitors.length) },
+        { label: tr('Endepunkt', 'Endpoint'), value: workspace.resources.competitors === 'live' ? tr('Live', 'Live') : tr('Venter', 'Pending') },
+        { label: tr('Klare kanaler', 'Ready channels'), value: String(connectedAccounts) },
       ]
     case 'trends':
       return [
-        { label: 'Signals', value: String(workspace.trends.length) },
-        { label: 'Ready', value: String(workspace.trends.filter((trend) => trend.status === 'ready').length) },
-        { label: 'Needs media', value: String(postsNeedingMedia) },
+        { label: tr('Signaler', 'Signals'), value: String(workspace.trends.length) },
+        { label: tr('Klar', 'Ready'), value: String(workspace.trends.filter((trend) => trend.status === 'ready').length) },
+        { label: tr('Trenger media', 'Needs media'), value: String(postsNeedingMedia) },
       ]
     case 'evergreen':
       return [
-        { label: 'Candidates', value: String(workspace.evergreen.length) },
-        { label: 'Ready', value: String(workspace.evergreen.filter((item) => item.status === 'ready').length) },
-        { label: 'Publish adapters', value: String(supportedOrganicAdapters) },
+        { label: tr('Kandidater', 'Candidates'), value: String(workspace.evergreen.length) },
+        { label: tr('Klar', 'Ready'), value: String(workspace.evergreen.filter((item) => item.status === 'ready').length) },
+        { label: tr('Publiseringsadaptere', 'Publish adapters'), value: String(supportedOrganicAdapters) },
       ]
   }
 }
@@ -357,60 +366,63 @@ function buildSectionMetrics(
 function buildSectionCards(
   section: SocialOperationsSection,
   workspace: SocialWorkspace,
+  tr: TrFn,
 ): SocialOpsCard[] {
   const calendar = workspace.calendar
   const adapters = workspace.adapters
 
   switch (section) {
     case 'accounts':
-      return accountCards(calendar.accounts, adapters)
+      return accountCards(calendar.accounts, adapters, tr)
     case 'drafts':
       return postCards(
         calendar.posts.filter((post) => post.status === 'draft'),
         adapters,
-        'No drafts yet',
-        'Create in Studio or convert an inbox conversation to seed this queue.',
+        tr('Ingen utkast ennå', 'No drafts yet'),
+        tr('Opprett i Studio eller konverter en innbokssamtale for å fylle denne køen.', 'Create in Studio or convert an inbox conversation to seed this queue.'),
+        tr,
       )
     case 'approvals':
-      return approvalCards(workspace.approvals)
+      return approvalCards(workspace.approvals, tr)
     case 'campaigns':
-      return campaignCards(workspace.campaigns)
+      return campaignCards(workspace.campaigns, tr)
     case 'competitors':
-      return competitorCards(workspace.competitors)
+      return competitorCards(workspace.competitors, tr)
     case 'trends':
-      return trendCards(workspace.trends)
+      return trendCards(workspace.trends, tr)
     case 'evergreen':
-      return evergreenCards(workspace.evergreen)
+      return evergreenCards(workspace.evergreen, tr)
   }
 }
 
 function accountCards(
   accounts: readonly SocialAccount[],
   adapters: readonly SocialPlatformAdapter[],
+  tr: TrFn,
 ): SocialOpsCard[] {
   if (!accounts.length) {
     return [{
-      title: 'No social accounts connected',
-      meta: 'Integration required',
-      detail: 'Connect LinkedIn, X, Instagram, Facebook, TikTok, or Snapchat under organization settings before publishing.',
+      title: tr('Ingen sosiale kontoer tilkoblet', 'No social accounts connected'),
+      meta: tr('Integrasjon kreves', 'Integration required'),
+      detail: tr('Koble til LinkedIn, X, Instagram, Facebook, TikTok eller Snapchat under organisasjonsinnstillinger før publisering.', 'Connect LinkedIn, X, Instagram, Facebook, TikTok, or Snapchat under organization settings before publishing.'),
       status: 'needs_oauth',
       actionHref: '/settings/integrations',
-      actionLabel: 'Connect accounts',
+      actionLabel: tr('Koble til kontoer', 'Connect accounts'),
     }]
   }
 
   return accounts.map((account) => {
     const adapter = adapterFor(adapters, account.providerKey)
     const missing = adapter?.requiredCapabilities.filter((capability) => !account.capabilities.includes(capability)) ?? []
-    const readiness = missing.length ? `Missing ${missing.join(', ')}` : 'Required capabilities present'
+    const readiness = missing.length ? tr(`Mangler ${missing.join(', ')}`, `Missing ${missing.join(', ')}`) : tr('Nødvendige funksjoner er på plass', 'Required capabilities present')
 
     return {
       title: account.label,
       meta: `${platformLabels[account.providerKey]} · ${account.handle}`,
-      detail: `${readiness}. ${adapter ? `${adapter.mode} via ${adapter.endpoint}.` : 'No adapter registered.'}`,
+      detail: `${readiness}. ${adapter ? `${adapter.mode} via ${adapter.endpoint}.` : tr('Ingen adapter registrert.', 'No adapter registered.')}`,
       status: account.status,
       actionHref: account.status === 'connected' ? '/social/calendar' : '/settings/integrations',
-      actionLabel: account.status === 'connected' ? 'Use in calendar' : 'Connect',
+      actionLabel: account.status === 'connected' ? tr('Bruk i kalender', 'Use in calendar') : tr('Koble til', 'Connect'),
     }
   })
 }
@@ -420,15 +432,16 @@ function postCards(
   adapters: readonly SocialPlatformAdapter[],
   emptyTitle: string,
   emptyDetail: string,
+  tr: TrFn,
 ): SocialOpsCard[] {
   if (!posts.length) {
     return [{
       title: emptyTitle,
-      meta: 'Queue empty',
+      meta: tr('Kø er tom', 'Queue empty'),
       detail: emptyDetail,
       status: 'scheduled',
       actionHref: '/social/calendar',
-      actionLabel: 'Open calendar',
+      actionLabel: tr('Åpne kalender', 'Open calendar'),
     }]
   }
 
@@ -436,78 +449,84 @@ function postCards(
     title: post.title,
     meta: `${post.source.label} · ${platformNames(post.platforms)}`,
     detail: postNeedsMedia(post, adapters)
-      ? `${post.body} Media-first platforms need a ready image or video before publish.`
+      ? tr(`${post.body} Mediaførste plattformer trenger et klart bilde eller en video før publisering.`, `${post.body} Media-first platforms need a ready image or video before publish.`)
       : post.body,
     status: post.status,
     actionHref: post.source.href ?? '/social/calendar',
-    actionLabel: post.source.href ? 'Open source' : 'Open calendar',
+    actionLabel: post.source.href ? tr('Åpne kilde', 'Open source') : tr('Åpne kalender', 'Open calendar'),
   }))
 }
 
-function approvalCards(approvals: readonly SocialApprovalItem[]): SocialOpsCard[] {
+function approvalCards(approvals: readonly SocialApprovalItem[], tr: TrFn): SocialOpsCard[] {
   if (!approvals.length) {
     return [{
-      title: 'No approval blockers',
-      meta: 'Queue empty',
-      detail: 'Posts that require human review, media fixes, or policy decisions will appear here.',
+      title: tr('Ingen godkjenningsblokkeringer', 'No approval blockers'),
+      meta: tr('Kø er tom', 'Queue empty'),
+      detail: tr('Innlegg som krever manuell gjennomgang, mediarettelser eller policyavgjørelser vises her.', 'Posts that require human review, media fixes, or policy decisions will appear here.'),
       status: 'approved',
       actionHref: '/social/calendar',
-      actionLabel: 'Open calendar',
+      actionLabel: tr('Åpne kalender', 'Open calendar'),
     }]
   }
 
   return approvals.map((approval) => ({
-    title: approval.post?.title ?? `Approval ${approval.id}`,
-    meta: `${approval.campaignId ? 'Campaign review' : 'Post review'} · ${formatOptionalDate(approval.dueAt)}`,
-    detail: `${approval.decisionReason || approvalDetail(approval)} Source: ${approval.post?.source.label ?? 'Social approval queue'}. Channels: ${platformNames(approval.post?.platforms ?? [])}.`,
+    title: approval.post?.title ?? tr(`Godkjenning ${approval.id}`, `Approval ${approval.id}`),
+    meta: `${approval.campaignId ? tr('Kampanjegjennomgang', 'Campaign review') : tr('Innleggsgjennomgang', 'Post review')} · ${formatOptionalDate(approval.dueAt, tr)}`,
+    detail: tr(
+      `${approval.decisionReason || approvalDetail(approval, tr)} Kilde: ${approval.post?.source.label ?? 'Sosial godkjenningskø'}. Kanaler: ${platformNames(approval.post?.platforms ?? [])}.`,
+      `${approval.decisionReason || approvalDetail(approval, tr)} Source: ${approval.post?.source.label ?? 'Social approval queue'}. Channels: ${platformNames(approval.post?.platforms ?? [])}.`,
+    ),
     status: approval.state,
     actionHref: approval.post?.source.href ?? '/social/calendar',
-    actionLabel: approval.post?.source.href ? 'Open source' : 'Review post',
+    actionLabel: approval.post?.source.href ? tr('Åpne kilde', 'Open source') : tr('Gjennomgå innlegg', 'Review post'),
   }))
 }
 
-function campaignCards(campaigns: readonly SocialCampaign[]): SocialOpsCard[] {
+function campaignCards(campaigns: readonly SocialCampaign[], tr: TrFn): SocialOpsCard[] {
   if (!campaigns.length) {
     return [{
-      title: 'No campaign posts connected',
-      meta: 'Calendar-derived queue',
-      detail: 'Plan campaign packs in Studio, then send posts into Social drafts and approvals. The page consumes /api/v1/social/campaigns when available.',
+      title: tr('Ingen kampanjeinnlegg tilkoblet', 'No campaign posts connected'),
+      meta: tr('Kalenderavledet kø', 'Calendar-derived queue'),
+      detail: tr('Planlegg kampanjepakker i Studio, og send deretter innlegg til Sosial-utkast og godkjenninger. Siden bruker /api/v1/social/campaigns når tilgjengelig.', 'Plan campaign packs in Studio, then send posts into Social drafts and approvals. The page consumes /api/v1/social/campaigns when available.'),
       status: 'draft',
       actionHref: '/social/drafts',
-      actionLabel: 'Open drafts',
+      actionLabel: tr('Åpne utkast', 'Open drafts'),
     }]
   }
 
   return campaigns.map((campaign) => ({
     title: campaign.name,
     meta: `${platformNames(campaign.platforms)} · ${campaign.status}`,
-    detail: `${campaign.goal || 'Coordinate social campaign posts across selected channels.'} Window: ${formatOptionalDate(campaign.startsAt)} to ${formatOptionalDate(campaign.endsAt)}. ${campaign.brief}`,
+    detail: tr(
+      `${campaign.goal || 'Koordiner sosiale kampanjeinnlegg på tvers av valgte kanaler.'} Vindu: ${formatOptionalDate(campaign.startsAt, tr)} til ${formatOptionalDate(campaign.endsAt, tr)}. ${campaign.brief}`,
+      `${campaign.goal || 'Coordinate social campaign posts across selected channels.'} Window: ${formatOptionalDate(campaign.startsAt, tr)} to ${formatOptionalDate(campaign.endsAt, tr)}. ${campaign.brief}`,
+    ),
     status: campaign.status,
     actionHref: campaign.source.href ?? '/social/calendar',
-    actionLabel: campaign.source.href ? 'Open source' : 'Open calendar',
+    actionLabel: campaign.source.href ? tr('Åpne kilde', 'Open source') : tr('Åpne kalender', 'Open calendar'),
   }))
 }
 
-function competitorCards(competitors: readonly SocialCompetitorWatchItem[]): SocialOpsCard[] {
+function competitorCards(competitors: readonly SocialCompetitorWatchItem[], tr: TrFn): SocialOpsCard[] {
   return competitors.map((competitor) => ({
     title: competitor.label,
     meta: `${platformLabels[competitor.providerKey]} · ${competitor.velocity}`,
-    detail: `${competitor.signal} Target: ${competitor.handle}.`,
+    detail: tr(`${competitor.signal} Mål: ${competitor.handle}.`, `${competitor.signal} Target: ${competitor.handle}.`),
     status: competitor.status,
     actionHref: competitor.sourceHref ?? '/social/trends',
-    actionLabel: competitor.status === 'endpoint_pending' ? 'Prepare trends' : 'Open signal',
+    actionLabel: competitor.status === 'endpoint_pending' ? tr('Forbered trender', 'Prepare trends') : tr('Åpne signal', 'Open signal'),
   }))
 }
 
-function trendCards(trends: readonly SocialTrendSignal[]): SocialOpsCard[] {
+function trendCards(trends: readonly SocialTrendSignal[], tr: TrFn): SocialOpsCard[] {
   if (!trends.length) {
     return [{
-      title: 'No trend signals yet',
-      meta: 'Endpoint ready',
-      detail: 'Platform warnings, adapter formats, and captured trend opportunities will appear here.',
+      title: tr('Ingen trendsignaler ennå', 'No trend signals yet'),
+      meta: tr('Endepunkt klart', 'Endpoint ready'),
+      detail: tr('Plattformvarsler, adapterformater og fangede trendmuligheter vises her.', 'Platform warnings, adapter formats, and captured trend opportunities will appear here.'),
       status: 'endpoint_pending',
       actionHref: '/social/drafts',
-      actionLabel: 'Open drafts',
+      actionLabel: tr('Åpne utkast', 'Open drafts'),
     }]
   }
 
@@ -517,18 +536,18 @@ function trendCards(trends: readonly SocialTrendSignal[]): SocialOpsCard[] {
     detail: `${trend.opportunity} Format: ${trend.format}.`,
     status: trend.status,
     actionHref: trend.sourceHref ?? '/social/drafts',
-    actionLabel: 'Use signal',
+    actionLabel: tr('Bruk signal', 'Use signal'),
   }))
 }
 
-function evergreenCards(items: readonly SocialEvergreenItem[]): SocialOpsCard[] {
+function evergreenCards(items: readonly SocialEvergreenItem[], tr: TrFn): SocialOpsCard[] {
   return items.map((item) => ({
     title: item.title,
     meta: `${item.cadence} · ${platformNames(item.platforms)}`,
-    detail: `${item.guardrail} Next eligible: ${formatOptionalDate(item.nextEligibleAt)}.`,
+    detail: tr(`${item.guardrail} Neste kvalifisert: ${formatOptionalDate(item.nextEligibleAt, tr)}.`, `${item.guardrail} Next eligible: ${formatOptionalDate(item.nextEligibleAt, tr)}.`),
     status: item.status,
     actionHref: item.sourcePostId ? '/social/calendar' : '/agents',
-    actionLabel: item.sourcePostId ? 'Open source post' : 'Open workflows',
+    actionLabel: item.sourcePostId ? tr('Åpne kildeinnlegg', 'Open source post') : tr('Åpne arbeidsflyter', 'Open workflows'),
   }))
 }
 
@@ -550,10 +569,10 @@ function platformNames(platforms: readonly SocialProviderKey[]) {
   return platforms.map((platform) => platformLabels[platform]).join(', ')
 }
 
-function approvalDetail(approval: SocialApprovalItem) {
-  if (approval.state === 'blocked') return 'Resolve the blocked post before approval can continue.'
-  if (approval.post && postHasMissingMedia(approval.post)) return 'Ready media is required before this post can move through approval.'
-  return 'Human review is required before schedule or publish.'
+function approvalDetail(approval: SocialApprovalItem, tr: TrFn) {
+  if (approval.state === 'blocked') return tr('Løs det blokkerte innlegget før godkjenningen kan fortsette.', 'Resolve the blocked post before approval can continue.')
+  if (approval.post && postHasMissingMedia(approval.post)) return tr('Klart media kreves før dette innlegget kan gå gjennom godkjenning.', 'Ready media is required before this post can move through approval.')
+  return tr('Manuell gjennomgang kreves før planlegging eller publisering.', 'Human review is required before schedule or publish.')
 }
 
 function mergeCampaigns(created: readonly SocialCampaign[], existing: readonly SocialCampaign[]) {
@@ -589,8 +608,8 @@ function sourceForSection(section: SocialOperationsSection, workspace: SocialWor
   }
 }
 
-function formatOptionalDate(iso?: string | null) {
-  if (!iso) return 'not scheduled'
+function formatOptionalDate(iso: string | null | undefined, tr: TrFn) {
+  if (!iso) return tr('ikke planlagt', 'not scheduled')
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 }
 

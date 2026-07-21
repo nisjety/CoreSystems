@@ -31,6 +31,7 @@ import {
   SupportIntegrationBanner,
 } from '@/features/agents/components/ChatbotStudioPrimitives'
 import { chatbotDisplayName } from '@/features/agents/lib/velion-chatbot-studio-data'
+import { useI18n } from '@/shared/i18n'
 
 export function ChatbotPlaygroundSurface(props: {
   onAddOnSelect: (addOn: ChatbotAddOnId) => void
@@ -71,6 +72,7 @@ function PlaygroundSettingsPanel(props: {
   supportStatus: SupportIntegrationStatus
   visibleAddOns: ReadonlySet<ChatbotAddOnId>
 }) {
+  const i18n = useI18n()
   const actionEnabled = () => props.visibleAddOns.has('subscription-action')
 
   return (
@@ -78,35 +80,35 @@ function PlaygroundSettingsPanel(props: {
       <div class="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-5">
         <div class="flex flex-wrap items-center gap-3">
           <h1 class="text-[24px] font-semibold leading-8 tracking-normal text-[#0F1011] dark:text-white">
-            Playground
+            {i18n.tr('Playground', 'Playground')}
           </h1>
           <DesignPreviewBadge />
         </div>
         <SupportIntegrationBanner status={props.supportStatus} />
 
         <div class="mt-6 space-y-3">
-          <PlaygroundAccordion defaultOpen Icon={Box} title="AI Settings">
+          <PlaygroundAccordion defaultOpen Icon={Box} title={i18n.tr('AI-innstillinger', 'AI Settings')}>
             <div class="rounded-[9px] bg-[#FAFAFA] px-4 py-3 dark:bg-[#111216]">
               <div class="flex items-center gap-2 text-[14px] font-semibold text-[#12944B]">
                 <span class="size-2 rounded-full bg-[#0BA95B]" />
-                Runtime ready
+                {i18n.tr('Kjøretid klar', 'Runtime ready')}
               </div>
               <p class="mt-2 text-[13px] font-medium text-[#767676] dark:text-[#AEB4C0]">
-                Training state updates after real sources or fine-tuning datasets are connected.
+                {i18n.tr('Treningsstatus oppdateres når ekte kilder eller finjusteringsdatasett kobles til.', 'Training state updates after real sources or fine-tuning datasets are connected.')}
               </p>
             </div>
             <div class="mt-3 flex h-11 items-center justify-between rounded-[9px] border border-[#E8E8EA] bg-white px-3 dark:border-[#2A2C31] dark:bg-[#15161A]">
-              <span class="text-[13px] font-medium text-[#67686D] dark:text-[#D7DCE4]">Compare AI models</span>
+              <span class="text-[13px] font-medium text-[#67686D] dark:text-[#D7DCE4]">{i18n.tr('Sammenlign AI-modeller', 'Compare AI models')}</span>
               {/* Phase 4 honesty sweep: model comparison has no backend yet. */}
               <Button size="xs" shape="rounded" disabled>
-                Compare
+                {i18n.tr('Sammenlign', 'Compare')}
               </Button>
             </div>
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion defaultOpen Icon={Sparkles} title="Model Selector">
+          <PlaygroundAccordion defaultOpen Icon={Sparkles} title={i18n.tr('Modellvelger', 'Model Selector')}>
             <label for="chatbot-model" class="block text-[13px] font-medium text-[#5F6067] dark:text-[#C6CCD6]">
-              Model
+              {i18n.tr('Modell', 'Model')}
             </label>
             <div class="relative mt-2">
               <VelionSelect
@@ -123,16 +125,16 @@ function PlaygroundSettingsPanel(props: {
             </div>
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion defaultOpen Icon={Wrench} title="AI Tools">
+          <PlaygroundAccordion defaultOpen Icon={Wrench} title={i18n.tr('AI-verktøy', 'AI Tools')}>
             <div class="flex items-center justify-between gap-3">
-              <h2 class="text-[13px] font-medium text-[#5F6067] dark:text-[#C6CCD6]">Tool pool</h2>
+              <h2 class="text-[13px] font-medium text-[#5F6067] dark:text-[#C6CCD6]">{i18n.tr('Verktøysett', 'Tool pool')}</h2>
               <button type="button" onClick={() => props.onClearCanvas()} class="text-[12px] font-semibold text-[#8B8F98] transition-colors hover:text-[#1D1D1F] dark:hover:text-white">
-                Clear
+                {i18n.tr('Tøm', 'Clear')}
               </button>
             </div>
             <button
               type="button"
-              aria-label="Select update subscription add-on"
+              aria-label={i18n.tr('Velg tillegg for abonnementsoppdatering', 'Select update subscription add-on')}
               onClick={() => props.onAddOnSelect('subscription-action')}
               class={cn(
                 'mt-3 flex h-12 w-full items-center gap-3 rounded-[9px] border px-3 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#111111]',
@@ -145,71 +147,88 @@ function PlaygroundSettingsPanel(props: {
                 <Zap class="size-3.5" />
               </span>
               <span class="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#202126] dark:text-white">
-                {actionEnabled() ? '1 Tool Enabled' : 'Tool ready to enable'}
+                {actionEnabled() ? i18n.tr('1 verktøy aktivert', '1 Tool Enabled') : i18n.tr('Verktøy klart til å aktiveres', 'Tool ready to enable')}
               </span>
               <ChevronDown class="-rotate-90 text-[#111111] dark:text-white" />
             </button>
             {actionEnabled()
               ? (
                 <button type="button" onClick={() => props.onRemoveSelected()} class="mt-2 text-[12px] font-semibold text-[#9A4A32] transition-colors hover:text-[#6E2E1C] dark:text-[#F0A08A]">
-                  Remove selected tool
+                  {i18n.tr('Fjern valgt verktøy', 'Remove selected tool')}
                 </button>
               )
               : null}
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion Icon={UserRound} title="Lead Collections">
-            <SettingInput label="Lead form title" value="Talk to sales" />
-            <SettingInput label="Required fields" value="Name, email, company" />
+          <PlaygroundAccordion Icon={UserRound} title={i18n.tr('Lead-innsamling', 'Lead Collections')}>
+            <SettingInput label={i18n.tr('Tittel på lead-skjema', 'Lead form title')} value={i18n.tr('Snakk med salg', 'Talk to sales')} />
+            <SettingInput label={i18n.tr('Påkrevde felt', 'Required fields')} value={i18n.tr('Navn, e-post, firma', 'Name, email, company')} />
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion defaultOpen Icon={Table2} title="Messages">
-            <SettingInput label="Input placeholder" value="Type your message…" />
-            <SettingTextarea label="Suggested queries" value={'What can you help with?\nHow does this work?'} />
-            <SettingTextarea label="Initial Message" value={'Hi! I am an AI Assistant.\nHow can I help you today?'} />
+          <PlaygroundAccordion defaultOpen Icon={Table2} title={i18n.tr('Meldinger', 'Messages')}>
+            <SettingInput label={i18n.tr('Inndataplassholder', 'Input placeholder')} value={i18n.tr('Skriv meldingen din…', 'Type your message…')} />
+            <SettingTextarea
+              label={i18n.tr('Foreslåtte spørsmål', 'Suggested queries')}
+              value={i18n.tr('Hva kan du hjelpe med?\nHvordan fungerer dette?', 'What can you help with?\nHow does this work?')}
+            />
+            <SettingTextarea
+              label={i18n.tr('Innledende melding', 'Initial Message')}
+              value={i18n.tr('Hei! Jeg er en AI-assistent.\nHvordan kan jeg hjelpe deg i dag?', 'Hi! I am an AI Assistant.\nHow can I help you today?')}
+            />
             <div class="mt-4 flex items-center justify-between gap-3">
-              <span class="text-[14px] font-medium text-[#202126] dark:text-white">Tease Initial Messages</span>
-              <ToggleSwitch enabled label="Tease initial messages" />
+              <span class="text-[14px] font-medium text-[#202126] dark:text-white">{i18n.tr('Forhåndsvisning av innledende melding', 'Tease Initial Messages')}</span>
+              <ToggleSwitch enabled label={i18n.tr('Forhåndsvisning av innledende melding', 'Tease initial messages')} />
             </div>
-            <SettingInput compact label="Delay (seconds)" value="3" />
+            <SettingInput compact label={i18n.tr('Forsinkelse (sekunder)', 'Delay (seconds)')} value="3" />
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion defaultOpen Icon={FileText} title="Instructions">
+          <PlaygroundAccordion defaultOpen Icon={FileText} title={i18n.tr('Instruksjoner', 'Instructions')}>
             <div class="flex gap-2">
               {/* Phase 4 honesty sweep: instruction-set switcher is preview-only. */}
               <Button shape="rounded" size="md" disabled class="min-w-0 flex-1 justify-between">
-                Base Instructions
+                {i18n.tr('Grunninstruksjoner', 'Base Instructions')}
                 <ChevronDown class="size-3.5 text-[#9EA3AA]" />
               </Button>
-              <VelionIconButton size="lg" shape="rounded" onClick={() => props.onResetCanvas()} aria-label="Reset playground instructions" class="shrink-0">
+              <VelionIconButton size="lg" shape="rounded" onClick={() => props.onResetCanvas()} aria-label={i18n.tr('Tilbakestill playground-instruksjoner', 'Reset playground instructions')} class="shrink-0">
                 <RotateCcw class="size-4" />
               </VelionIconButton>
             </div>
             <VelionTextarea
-              aria-label="Instructions system prompt"
-              value={`Role: You are the Velion Design Concierge, an expert in UI/UX patterns, customer automation, and product strategy. Your mission is to help teams find the exact answer, workflow, or source they need.
+              aria-label={i18n.tr('Systemprompt for instruksjoner', 'Instructions system prompt')}
+              value={i18n.tr(
+                `Rolle: Du er Velion Design Concierge, en ekspert på UI/UX-mønstre, kundeautomatisering og produktstrategi. Oppdraget ditt er å hjelpe team med å finne akkurat det svaret, den arbeidsflyten eller kilden de trenger.
+
+Stemme og tone:
+- Kuratert og sofistikert: Bruk klart produktspråk og praktiske anbefalinger.
+- Konsis først: Start med svaret, og legg til detaljer ved behov.
+- Verktøybevisst: Bruk aktiverte verktøy kun etter eksplisitt bekreftelse.`,
+                `Role: You are the Velion Design Concierge, an expert in UI/UX patterns, customer automation, and product strategy. Your mission is to help teams find the exact answer, workflow, or source they need.
 
 Voice & Tone:
 - Curated & sophisticated: Use clear product language and practical recommendations.
 - Concise first: Start with the answer, then add details when needed.
-- Tool aware: Use enabled tools only after explicit confirmation.`}
+- Tool aware: Use enabled tools only after explicit confirmation.`,
+              )}
               class="mt-4 min-h-[240px]"
             />
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion Icon={MessageSquare} title="Chat Window">
-            <SettingInput label="Window title" value={chatbotDisplayName} />
-            <SettingInput label="Brand color" value="#111111" />
+          <PlaygroundAccordion Icon={MessageSquare} title={i18n.tr('Chattevindu', 'Chat Window')}>
+            <SettingInput label={i18n.tr('Vindutittel', 'Window title')} value={chatbotDisplayName} />
+            <SettingInput label={i18n.tr('Merkevarefarge', 'Brand color')} value="#111111" />
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion Icon={MessageCircle} title="Chat Bubble">
-            <SettingInput label="Bubble position" value="Bottom right" />
-            <SettingInput label="Bubble label" value="Ask AI" />
+          <PlaygroundAccordion Icon={MessageCircle} title={i18n.tr('Chatteboble', 'Chat Bubble')}>
+            <SettingInput label={i18n.tr('Bobleposisjon', 'Bubble position')} value={i18n.tr('Nederst til høyre', 'Bottom right')} />
+            <SettingInput label={i18n.tr('Bobletekst', 'Bubble label')} value={i18n.tr('Spør AI', 'Ask AI')} />
           </PlaygroundAccordion>
 
-          <PlaygroundAccordion Icon={Globe2} title="Contexts">
-            <SettingInput label="Default locale" value="English" />
-            <SettingInput label="Connected context" value="Customer profile, subscription, last ticket" />
+          <PlaygroundAccordion Icon={Globe2} title={i18n.tr('Kontekster', 'Contexts')}>
+            <SettingInput label={i18n.tr('Standard språk', 'Default locale')} value={i18n.tr('Engelsk', 'English')} />
+            <SettingInput
+              label={i18n.tr('Tilkoblet kontekst', 'Connected context')}
+              value={i18n.tr('Kundeprofil, abonnement, siste sak', 'Customer profile, subscription, last ticket')}
+            />
           </PlaygroundAccordion>
         </div>
       </div>
@@ -221,6 +240,8 @@ function PlaygroundBotPanel(props: {
   selectedAddOn: ChatbotAddOnId
   supportStatus: SupportIntegrationStatus
 }) {
+  const i18n = useI18n()
+
   return (
     <section class="velion-panel velion-panel-strong relative flex min-h-[600px] min-w-0 overflow-hidden text-[#111111] xl:min-h-0 dark:text-white">
       <div
@@ -234,7 +255,7 @@ function PlaygroundBotPanel(props: {
       <button
         type="button"
         disabled
-        aria-label="Open chatbot widget"
+        aria-label={i18n.tr('Åpne chatbot-widget', 'Open chatbot widget')}
         class="absolute bottom-5 right-5 z-20 grid size-[52px] place-items-center rounded-full bg-[#111111] text-white shadow-[0_12px_34px_rgba(0,0,0,0.22)] transition-transform hover:scale-[1.03] disabled:cursor-not-allowed"
       >
         <Sparkles class="size-5" />
@@ -247,7 +268,8 @@ function ChatbotDevice(props: {
   selectedAddOn: ChatbotAddOnId
   supportStatus: SupportIntegrationStatus
 }) {
-  const placeholder = () => props.selectedAddOn === 'subscription-action' ? 'Message…' : 'Ask a question…'
+  const i18n = useI18n()
+  const placeholder = () => props.selectedAddOn === 'subscription-action' ? i18n.tr('Melding…', 'Message…') : i18n.tr('Still et spørsmål…', 'Ask a question…')
   const connected = () => props.supportStatus.status === 'connected'
 
   return (
@@ -264,7 +286,7 @@ function ChatbotDevice(props: {
         <button
           type="button"
           disabled
-          aria-label="Refresh chatbot preview"
+          aria-label={i18n.tr('Oppdater chatbot-forhåndsvisning', 'Refresh chatbot preview')}
           class="grid size-9 shrink-0 place-items-center rounded-[9px] text-[#4F5661] transition-colors hover:bg-[#F4F5F7] disabled:cursor-not-allowed dark:text-[#D7DCE4] dark:hover:bg-[#202229]"
         >
           <RefreshCw class="size-4" strokeWidth={1.9} />
@@ -273,16 +295,22 @@ function ChatbotDevice(props: {
 
       <div class="flex min-h-0 flex-1 flex-col px-5 pb-4 pt-6">
         <div class="w-max max-w-[78%] rounded-[18px] bg-[#F4F4F5] px-4 py-2.5 text-[14px] leading-5 text-[#35383F] dark:bg-[#202229] dark:text-[#E8ECF2]">
-          Hi. I can answer from approved sources and hand off to your support team when the case needs a person.
+          {i18n.tr(
+            'Hei. Jeg kan svare basert på godkjente kilder og overlevere til supportteamet ditt når saken trenger et menneske.',
+            'Hi. I can answer from approved sources and hand off to your support team when the case needs a person.',
+          )}
         </div>
         <div class="mt-4 w-max max-w-[86%] rounded-[14px] border border-[#E5E6EA] bg-white px-4 py-2 text-[12px] font-semibold leading-5 text-[#5F6673] dark:border-[#303238] dark:bg-[#15161A] dark:text-[#C6CCD6]">
           {connected()
-            ? `Live actions available: ${props.supportStatus.agents} agents, ${props.supportStatus.groups} groups, ${props.supportStatus.macros} macros.`
-            : 'Connect support-core/Zammad before enabling live ticket actions.'}
+            ? i18n.tr(
+                `Live handlinger tilgjengelig: ${props.supportStatus.agents} agenter, ${props.supportStatus.groups} grupper, ${props.supportStatus.macros} makroer.`,
+                `Live actions available: ${props.supportStatus.agents} agents, ${props.supportStatus.groups} groups, ${props.supportStatus.macros} macros.`,
+              )
+            : i18n.tr('Koble til support-core/Zammad før du aktiverer live sakshandlinger.', 'Connect support-core/Zammad before enabling live ticket actions.')}
         </div>
         <div class="mt-auto pb-3 text-center text-[12px] font-medium text-[#B1B3B9]">
           <span class="mr-1 inline-grid size-4 place-items-center rounded-[4px] bg-[#AEB0B7] text-[10px] font-bold text-white">V</span>
-          Powered by Velion
+          {i18n.tr('Drevet av Velion', 'Powered by Velion')}
         </div>
         <div class="flex h-12 items-center gap-2 rounded-full border border-[#E2E3E8] bg-white px-4 text-[14px] text-[#A1A5AE] shadow-[0_8px_24px_rgba(31,35,42,0.08)] dark:border-[#303238] dark:bg-[#17181C]">
           {placeholder()}

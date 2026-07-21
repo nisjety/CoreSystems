@@ -1,5 +1,6 @@
 import { createResource, createSignal, For, Show } from 'solid-js'
 import { no } from '@/shared/i18n/no'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import {
   createLeadList,
   deleteLeadList,
@@ -17,6 +18,7 @@ const t = no.leads
  *  table → metered CSV export. Company data only; no person/role data is ever
  *  fetched or shown. Norwegian copy is centralized in shared/i18n/no.ts. */
 export function LeadsPage() {
+  const i18n = useI18n()
   const [naeringskode, setNaeringskode] = createSignal('')
   const [kommunenummer, setKommunenummer] = createSignal('')
   const [organisasjonsform, setOrganisasjonsform] = createSignal('')
@@ -60,7 +62,12 @@ export function LeadsPage() {
     } catch (err) {
       // Enhetsregisteret rejects employee filters in the 1–4 band and deep paging
       // beyond 10k — the gateway surfaces these as a clear message (422).
-      setSearchError(err instanceof Error ? err.message : t.searchError)
+      setSearchError(
+        translateApiError(err, i18n.tr, {
+          no: t.searchError,
+          en: 'Search failed. Adjust the filters and try again.',
+        }),
+      )
       setResults([])
     } finally {
       setSearching(false)
@@ -96,7 +103,12 @@ export function LeadsPage() {
       setSelected({})
       await refetchLists()
     } catch (err) {
-      setSaveMessage(err instanceof Error ? err.message : t.saveError)
+      setSaveMessage(
+        translateApiError(err, i18n.tr, {
+          no: t.saveError,
+          en: 'Could not save the list. Try again.',
+        }),
+      )
     }
   }
 

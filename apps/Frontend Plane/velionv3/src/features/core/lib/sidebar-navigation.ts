@@ -105,7 +105,7 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'overview-knowledge', label: 'Kunnskap', href: '/knowledge', icon: BookOpen, description: 'Indekserte kilder, status og datakvalitet.', tabId: 'shared' },
           { id: 'overview-insights', label: 'Insights', href: '/insights/overview', icon: BarChart3, description: 'Mål sosialt, inbox, agenter, kampanjer og eksperimenter.', tabId: 'shared' },
           { id: 'overview-leads', label: 'Leads', href: '/leads', icon: Search, description: 'Finn norske bedrifter i Enhetsregisteret etter bransje, sted og størrelse.', tabId: 'shared' },
-          { id: 'overview-agents', label: 'Agenter', href: '/agents', icon: Bot, description: 'Roller, handlinger og operasjonelle grenser.', tabId: 'shared' },
+          { id: 'overview-agents', label: 'Agenter', href: '/agents/runs', icon: Bot, description: 'Start en kjøring, følg planen og godkjenn risikofylte steg.', tabId: 'shared' },
         ],
       },
     ],
@@ -358,6 +358,67 @@ export const sidebarSearchAction = {
   icon: Search,
   pinnedBottom: true,
 } as const
+
+// --- Closed-demo navigation gate -------------------------------------------
+//
+// Hides still-unfinished / design-prototype-only surfaces from PRIMARY
+// NAVIGATION only. No route or component is removed: every hidden URL still
+// works if a demo participant is given a direct link or types it in — this
+// only controls what CoreSidebar offers to click into. Flip
+// `DEMO_MODE_HIDE_UNFINISHED_NAV` to `false` to restore full navigation for
+// the open pilot; nothing else needs to change.
+//
+// Hidden while true:
+// - The "agents" section (`/agents`): its dedicated sidebar panel
+//   (CoreSidebar.tsx special-cases `section.id === 'agents'` to render
+//   `AgentsExpandedSidebarPanel` instead of this file's generic items — see
+//   CoreSidebarAgentsPanel.tsx) is exclusively a role/feature switcher for
+//   the mock builder/ChatbotStudio/WorkflowBuilder ("Playground") surface,
+//   confirmed design-prototype only — every role shows a "Blueprint / not
+//   yet configured for this org" state with disabled activation controls
+//   (see AgentsPage.tsx). That panel never linked to `/agents/cost`,
+//   `/agents/quality`, or `/agents/runs` in the first place (it has no route
+//   navigation at all, only local view-state), so hiding this section does
+//   not remove any real discovery path through it.
+// - `overview-agents` was repointed (not hidden) from the mock `/agents`
+//   builder to the REAL `/agents/runs` console — this is the one path that
+//   actually renders (Overview's panelGroups are NOT special-cased), so it
+//   is the sole nav entry point to the real Agent Run Console + this
+//   session's preset agents while the "agents" section is hidden. Do not
+//   hide this item without adding another real link to `/agents/runs`
+//   first.
+// - Insights sub-surfaces beyond Overview (`insights-social`, `insights-
+//   inbox`, `insights-agents`, `insights-campaigns`, `insights-experiments`):
+//   InsightsPage.tsx documents that `section` only drives header copy — the
+//   same connector-registry "not yet reporting" numbers render everywhere.
+//   Overview is kept because it is where the 3 real insightsNumbers land.
+export const DEMO_MODE_HIDE_UNFINISHED_NAV = true
+
+const DEMO_MODE_HIDDEN_SECTION_IDS = new Set<string>(['agents'])
+
+const DEMO_MODE_HIDDEN_ITEM_IDS = new Set<string>([
+  'insights-social',
+  'insights-inbox',
+  'insights-agents',
+  'insights-campaigns',
+  'insights-experiments',
+])
+
+export function applyDemoModeNavGate(sections: SidebarSection[]): SidebarSection[] {
+  if (!DEMO_MODE_HIDE_UNFINISHED_NAV) return sections
+
+  return sections
+    .filter((section) => !DEMO_MODE_HIDDEN_SECTION_IDS.has(section.id))
+    .map((section) => ({
+      ...section,
+      panelGroups: section.panelGroups
+        .map((group) => ({
+          ...group,
+          items: group.items.filter((item) => !DEMO_MODE_HIDDEN_ITEM_IDS.has(item.id)),
+        }))
+        .filter((group) => group.items.length > 0),
+    }))
+}
 
 export function isSidebarPathActive(pathname: string, href: VelionRoute, aliases: string[] = []) {
   const normalizedPathname = normalizePath(pathname)

@@ -1,6 +1,7 @@
 import { Show, createEffect, createSignal, onCleanup } from 'solid-js'
 import type { CheckoutSession } from '@/features/billing/lib/api'
 import { Button } from '@/shared/ui/Button'
+import { translateApiError, useI18n } from '@/shared/i18n'
 
 type ConfirmedPayment = {
   paymentId?: string
@@ -73,6 +74,7 @@ function amountLabel(session: CheckoutSession) {
 }
 
 export function HyperswitchCheckout(props: HyperswitchCheckoutProps) {
+  const i18n = useI18n()
   const containerId = checkoutContainerId()
   const [loading, setLoading] = createSignal(true)
   const [submitting, setSubmitting] = createSignal(false)
@@ -124,7 +126,12 @@ export function HyperswitchCheckout(props: HyperswitchCheckoutProps) {
       })
       .catch((reason: unknown) => {
         setLoading(false)
-        setMessage(reason instanceof Error ? reason.message : 'Could not load payment checkout.')
+        setMessage(
+          translateApiError(reason, i18n.tr, {
+            no: 'Kunne ikke laste betalingsløsningen.',
+            en: 'Could not load payment checkout.',
+          }),
+        )
       })
   })
 
@@ -149,7 +156,12 @@ export function HyperswitchCheckout(props: HyperswitchCheckoutProps) {
       })
 
       if (result.error) {
-        setMessage(result.error.message || 'Payment failed.')
+        setMessage(
+          translateApiError(result.error, i18n.tr, {
+            no: 'Betalingen feilet.',
+            en: 'Payment failed.',
+          }),
+        )
         return
       }
 
@@ -159,7 +171,12 @@ export function HyperswitchCheckout(props: HyperswitchCheckoutProps) {
         status: result.status || 'processing',
       })
     } catch (reason) {
-      setMessage(reason instanceof Error ? reason.message : 'Payment failed.')
+      setMessage(
+        translateApiError(reason, i18n.tr, {
+          no: 'Betalingen feilet.',
+          en: 'Payment failed.',
+        }),
+      )
     } finally {
       setSubmitting(false)
     }

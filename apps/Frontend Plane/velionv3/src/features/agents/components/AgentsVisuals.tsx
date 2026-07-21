@@ -16,6 +16,7 @@ import {
 } from 'lucide-solid'
 import { For, Index, type JSX } from 'solid-js'
 import { cn } from '@/shared/lib/cn'
+import { useI18n } from '@/shared/i18n'
 
 export type AgentVisualProps = {
   large?: boolean
@@ -26,6 +27,7 @@ function visualClass(variant: string, large?: boolean) {
 }
 
 export function ServiceVisual(props: AgentVisualProps) {
+  const i18n = useI18n()
   return (
     <div aria-hidden="true" class={visualClass('service', props.large)}>
       <div class="agent-visual__service-ring agent-visual__service-ring--left" />
@@ -36,13 +38,13 @@ export function ServiceVisual(props: AgentVisualProps) {
             <span class="agent-visual__brand-icon">
               <Sparkles class="agent-visual__tiny-icon" />
             </span>
-            <span>Velion Service</span>
+            <span>{i18n.tr('Velion Service', 'Velion Service')}</span>
           </div>
           <span class="agent-visual__status-dot" />
         </div>
-        <div class="agent-visual__service-message agent-visual__service-message--dark">Can you help with my order?</div>
+        <div class="agent-visual__service-message agent-visual__service-message--dark">{i18n.tr('Kan du hjelpe meg med bestillingen min?', 'Can you help with my order?')}</div>
         <div class="agent-visual__service-message agent-visual__service-message--light">
-          I found the order and can create a support case if needed.
+          {i18n.tr('Jeg fant bestillingen og kan opprette en støttesak om nødvendig.', 'I found the order and can create a support case if needed.')}
         </div>
       </div>
       <div class="agent-visual__floating-action">
@@ -53,12 +55,13 @@ export function ServiceVisual(props: AgentVisualProps) {
 }
 
 export function SalesVisual(props: AgentVisualProps) {
+  const i18n = useI18n()
   return (
     <div aria-hidden="true" class={visualClass('sales', props.large)}>
       <div class="agent-visual__calendar">
         <div class="agent-visual__calendar-header">
-          <span>Calendar rules</span>
-          <span>Availability</span>
+          <span>{i18n.tr('Kalenderregler', 'Calendar rules')}</span>
+          <span>{i18n.tr('Tilgjengelighet', 'Availability')}</span>
         </div>
         <div class="agent-visual__calendar-grid">
           <Index each={Array.from({ length: 21 })}>
@@ -70,7 +73,7 @@ export function SalesVisual(props: AgentVisualProps) {
           </Index>
         </div>
         <div class="agent-visual__calendar-slots">
-          <Index each={['Owner', 'Team', 'Fallback']}>
+          <Index each={[i18n.tr('Eier', 'Owner'), i18n.tr('Team', 'Team'), i18n.tr('Reserve', 'Fallback')]}>
             {(slot, index) => (
               <span class={cn('agent-visual__calendar-slot', index === 1 && 'agent-visual__calendar-slot--active')}>
                 {slot()}
@@ -81,17 +84,18 @@ export function SalesVisual(props: AgentVisualProps) {
       </div>
       <div class="agent-visual__sales-pill">
         <MessageSquareText class="agent-visual__sales-pill-icon" />
-        Book a demo with sales
+        {i18n.tr('Book en demo med salg', 'Book a demo with sales')}
       </div>
     </div>
   )
 }
 
 export function EcommerceVisual(props: AgentVisualProps) {
+  const i18n = useI18n()
   return (
     <div aria-hidden="true" class={visualClass('ecommerce', props.large)}>
       <div class="agent-visual__product-window">
-        <div class="agent-visual__product-query">Looking for running shoes?</div>
+        <div class="agent-visual__product-query">{i18n.tr('Leter du etter løpesko?', 'Looking for running shoes?')}</div>
         <div class="agent-visual__product-grid">
           <Index each={['#ECEFF3', '#D9D0BE', '#1F2428']}>
             {(color, index) => (
@@ -101,7 +105,7 @@ export function EcommerceVisual(props: AgentVisualProps) {
                 </div>
                 <div class="agent-visual__product-line agent-visual__product-line--wide" />
                 <div class="agent-visual__product-line agent-visual__product-line--short" />
-                <div class="agent-visual__product-label">{index === 0 ? 'Data' : 'Rule'}</div>
+                <div class="agent-visual__product-label">{index === 0 ? i18n.tr('Data', 'Data') : i18n.tr('Regel', 'Rule')}</div>
               </div>
             )}
           </Index>
@@ -115,15 +119,16 @@ export function EcommerceVisual(props: AgentVisualProps) {
 }
 
 export function ChatbotVisual(props: AgentVisualProps) {
+  const i18n = useI18n()
   return (
     <div aria-hidden="true" class={visualClass('dotted', props.large)}>
       <div class="agent-visual__chatbot-sidebar">
         <div class="agent-visual__chatbot-sidebar-title">
           <Bot class="agent-visual__tiny-icon" />
-          Playground
+          {i18n.tr('Testmiljø', 'Playground')}
         </div>
-        <div class="agent-visual__chatbot-source">Source mapped</div>
-        <For each={['Model', 'Actions', 'Instructions']}>
+        <div class="agent-visual__chatbot-source">{i18n.tr('Kilde tilordnet', 'Source mapped')}</div>
+        <For each={[i18n.tr('Modell', 'Model'), i18n.tr('Handlinger', 'Actions'), i18n.tr('Instruksjoner', 'Instructions')]}>
           {(item) => <div class="agent-visual__chatbot-field">{item}</div>}
         </For>
       </div>
@@ -134,15 +139,15 @@ export function ChatbotVisual(props: AgentVisualProps) {
             <span class="agent-visual__brand-icon agent-visual__brand-icon--round">
               <Sparkles class="agent-visual__tiny-icon" />
             </span>
-            <span>Velion Chatbot</span>
+            <span>{i18n.tr('Velion Chatbot', 'Velion Chatbot')}</span>
           </div>
           <CircleDashed class="agent-visual__muted-icon" />
         </div>
         <div class="agent-visual__chatbot-body">
-          <div class="agent-visual__chatbot-bubble">Hi. What can I help you with?</div>
+          <div class="agent-visual__chatbot-bubble">{i18n.tr('Hei. Hva kan jeg hjelpe deg med?', 'Hi. What can I help you with?')}</div>
         </div>
         <div class="agent-visual__chatbot-input">
-          <span>Message…</span>
+          <span>{i18n.tr('Melding …', 'Message…')}</span>
           <Send class="agent-visual__tiny-icon" />
         </div>
       </div>
@@ -151,12 +156,13 @@ export function ChatbotVisual(props: AgentVisualProps) {
 }
 
 export function WorkflowVisual(props: AgentVisualProps) {
+  const i18n = useI18n()
   return (
     <div aria-hidden="true" class={visualClass('dotted', props.large)}>
       <div class="agent-visual__workflow-tools">
         <div class="agent-visual__workflow-tools-title">
           <Search class="agent-visual__tiny-icon" />
-          Tools
+          {i18n.tr('Verktøy', 'Tools')}
         </div>
         <div class="agent-visual__workflow-tool-grid">
           <For each={[Bot, Database, Globe2, TicketCheck, Split, Code2]}>
@@ -170,16 +176,16 @@ export function WorkflowVisual(props: AgentVisualProps) {
       </div>
 
       <div class="agent-visual__workflow-flow">
-        <WorkflowNode icon={<CalendarClock class="agent-visual__small-icon" />} label={props.large ? 'Trigger' : undefined} />
+        <WorkflowNode icon={<CalendarClock class="agent-visual__small-icon" />} label={props.large ? i18n.tr('Utløser', 'Trigger') : undefined} />
         <Connector />
-        <WorkflowNode icon={<Bot class="agent-visual__small-icon" />} label={props.large ? 'AI step' : undefined} />
+        <WorkflowNode icon={<Bot class="agent-visual__small-icon" />} label={props.large ? i18n.tr('AI-steg', 'AI step') : undefined} />
         <Connector />
-        <WorkflowNode icon={<GitBranch class="agent-visual__small-icon" />} label={props.large ? 'Branch' : undefined} />
+        <WorkflowNode icon={<GitBranch class="agent-visual__small-icon" />} label={props.large ? i18n.tr('Forgrening', 'Branch') : undefined} />
       </div>
 
       {props.large ? (
         <div class="agent-visual__workflow-prompt">
-          Describe your workflow to Velion
+          {i18n.tr('Beskriv arbeidsflyten din til Velion', 'Describe your workflow to Velion')}
           <span>
             <Send class="agent-visual__tiny-icon" />
           </span>
@@ -189,10 +195,10 @@ export function WorkflowVisual(props: AgentVisualProps) {
       {props.large ? (
         <div class="agent-visual__workflow-inspector">
           <div class="agent-visual__workflow-inspector-title">
-            Generate caption
+            {i18n.tr('Generer bildetekst', 'Generate caption')}
             <CircleDashed class="agent-visual__muted-icon" />
           </div>
-          <Index each={['Provider', 'Model', 'Prompt']}>
+          <Index each={[i18n.tr('Leverandør', 'Provider'), i18n.tr('Modell', 'Model'), i18n.tr('Prompt', 'Prompt')]}>
             {(item, index) => (
               <div class={cn('agent-visual__workflow-field', index === 2 && 'agent-visual__workflow-field--large')}>
                 {item()}

@@ -57,6 +57,7 @@ import {
   saveStudioProject,
 } from '@/shared/api/studio-client'
 import { cn } from '@/shared/lib/cn'
+import { useI18n } from '@/shared/i18n'
 
 type StudioSection = 'canvas' | 'campaigns' | 'templates'
 
@@ -70,16 +71,18 @@ type DragState = {
 const addBlockOptions: Array<{
   kind: StudioBlockKind
   label: string
+  labelNo: string
   icon: typeof Type
 }> = [
-  { kind: 'image', label: 'Image', icon: Image },
-  { kind: 'video', label: 'Video', icon: Video },
-  { kind: 'link', label: 'Link', icon: Link },
-  { kind: 'text', label: 'Text', icon: Type },
-  { kind: 'social', label: 'Post', icon: PenLine },
+  { kind: 'image', label: 'Image', labelNo: 'Bilde', icon: Image },
+  { kind: 'video', label: 'Video', labelNo: 'Video', icon: Video },
+  { kind: 'link', label: 'Link', labelNo: 'Lenke', icon: Link },
+  { kind: 'text', label: 'Text', labelNo: 'Tekst', icon: Type },
+  { kind: 'social', label: 'Post', labelNo: 'Innlegg', icon: PenLine },
 ]
 
 export default function StudioPage(props: { section?: StudioSection }) {
+  const i18n = useI18n()
   const section = () => props.section ?? 'canvas'
 
   return (
@@ -89,17 +92,23 @@ export default function StudioPage(props: { section?: StudioSection }) {
       </Match>
       <Match when={section() === 'campaigns'}>
         <StudioLibraryPage
-          eyebrow="Studio campaign planner"
-          title="Campaign planner"
-          description="Shape a launch, social pack, email pack, and approval path before it moves into Social or Agents."
+          eyebrow={i18n.tr('Studio-kampanjeplanlegger', 'Studio campaign planner')}
+          title={i18n.tr('Kampanjeplanlegger', 'Campaign planner')}
+          description={i18n.tr(
+            'Forme en lansering, sosial-pakke, e-postpakke og godkjenningsløp før det går videre til Sosialt eller Agenter.',
+            'Shape a launch, social pack, email pack, and approval path before it moves into Social or Agents.',
+          )}
           active="campaigns"
         />
       </Match>
       <Match when={section() === 'templates'}>
         <StudioLibraryPage
-          eyebrow="Starter canvas templates"
-          title="Templates"
-          description="Starter layouts you can copy onto a canvas for launches, founder updates, UGC scripts, case studies, and weekly content systems — edit everything before you ship."
+          eyebrow={i18n.tr('Startmaler for lerret', 'Starter canvas templates')}
+          title={i18n.tr('Maler', 'Templates')}
+          description={i18n.tr(
+            'Startoppsett du kan kopiere til et lerret for lanseringer, grunnleggeroppdateringer, UGC-manus, kundehistorier og ukentlige innholdssystemer — rediger alt før du publiserer.',
+            'Starter layouts you can copy onto a canvas for launches, founder updates, UGC scripts, case studies, and weekly content systems — edit everything before you ship.',
+          )}
           active="templates"
         />
       </Match>
@@ -108,6 +117,9 @@ export default function StudioPage(props: { section?: StudioSection }) {
 }
 
 function StudioCanvasPage() {
+  const i18n = useI18n()
+  const launchCanvasTitle = i18n.tr('Lanseringslerret', 'Launch canvas')
+  const localCanvasMessage = i18n.tr('Lokalt lerret', 'Local canvas')
   let canvasRef: HTMLDivElement | undefined
   let loadedProjectId: string | null = null
   const [blocks, setBlocks] = createSignal<StudioBlock[]>(initialBlocks)
@@ -115,9 +127,9 @@ function StudioCanvasPage() {
   const [previewDevice, setPreviewDevice] = createSignal<StudioPreviewDevice>('desktop')
   const [projectId, setProjectId] = createSignal<string | null>(null)
   const [orgId, setOrgId] = createSignal('')
-  const [projectTitle, setProjectTitle] = createSignal('Launch canvas')
+  const [projectTitle, setProjectTitle] = createSignal(launchCanvasTitle)
   const [persistenceSource, setPersistenceSource] = createSignal<StudioPersistenceSource>('fallback')
-  const [persistenceMessage, setPersistenceMessage] = createSignal('Local canvas')
+  const [persistenceMessage, setPersistenceMessage] = createSignal(localCanvasMessage)
   const [busyAction, setBusyAction] = createSignal<StudioPersistenceAction | null>(null)
   const [history, setHistory] = createSignal<StudioBlock[][]>([])
   const [future, setFuture] = createSignal<StudioBlock[][]>([])
@@ -139,7 +151,7 @@ function StudioCanvasPage() {
   createEffect(() => {
     const nextWorkspace = workspace()
     if (!nextWorkspace) {
-      setPersistenceMessage('Loading project')
+      setPersistenceMessage(i18n.tr('Laster inn prosjekt', 'Loading project'))
       return
     }
 
@@ -147,7 +159,7 @@ function StudioCanvasPage() {
     setPersistenceSource(nextWorkspace.source)
 
     if (!nextWorkspace.project) {
-      setPersistenceMessage(nextWorkspace.orgId ? 'Ready to save' : 'Local canvas')
+      setPersistenceMessage(nextWorkspace.orgId ? i18n.tr('Klar til å lagre', 'Ready to save') : localCanvasMessage)
       return
     }
 
@@ -158,12 +170,12 @@ function StudioCanvasPage() {
       : cloneBlocks(initialBlocks)
 
     setProjectId(nextWorkspace.project.id)
-    setProjectTitle(nextWorkspace.project.title || 'Launch canvas')
+    setProjectTitle(nextWorkspace.project.title || launchCanvasTitle)
     setBlocks(nextBlocks)
     setSelectedBlockId(nextWorkspace.project.selectedBlockId ?? nextBlocks[0]?.id ?? '')
     setHistory([])
     setFuture([])
-    setPersistenceMessage('Saved project')
+    setPersistenceMessage(i18n.tr('Prosjekt lagret', 'Saved project'))
   })
 
   const pushHistory = (snapshot: StudioBlock[]) => {
@@ -202,7 +214,7 @@ function StudioCanvasPage() {
     const activeOrgId = orgId()
     if (!activeOrgId) {
       setPersistenceSource('fallback')
-      setPersistenceMessage('Local canvas')
+      setPersistenceMessage(localCanvasMessage)
       return null
     }
 
@@ -220,7 +232,7 @@ function StudioCanvasPage() {
     setProjectId(result.project.id)
     setProjectTitle(result.project.title)
     setPersistenceSource('live')
-    setPersistenceMessage('Saved project')
+    setPersistenceMessage(i18n.tr('Prosjekt lagret', 'Saved project'))
     return result.project
   }
 
@@ -228,12 +240,12 @@ function StudioCanvasPage() {
     if (busyAction()) return
 
     setBusyAction('save')
-    setPersistenceMessage(orgId() ? 'Saving project' : 'Local canvas')
+    setPersistenceMessage(orgId() ? i18n.tr('Lagrer prosjekt', 'Saving project') : localCanvasMessage)
     try {
       await persistCurrentProject()
     } catch (reason) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(reason instanceof Error ? reason.message : 'Save failed')
+      setPersistenceMessage(reason instanceof Error ? reason.message : i18n.tr('Lagring mislyktes', 'Save failed'))
     } finally {
       setBusyAction(null)
     }
@@ -243,7 +255,7 @@ function StudioCanvasPage() {
     if (busyAction()) return
 
     setBusyAction('export')
-    setPersistenceMessage(orgId() ? 'Exporting draft' : 'Local canvas')
+    setPersistenceMessage(orgId() ? i18n.tr('Eksporterer utkast', 'Exporting draft') : localCanvasMessage)
     try {
       const project = await persistCurrentProject()
       if (!project || !orgId()) return
@@ -256,10 +268,10 @@ function StudioCanvasPage() {
       loadedProjectId = result.project.id
       setProjectId(result.project.id)
       setPersistenceSource('live')
-      setPersistenceMessage('Social draft created')
+      setPersistenceMessage(i18n.tr('Sosialt utkast opprettet', 'Social draft created'))
     } catch (reason) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(reason instanceof Error ? reason.message : 'Export failed')
+      setPersistenceMessage(reason instanceof Error ? reason.message : i18n.tr('Eksport mislyktes', 'Export failed'))
     } finally {
       setBusyAction(null)
     }
@@ -460,7 +472,7 @@ function StudioCanvasPage() {
               LC
             </span>
             <div>
-              <strong>Launch canvas</strong>
+              <strong>{launchCanvasTitle}</strong>
               <span>{canvasSummary()}</span>
             </div>
           </div>
@@ -472,7 +484,7 @@ function StudioCanvasPage() {
               disabled={!canPersist()}
             >
               <Send size={15} />
-              {busyAction() === 'export' ? 'Exporting' : 'Send to drafts'}
+              {busyAction() === 'export' ? i18n.tr('Eksporterer', 'Exporting') : i18n.tr('Send til utkast', 'Send to drafts')}
             </button>
             <button
               type="button"
@@ -481,12 +493,12 @@ function StudioCanvasPage() {
               disabled={!canPersist()}
             >
               <span />
-              {busyAction() === 'save' ? 'Saving' : 'Save'}
+              {busyAction() === 'save' ? i18n.tr('Lagrer', 'Saving') : i18n.tr('Lagre', 'Save')}
             </button>
           </div>
         </header>
 
-        <main class="velion-studio-canvas-wrap" aria-label="Studio canvas workspace">
+        <main class="velion-studio-canvas-wrap" aria-label={i18n.tr('Studio-lerretsarbeidsområde', 'Studio canvas workspace')}>
           <div
             ref={canvasRef}
             class={cn(
@@ -513,22 +525,22 @@ function StudioCanvasPage() {
                 <div
                   class="velion-studio-block-toolbar"
                   style={selectedToolbarStyle()}
-                  aria-label={`Selected block toolbar for ${block().title}`}
+                  aria-label={i18n.tr(`Verktøylinje for valgt blokk: ${block().title}`, `Selected block toolbar for ${block().title}`)}
                   onPointerDown={(event) => event.stopPropagation()}
                 >
                   <span class="velion-studio-block-toolbar__handle" aria-hidden="true">
                     <GripHorizontal size={16} />
                   </span>
-                  <button type="button" onClick={duplicateSelected} aria-label="Duplicate selected block">
+                  <button type="button" onClick={duplicateSelected} aria-label={i18n.tr('Dupliser valgt blokk', 'Duplicate selected block')}>
                     <Copy size={15} />
                   </button>
-                  <button type="button" onClick={() => moveSelectedLayer('back')} aria-label="Send selected block to back">
+                  <button type="button" onClick={() => moveSelectedLayer('back')} aria-label={i18n.tr('Send valgt blokk bakerst', 'Send selected block to back')}>
                     <SendToBack size={15} />
                   </button>
-                  <button type="button" onClick={() => moveSelectedLayer('front')} aria-label="Bring selected block to front">
+                  <button type="button" onClick={() => moveSelectedLayer('front')} aria-label={i18n.tr('Send valgt blokk fremst', 'Bring selected block to front')}>
                     <BringToFront size={15} />
                   </button>
-                  <button type="button" class="is-danger" onClick={deleteSelected} aria-label="Delete selected block">
+                  <button type="button" class="is-danger" onClick={deleteSelected} aria-label={i18n.tr('Slett valgt blokk', 'Delete selected block')}>
                     <Trash2 size={15} />
                   </button>
                 </div>
@@ -539,46 +551,46 @@ function StudioCanvasPage() {
                 <span>
                   <Plus size={20} />
                 </span>
-                <strong>Start a Studio board</strong>
-                <p>Add a campaign note, image, or social draft to build the canvas.</p>
+                <strong>{i18n.tr('Start et Studio-brett', 'Start a Studio board')}</strong>
+                <p>{i18n.tr('Legg til et kampanjenotat, bilde eller sosialt utkast for å bygge lerretet.', 'Add a campaign note, image, or social draft to build the canvas.')}</p>
                 <div>
-                  <button type="button" onClick={() => addBlock('text')}>Text</button>
-                  <button type="button" onClick={() => addBlock('image')}>Image</button>
-                  <button type="button" onClick={() => addBlock('social')}>Post</button>
+                  <button type="button" onClick={() => addBlock('text')}>{i18n.tr('Tekst', 'Text')}</button>
+                  <button type="button" onClick={() => addBlock('image')}>{i18n.tr('Bilde', 'Image')}</button>
+                  <button type="button" onClick={() => addBlock('social')}>{i18n.tr('Innlegg', 'Post')}</button>
                 </div>
               </div>
             </Show>
           </div>
         </main>
 
-        <div class="velion-studio-undo" aria-label="Canvas history controls">
-          <button type="button" onClick={undo} disabled={!history().length} aria-label="Undo">
+        <div class="velion-studio-undo" aria-label={i18n.tr('Historikkontroller for lerret', 'Canvas history controls')}>
+          <button type="button" onClick={undo} disabled={!history().length} aria-label={i18n.tr('Angre', 'Undo')}>
             <Undo2 size={17} />
           </button>
-          <button type="button" onClick={redo} disabled={!future().length} aria-label="Redo">
+          <button type="button" onClick={redo} disabled={!future().length} aria-label={i18n.tr('Gjør om', 'Redo')}>
             <Redo2 size={17} />
           </button>
         </div>
 
-        <div class="velion-studio-dock" aria-label="Add canvas blocks">
-          <button type="button" class="is-active" aria-label="Select blocks">
+        <div class="velion-studio-dock" aria-label={i18n.tr('Legg til lerretblokker', 'Add canvas blocks')}>
+          <button type="button" class="is-active" aria-label={i18n.tr('Velg blokker', 'Select blocks')}>
             <MousePointer2 size={18} />
           </button>
           <For each={addBlockOptions}>
             {(option) => (
-              <button type="button" onClick={() => addBlock(option.kind)} aria-label={`Add ${option.label} block`}>
+              <button type="button" onClick={() => addBlock(option.kind)} aria-label={i18n.tr(`Legg til ${option.labelNo}-blokk`, `Add ${option.label} block`)}>
                 <Dynamic component={option.icon} size={18} />
               </button>
             )}
           </For>
         </div>
 
-        <div class="velion-studio-device-switch" aria-label="Preview device">
+        <div class="velion-studio-device-switch" aria-label={i18n.tr('Forhåndsvisningsenhet', 'Preview device')}>
           <button
             type="button"
             class={cn(previewDevice() === 'desktop' && 'is-active')}
             onClick={() => setPreviewDevice('desktop')}
-            aria-label="Desktop preview"
+            aria-label={i18n.tr('Skrivebordsforhåndsvisning', 'Desktop preview')}
             aria-pressed={previewDevice() === 'desktop'}
           >
             <Monitor size={17} />
@@ -587,7 +599,7 @@ function StudioCanvasPage() {
             type="button"
             class={cn(previewDevice() === 'mobile' && 'is-active')}
             onClick={() => setPreviewDevice('mobile')}
-            aria-label="Mobile preview"
+            aria-label={i18n.tr('Mobilforhåndsvisning', 'Mobile preview')}
             aria-pressed={previewDevice() === 'mobile'}
           >
             <Smartphone size={17} />
@@ -597,24 +609,24 @@ function StudioCanvasPage() {
         <div class="velion-studio-preview-actions">
           <button type="button">
             <Eye size={16} />
-            Preview
+            {i18n.tr('Forhåndsvis', 'Preview')}
           </button>
-          <button type="button" aria-label="Open inspector">
+          <button type="button" aria-label={i18n.tr('Åpne inspektør', 'Open inspector')}>
             <PanelRight size={17} />
           </button>
         </div>
 
         <aside class="velion-studio-inspector">
-          <Show when={selectedBlock()} fallback={<p>Select a block</p>}>
+          <Show when={selectedBlock()} fallback={<p>{i18n.tr('Velg en blokk', 'Select a block')}</p>}>
             {(block) => (
               <>
                 <span class="velion-studio-inspector__eyebrow">{block().kind}</span>
                 <label>
-                  Title
+                  {i18n.tr('Tittel', 'Title')}
                   <input value={block().title} onInput={(event) => updateSelectedText('title', event.currentTarget.value)} />
                 </label>
                 <label>
-                  Notes
+                  {i18n.tr('Notater', 'Notes')}
                   <textarea value={block().body ?? ''} onInput={(event) => updateSelectedText('body', event.currentTarget.value)} />
                 </label>
                 <div class="velion-studio-inspector__layout">
@@ -636,8 +648,8 @@ function StudioCanvasPage() {
                   </label>
                 </div>
                 <div class="velion-studio-inspector__links">
-                  <A href="/social/calendar">Open calendar</A>
-                  <A href="/knowledge">Attach assets</A>
+                  <A href="/social/calendar">{i18n.tr('Åpne kalender', 'Open calendar')}</A>
+                  <A href="/knowledge">{i18n.tr('Legg ved ressurser', 'Attach assets')}</A>
                 </div>
               </>
             )}
@@ -655,6 +667,8 @@ function StudioCanvasBlock(props: {
   onSelect: () => void
   selected: boolean
 }) {
+  const i18n = useI18n()
+
   return (
     <article
       class={cn(
@@ -669,7 +683,7 @@ function StudioCanvasBlock(props: {
         width: `${props.block.width}px`,
         height: `${props.block.height}px`,
       }}
-      aria-label={`${props.block.kind} block: ${props.block.title}`}
+      aria-label={i18n.tr(`${props.block.kind}-blokk: ${props.block.title}`, `${props.block.kind} block: ${props.block.title}`)}
       onClick={() => props.onSelect()}
       onPointerDown={(event) => props.onPointerDown(event)}
       onFocus={() => props.onSelect()}
@@ -703,7 +717,7 @@ function StudioCanvasBlock(props: {
             <p>{props.block.body}</p>
           </Match>
           <Match when={props.block.kind === 'social'}>
-            <span class="velion-studio-social-label">Social post</span>
+            <span class="velion-studio-social-label">{i18n.tr('Sosialt innlegg', 'Social post')}</span>
             <strong>{props.block.title}</strong>
             <p>{props.block.body}</p>
           </Match>
@@ -732,16 +746,17 @@ function StudioLibraryPage(props: {
   eyebrow: string
   title: string
 }) {
+  const i18n = useI18n()
   const cards = createMemo(() => props.active === 'campaigns'
     ? [
-        ['Product launch', 'Map social, email, landing, and approval work.'],
-        ['Weekly trust loop', 'Turn support patterns into public content.'],
-        ['Founder narrative', 'Shape a multi-channel executive story.'],
+        [i18n.tr('Produktlansering', 'Product launch'), i18n.tr('Kartlegg sosialt, e-post, landingsside og godkjenningsarbeid.', 'Map social, email, landing, and approval work.')],
+        [i18n.tr('Ukentlig tillitssløyfe', 'Weekly trust loop'), i18n.tr('Gjør supportmønstre om til offentlig innhold.', 'Turn support patterns into public content.')],
+        [i18n.tr('Grunnleggerfortelling', 'Founder narrative'), i18n.tr('Forme en lederhistorie på tvers av kanaler.', 'Shape a multi-channel executive story.')],
       ]
     : [
-        ['Social launch board', 'Canvas blocks for calendar-ready post packs.'],
-        ['UGC script pack', 'Hooks, scenes, captions, and asset placeholders.'],
-        ['Trend remix board', 'Reference, angle, draft, and approval blocks.'],
+        [i18n.tr('Lanseringstavle for sosialt', 'Social launch board'), i18n.tr('Lerretblokker for kalenderklare innleggspakker.', 'Canvas blocks for calendar-ready post packs.')],
+        [i18n.tr('UGC-manuspakke', 'UGC script pack'), i18n.tr('Hooks, scener, bildetekster og ressursplassholdere.', 'Hooks, scenes, captions, and asset placeholders.')],
+        [i18n.tr('Trend-remix-tavle', 'Trend remix board'), i18n.tr('Referanse-, vinkel-, utkast- og godkjenningsblokker.', 'Reference, angle, draft, and approval blocks.')],
       ])
 
   return (
@@ -750,7 +765,7 @@ function StudioLibraryPage(props: {
         <span>{props.eyebrow}</span>
         <h1>{props.title}</h1>
         <p>{props.description}</p>
-        <A href="/studio/canvas">Open canvas</A>
+        <A href="/studio/canvas">{i18n.tr('Åpne lerret', 'Open canvas')}</A>
       </section>
       <div class="velion-studio-library-grid">
         <For each={cards()}>

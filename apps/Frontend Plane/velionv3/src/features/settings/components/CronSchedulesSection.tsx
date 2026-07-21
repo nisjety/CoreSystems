@@ -7,7 +7,7 @@ import {
   updateCronSchedule,
   type CronSchedule,
 } from '@/shared/api/cron-client'
-import { ApiError } from '@/shared/api/http'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { getSession } from '@/shared/session/session-store'
@@ -31,6 +31,7 @@ function formatWhen(value?: string | null): string {
 }
 
 export function CronSchedulesSection() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
@@ -88,7 +89,7 @@ export function CronSchedulesSection() {
       await refetch()
     } catch (err) {
       setFormError(
-        err instanceof ApiError ? err.message : 'Kunne ikke opprette planen.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke opprette planen.', en: 'Could not create the schedule.' }),
       )
     } finally {
       setSubmitting(false)
@@ -105,7 +106,7 @@ export function CronSchedulesSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke oppdatere planen.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere planen.', en: 'Could not update the schedule.' }),
       )
     } finally {
       setBusyId(null)
@@ -128,7 +129,7 @@ export function CronSchedulesSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke slette planen.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke slette planen.', en: 'Could not delete the schedule.' }),
       )
     } finally {
       setBusyId(null)

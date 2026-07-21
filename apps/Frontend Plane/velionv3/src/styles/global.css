@@ -4438,6 +4438,64 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* Preset agent quick-launch picker */
+.velion-run-launcher__presets {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.velion-run-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--velion-border);
+  border-radius: 10px;
+  background: var(--velion-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.velion-run-preset:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--velion-accent) 40%, transparent);
+}
+
+.velion-run-preset--active {
+  border-color: var(--velion-accent);
+  background: color-mix(in srgb, var(--velion-accent) 10%, transparent);
+  box-shadow: inset 0 0 0 1px var(--velion-accent);
+}
+
+.velion-run-preset:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dark .velion-run-preset {
+  background: #101116;
+  border-color: var(--border);
+}
+
+.velion-run-preset__label {
+  color: var(--velion-dark-surface-soft);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.dark .velion-run-preset__label {
+  color: var(--panel);
+}
+
+.velion-run-preset__desc {
+  overflow: hidden;
+  color: var(--velion-text-muted);
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
 .velion-run-launcher__modes {
   display: flex;
   flex-direction: column;
@@ -6136,9 +6194,12 @@ textarea:focus-visible {
   position: relative;
   height: 100%;
   overflow: hidden;
-  padding-top: 56px;
+  /* Defaults to the navbar-only height; CoreShell raises this custom property
+     while the org-deletion banner (Flow C) is visible so content reflows
+     below it instead of being covered by the fixed banner bar. */
+  padding-top: var(--dashboard-navbar-height, 56px);
   padding-left: var(--dashboard-rail-width);
-  transition: padding-left 300ms ease-out;
+  transition: padding-left 300ms ease-out, padding-top 160ms ease-out;
 }
 
 .core-main__panel {
@@ -6175,6 +6236,88 @@ textarea:focus-visible {
   border-top-color: rgb(42 44 49 / 95%);
   border-left-color: rgb(42 44 49 / 95%);
   box-shadow: inset 10px 10px 18px rgb(255 255 255 / 2%);
+}
+
+/* App-wide pending organization deletion banner (Flow C). Fixed directly
+   below the (always 56px) navbar, clearing the sidebar via the same
+   --dashboard-rail-width custom property .core-main uses. CoreShell raises
+   --dashboard-navbar-height while this is visible so .core-main's padding-top
+   reflows content below it instead of being covered. */
+.org-deletion-banner {
+  position: fixed;
+  top: 56px;
+  left: var(--dashboard-rail-width);
+  right: 0;
+  z-index: var(--velion-z-sidebar);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 6px 20px;
+  border-bottom: 1px solid color-mix(in srgb, var(--destructive) 35%, transparent);
+  background: color-mix(in srgb, var(--destructive) 12%, var(--velion-surface));
+  color: var(--foreground);
+  font-size: 13px;
+  transition: left 300ms ease-out;
+}
+
+.org-deletion-banner__message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--destructive, #dc2626);
+}
+
+.org-deletion-banner__message span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.org-deletion-banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.org-deletion-banner__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background, var(--panel));
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.org-deletion-banner__action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--background, var(--panel)));
+}
+
+.org-deletion-banner__action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.org-deletion-banner__action--primary {
+  border-color: var(--destructive, #dc2626);
+  color: var(--destructive, #dc2626);
+}
+
+.org-deletion-banner__error {
+  flex: 1 0 100%;
+  font-size: 12px;
+  color: var(--destructive, #dc2626);
 }
 
 .core-search-toast {
@@ -22146,6 +22289,25 @@ textarea:focus-visible {
   font-weight: 550;
 }
 
+.velion-chat-low-confidence-notice {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  border: 1px solid #f0d9d4;
+  border-radius: 999px;
+  background: #fcf4f2;
+  padding: 4px 10px;
+  color: #a2483b;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.velion-chat-low-confidence-notice svg {
+  flex-shrink: 0;
+}
+
 .velion-chat-error-notice {
   display: grid;
   gap: 10px;
@@ -28207,7 +28369,7 @@ textarea:focus-visible {
 
 .velion-ai-review__item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   padding: 8px 10px;
@@ -28219,8 +28381,49 @@ textarea:focus-visible {
 .velion-ai-review__body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
   min-width: 0;
+  flex: 1;
+}
+
+.velion-ai-review__fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.velion-ai-review__field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 96px;
+}
+
+.velion-ai-review__field-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+.velion-ai-review__field-input {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel, var(--background));
+  color: var(--foreground);
+}
+
+.velion-ai-review__field-input:focus-visible {
+  outline: 2px solid var(--ring, var(--primary, #c2410c));
+  outline-offset: 1px;
+}
+
+.velion-ai-review__field-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .velion-ai-review__kind {
@@ -28593,15 +28796,40 @@ textarea:focus-visible {
 .velion-inbox-queue__list {
   min-height: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
 .velion-inbox-ticket-list {
-  height: 100%;
+  min-height: 0;
+  flex: 1;
   margin: 0;
   padding: 0;
   overflow-y: auto;
   list-style: none;
+}
+
+.velion-inbox-load-more {
+  width: calc(100% - 20px);
+  margin: 8px 10px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--velion-text-soft);
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.velion-inbox-load-more:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--background);
+}
+
+.velion-inbox-load-more:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .velion-inbox-ticket-list li {
@@ -28692,9 +28920,15 @@ textarea:focus-visible {
   fill: var(--velion-accent);
 }
 
-.velion-inbox-ticket-row__mail {
+.velion-inbox-ticket-row__channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
   color: var(--velion-text-muted);
-  fill: var(--velion-text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
 }
 
 .velion-inbox-ticket-row__more {
@@ -33162,6 +33396,90 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* Pilot headline metrics (conversations handled / AI draft acceptance % /
+   cost per resolution). Each card renders its OWN honest state — `live`,
+   `empty`, `planned` (not built yet), or `unavailable` — independent of the
+   other two cards and independent of the generic scorecard list below. */
+.velion-insights-headline-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.velion-insights-headline-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--velion-border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 16px;
+}
+
+.velion-insights-headline-card__topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.velion-insights-headline-card__topline span {
+  color: var(--velion-text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.velion-insights-headline-card__topline small {
+  border-radius: 999px;
+  background: var(--velion-surface-soft);
+  padding: 4px 7px;
+  color: var(--velion-text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.velion-insights-headline-card__value {
+  color: var(--velion-text);
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.velion-insights-headline-card__detail {
+  margin: 0;
+  color: var(--velion-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.velion-insights-headline-card--live {
+  border-color: rgba(79, 125, 243, 0.24);
+  background: #eef4ff;
+}
+
+.velion-insights-headline-card--planned {
+  border-color: rgba(238, 122, 80, 0.24);
+  background: var(--velion-coral-soft);
+}
+
+.velion-insights-headline-card--empty,
+.velion-insights-headline-card--not_connected,
+.velion-insights-headline-card--unavailable {
+  border-color: #e5e1da;
+  background: #fdfcf9;
+}
+
+@media (max-width: 860px) {
+  .velion-insights-headline-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 1120px) {
   .velion-studio-inspector {
     display: none;
@@ -34528,4 +34846,136 @@ textarea:focus-visible {
   .knowledge-pulse-card__activity {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ==================================================================
+   Feedback widget — persistent "Send feedback" control (CoreShell),
+   Phase 2 closed-demo instrumentation. Floats over every route so a
+   demo user can flag friction with zero setup. Theme-aware via the
+   existing --velion-* tokens; no bespoke color literals.
+================================================================== */
+
+.feedback-widget {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 70;
+}
+
+.feedback-widget__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  color: var(--velion-text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: var(--velion-surface);
+  border: 1px solid var(--velion-border);
+  border-radius: 999px;
+  box-shadow: 0 10px 24px rgb(31 27 23 / 12%);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.feedback-widget__trigger:hover {
+  border-color: var(--velion-border-strong);
+  box-shadow: 0 14px 28px rgb(31 27 23 / 16%);
+  transform: translateY(-1px);
+}
+
+.feedback-widget__trigger:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px rgba(238, 122, 80, 0.34);
+}
+
+.dark .feedback-widget__trigger {
+  color: var(--velion-surface-soft);
+  background: var(--velion-dark-surface);
+  border-color: var(--velion-dark-border);
+}
+
+.feedback-widget__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 296px;
+  padding: 14px;
+  color: var(--velion-text);
+  background: var(--velion-surface);
+  border: 1px solid var(--velion-border);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 44px rgb(31 27 23 / 20%);
+}
+
+.dark .feedback-widget__panel {
+  color: var(--velion-surface-soft);
+  background: var(--velion-dark-surface);
+  border-color: var(--velion-dark-border);
+}
+
+.feedback-widget__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.feedback-widget__title {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.feedback-widget__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.feedback-widget__close:hover {
+  background: var(--velion-surface-muted);
+  opacity: 1;
+}
+
+.dark .feedback-widget__close:hover {
+  background: rgb(255 255 255 / 10%);
+}
+
+.feedback-widget__hint {
+  margin: 0;
+  color: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  opacity: 0.68;
+}
+
+.feedback-widget__status {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.feedback-widget__status--ok {
+  color: #1a7f4e;
+}
+
+.feedback-widget__status--error {
+  color: var(--destructive);
+}
+
+.feedback-widget__actions {
+  display: flex;
+  justify-content: flex-end;
 }

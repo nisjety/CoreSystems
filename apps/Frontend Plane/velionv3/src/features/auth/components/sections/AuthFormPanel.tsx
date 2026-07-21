@@ -9,6 +9,7 @@ import { VelionField } from '@/shared/ui/velion/VelionField'
 import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
 import { VelionLanguageButton } from '@/shared/ui/velion/VelionLanguageButton'
 import { VelionProviderButton } from '@/shared/ui/velion/VelionProviderButton'
+import { useI18n } from '@/shared/i18n'
 
 const PHONE_COUNTRY_OPTIONS = [
   { iso: 'NO', dialCode: '+47', nameNb: 'Norge', nameEn: 'Norway', placeholder: '123 45 678' },
@@ -57,14 +58,15 @@ type AuthFormPanelProps = {
 }
 
 export function AuthFormPanel(props: AuthFormPanelProps) {
+  const i18n = useI18n()
   const selectedPhoneCountry = createMemo(() => (
     PHONE_COUNTRY_OPTIONS.find((country) => country.dialCode === props.phoneCountryCode()) ?? PHONE_COUNTRY_OPTIONS[0]
   ))
 
   const primaryActionLabel = () => {
     if (!props.submitting()) return props.copy().primaryAction
-    if (props.mode() === 'signin') return props.locale() === 'nb' ? 'Logger inn...' : 'Signing in...'
-    return props.locale() === 'nb' ? 'Oppretter konto...' : 'Creating account...'
+    if (props.mode() === 'signin') return i18n.tr('Logger inn …', 'Signing in...')
+    return i18n.tr('Oppretter konto …', 'Creating account...')
   }
 
   return (
@@ -82,7 +84,7 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
         </div>
       </div>
 
-      <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+      <div class="auth-tabs" role="tablist" aria-label={i18n.tr('Autentiseringsmodus', 'Authentication mode')}>
         <button
           type="button"
           class={`auth-tab ${props.mode() === 'signin' ? 'auth-tab--active' : ''}`}
@@ -121,7 +123,7 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
                     onInput={(event) => props.onNameInput(event.currentTarget.value)}
                     type="text"
                     autocomplete="name"
-                    placeholder={props.locale() === 'nb' ? 'Ola Nordmann' : 'Jane Doe'}
+                    placeholder={i18n.tr('Ola Nordmann', 'Jane Doe')}
                   />
                 </div>
               </VelionField>
@@ -135,14 +137,14 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
                   onInput={(event) => props.onEmailInput(event.currentTarget.value)}
                   type="email"
                   autocomplete="email"
-                  placeholder={props.locale() === 'nb' ? 'navn@eksempel.no' : 'name@example.com'}
+                  placeholder={i18n.tr('navn@eksempel.no', 'name@example.com')}
                 />
               </div>
             </VelionField>
 
             <Show when={props.mode() === 'signup'}>
               <div class="auth-field">
-                <label for="auth-phone-number">{props.locale() === 'nb' ? 'Telefonnummer *' : 'Phone number *'}</label>
+                <label for="auth-phone-number">{i18n.tr('Telefonnummer *', 'Phone number *')}</label>
                 <div class="auth-field__control auth-field__control--phone">
                   <PhoneCountryMenu
                     locale={props.locale()}
@@ -180,7 +182,7 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
                   shape="rounded"
                   class="auth-field__toggle"
                   onClick={() => props.onTogglePassword()}
-                  aria-label="Toggle password visibility"
+                  aria-label={i18n.tr('Vis/skjul passord', 'Toggle password visibility')}
                 >
                   <Eye size={18} />
                 </VelionIconButton>
@@ -194,7 +196,7 @@ export function AuthFormPanel(props: AuthFormPanelProps) {
                 disabled={props.submitting()}
                 onClick={() => props.onForgotPassword()}
               >
-                {props.locale() === 'nb' ? 'Glemt passord?' : 'Forgot password?'}
+                {i18n.tr('Glemt passord?', 'Forgot password?')}
               </button>
             </Show>
 
@@ -292,6 +294,7 @@ function AuthLanguageMenu(props: {
   locale: Locale
   onSelect: (locale: Locale) => void
 }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   let rootRef: HTMLDivElement | undefined
   const options: Array<{ code: Locale; label: string; shortLabel: string }> = [
@@ -307,12 +310,12 @@ function AuthLanguageMenu(props: {
         code={props.locale.toUpperCase()}
         class="auth-language-switcher"
         onClick={() => setOpen((current) => !current)}
-        ariaLabel="Switch language"
+        ariaLabel={i18n.tr('Bytt språk', 'Switch language')}
         ariaExpanded={open()}
         ariaControls={open() ? 'auth-language-menu' : undefined}
       />
       <Show when={open()}>
-        <menu id="auth-language-menu" class="velion-popover auth-dropdown-menu auth-language-menu__menu" aria-label="Language options">
+        <menu id="auth-language-menu" class="velion-popover auth-dropdown-menu auth-language-menu__menu" aria-label={i18n.tr('Språkvalg', 'Language options')}>
           <For each={options}>
             {(option) => {
               const selected = () => option.code === props.locale
@@ -351,6 +354,7 @@ function PhoneCountryMenu(props: {
   value: string
   onChange: (dialCode: string) => void
 }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   let rootRef: HTMLDivElement | undefined
 
@@ -363,7 +367,7 @@ function PhoneCountryMenu(props: {
       <button
         type="button"
         class="auth-phone-country__chrome"
-        aria-label={props.locale === 'nb' ? 'Landskode' : 'Country code'}
+        aria-label={i18n.tr('Landskode', 'Country code')}
         aria-haspopup="menu"
         aria-expanded={open()}
         aria-controls={open() ? 'auth-phone-country-menu' : undefined}
@@ -374,7 +378,7 @@ function PhoneCountryMenu(props: {
         <ChevronDown size={12} class={open() ? 'rotate-180' : undefined} />
       </button>
       <Show when={open()}>
-        <menu id="auth-phone-country-menu" class="velion-popover auth-dropdown-menu auth-phone-country__menu" aria-label={props.locale === 'nb' ? 'Landskode' : 'Country code'}>
+        <menu id="auth-phone-country-menu" class="velion-popover auth-dropdown-menu auth-phone-country__menu" aria-label={i18n.tr('Landskode', 'Country code')}>
           <For each={PHONE_COUNTRY_OPTIONS}>
             {(country) => {
               const selected = () => country.dialCode === props.value

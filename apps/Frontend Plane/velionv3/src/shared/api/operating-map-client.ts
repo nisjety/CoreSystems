@@ -135,7 +135,11 @@ export type OperatingMapRunEvent = {
 
 export type OperatingMapRunHandlers = {
   onDone?: () => void
-  onError?: (message: string) => void
+  // Raw error (ApiError or Error) — never a pre-formatted English string. This
+  // module cannot call useI18n() itself (it's a plain client, not a Solid
+  // component), so callers translate via translateApiError(err, i18n.tr, ...)
+  // once they receive it, using their own locale-aware fallback copy.
+  onError?: (err: unknown) => void
   onEvent?: (event: OperatingMapRunEvent) => void
 }
 
@@ -198,7 +202,7 @@ export async function streamOperatingMapRunEvents(
       handlers.onEvent?.(parsed)
       if (parsed.status === 'completed') handlers.onDone?.()
     },
-    (err) => handlers.onError?.(err instanceof Error ? err.message : 'Operating Map event stream failed.'),
+    (err) => handlers.onError?.(err),
     () => handlers.onDone?.(),
   )
 }

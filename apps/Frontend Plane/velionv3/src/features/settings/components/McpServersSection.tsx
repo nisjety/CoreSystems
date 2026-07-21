@@ -7,7 +7,7 @@ import {
   shareMcpServer,
   type McpServer,
 } from '@/shared/api/mcp-client'
-import { ApiError } from '@/shared/api/http'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { getSession } from '@/shared/session/session-store'
@@ -46,6 +46,7 @@ function scopeLabel(server: McpServer): ServerScope {
 }
 
 export function McpServersSection() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
   const currentUserId = createMemo(() => session.user?.id ?? '')
@@ -114,7 +115,7 @@ export function McpServersSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke oppdatere delingen.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke oppdatere delingen.', en: 'Could not update the sharing.' }),
       )
     } finally {
       setBusyServerId(null)
@@ -178,7 +179,7 @@ export function McpServersSection() {
       await refetch()
     } catch (err) {
       setFormError(
-        err instanceof ApiError ? err.message : 'Kunne ikke registrere MCP-tjeneren.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke registrere MCP-tjeneren.', en: 'Could not register the MCP server.' }),
       )
     } finally {
       setSubmitting(false)
@@ -202,7 +203,7 @@ export function McpServersSection() {
       await refetch()
     } catch (err) {
       setActionError(
-        err instanceof ApiError ? err.message : 'Kunne ikke fjerne MCP-tjeneren.',
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke fjerne MCP-tjeneren.', en: 'Could not remove the MCP server.' }),
       )
     } finally {
       setBusyServerId(null)

@@ -1,7 +1,6 @@
 import { Eye } from 'lucide-solid'
 import { cn } from '@/shared/lib/cn'
-
-const PREVIEW_TITLE = 'Design preview — a visual concept. This surface is not yet connected to a backend, so its actions are inactive.'
+import { useI18n } from '@/shared/i18n'
 
 /**
  * Non-interactive badge marking a surface as a not-yet-wired design preview.
@@ -18,21 +17,31 @@ const PREVIEW_TITLE = 'Design preview — a visual concept. This surface is not 
  * carries no Active/Private/Live badge.
  */
 export function DesignPreviewBadge(props: { class?: string; label?: string; title?: string }) {
+  const i18n = useI18n()
+  const defaultTitle = i18n.tr(
+    'Designforhåndsvisning — et visuelt konsept. Denne flaten er ikke koblet til en backend ennå, så handlingene er inaktive.',
+    'Design preview — a visual concept. This surface is not yet connected to a backend, so its actions are inactive.',
+  )
+
   return (
     <span
       role="note"
-      title={props.title ?? PREVIEW_TITLE}
+      title={props.title ?? defaultTitle}
       class={cn(
         'inline-flex items-center gap-1.5 rounded-full border border-[#E3D8B8] bg-[#FBF4DD] px-3 py-1 text-[11px] font-semibold text-[#7A6410] dark:border-[#4A411F] dark:bg-[#2A2614] dark:text-[#E4D08A]',
         props.class,
       )}
     >
       <Eye class="size-3.5" strokeWidth={2} />
-      {props.label ?? 'Design preview'}
+      {props.label ?? i18n.tr('Designforhåndsvisning', 'Design preview')}
     </span>
   )
 }
 
 /** Honest tooltip for the agents operating-model (Blueprint) surface (A5). */
-export const BLUEPRINT_BADGE_TITLE =
-  'Blueprint — a reference operating model. This agent is not yet configured for this org, so its activation controls are inactive.'
+export function blueprintBadgeTitle(tr: (noText: string, enText: string) => string): string {
+  return tr(
+    'Blueprint — en referansemodell for drift. Denne agenten er ikke konfigurert for denne organisasjonen ennå, så aktiveringskontrollene er inaktive.',
+    'Blueprint — a reference operating model. This agent is not yet configured for this org, so its activation controls are inactive.',
+  )
+}

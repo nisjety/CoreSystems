@@ -12,6 +12,9 @@ import {
   type SocialProviderKey,
 } from '@/shared/api/social-client'
 import { MetricCard } from '@/shared/ui/MetricCard'
+import { useI18n } from '@/shared/i18n'
+
+type TrFn = (noText: string, enText: string) => string
 
 type CommerceWorkspace = {
   orgId: string
@@ -61,6 +64,7 @@ async function loadCommerceWorkspace(): Promise<CommerceWorkspace> {
 }
 
 export default function SocialCommercePage() {
+  const i18n = useI18n()
   const [workspace] = createResource(loadCommerceWorkspace)
   const [selected, setSelected] = createSignal<SelectedCatalog | null>(null)
 
@@ -81,34 +85,35 @@ export default function SocialCommercePage() {
         <div>
           <span class="velion-social-kicker">
             <BarChart3 size={14} />
-            Social commerce
+            {i18n.tr('Sosial handel', 'Social commerce')}
           </span>
-          <h1>Ad metrics &amp; catalogs</h1>
+          <h1>{i18n.tr('Annonsestatistikk og kataloger', 'Ad metrics & catalogs')}</h1>
           <p>
-            Per-provider ad and analytics snapshots plus read-only Meta Commerce catalogs for the
-            connected social accounts in this organization. Values are served by social-core; nothing
-            is fabricated.
+            {i18n.tr(
+              'Annonse- og analysebilder per leverandør, samt skrivebeskyttede Meta Commerce-kataloger for de tilkoblede sosiale kontoene i denne organisasjonen. Verdiene leveres av social-core; ingenting er fabrikkert.',
+              'Per-provider ad and analytics snapshots plus read-only Meta Commerce catalogs for the connected social accounts in this organization. Values are served by social-core; nothing is fabricated.',
+            )}
           </p>
         </div>
-        <A href="/settings/integrations">Manage integrations</A>
+        <A href="/settings/integrations">{i18n.tr('Administrer integrasjoner', 'Manage integrations')}</A>
       </section>
 
       <Show when={!workspace()}>
         <p class="velion-social-ops-state">
           <Clock3 size={16} />
-          Loading organization-scoped commerce workspace...
+          {i18n.tr('Laster organisasjonsscopet handelsarbeidsområde …', 'Loading organization-scoped commerce workspace...')}
         </p>
       </Show>
 
       <Show when={workspace() && !workspace()!.orgId}>
         <p class="velion-social-ops-state velion-social-ops-state--warning">
           <AlertCircle size={16} />
-          No organization scope was resolved, so no metrics or catalogs could be loaded.
+          {i18n.tr('Ingen organisasjonsscope ble løst, så ingen statistikk eller kataloger kunne lastes.', 'No organization scope was resolved, so no metrics or catalogs could be loaded.')}
         </p>
       </Show>
 
       <Show when={workspace()?.orgId}>
-        <section class="velion-social-ops-metrics" aria-label="Ad metrics">
+        <section class="velion-social-ops-metrics" aria-label={i18n.tr('Annonsestatistikk', 'Ad metrics')}>
           <Show
             when={metrics().length}
             fallback={
@@ -116,10 +121,12 @@ export default function SocialCommercePage() {
                 <AlertCircle size={16} />
                 <Show
                   when={workspace()?.metricsAvailable}
-                  fallback="Metrics are unavailable because the social gateway or social-core is unreachable."
+                  fallback={i18n.tr('Statistikk er utilgjengelig fordi den sosiale gatewayen eller social-core ikke kan nås.', 'Metrics are unavailable because the social gateway or social-core is unreachable.')}
                 >
-                  No metric snapshots recorded yet. Metrics populate after social-core runs a snapshot
-                  for connected ad/analytics accounts.
+                  {i18n.tr(
+                    'Ingen statistikkbilder registrert ennå. Statistikk fylles ut etter at social-core kjører et øyeblikksbilde for tilkoblede annonse-/analysekontoer.',
+                    'No metric snapshots recorded yet. Metrics populate after social-core runs a snapshot for connected ad/analytics accounts.',
+                  )}
                 </Show>
               </p>
             }
@@ -127,9 +134,9 @@ export default function SocialCommercePage() {
             <For each={metrics()}>
               {(metric) => (
                 <MetricCard
-                  label={`${providerLabel(metric.providerKey)} · ${metric.metricName}`}
+                  label={`${providerLabel(metric.providerKey, i18n.tr)} · ${metric.metricName}`}
                   value={formatMetricValue(metric.metricValue)}
-                  delta={formatSnapshotDate(metric.snapshotDate)}
+                  delta={formatSnapshotDate(metric.snapshotDate, i18n.tr)}
                 />
               )}
             </For>
@@ -138,7 +145,7 @@ export default function SocialCommercePage() {
       </Show>
 
       <Show when={workspace()?.orgId}>
-        <section class="velion-social-ops-grid" aria-label="Commerce catalogs">
+        <section class="velion-social-ops-grid" aria-label={i18n.tr('Handelskataloger', 'Commerce catalogs')}>
           <Show
             when={catalogs().length}
             fallback={
@@ -147,18 +154,20 @@ export default function SocialCommercePage() {
                   <ShoppingBag size={16} />
                   <span>Meta Commerce</span>
                 </div>
-                <h2>No commerce catalogs</h2>
+                <h2>{i18n.tr('Ingen handelskataloger', 'No commerce catalogs')}</h2>
                 <p>
                   <Show
                     when={workspace()?.catalogsAvailable}
-                    fallback="Catalogs are unavailable because the social gateway or social-core is unreachable."
+                    fallback={i18n.tr('Kataloger er utilgjengelige fordi den sosiale gatewayen eller social-core ikke kan nås.', 'Catalogs are unavailable because the social gateway or social-core is unreachable.')}
                   >
-                    Connect a Meta (Facebook/Instagram) account with the social.catalog.manage
-                    capability to read its commerce catalogs here.
+                    {i18n.tr(
+                      'Koble til en Meta-konto (Facebook/Instagram) med social.catalog.manage-funksjonen for å lese handelskatalogene dens her.',
+                      'Connect a Meta (Facebook/Instagram) account with the social.catalog.manage capability to read its commerce catalogs here.',
+                    )}
                   </Show>
                 </p>
                 <footer class="velion-social-ops-card__footer">
-                  <A href="/settings/integrations">Connect accounts</A>
+                  <A href="/settings/integrations">{i18n.tr('Koble til kontoer', 'Connect accounts')}</A>
                 </footer>
               </article>
             }
@@ -167,7 +176,7 @@ export default function SocialCommercePage() {
               {(catalog) => {
                 const catalogId = catalogField(catalog, 'id')
                 const accountId = catalogField(catalog, 'account_id')
-                const label = catalogField(catalog, 'name') || catalogId || 'Catalog'
+                const label = catalogField(catalog, 'name') || catalogId || i18n.tr('Katalog', 'Catalog')
                 const providerKey = catalogField(catalog, 'provider_key')
                 const productCount = catalogField(catalog, 'product_count')
                 const isSelected = createMemo(() => selected()?.catalogId === catalogId)
@@ -175,12 +184,12 @@ export default function SocialCommercePage() {
                   <article class="velion-social-ops-card">
                     <div>
                       <ShoppingBag size={16} />
-                      <span>{providerLabel(providerKey)}</span>
+                      <span>{providerLabel(providerKey, i18n.tr)}</span>
                     </div>
                     <h2>{label}</h2>
                     <p>
-                      {productCount ? `${productCount} products.` : 'Catalog connected.'}
-                      {catalogId ? ` Catalog ${catalogId}.` : ''}
+                      {productCount ? i18n.tr(`${productCount} produkter.`, `${productCount} products.`) : i18n.tr('Katalog tilkoblet.', 'Catalog connected.')}
+                      {catalogId ? i18n.tr(` Katalog ${catalogId}.`, ` Catalog ${catalogId}.`) : ''}
                     </p>
                     <footer class="velion-social-ops-card__footer">
                       <button
@@ -188,7 +197,7 @@ export default function SocialCommercePage() {
                         disabled={!catalogId || !accountId}
                         onClick={() => setSelected({ catalogId, accountId, label })}
                       >
-                        {isSelected() ? 'Viewing products' : 'View products'}
+                        {isSelected() ? i18n.tr('Viser produkter', 'Viewing products') : i18n.tr('Vis produkter', 'View products')}
                       </button>
                     </footer>
                   </article>
@@ -201,11 +210,11 @@ export default function SocialCommercePage() {
 
       <Show when={selected()}>
         {(choice) => (
-          <section class="velion-social-ops-grid" aria-label="Catalog products">
+          <section class="velion-social-ops-grid" aria-label={i18n.tr('Katalogprodukter', 'Catalog products')}>
             <Show when={!products.loading} fallback={
               <p class="velion-social-ops-state">
                 <Clock3 size={16} />
-                Loading products for {choice().label}...
+                {i18n.tr(`Laster produkter for ${choice().label} …`, `Loading products for ${choice().label}...`)}
               </p>
             }>
               <Show
@@ -215,9 +224,9 @@ export default function SocialCommercePage() {
                     <PackageSearch size={16} />
                     <Show
                       when={products()?.ok}
-                      fallback="Products are unavailable for this catalog right now."
+                      fallback={i18n.tr('Produkter er utilgjengelige for denne katalogen akkurat nå.', 'Products are unavailable for this catalog right now.')}
                     >
-                      No products found in {choice().label}.
+                      {i18n.tr(`Ingen produkter funnet i ${choice().label}.`, `No products found in ${choice().label}.`)}
                     </Show>
                   </p>
                 }
@@ -229,7 +238,7 @@ export default function SocialCommercePage() {
                         <PackageSearch size={16} />
                         <span>{choice().label}</span>
                       </div>
-                      <h2>{catalogField(product, 'name') || catalogField(product, 'id') || 'Product'}</h2>
+                      <h2>{catalogField(product, 'name') || catalogField(product, 'id') || i18n.tr('Produkt', 'Product')}</h2>
                       <p>
                         {[
                           catalogField(product, 'retailer_id') && `SKU ${catalogField(product, 'retailer_id')}`,
@@ -237,7 +246,7 @@ export default function SocialCommercePage() {
                           catalogField(product, 'availability'),
                         ]
                           .filter(Boolean)
-                          .join(' · ') || 'Product record.'}
+                          .join(' · ') || i18n.tr('Produktoppføring.', 'Product record.')}
                       </p>
                     </article>
                   )}
@@ -251,8 +260,8 @@ export default function SocialCommercePage() {
   )
 }
 
-function providerLabel(providerKey: string): string {
-  return platformLabels[providerKey as SocialProviderKey] ?? providerKey ?? 'Provider'
+function providerLabel(providerKey: string, tr: TrFn): string {
+  return platformLabels[providerKey as SocialProviderKey] ?? providerKey ?? tr('Leverandør', 'Provider')
 }
 
 function formatMetricValue(value: number): string {
@@ -260,8 +269,8 @@ function formatMetricValue(value: number): string {
   return new Intl.NumberFormat('en-GB', { maximumFractionDigits: 2 }).format(value)
 }
 
-function formatSnapshotDate(iso: string): string {
-  if (!iso) return 'no snapshot date'
+function formatSnapshotDate(iso: string, tr: TrFn): string {
+  if (!iso) return tr('ingen øyeblikksbildedato', 'no snapshot date')
   const parsed = new Date(iso)
   if (Number.isNaN(parsed.getTime())) return iso
   return parsed.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })

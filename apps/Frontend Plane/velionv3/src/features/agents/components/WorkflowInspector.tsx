@@ -13,8 +13,10 @@ import { Button } from '@/shared/ui/Button'
 import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
 import { WorkflowBrandMark } from '@/features/agents/components/WorkflowBrandMark'
 import type { InspectorField, ToolInspector } from '@/features/agents/lib/velion-workflow-builder-data'
+import { useI18n } from '@/shared/i18n'
 
 export function WorkflowInspector(props: { inspector: ToolInspector }) {
+  const i18n = useI18n()
   return (
     <aside class="absolute bottom-4 right-4 top-4 z-30 hidden w-[318px] flex-col overflow-hidden rounded-[18px] border border-white/76 bg-white/82 shadow-[0_24px_70px_rgba(43,45,52,0.16)] backdrop-blur-xl dark:border-white/10 dark:bg-[#17181C]/90 lg:flex">
       <div class="flex h-12 shrink-0 items-center gap-2 border-b border-[#E8E9EC] px-4 dark:border-[#2A2C31]">
@@ -30,20 +32,20 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
         </h2>
         {/* Phase 3 PR-1: inspector is part of the WorkflowBuilder design
             preview — its config actions have no backend, so they are disabled. */}
-        <VelionIconButton type="button" size="xs" shape="rounded" aria-label="More tool options" disabled>
+        <VelionIconButton type="button" size="xs" shape="rounded" aria-label={i18n.tr('Flere verktøyalternativer', 'More tool options')} disabled>
           <MoreHorizontal class="size-3.5" strokeWidth={2} />
         </VelionIconButton>
-        <VelionIconButton type="button" size="xs" shape="rounded" aria-label="Close tool settings" disabled>
+        <VelionIconButton type="button" size="xs" shape="rounded" aria-label={i18n.tr('Lukk verktøyinnstillinger', 'Close tool settings')} disabled>
           <X class="size-3.5" strokeWidth={2} />
         </VelionIconButton>
       </div>
 
       <div class="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-center border-b border-[#E8E9EC] px-4 py-3 text-[11px] font-semibold dark:border-[#2A2C31]">
-        <span class="text-[#606672]">Setup</span>
+        <span class="text-[#606672]">{i18n.tr('Oppsett', 'Setup')}</span>
         <ChevronDown class="-rotate-90 text-[#A2A7B0]" size={15} />
-        <span class="border-b-2 border-[#343842] pb-3 text-center text-[#343842] dark:border-white dark:text-white">Configure</span>
+        <span class="border-b-2 border-[#343842] pb-3 text-center text-[#343842] dark:border-white dark:text-white">{i18n.tr('Konfigurer', 'Configure')}</span>
         <ChevronDown class="-rotate-90 text-[#A2A7B0]" size={15} />
-        <span class="text-right text-[#B2B6BE]">Test</span>
+        <span class="text-right text-[#B2B6BE]">{i18n.tr('Test', 'Test')}</span>
       </div>
 
       <div class="min-h-0 flex-1 overflow-y-auto p-4">
@@ -53,7 +55,7 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
           </For>
 
           <div>
-            <InspectorLabel label="Prompt" />
+            <InspectorLabel label={i18n.tr('Prompt', 'Prompt')} />
             <div class="mt-2 rounded-[8px] border border-[#DDE0E5] bg-white/70 p-3 text-[11px] leading-5 text-[#4C515B] dark:border-[#30333B] dark:bg-[#111216]/70 dark:text-[#D8DDE6]">
               <For each={props.inspector.prompt.split('\n')}>
                 {(line) => (
@@ -67,11 +69,11 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
 
           <Button variant="secondary" size="xs" shape="pill" disabled>
             <Pencil class="size-3.5" strokeWidth={2} />
-            Improve prompt
+            {i18n.tr('Forbedre prompt', 'Improve prompt')}
           </Button>
 
           <div>
-            <InspectorLabel label="Output" />
+            <InspectorLabel label={i18n.tr('Output', 'Output')} />
             <div class="mt-2 rounded-[8px] border border-[#DDE0E5] bg-white/70 p-2 dark:border-[#30333B] dark:bg-[#111216]/70">
               <For each={props.inspector.outputs}>
                 {(output) => (
@@ -85,7 +87,7 @@ export function WorkflowInspector(props: { inspector: ToolInspector }) {
             </div>
             <Button variant="secondary" size="xs" shape="pill" class="mt-2" disabled>
               <Plus class="size-3.5" strokeWidth={2} />
-              Add output
+              {i18n.tr('Legg til output', 'Add output')}
             </Button>
           </div>
         </div>

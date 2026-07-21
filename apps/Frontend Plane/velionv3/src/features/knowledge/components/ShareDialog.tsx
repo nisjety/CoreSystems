@@ -3,6 +3,7 @@ import { createResource, createSignal, For, onCleanup, onMount, Show } from 'sol
 import { Button } from '@/shared/ui/Button'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { isGateOpen } from '@/shared/context/ownership-gate'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import {
   listDocumentShares,
   revokeDocumentShare,
@@ -22,6 +23,7 @@ export function ShareDialog(props: {
   visibility?: 'private' | 'org' | 'shared'
   onClose: () => void
 }) {
+  const i18n = useI18n()
   const [subject, setSubject] = createSignal('')
   const [busy, setBusy] = createSignal(false)
   const [errorMessage, setErrorMessage] = createSignal('')
@@ -45,7 +47,7 @@ export function ShareDialog(props: {
       setSubject('')
       await refetch()
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to share')
+      setErrorMessage(translateApiError(error, i18n.tr, { no: 'Dokumentet kunne ikke deles.', en: 'The document could not be shared.' }))
     } finally {
       setBusy(false)
     }
@@ -59,7 +61,7 @@ export function ShareDialog(props: {
       await revokeDocumentShare(props.docId, subjectId)
       await refetch()
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to remove')
+      setErrorMessage(translateApiError(error, i18n.tr, { no: 'Delingen kunne ikke fjernes.', en: 'The share could not be removed.' }))
     } finally {
       setBusy(false)
     }

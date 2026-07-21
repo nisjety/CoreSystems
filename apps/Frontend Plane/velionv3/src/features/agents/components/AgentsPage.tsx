@@ -26,7 +26,7 @@ import {
   StageReadinessPanel,
   StageSystemCard,
 } from '@/features/agents/components/AgentsWorkspacePrimitives'
-import { BLUEPRINT_BADGE_TITLE, DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
+import { blueprintBadgeTitle, DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import { WorkflowBuilder } from '@/features/agents/components/WorkflowBuilder'
 import { agentBlueprints } from '@/features/agents/lib/velion-agent-blueprints'
 import {
@@ -41,6 +41,7 @@ import {
 } from '@/features/agents/lib/velion-agent-page-styles'
 import type { AgentBlueprint } from '@/features/agents/lib/velion-agent-page-types'
 import { useAgentFeature, useAgentSelection } from '@/features/agents/lib/use-agent-selection'
+import { useI18n } from '@/shared/i18n'
 
 export default function AgentsPage() {
   const [agentSelection, setAgentSelection] = useAgentSelection()
@@ -90,6 +91,7 @@ function AgentsPageFrame(props: { children: JSX.Element }) {
 }
 
 function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) {
+  const i18n = useI18n()
   return (
     <>
       <header class="agents-overview-header">
@@ -100,11 +102,13 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
           id="agent-role-heading"
           class="agents-overview-title"
         >
-          One agent system for the entire customer journey
+          {i18n.tr('Ett agentsystem for hele kundereisen', 'One agent system for the entire customer journey')}
         </h1>
         <p class="agents-overview-description">
-          Each role below is a Velion blueprint — a reference operating model, not yet configured for this org.
-          Choose one to review how its knowledge, tests, channels, and insight loops fit together.
+          {i18n.tr(
+            'Hver rolle under er et Velion-blueprint — en referansemodell for drift, ennå ikke konfigurert for denne organisasjonen. Velg én for å se hvordan kunnskap, tester, kanaler og innsiktsløkker henger sammen.',
+            'Each role below is a Velion blueprint — a reference operating model, not yet configured for this org. Choose one to review how its knowledge, tests, channels, and insight loops fit together.',
+          )}
         </p>
       </header>
 
@@ -127,19 +131,23 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
 }
 
 function TaskConsoleEntry() {
+  const i18n = useI18n()
   return (
-    <A href="/agents/runs" class={cn('agents-task-console-entry', controlFocusClass)} aria-label="Open the Agent Run Console to run and approve agent tasks">
+    <A href="/agents/runs" class={cn('agents-task-console-entry', controlFocusClass)} aria-label={i18n.tr('Åpne Agent Run Console for å kjøre og godkjenne agentoppgaver', 'Open the Agent Run Console to run and approve agent tasks')}>
       <span class="agents-task-console-entry__icon">
         <Gauge class="size-5" strokeWidth={2.1} />
       </span>
       <span class="agents-task-console-entry__copy">
-        <span class="agents-task-console-entry__title">Task Console — run &amp; approve agent tasks</span>
+        <span class="agents-task-console-entry__title">{i18n.tr('Oppgavekonsoll — kjør og godkjenn agentoppgaver', 'Task Console — run & approve agent tasks')}</span>
         <span class="agents-task-console-entry__desc">
-          Launch an autonomous run, watch the live plan, tools, and browser steps, and approve risky actions before they happen.
+          {i18n.tr(
+            'Start en selvstendig kjøring, følg planen, verktøyene og nettleser-stegene live, og godkjenn risikable handlinger før de skjer.',
+            'Launch an autonomous run, watch the live plan, tools, and browser steps, and approve risky actions before they happen.',
+          )}
         </span>
       </span>
       <span class="agents-task-console-entry__cta">
-        Open console
+        {i18n.tr('Åpne konsoll', 'Open console')}
         <ChevronRight class="size-4" strokeWidth={2.2} />
       </span>
     </A>
@@ -151,6 +159,7 @@ function SelectedAgentWorkspace(props: {
   onFeatureSelect: (feature: AgentFeatureId) => void
   role: AgentBlueprint
 }) {
+  const i18n = useI18n()
   const workspace = createMemo(() => {
     const role = props.role
     const operatingModel = role.operatingModel
@@ -208,7 +217,7 @@ function SelectedAgentWorkspace(props: {
               <div class={cn('rounded-[8px] border p-4 shadow-[0_14px_34px_rgba(20,21,24,0.055)]', rolePanelClass(view().role))}>
                 <div class="flex items-center justify-between gap-3">
                   <div>
-                    <p class={cn('text-[11px] font-semibold uppercase', roleEyebrowClass(view().role))}>Activation</p>
+                    <p class={cn('text-[11px] font-semibold uppercase', roleEyebrowClass(view().role))}>{i18n.tr('Aktivering', 'Activation')}</p>
                     <p class="mt-1 text-[15px] font-semibold text-[#202126] dark:text-white">{view().operatingModel.activationStatus}</p>
                   </div>
                   <span class={cn('grid size-9 place-items-center rounded-[8px] text-white', view().role.accentClass)}>
@@ -222,8 +231,8 @@ function SelectedAgentWorkspace(props: {
                     Labelled "Blueprint / not yet configured for this org" and the
                     activate/readiness controls are disabled so nothing implies a
                     configured or deployable agent. No Active/Private/Live badge. */}
-                <DesignPreviewBadge class="mt-3" label="Blueprint" title={BLUEPRINT_BADGE_TITLE} />
-                <p class="mt-2 text-[11px] font-medium leading-4 text-[#8A909B] dark:text-[#7C828C]">Not yet configured for this org</p>
+                <DesignPreviewBadge class="mt-3" label={i18n.tr('Blueprint', 'Blueprint')} title={blueprintBadgeTitle(i18n.tr)} />
+                <p class="mt-2 text-[11px] font-medium leading-4 text-[#8A909B] dark:text-[#7C828C]">{i18n.tr('Ikke konfigurert for denne organisasjonen ennå', 'Not yet configured for this org')}</p>
                 <div class="mt-4 flex gap-2">
                   <Button variant="primary" size="md" shape="pill" disabled class={cn('min-h-8 flex-1 px-4 text-[12px] font-semibold', controlFocusClass)}>
                     <Rocket class="size-3.5" />
@@ -234,18 +243,18 @@ function SelectedAgentWorkspace(props: {
                     size="md"
                     shape="circle"
                     disabled
-                    aria-label={`Run ${view().role.shortTitle} readiness test`}
+                    aria-label={i18n.tr(`Kjør beredskapstest for ${view().role.shortTitle}`, `Run ${view().role.shortTitle} readiness test`)}
                     class={cn('border border-[#E2E3E8] bg-white dark:border-[#2B2D33] dark:bg-[#17181C]', controlFocusClass)}
                   >
                     <Play class="size-3.5" />
                   </VelionIconButton>
                 </div>
-                <div class="mt-4 grid gap-1 sm:grid-cols-2" aria-label={`${view().role.shortTitle} feature areas`}>
+                <div class="mt-4 grid gap-1 sm:grid-cols-2" aria-label={i18n.tr(`${view().role.shortTitle}-funksjonsområder`, `${view().role.shortTitle} feature areas`)}>
                   <For each={view().featureOptions}>
                     {(option) => (
                       <button
                         type="button"
-                        aria-label={`Open ${option.label} workspace`}
+                        aria-label={i18n.tr(`Åpne arbeidsområdet ${option.label}`, `Open ${option.label} workspace`)}
                         aria-pressed={option.id === view().activeFeature}
                         onClick={() => props.onFeatureSelect(option.id)}
                         class={cn(
@@ -281,7 +290,7 @@ function SelectedAgentWorkspace(props: {
                 <div class={cn('rounded-[8px] border p-3 shadow-[0_18px_48px_rgba(20,21,24,0.055)]', rolePanelClass(view().role))}>
                   <div class="mb-3 flex items-center justify-between gap-3">
                     <div>
-                      <p class={cn('text-[11px] font-semibold uppercase', roleEyebrowClass(view().role))}>Preview</p>
+                      <p class={cn('text-[11px] font-semibold uppercase', roleEyebrowClass(view().role))}>{i18n.tr('Forhåndsvisning', 'Preview')}</p>
                       <h2 class="mt-1 text-[16px] font-semibold text-[#202126] dark:text-white">{view().system.previewTitle}</h2>
                     </div>
                     <span class={cn('grid size-8 place-items-center rounded-[8px] text-white', view().role.accentClass)}>

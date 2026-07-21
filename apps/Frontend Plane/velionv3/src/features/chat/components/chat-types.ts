@@ -123,6 +123,26 @@ export type ChatKnowledgeGrounding = {
   graph?: ChatGroundingGraph
 }
 
+/**
+ * Below this answer-confidence score, the chat UI must surface a visible
+ * caveat on the message bubble itself rather than leaving it discoverable
+ * only in the Reasoning/Steps popover.
+ *
+ * Reference point (Model Plane `confidence.rs`): a clean, ungrounded answer
+ * scores exactly `BASE = 0.72` — confident-sounding text with no hedging and
+ * no knowledge-base citations. A genuinely knowledge-base-grounded answer
+ * gets `GROUNDED_BONUS = 0.15` on top, landing around `0.87`. Setting the
+ * threshold at `0.75` — just above the ungrounded baseline — means any
+ * answer that is fluent but NOT grounded in this org's knowledge base gets
+ * flagged, while a real grounded answer does not.
+ *
+ * Incident (2026-07-20): "tell me about aquatiq what do they do and sell"
+ * returned a confidently wrong, uncited answer scored exactly 0.72; that
+ * score was computed but only ever visible by opening the Reasoning popover
+ * and clicking into its "Oversikt" tab — never in the actual chat bubble.
+ */
+export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
+
 export type ChatTurn = {
   id: string
   role: 'user' | 'assistant'

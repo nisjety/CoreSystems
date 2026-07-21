@@ -65,6 +65,7 @@ import {
   type GeneratedFile,
   type GeneratedImagePreview,
   type IconComponent,
+  LOW_CONFIDENCE_ANSWER_THRESHOLD,
   type MarkdownBlock,
   OVERFLOW_PROMPTS,
   PRIMARY_PROMPTS,
@@ -145,6 +146,9 @@ export function AssistantMessage(props: {
         </Show>
         <Show when={props.message.grounding}>
           {(grounding) => <GroundingInlineSummary grounding={grounding()} />}
+        </Show>
+        <Show when={!waiting() && !errored() && props.message.confidence != null && (props.message.confidence ?? 1) < LOW_CONFIDENCE_ANSWER_THRESHOLD}>
+          <LowConfidenceNotice confidence={props.message.confidence ?? 0} />
         </Show>
         <ToolChips tools={props.message.tools} />
         <AttachmentChips attachments={props.message.attachments} tone="assistant" />
@@ -691,6 +695,24 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
         )}
       </For>
     </div>
+  )
+}
+
+/**
+ * Visible, inline caveat for an answer scored below
+ * `LOW_CONFIDENCE_ANSWER_THRESHOLD` (see chat-types.ts for the threshold
+ * rationale). Rendered directly on the message bubble — unlike the
+ * `ReasoningPopover`'s "Sikkerhet" metric, this does not require the user to
+ * open anything to see it. Independent of `message.grounding`: an answer can
+ * be low-confidence with no grounding object at all (an ungrounded guess),
+ * which is exactly the case this notice exists to catch.
+ */
+export function LowConfidenceNotice(props: { confidence: number }) {
+  return (
+    <p class="velion-chat-low-confidence-notice" role="note">
+      <AlertCircle size={12} />
+      Usikkert svar ({Math.round(props.confidence * 100)}% sikkerhet) — sjekk kilder før du stoler på dette.
+    </p>
   )
 }
 

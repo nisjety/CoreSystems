@@ -4,8 +4,10 @@ import { WorkflowInspector } from '@/features/agents/components/WorkflowInspecto
 import { WorkflowToolsPanel } from '@/features/agents/components/WorkflowToolsPanel'
 import { inspectorByTool, toolToCanvasNode } from '@/features/agents/lib/velion-workflow-builder-data'
 import { useAgentSelection, useWorkflowBuilderTool } from '@/features/agents/lib/use-agent-selection'
+import { useI18n } from '@/shared/i18n'
 
 export function WorkflowBuilder() {
+  const i18n = useI18n()
   const [agentSelection, setAgentSelection] = useAgentSelection()
   const [selectedTool, setSelectedTool] = useWorkflowBuilderTool()
   const selectedNodeId = createMemo(() => toolToCanvasNode[selectedTool()])
@@ -36,7 +38,7 @@ export function WorkflowBuilder() {
         <WorkflowTopBar />
 
         <section
-          aria-label="Workflow canvas"
+          aria-label={i18n.tr('Arbeidsflyt-lerret', 'Workflow canvas')}
           class="absolute inset-y-0 left-0 right-0 overflow-hidden pt-20 lg:right-[338px]"
         >
           <WorkflowCanvas

@@ -16,6 +16,7 @@ import {
   workflowToolIconMap,
 } from '@/features/agents/lib/velion-workflow-builder-data'
 import { useWorkflowBuilderTool } from '@/features/agents/lib/use-agent-selection'
+import { useI18n } from '@/shared/i18n'
 
 export function WorkflowToolsPanel(props: {
   activeTool?: WorkflowBuilderToolId
@@ -24,6 +25,7 @@ export function WorkflowToolsPanel(props: {
   onToolChange?: (tool: WorkflowBuilderToolId) => void
   withFrame?: boolean
 }) {
+  const i18n = useI18n()
   const [selectedToolFromContext, setSelectedToolFromContext] = useWorkflowBuilderTool()
   const [activeTab, setActiveTab] = createSignal<WorkflowToolTabId>('ai-apps')
   const [searchQuery, setSearchQuery] = createSignal('')
@@ -44,7 +46,7 @@ export function WorkflowToolsPanel(props: {
 
   return (
     <aside
-      aria-label="Workflow tools"
+      aria-label={i18n.tr('Arbeidsflytverktøy', 'Workflow tools')}
       class={cn(
         'velion-sidebar-type flex h-full min-w-0 flex-col bg-[#F7F7F8] font-sans text-[#25272D] dark:bg-[#101114] dark:text-white',
         props.class,
@@ -57,10 +59,10 @@ export function WorkflowToolsPanel(props: {
               {() => <span class="rounded-full border-[1.7px] border-[#17181C] dark:border-white" />}
             </For>
           </span>
-          <h2 class="velion-sidebar-group-title">Tools</h2>
+          <h2 class="velion-sidebar-group-title">{i18n.tr('Verktøy', 'Tools')}</h2>
         </div>
         <div class="flex items-center gap-1">
-          <VelionIconButton type="button" size="xs" shape="rounded" aria-label="More workflow tools options">
+          <VelionIconButton type="button" size="xs" shape="rounded" aria-label={i18n.tr('Flere alternativer for arbeidsflytverktøy', 'More workflow tools options')}>
             <MoreHorizontal class="size-3.5" strokeWidth={2} />
           </VelionIconButton>
           {props.onCollapse
@@ -70,7 +72,7 @@ export function WorkflowToolsPanel(props: {
                 size="xs"
                 shape="rounded"
                 onClick={props.onCollapse}
-                aria-label="Collapse workflow tools"
+                aria-label={i18n.tr('Skjul arbeidsflytverktøy', 'Collapse workflow tools')}
               >
                 <X class="size-3.5" strokeWidth={2} />
               </VelionIconButton>
@@ -83,11 +85,11 @@ export function WorkflowToolsPanel(props: {
         <label class="relative block">
           <Search class="pointer-events-none absolute left-3 top-1/2 size-[15px] -translate-y-1/2 text-[#A3A7AF]" strokeWidth={2} />
           <input
-            aria-label="Workflow tool search"
+            aria-label={i18n.tr('Søk i arbeidsflytverktøy', 'Workflow tool search')}
             type="search"
             value={searchQuery()}
             onInput={(event) => setSearchQuery(event.currentTarget.value)}
-            placeholder="Search…"
+            placeholder={i18n.tr('Søk …', 'Search…')}
             class="velion-field-compact h-9 pl-9 pr-3 placeholder:text-[#B2B6BE] dark:placeholder:text-[#777E8B]"
           />
         </label>
@@ -136,11 +138,12 @@ function WorkflowToolCard(props: {
   onSelect: (tool: WorkflowBuilderToolId) => void
   toolId: WorkflowBuilderToolId
 }) {
+  const i18n = useI18n()
   return (
     <button
       type="button"
       draggable
-      aria-label={`Select ${props.label} tool`}
+      aria-label={i18n.tr(`Velg verktøyet ${props.label}`, `Select ${props.label} tool`)}
       onClick={() => props.onSelect(props.toolId)}
       onDragStart={(event) => {
         event.dataTransfer?.setData('text/plain', props.toolId)

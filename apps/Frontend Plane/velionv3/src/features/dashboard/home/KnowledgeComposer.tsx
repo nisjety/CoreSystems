@@ -100,6 +100,19 @@ type IngestJob = {
   events?: IngestEvent[]
   eventStream?: string
   id?: string
+  /** Whether this crawl/batch job asked quarry to persist pages into the
+   * knowledge base (`ingest: true`). Undefined/false for a working-set-only
+   * run. Drives {@link statusLabel} — a crawl's own completion is NEVER, by
+   * itself, evidence that anything was durably indexed. */
+  ingestRequested?: boolean
+  /** Set true once a `store_record_failed` event is observed for this job —
+   * the crawl succeeded but the Data Plane write for at least one page did
+   * not (e.g. an org-identity or Data Plane outage). */
+  ingestFailed?: boolean
+  /** Set true once at least one `store_record_written` event is observed —
+   * real proof a page was durably persisted, independent of quarry's own
+   * scrape/crawl completion status. */
+  ingestWritten?: boolean
   key: string
   kind: IngestKind
   label: string
@@ -285,6 +298,12 @@ export function KnowledgeComposer(props: {
         ...(event.progress !== undefined ? { progress: event.progress } : {}),
         ...(event.status ? { status: event.status } : {}),
         ...(event.pagesVisited !== undefined ? { pages: event.pagesVisited } : {}),
+        // Real Data Plane ingest proof/failure — independent of quarry's own
+        // run status, so a crawl can't read "Indexed" off scrape completion
+        // alone. Latched (never cleared) so one written page still counts
+        // even if a later page on the same job fails, and vice versa.
+        ...(event.event === 'store_record_written' ? { ingestWritten: true } : {}),
+        ...(event.event === 'store_record_failed' ? { ingestFailed: true } : {}),
       }
     }))
   }
@@ -463,6 +482,7 @@ export function KnowledgeComposer(props: {
       detail: agentMode()
         ? i18n.tr('Starter agentstyrt crawl-workflow ...', 'Starting agent-run crawl workflow ...')
         : i18n.tr(`Crawler opptil ${maxPages} sider ...`, `Crawling up to ${maxPages} pages ...`),
+      ingestRequested: ingest,
       kind: 'crawl',
       label: target,
       status: 'pending',
@@ -530,14 +550,29 @@ export function KnowledgeComposer(props: {
     setFormError(null)
     setSubmitting(true)
     const host = hostnameOf(discovery()?.url || urls[0] || '')
+    // Phase 6 selective ingest, CrawlPagePicker parity fix: this flow never
+    // resolved the user's crawl_ingest_mode at all, so "Velg sider" could
+    // never persist to the knowledge base regardless of preference. Resolve
+    // it the same way startCrawlJob does before handing off to quarry.
+    const ingestMode = (await getPreferences().catch(() => null))?.crawlIngestMode ?? 'never'
+    const ingest =
+      ingestMode === 'auto' ||
+      (ingestMode === 'prompt' &&
+        window.confirm(
+          i18n.tr(
+            'Lagre disse sidene i kunnskapsbasen din? (privat for deg til du deler dem)',
+            'Save these pages to your knowledge base? (private to you until you share them)',
+          ),
+        ))
     const key = addJob({
       detail: i18n.tr(`Crawler ${urls.length} valgte sider ...`, `Crawling ${urls.length} selected pages ...`),
+      ingestRequested: ingest,
       kind: 'crawl',
       label: `${host} · ${urls.length} sider`,
       status: 'pending',
     })
     try {
-      const job = await crawlSelectedPages(orgId(), urls)
+      const job = await crawlSelectedPages(orgId(), urls, ingest)
       updateJob(key, { eventStream: job.eventStream, id: job.id, status: job.status || 'running' })
       startCrawlEventStream(key, job.id)
       setDiscovery(null)
@@ -1631,19 +1666,36 @@ function IngestJobRow(props: { job: IngestJob }) {
   )
 }
 
-function statusLabel(status: string, i18n: ReturnType<typeof useI18n>): string {
-  const normalized = status.trim().toLowerCase()
-  if (normalized === 'completed' || normalized === 'complete' || normalized === 'succeeded') return i18n.tr('Ferdig indeksert', 'Indexed')
+/** Completed-status label. For a `crawl`/`batch` job (kind `'crawl'`), quarry's
+ * own run completion is NEVER by itself proof anything was durably indexed —
+ * that requires `ingest: true` to have been requested AND a real
+ * `store_record_written` event to have been observed (see `appendJobEvent`).
+ * Other kinds (`link`, `upload`) already gate their own "completed" status on
+ * a real Data Plane / imports-core write, so they keep the direct label. */
+function completedLabel(job: IngestJob, i18n: ReturnType<typeof useI18n>): string {
+  if (job.kind !== 'crawl') return i18n.tr('Ferdig indeksert', 'Indexed')
+  if (!job.ingestRequested) return i18n.tr('Crawlet (ikke lagret i kunnskapsbasen)', 'Crawled (not saved to knowledge base)')
+  if (job.ingestWritten) return i18n.tr('Ferdig indeksert', 'Indexed')
+  if (job.ingestFailed) return i18n.tr('Crawlet, men lagring feilet', 'Crawled, but saving failed')
+  // Ingest was requested but neither confirmed nor failed yet (e.g. the
+  // ingest write is still in flight, or the event stream disconnected
+  // before it resolved) — stay neutral rather than claim success.
+  return i18n.tr('Crawlet', 'Crawled')
+}
+
+function statusLabel(job: IngestJob, i18n: ReturnType<typeof useI18n>): string {
+  const normalized = job.status.trim().toLowerCase()
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'succeeded') return completedLabel(job, i18n)
   if (normalized === 'failed' || normalized === 'error') return i18n.tr('Mislyktes', 'Failed')
   if (normalized === 'cancelled') return i18n.tr('Avbrutt', 'Cancelled')
-  return status
+  return job.status
 }
 
 /** Terminal-row detail: status label, plus the crawled page count when the
  * run reported one (so a completed crawl reads "Indexed · 5 pages" rather
  * than dropping to a bare status with 0 pages). */
 function terminalDetail(job: IngestJob, i18n: ReturnType<typeof useI18n>): string {
-  const label = statusLabel(job.status, i18n)
+  const label = statusLabel(job, i18n)
   if (job.kind === 'crawl' && job.pages !== undefined) {
     const pages = i18n.tr(
       `${job.pages} ${job.pages === 1 ? 'side' : 'sider'}`,

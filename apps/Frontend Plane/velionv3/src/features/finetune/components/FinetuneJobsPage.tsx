@@ -31,6 +31,7 @@ import {
   jobDetail,
   productionHourlyRate,
 } from '@/features/finetune/lib/finetune-model'
+import { useI18n } from '@/shared/i18n'
 
 function modelOptions(models: ModelInfo[]): Array<{ value: string; label: string }> {
   return models.map((model) => ({ value: model.id, label: model.name || model.id }))
@@ -41,6 +42,7 @@ const finetuneQueryKeys = {
 }
 
 export default function FinetuneJobsPage() {
+  const i18n = useI18n()
   const session = getSession()
   const queryClient = useQueryClient()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
@@ -78,7 +80,7 @@ export default function FinetuneJobsPage() {
 
   const baseModelOptions = createMemo(() => {
     const options = modelOptions(modelList())
-    return [{ value: '', label: 'Select a base model…' }, ...options]
+    return [{ value: '', label: i18n.tr('Velg en grunnmodell …', 'Select a base model…') }, ...options]
   })
 
   // Production hourly rate is server-configurable: read it from any job envelope
@@ -101,20 +103,20 @@ export default function FinetuneJobsPage() {
   const createJob = async () => {
     const id = orgId()
     if (!id) {
-      setError('No active organization.')
+      setError(i18n.tr('Ingen aktiv organisasjon.', 'No active organization.'))
       return
     }
     const selectedFile = file()
     if (!selectedFile) {
-      setError('Choose a JSONL training file first.')
+      setError(i18n.tr('Velg en JSONL-treningsfil først.', 'Choose a JSONL training file first.'))
       return
     }
     if (!agentId().trim()) {
-      setError('Agent id is required.')
+      setError(i18n.tr('Agent-id er påkrevd.', 'Agent id is required.'))
       return
     }
     if (!baseModel()) {
-      setError('Base model is required.')
+      setError(i18n.tr('Grunnmodell er påkrevd.', 'Base model is required.'))
       return
     }
     setBusy(true)
@@ -130,13 +132,13 @@ export default function FinetuneJobsPage() {
       })
       setNotice(
         tier() === 'production'
-          ? 'Fine-tune job queued for a production deployment.'
-          : 'Fine-tune job queued as a free 24h test.',
+          ? i18n.tr('Fine-tune-jobb satt i kø for en produksjonsutrulling.', 'Fine-tune job queued for a production deployment.')
+          : i18n.tr('Fine-tune-jobb satt i kø som en gratis 24-timers test.', 'Fine-tune job queued as a free 24h test.'),
       )
       setFile(null)
       refreshJobs()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not create fine-tune job.')
+      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke opprette fine-tune-jobb.', 'Could not create fine-tune job.'))
     } finally {
       setBusy(false)
     }
@@ -150,10 +152,10 @@ export default function FinetuneJobsPage() {
     setNotice(null)
     try {
       await cancelFinetuneJob(id, jobId)
-      setNotice('Fine-tune job cancelled.')
+      setNotice(i18n.tr('Fine-tune-jobb kansellert.', 'Fine-tune job cancelled.'))
       refreshJobs()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not cancel fine-tune job.')
+      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke kansellere fine-tune-jobb.', 'Could not cancel fine-tune job.'))
     } finally {
       setCancellingId(null)
     }
@@ -168,10 +170,10 @@ export default function FinetuneJobsPage() {
     try {
       await deployFinetuneJob(id, jobId, 'production')
       setConfirmingDeployId(null)
-      setNotice('Model promoted to a production deployment.')
+      setNotice(i18n.tr('Modell forfremmet til en produksjonsutrulling.', 'Model promoted to a production deployment.'))
       refreshJobs()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not promote fine-tune to production.')
+      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke forfremme fine-tune til produksjon.', 'Could not promote fine-tune to production.'))
     } finally {
       setDeployingId(null)
     }
@@ -181,16 +183,16 @@ export default function FinetuneJobsPage() {
     <SettingsSurface contentVariant="workspace">
       <SettingsHero
         eyebrow="Admin"
-        title="Fine-tune jobs"
-        description="Manage Azure model fine-tuning: upload supervised JSONL examples, launch jobs, and track status."
+        title={i18n.tr('Fine-tune-jobber', 'Fine-tune jobs')}
+        description={i18n.tr('Administrer Azure-modell-finjustering: last opp overvåkede JSONL-eksempler, start jobber og følg status.', 'Manage Azure model fine-tuning: upload supervised JSONL examples, launch jobs, and track status.')}
       />
 
-      <section class="velion-finetune-pricing" aria-label="Fine-tune pricing and tiers">
+      <section class="velion-finetune-pricing" aria-label={i18n.tr('Fine-tune-priser og nivåer', 'Fine-tune pricing and tiers')}>
         <p class="velion-finetune-pricing__framing">
-          Your <strong>RAG knowledge system is always on and standard</strong> — no fine-tune
-          hosting charge. <strong>Fine-tuning is an optional enhancement</strong>: test it free for
-          {' '}{developerAutoDelete()}h, run it <strong>alongside</strong> RAG (a combination), and
-          keep a production deployment only if it wins for your use case.
+          {i18n.tr('Ditt ', 'Your ')}<strong>{i18n.tr('RAG-kunnskapssystem er alltid på og standard', 'RAG knowledge system is always on and standard')}</strong>
+          {i18n.tr(' — ingen fine-tune-hostingkostnad. ', ' — no fine-tune hosting charge. ')}<strong>{i18n.tr('Fine-tuning er en valgfri forbedring', 'Fine-tuning is an optional enhancement')}</strong>
+          {i18n.tr(': test den gratis i ', ': test it free for ')}{developerAutoDelete()}{i18n.tr('t, kjør den ', 'h, run it ')}<strong>{i18n.tr('sammen med', 'alongside')}</strong>
+          {i18n.tr(' RAG (en kombinasjon), og behold en produksjonsutrulling bare hvis den vinner for ditt bruksområde.', ' RAG (a combination), and keep a production deployment only if it wins for your use case.')}
         </p>
         <div class="velion-finetune-pricing__tiers">
           <div
@@ -198,29 +200,28 @@ export default function FinetuneJobsPage() {
             data-recommended="true"
           >
             <div class="velion-finetune-pricing__tier-head">
-              <span class="velion-finetune-pricing__tier-name">Developer (Test)</span>
-              <span class="velion-finetune-pricing__tier-flag">Default · Recommended</span>
+              <span class="velion-finetune-pricing__tier-name">{i18n.tr('Utvikler (Test)', 'Developer (Test)')}</span>
+              <span class="velion-finetune-pricing__tier-flag">{i18n.tr('Standard · Anbefalt', 'Default · Recommended')}</span>
             </div>
             <p class="velion-finetune-pricing__tier-price">
-              <strong>$0/hr</strong> hosting
+              <strong>{i18n.tr('$0/t', '$0/hr')}</strong> {i18n.tr('hosting', 'hosting')}
             </p>
             <p class="velion-finetune-pricing__tier-note">
-              Auto-deletes in <strong>{developerAutoDelete()}h</strong> · for evaluation &amp;
-              proof-of-concept.
+              {i18n.tr('Slettes automatisk om ', 'Auto-deletes in ')}<strong>{developerAutoDelete()}{i18n.tr('t', 'h')}</strong>{i18n.tr(' · for evaluering og proof-of-concept.', ' · for evaluation & proof-of-concept.')}
             </p>
           </div>
           <div class="velion-finetune-pricing__tier velion-finetune-pricing__tier--production">
             <div class="velion-finetune-pricing__tier-head">
-              <span class="velion-finetune-pricing__tier-name">Production</span>
+              <span class="velion-finetune-pricing__tier-name">{i18n.tr('Produksjon', 'Production')}</span>
               <span class="velion-finetune-pricing__tier-flag velion-finetune-pricing__tier-flag--optin">
-                Explicit opt-in
+                {i18n.tr('Eksplisitt tilvalg', 'Explicit opt-in')}
               </span>
             </div>
             <p class="velion-finetune-pricing__tier-price">
-              <strong>{productionRateLabel()}</strong> hosting + per-token inference
+              <strong>{productionRateLabel()}</strong> {i18n.tr('hosting + per-token-inferens', 'hosting + per-token inference')}
             </p>
             <p class="velion-finetune-pricing__tier-note">
-              Same inference rate as the base model · billed hourly while deployed (even when idle).
+              {i18n.tr('Samme inferensrate som grunnmodellen · faktureres time for time mens utrullet (selv når inaktiv).', 'Same inference rate as the base model · billed hourly while deployed (even when idle).')}
             </p>
           </div>
         </div>
@@ -229,26 +230,26 @@ export default function FinetuneJobsPage() {
       <section class="velion-finetune">
         <div class="velion-finetune__create">
           <SectionHeader
-            title="New fine-tune job"
-            description="Upload a JSONL training file and launch a job against a base model."
+            title={i18n.tr('Ny fine-tune-jobb', 'New fine-tune job')}
+            description={i18n.tr('Last opp en JSONL-treningsfil og start en jobb mot en grunnmodell.', 'Upload a JSONL training file and launch a job against a base model.')}
           />
           <div class="velion-settings-field-grid">
             <SettingsField
               id="finetune-agent-id"
-              label="Agent id"
+              label={i18n.tr('Agent-id', 'Agent id')}
               value={agentId()}
               onInput={(event) => setAgentId(event.currentTarget.value)}
             />
             <SettingsSelect
               id="finetune-base-model"
-              label="Base model"
+              label={i18n.tr('Grunnmodell', 'Base model')}
               value={baseModel()}
               options={baseModelOptions()}
               onChange={(event) => setBaseModel(event.currentTarget.value)}
             />
           </div>
           <label for="finetune-file" class="velion-settings-field">
-            <span class="velion-settings-label">Training file (JSONL)</span>
+            <span class="velion-settings-label">{i18n.tr('Treningsfil (JSONL)', 'Training file (JSONL)')}</span>
             <input
               id="finetune-file"
               type="file"
@@ -262,8 +263,8 @@ export default function FinetuneJobsPage() {
           </label>
 
           <fieldset class="velion-finetune-tier" aria-describedby="finetune-tier-help">
-            <legend class="velion-settings-label">Deployment</legend>
-            <div class="velion-finetune-tier__options" role="radiogroup" aria-label="Deployment tier">
+            <legend class="velion-settings-label">{i18n.tr('Utrulling', 'Deployment')}</legend>
+            <div class="velion-finetune-tier__options" role="radiogroup" aria-label={i18n.tr('Utrullingsnivå', 'Deployment tier')}>
               <button
                 type="button"
                 role="radio"
@@ -273,7 +274,7 @@ export default function FinetuneJobsPage() {
                 onClick={() => setTier('developer')}
               >
                 <span class="velion-finetune-tier__option-title">Test</span>
-                <span class="velion-finetune-tier__option-sub">Free · auto-deletes in {developerAutoDelete()}h</span>
+                <span class="velion-finetune-tier__option-sub">{i18n.tr(`Gratis · slettes automatisk om ${developerAutoDelete()}t`, `Free · auto-deletes in ${developerAutoDelete()}h`)}</span>
               </button>
               <button
                 type="button"
@@ -283,16 +284,16 @@ export default function FinetuneJobsPage() {
                 data-active={tier() === 'production'}
                 onClick={() => setTier('production')}
               >
-                <span class="velion-finetune-tier__option-title">Production</span>
-                <span class="velion-finetune-tier__option-sub">{productionRateLabel()} + inference</span>
+                <span class="velion-finetune-tier__option-title">{i18n.tr('Produksjon', 'Production')}</span>
+                <span class="velion-finetune-tier__option-sub">{i18n.tr(`${productionRateLabel()} + inferens`, `${productionRateLabel()} + inference`)}</span>
               </button>
             </div>
             <span id="finetune-tier-help" class="velion-settings-help">
               <Show
                 when={tier() === 'production'}
-                fallback={`Recommended for trying a model: free, removed automatically after ${developerAutoDelete()}h.`}
+                fallback={i18n.tr(`Anbefalt for å prøve en modell: gratis, fjernes automatisk etter ${developerAutoDelete()}t.`, `Recommended for trying a model: free, removed automatically after ${developerAutoDelete()}h.`)}
               >
-                {`Billed ${productionRateLabel()} while deployed (even when idle), plus per-token inference at the base-model rate.`}
+                {i18n.tr(`Faktureres ${productionRateLabel()} mens utrullet (selv når inaktiv), pluss per-token-inferens til grunnmodell-raten.`, `Billed ${productionRateLabel()} while deployed (even when idle), plus per-token inference at the base-model rate.`)}
               </Show>
             </span>
           </fieldset>
@@ -313,19 +314,19 @@ export default function FinetuneJobsPage() {
               )}
             </Show>
             <SettingsButton variant="primary" disabled={busy()} onClick={() => void createJob()}>
-              {busy() ? 'Launching…' : 'Launch fine-tune'}
+              {busy() ? i18n.tr('Starter …', 'Launching…') : i18n.tr('Start fine-tune', 'Launch fine-tune')}
             </SettingsButton>
           </div>
         </div>
 
-        <SectionHeader title="Jobs" description="Recent fine-tune jobs for this organization." />
+        <SectionHeader title={i18n.tr('Jobber', 'Jobs')} description={i18n.tr('Nylige fine-tune-jobber for denne organisasjonen.', 'Recent fine-tune jobs for this organization.')} />
         <Show
           when={!jobsQuery.isLoading}
-          fallback={<p class="velion-finetune__loading">Loading jobs…</p>}
+          fallback={<p class="velion-finetune__loading">{i18n.tr('Laster jobber …', 'Loading jobs…')}</p>}
         >
           <Show
             when={jobs().length > 0}
-            fallback={<p class="velion-finetune__empty">No fine-tune jobs yet.</p>}
+            fallback={<p class="velion-finetune__empty">{i18n.tr('Ingen fine-tune-jobber ennå.', 'No fine-tune jobs yet.')}</p>}
           >
             <div class="velion-settings-list-card">
               <For each={jobs()}>
@@ -338,14 +339,12 @@ export default function FinetuneJobsPage() {
                         <span class="velion-finetune__error">{job.error_message}</span>
                       </Show>
                       <Show when={confirmingDeployId() === job.job_id}>
-                        <div class="velion-finetune__deploy-confirm" role="group" aria-label="Confirm production promotion">
+                        <div class="velion-finetune__deploy-confirm" role="group" aria-label={i18n.tr('Bekreft produksjonsforfremmelse', 'Confirm production promotion')}>
                           <p class="velion-finetune__deploy-cost">
-                            Production hosting: <strong>{productionRateLabel()}</strong> + per-token
-                            inference, billed while deployed (even when idle).
+                            {i18n.tr('Produksjonshosting: ', 'Production hosting: ')}<strong>{productionRateLabel()}</strong>{i18n.tr(' + per-token-inferens, faktureres mens utrullet (selv når inaktiv).', ' + per-token inference, billed while deployed (even when idle).')}
                           </p>
                           <p class="velion-finetune__deploy-note">
-                            Your current Test deployment is free and auto-deletes in{' '}
-                            {developerAutoDelete()}h.
+                            {i18n.tr(`Din nåværende Test-utrulling er gratis og slettes automatisk om ${developerAutoDelete()}t.`, `Your current Test deployment is free and auto-deletes in ${developerAutoDelete()}h.`)}
                           </p>
                           <div class="velion-finetune__deploy-actions">
                             <SettingsButton
@@ -354,14 +353,14 @@ export default function FinetuneJobsPage() {
                               disabled={deployingId() === job.job_id}
                               onClick={() => void promoteJob(job.job_id)}
                             >
-                              {deployingId() === job.job_id ? 'Promoting…' : 'Confirm production'}
+                              {deployingId() === job.job_id ? i18n.tr('Forfremmer …', 'Promoting…') : i18n.tr('Bekreft produksjon', 'Confirm production')}
                             </SettingsButton>
                             <SettingsButton
                               settingsSize="sm"
                               disabled={deployingId() === job.job_id}
                               onClick={() => setConfirmingDeployId(null)}
                             >
-                              Cancel
+                              {i18n.tr('Avbryt', 'Cancel')}
                             </SettingsButton>
                           </div>
                         </div>
@@ -373,8 +372,8 @@ export default function FinetuneJobsPage() {
                         data-tier={deploymentTier(job)}
                         title={
                           deploymentTier(job) === 'production'
-                            ? `Production deployment · ${formatHourlyRate(productionHourlyRate(job))} hosting`
-                            : 'Test deployment · free, auto-deletes'
+                            ? i18n.tr(`Produksjonsutrulling · ${formatHourlyRate(productionHourlyRate(job))} hosting`, `Production deployment · ${formatHourlyRate(productionHourlyRate(job))} hosting`)
+                            : i18n.tr('Test-utrulling · gratis, slettes automatisk', 'Test deployment · free, auto-deletes')
                         }
                       >
                         {deploymentTierLabel(deploymentTier(job))}
@@ -402,7 +401,7 @@ export default function FinetuneJobsPage() {
                           }
                           onClick={() => setConfirmingDeployId(job.job_id)}
                         >
-                          Promote to production
+                          {i18n.tr('Forfrem til produksjon', 'Promote to production')}
                         </SettingsButton>
                       </Show>
                       <Show when={isCancellableStatus(job.status)}>
@@ -412,7 +411,7 @@ export default function FinetuneJobsPage() {
                           disabled={cancellingId() === job.job_id}
                           onClick={() => void cancelJob(job.job_id)}
                         >
-                          {cancellingId() === job.job_id ? 'Cancelling…' : 'Cancel'}
+                          {cancellingId() === job.job_id ? i18n.tr('Kansellerer …', 'Cancelling…') : i18n.tr('Avbryt', 'Cancel')}
                         </SettingsButton>
                       </Show>
                     </div>

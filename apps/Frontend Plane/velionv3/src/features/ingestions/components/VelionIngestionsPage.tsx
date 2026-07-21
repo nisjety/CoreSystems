@@ -53,6 +53,7 @@ import {
   type BaselineSnapshot,
   type ChangeRecord,
 } from '@/shared/api/monitoring-client'
+import { localeDateTime, useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
@@ -83,16 +84,34 @@ type SourceFormState = {
   monitor: boolean
 }
 
-const views: Array<{ id: IngestionView; label: string; icon: Component<LucideProps> }> = [
-  { id: 'runs', label: 'Runs', icon: ScanSearch },
-  { id: 'schedules', label: 'Schedules', icon: CalendarClock },
-  { id: 'monitoring', label: 'Monitoring', icon: Telescope },
-  { id: 'sources', label: 'Sources', icon: Globe },
-  { id: 'evidence', label: 'Evidence', icon: FileSearch },
-  { id: 'profiles', label: 'Profiles', icon: ShieldCheck },
+const views: Array<{ id: IngestionView; icon: Component<LucideProps> }> = [
+  { id: 'runs', icon: ScanSearch },
+  { id: 'schedules', icon: CalendarClock },
+  { id: 'monitoring', icon: Telescope },
+  { id: 'sources', icon: Globe },
+  { id: 'evidence', icon: FileSearch },
+  { id: 'profiles', icon: ShieldCheck },
 ]
 
+function viewLabel(id: IngestionView, i18n: ReturnType<typeof useI18n>) {
+  switch (id) {
+    case 'runs':
+      return i18n.tr('Kjøringer', 'Runs')
+    case 'schedules':
+      return i18n.tr('Tidsplaner', 'Schedules')
+    case 'monitoring':
+      return i18n.tr('Overvåking', 'Monitoring')
+    case 'sources':
+      return i18n.tr('Kilder', 'Sources')
+    case 'evidence':
+      return i18n.tr('Bevis', 'Evidence')
+    case 'profiles':
+      return i18n.tr('Profiler', 'Profiles')
+  }
+}
+
 export default function VelionIngestionsPage() {
+  const i18n = useI18n()
   const [activeView, setActiveView] = createSignal<IngestionView>('runs')
   const [loading, setLoading] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
@@ -143,7 +162,11 @@ export default function VelionIngestionsPage() {
       setSelectedRunId((current) => current ?? runData[0]?.id ?? null)
     } catch (nextError) {
       if (signal?.aborted) return
-      setError(nextError instanceof Error ? nextError.message : 'Could not load ingestion workspace.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Kunne ikke laste inn arbeidsområdet for innhenting.', 'Could not load ingestion workspace.'),
+      )
     } finally {
       if (!signal?.aborted) setLoading(false)
     }
@@ -199,7 +222,11 @@ export default function VelionIngestionsPage() {
       }
       await loadWorkspace()
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Run could not be started.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Kjøringen kunne ikke startes.', 'Run could not be started.'),
+      )
     }
   }
 
@@ -216,7 +243,11 @@ export default function VelionIngestionsPage() {
       setScheduleForm((current) => ({ ...current, name: '', targetUrl: '' }))
       await loadWorkspace()
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Schedule could not be created.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Tidsplanen kunne ikke opprettes.', 'Schedule could not be created.'),
+      )
     }
   }
 
@@ -226,7 +257,11 @@ export default function VelionIngestionsPage() {
       await runIngestionScheduleAction(action, scheduleId)
       await loadWorkspace()
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Schedule action failed.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Tidsplanhandlingen mislyktes.', 'Schedule action failed.'),
+      )
     }
   }
 
@@ -234,7 +269,7 @@ export default function VelionIngestionsPage() {
     setError(null)
     const form = sourceForm()
     if (!form.name.trim() || !form.url.trim()) {
-      setError('A source name and URL are required.')
+      setError(i18n.tr('Kildenavn og URL er påkrevd.', 'A source name and URL are required.'))
       return
     }
     setSourcePending(true)
@@ -249,7 +284,11 @@ export default function VelionIngestionsPage() {
       setSourceForm((current) => ({ ...current, name: '', url: '' }))
       await loadWorkspace()
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Source could not be created.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Kilden kunne ikke opprettes.', 'Source could not be created.'),
+      )
     } finally {
       setSourcePending(false)
     }
@@ -262,7 +301,11 @@ export default function VelionIngestionsPage() {
       await deleteIngestionSource(id)
       await loadWorkspace()
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Source could not be removed.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Kilden kunne ikke fjernes.', 'Source could not be removed.'),
+      )
     } finally {
       setDeletingSourceId(null)
     }
@@ -273,15 +316,17 @@ export default function VelionIngestionsPage() {
       <div class="ingestions-page__content">
         <header class="ingestions-header">
           <div class="ingestions-header__copy">
-            <h1>Ingestions</h1>
+            <h1>{i18n.tr('Innhenting', 'Ingestions')}</h1>
             <p>
-              Run crawls and extracts, inspect evidence, manage recurring schedules, and hand trusted sources back into
-              Knowledge.
+              {i18n.tr(
+                'Kjør crawler og uttrekk, inspiser bevis, administrer gjentakende tidsplaner, og gi tiltrodde kilder tilbake til Kunnskap.',
+                'Run crawls and extracts, inspect evidence, manage recurring schedules, and hand trusted sources back into Knowledge.',
+              )}
             </p>
           </div>
 
           <div class="ingestions-header__actions">
-            <VelionSegmented class="ingestions-tabs" aria-label="Ingestion views">
+            <VelionSegmented class="ingestions-tabs" aria-label={i18n.tr('Innhentingsvisninger', 'Ingestion views')}>
               <For each={views}>
                 {(view) => {
                   const Icon = view.icon
@@ -292,7 +337,7 @@ export default function VelionIngestionsPage() {
                       onClick={() => setActiveView(view.id)}
                     >
                       <Icon class="size-4" strokeWidth={1.9} />
-                      {view.label}
+                      {viewLabel(view.id, i18n)}
                     </VelionSegmentedButton>
                   )
                 }}
@@ -300,7 +345,7 @@ export default function VelionIngestionsPage() {
             </VelionSegmented>
             <Button class="ingestions-refresh" onClick={() => void loadWorkspace()}>
               <RefreshCw class={cn('size-4', loading() && 'ingestions-spin')} strokeWidth={1.9} />
-              Refresh
+              {i18n.tr('Oppdater', 'Refresh')}
             </Button>
           </div>
         </header>
@@ -382,6 +427,7 @@ function RunComposer(props: {
   onFormChange: (patch: Partial<RunFormState>) => void
   onSubmit: () => Promise<void>
 }) {
+  const i18n = useI18n()
   const isBatch = () => props.form.kind === 'batch'
 
   return (
@@ -393,23 +439,23 @@ function RunComposer(props: {
       }}
     >
       <div>
-        <h2>Start a run</h2>
-        <p>Manual parity for scrape, crawl, extract, and batch execution.</p>
+        <h2>{i18n.tr('Start en kjøring', 'Start a run')}</h2>
+        <p>{i18n.tr('Manuell parallell til scrape, crawl, uttrekk og batch-kjøring.', 'Manual parity for scrape, crawl, extract, and batch execution.')}</p>
       </div>
       <label class="ingestions-field">
-        Run type
+        {i18n.tr('Kjøringstype', 'Run type')}
         <VelionSelect value={props.form.kind} onChange={(event) => props.onFormChange({ kind: event.currentTarget.value })}>
-          <option value="scrape">Scrape</option>
-          <option value="crawl">Crawl</option>
-          <option value="extract">Extract</option>
-          <option value="batch">Batch</option>
+          <option value="scrape">{i18n.tr('Scrape', 'Scrape')}</option>
+          <option value="crawl">{i18n.tr('Crawl', 'Crawl')}</option>
+          <option value="extract">{i18n.tr('Uttrekk', 'Extract')}</option>
+          <option value="batch">{i18n.tr('Batch', 'Batch')}</option>
         </VelionSelect>
       </label>
       <Show
         when={isBatch()}
         fallback={
           <label class="ingestions-field">
-            Target URL
+            {i18n.tr('Mål-URL', 'Target URL')}
             <VelionInput
               value={props.form.url}
               onInput={(event) => props.onFormChange({ url: event.currentTarget.value })}
@@ -419,7 +465,7 @@ function RunComposer(props: {
         }
       >
         <label class="ingestions-field">
-          URLs
+          {i18n.tr('URL-er', 'URLs')}
           <VelionTextarea
             rows={6}
             value={props.form.urls}
@@ -430,18 +476,21 @@ function RunComposer(props: {
       </Show>
       <Show when={props.form.kind === 'extract'}>
         <label class="ingestions-field">
-          Extraction prompt
+          {i18n.tr('Uttrekksprompt', 'Extraction prompt')}
           <VelionTextarea
             rows={4}
             value={props.form.prompt}
             onInput={(event) => props.onFormChange({ prompt: event.currentTarget.value })}
-            placeholder="Extract key support topics, contact channels, and pricing signals."
+            placeholder={i18n.tr(
+              'Trekk ut sentrale supporttemaer, kontaktkanaler og prissignaler.',
+              'Extract key support topics, contact channels, and pricing signals.',
+            )}
           />
         </label>
       </Show>
       <Button variant="primary" fullWidth type="submit">
         <Play class="size-4" strokeWidth={1.9} />
-        Start run
+        {i18n.tr('Start kjøring', 'Start run')}
       </Button>
     </form>
   )
@@ -452,15 +501,16 @@ function RunsPanel(props: {
   selectedRunId: string | null
   onSelectRun: (runId: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <section class="velion-panel ingestions-card ingestions-runs-panel">
       <div class="ingestions-card__header">
         <div>
-          <h2>Recent runs</h2>
-          <p>Durable crawl, extract, batch, search, and agent jobs from Quarry.</p>
+          <h2>{i18n.tr('Nylige kjøringer', 'Recent runs')}</h2>
+          <p>{i18n.tr('Varige crawl-, uttrekk-, batch-, søk- og agentjobber fra Quarry.', 'Durable crawl, extract, batch, search, and agent jobs from Quarry.')}</p>
         </div>
         <A href="/knowledge" class="ingestions-inline-link">
-          Open Knowledge
+          {i18n.tr('Åpne Kunnskap', 'Open Knowledge')}
           <ArrowUpRight class="size-4" strokeWidth={1.9} />
         </A>
       </div>
@@ -468,11 +518,11 @@ function RunsPanel(props: {
         <table class="ingestions-table">
           <thead>
             <tr>
-              <th>Kind</th>
-              <th>Target</th>
-              <th>Status</th>
-              <th>Created</th>
-              <th>Progress</th>
+              <th>{i18n.tr('Type', 'Kind')}</th>
+              <th>{i18n.tr('Mål', 'Target')}</th>
+              <th>{i18n.tr('Status', 'Status')}</th>
+              <th>{i18n.tr('Opprettet', 'Created')}</th>
+              <th>{i18n.tr('Fremdrift', 'Progress')}</th>
             </tr>
           </thead>
           <tbody>
@@ -481,7 +531,7 @@ function RunsPanel(props: {
               fallback={
                 <tr>
                   <td colspan="5" class="ingestions-empty-cell">
-                    No durable runs yet.
+                    {i18n.tr('Ingen varige kjøringer ennå.', 'No durable runs yet.')}
                   </td>
                 </tr>
               }
@@ -496,7 +546,7 @@ function RunsPanel(props: {
                   <td>
                     <StatusBadge status={run.status} />
                   </td>
-                  <td class="ingestions-muted-cell">{relativeTime(run.createdAt)}</td>
+                  <td class="ingestions-muted-cell">{relativeTime(run.createdAt, i18n)}</td>
                   <td>
                     {run.progress.completed ?? 0}
                     {run.progress.total ? ` / ${run.progress.total}` : ''}
@@ -516,6 +566,7 @@ function ScheduleComposer(props: {
   onFormChange: (patch: Partial<ScheduleFormState>) => void
   onSubmit: () => Promise<void>
 }) {
+  const i18n = useI18n()
   return (
     <form
       class="velion-panel ingestions-card ingestions-composer"
@@ -525,29 +576,29 @@ function ScheduleComposer(props: {
       }}
     >
       <div>
-        <h2>Create schedule</h2>
-        <p>Recurring ingestion for sources that should stay fresh without manual runs.</p>
+        <h2>{i18n.tr('Opprett tidsplan', 'Create schedule')}</h2>
+        <p>{i18n.tr('Gjentakende innhenting for kilder som skal holdes ferske uten manuelle kjøringer.', 'Recurring ingestion for sources that should stay fresh without manual runs.')}</p>
       </div>
       <label class="ingestions-field">
-        Name
+        {i18n.tr('Navn', 'Name')}
         <VelionInput
           value={props.form.name}
           onInput={(event) => props.onFormChange({ name: event.currentTarget.value })}
-          placeholder="Docs crawl"
+          placeholder={i18n.tr('Dokumentasjon-crawl', 'Docs crawl')}
         />
       </label>
       <label class="ingestions-field">
-        Kind
+        {i18n.tr('Type', 'Kind')}
         <VelionSelect value={props.form.kind} onChange={(event) => props.onFormChange({ kind: event.currentTarget.value })}>
-          <option value="crawl">Crawl</option>
-          <option value="extract">Extract</option>
-          <option value="search">Search</option>
-          <option value="batch">Batch</option>
-          <option value="agent">Agent</option>
+          <option value="crawl">{i18n.tr('Crawl', 'Crawl')}</option>
+          <option value="extract">{i18n.tr('Uttrekk', 'Extract')}</option>
+          <option value="search">{i18n.tr('Søk', 'Search')}</option>
+          <option value="batch">{i18n.tr('Batch', 'Batch')}</option>
+          <option value="agent">{i18n.tr('Agent', 'Agent')}</option>
         </VelionSelect>
       </label>
       <label class="ingestions-field">
-        Target URL
+        {i18n.tr('Mål-URL', 'Target URL')}
         <VelionInput
           value={props.form.targetUrl}
           onInput={(event) => props.onFormChange({ targetUrl: event.currentTarget.value })}
@@ -555,7 +606,7 @@ function ScheduleComposer(props: {
         />
       </label>
       <label class="ingestions-field">
-        Cron
+        {i18n.tr('Cron', 'Cron')}
         <VelionInput
           value={props.form.cron}
           onInput={(event) => props.onFormChange({ cron: event.currentTarget.value })}
@@ -564,7 +615,7 @@ function ScheduleComposer(props: {
       </label>
       <Button variant="primary" fullWidth type="submit">
         <CalendarClock class="size-4" strokeWidth={1.9} />
-        Save schedule
+        {i18n.tr('Lagre tidsplan', 'Save schedule')}
       </Button>
     </form>
   )
@@ -574,16 +625,17 @@ function SchedulesPanel(props: {
   schedules: ScheduleItem[]
   onAction: (action: string, scheduleId: string) => Promise<void>
 }) {
+  const i18n = useI18n()
   return (
     <section class="velion-panel ingestions-card">
       <div>
-        <h2>Schedule lifecycle</h2>
-        <p>Pause, resume, trigger, and retire recurring jobs from one surface.</p>
+        <h2>{i18n.tr('Tidsplansyklus', 'Schedule lifecycle')}</h2>
+        <p>{i18n.tr('Sett på pause, gjenoppta, utløs og legg ned gjentakende jobber fra én flate.', 'Pause, resume, trigger, and retire recurring jobs from one surface.')}</p>
       </div>
       <div class="ingestions-card-list">
         <For
           each={props.schedules}
-          fallback={<div class="ingestions-empty-box">No recurring schedules yet.</div>}
+          fallback={<div class="ingestions-empty-box">{i18n.tr('Ingen gjentakende tidsplaner ennå.', 'No recurring schedules yet.')}</div>}
         >
           {(schedule) => (
             <article class="ingestions-list-card">
@@ -596,8 +648,11 @@ function SchedulesPanel(props: {
                   <p>{schedule.target}</p>
                   <div class="ingestions-meta-row">
                     <span class="ingestions-capitalize">{schedule.kind}</span>
-                    <span>{schedule.cron || schedule.scheduleAt || 'Manual cadence'}</span>
-                    <span>Next: {schedule.nextRunAt ? relativeTime(schedule.nextRunAt) : 'Not scheduled'}</span>
+                    <span>{schedule.cron || schedule.scheduleAt || i18n.tr('Manuell frekvens', 'Manual cadence')}</span>
+                    <span>
+                      {i18n.tr('Neste', 'Next')}:{' '}
+                      {schedule.nextRunAt ? relativeTime(schedule.nextRunAt, i18n) : i18n.tr('Ikke planlagt', 'Not scheduled')}
+                    </span>
                   </div>
                 </div>
                 <div class="ingestions-actions-row">
@@ -606,21 +661,21 @@ function SchedulesPanel(props: {
                     fallback={
                       <Button size="xs" onClick={() => void props.onAction('pause_schedule', schedule.id)}>
                         <TimerReset class="size-4" strokeWidth={1.9} />
-                        Pause
+                        {i18n.tr('Pause', 'Pause')}
                       </Button>
                     }
                   >
                     <Button size="xs" onClick={() => void props.onAction('unpause_schedule', schedule.id)}>
                       <Play class="size-4" strokeWidth={1.9} />
-                      Resume
+                      {i18n.tr('Gjenoppta', 'Resume')}
                     </Button>
                   </Show>
                   <Button size="xs" onClick={() => void props.onAction('trigger_schedule', schedule.id)}>
                     <RefreshCw class="size-4" strokeWidth={1.9} />
-                    Trigger
+                    {i18n.tr('Utløs', 'Trigger')}
                   </Button>
                   <Button size="xs" onClick={() => void props.onAction('delete_schedule', schedule.id)}>
-                    Retire
+                    {i18n.tr('Legg ned', 'Retire')}
                   </Button>
                 </div>
               </div>
@@ -633,6 +688,7 @@ function SchedulesPanel(props: {
 }
 
 function MonitoringPanel() {
+  const i18n = useI18n()
   // The URL the user is actively working with vs. the one we've committed to
   // (submitted) — history/last-checked load only for a committed, valid URL.
   const [urlInput, setUrlInput] = createSignal('')
@@ -650,7 +706,7 @@ function MonitoringPanel() {
   async function check() {
     const candidate = urlInput().trim()
     if (!candidate) {
-      setError('Enter a URL to check.')
+      setError(i18n.tr('Angi en URL som skal sjekkes.', 'Enter a URL to check.'))
       return
     }
     setError(null)
@@ -662,7 +718,11 @@ function MonitoringPanel() {
       // The check may have produced a new baseline upstream; refresh history.
       void refetchHistory()
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : 'Check could not be completed.')
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : i18n.tr('Sjekken kunne ikke fullføres.', 'Check could not be completed.'),
+      )
     } finally {
       setChecking(false)
     }
@@ -678,14 +738,16 @@ function MonitoringPanel() {
         }}
       >
         <div>
-          <h2>Check a page for changes</h2>
+          <h2>{i18n.tr('Sjekk en side for endringer', 'Check a page for changes')}</h2>
           <p>
-            On-demand only: Velion fetches the page now, fingerprints its content, and compares it to the last
-            baseline this workspace captured. Recurring at-scale monitoring is not yet available.
+            {i18n.tr(
+              'Kun on-demand: Velion henter siden nå, fingeravtrykker innholdet, og sammenligner det med den siste basislinjen dette arbeidsområdet har fanget opp. Gjentakende overvåking i stor skala er ikke tilgjengelig ennå.',
+              'On-demand only: Velion fetches the page now, fingerprints its content, and compares it to the last baseline this workspace captured. Recurring at-scale monitoring is not yet available.',
+            )}
           </p>
         </div>
         <label class="ingestions-field">
-          Page URL
+          {i18n.tr('Side-URL', 'Page URL')}
           <VelionInput
             value={urlInput()}
             onInput={(event) => setUrlInput(event.currentTarget.value)}
@@ -694,7 +756,7 @@ function MonitoringPanel() {
         </label>
         <Button variant="primary" fullWidth type="submit" disabled={checking()}>
           <ScanSearch class={cn('size-4', checking() && 'ingestions-spin')} strokeWidth={1.9} />
-          {checking() ? 'Checking…' : 'Check now'}
+          {checking() ? i18n.tr('Sjekker …', 'Checking…') : i18n.tr('Sjekk nå', 'Check now')}
         </Button>
 
         <Show when={error()}>
@@ -710,18 +772,29 @@ function MonitoringPanel() {
             <div class="ingestions-code-card">
               <div class="ingestions-title-row">
                 <Telescope class="size-4" strokeWidth={1.9} />
-                <h3>Latest check</h3>
+                <h3>{i18n.tr('Siste sjekk', 'Latest check')}</h3>
                 <ChangeStatusBadge status={result().status} />
               </div>
               <div class="ingestions-meta-row ingestions-meta-row--spread">
                 <span class="ingestions-truncate">{result().sourceUrl}</span>
-                <span>{relativeTime(result().checkedAt)}</span>
+                <span>{relativeTime(result().checkedAt, i18n)}</span>
               </div>
               <Show
                 when={result().prevBaseline}
-                fallback={<p>No earlier baseline — this is the first time this workspace has checked this page.</p>}
+                fallback={
+                  <p>
+                    {i18n.tr(
+                      'Ingen tidligere basislinje — dette er første gang dette arbeidsområdet har sjekket denne siden.',
+                      'No earlier baseline — this is the first time this workspace has checked this page.',
+                    )}
+                  </p>
+                }
               >
-                {(prev) => <p>Previous baseline captured {relativeTime(prev().capturedAt)}.</p>}
+                {(prev) => (
+                  <p>
+                    {i18n.tr('Forrige basislinje ble fanget', 'Previous baseline captured')} {relativeTime(prev().capturedAt, i18n)}.
+                  </p>
+                )}
               </Show>
             </div>
           )}
@@ -731,25 +804,25 @@ function MonitoringPanel() {
       <section class="velion-panel ingestions-card ingestions-runs-panel">
         <div class="ingestions-card__header">
           <div>
-            <h2>Change history</h2>
-            <p>Captured baselines for the page above, newest first. Empty until a check records a baseline.</p>
+            <h2>{i18n.tr('Endringshistorikk', 'Change history')}</h2>
+            <p>{i18n.tr('Fangede basislinjer for siden over, nyeste først. Tom helt til en sjekk registrerer en basislinje.', 'Captured baselines for the page above, newest first. Empty until a check records a baseline.')}</p>
           </div>
         </div>
         <Show
           when={watchedUrl()}
-          fallback={<div class="ingestions-empty-box">Run a check to see this page's baseline history.</div>}
+          fallback={<div class="ingestions-empty-box">{i18n.tr('Kjør en sjekk for å se basislinjehistorikken til denne siden.', "Run a check to see this page's baseline history.")}</div>}
         >
           <Show
             when={!history.loading}
-            fallback={<div class="ingestions-empty-box">Loading history…</div>}
+            fallback={<div class="ingestions-empty-box">{i18n.tr('Laster historikk …', 'Loading history…')}</div>}
           >
             <div class="ingestions-table-wrap">
               <table class="ingestions-table">
                 <thead>
                   <tr>
-                    <th>Captured</th>
-                    <th>Fingerprint</th>
-                    <th>Run</th>
+                    <th>{i18n.tr('Fanget', 'Captured')}</th>
+                    <th>{i18n.tr('Fingeravtrykk', 'Fingerprint')}</th>
+                    <th>{i18n.tr('Kjøring', 'Run')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -758,14 +831,14 @@ function MonitoringPanel() {
                     fallback={
                       <tr>
                         <td colspan="3" class="ingestions-empty-cell">
-                          No baselines recorded for this page yet.
+                          {i18n.tr('Ingen basislinjer registrert for denne siden ennå.', 'No baselines recorded for this page yet.')}
                         </td>
                       </tr>
                     }
                   >
                     {(snapshot: BaselineSnapshot) => (
                       <tr class="ingestions-row">
-                        <td class="ingestions-muted-cell">{relativeTime(snapshot.capturedAt)}</td>
+                        <td class="ingestions-muted-cell">{relativeTime(snapshot.capturedAt, i18n)}</td>
                         <td class="ingestions-truncate">{shortFingerprint(snapshot.fingerprint)}</td>
                         <td class="ingestions-muted-cell">{snapshot.runId || '—'}</td>
                       </tr>
@@ -808,6 +881,7 @@ function SourcesPanel(props: {
   deletingId: string | null
   onDelete: (id: string) => Promise<void>
 }) {
+  const i18n = useI18n()
   const canSubmit = () =>
     !props.creating && props.form.name.trim().length > 0 && props.form.url.trim().length > 0
 
@@ -816,18 +890,18 @@ function SourcesPanel(props: {
       <div class="velion-panel ingestions-card">
         <div class="ingestions-card__header">
           <div>
-            <h2>Connected sources</h2>
-            <p>Integration-backed knowledge and website ingestion targets visible to Velion.</p>
+            <h2>{i18n.tr('Tilkoblede kilder', 'Connected sources')}</h2>
+            <p>{i18n.tr('Integrasjonsbasert kunnskap og nettsted-mål for innhenting synlige for Velion.', 'Integration-backed knowledge and website ingestion targets visible to Velion.')}</p>
           </div>
           <A href="/knowledge" class="ingestions-inline-link">
-            Open Knowledge
+            {i18n.tr('Åpne Kunnskap', 'Open Knowledge')}
             <ArrowUpRight class="size-4" strokeWidth={1.9} />
           </A>
         </div>
         <div class="ingestions-card-list">
           <For
             each={props.sources?.integrations ?? []}
-            fallback={<div class="ingestions-empty-box">No connected integrations yet.</div>}
+            fallback={<div class="ingestions-empty-box">{i18n.tr('Ingen tilkoblede integrasjoner ennå.', 'No connected integrations yet.')}</div>}
           >
             {(source) => (
               <article class="ingestions-list-card">
@@ -853,8 +927,8 @@ function SourcesPanel(props: {
         </div>
       </div>
       <div class="velion-panel ingestions-card">
-        <h2>Tracked web sources</h2>
-        <p>Durable source resources registered in Quarry for recurring refresh and review.</p>
+        <h2>{i18n.tr('Sporede nettkilder', 'Tracked web sources')}</h2>
+        <p>{i18n.tr('Varige kilderessurser registrert i Quarry for gjentakende oppdatering og gjennomgang.', 'Durable source resources registered in Quarry for recurring refresh and review.')}</p>
         <form
           class="ingestions-source-form"
           onSubmit={(event) => {
@@ -863,16 +937,16 @@ function SourcesPanel(props: {
           }}
         >
           <label class="ingestions-field">
-            Name
+            {i18n.tr('Navn', 'Name')}
             <VelionInput
               value={props.form.name}
               onInput={(event) => props.onFormChange({ name: event.currentTarget.value })}
-              placeholder="Acme pricing page"
+              placeholder={i18n.tr('Acme prisside', 'Acme pricing page')}
               disabled={props.creating}
             />
           </label>
           <label class="ingestions-field">
-            URL
+            {i18n.tr('URL', 'URL')}
             <VelionInput
               value={props.form.url}
               onInput={(event) => props.onFormChange({ url: event.currentTarget.value })}
@@ -881,15 +955,15 @@ function SourcesPanel(props: {
             />
           </label>
           <label class="ingestions-field">
-            Kind
+            {i18n.tr('Type', 'Kind')}
             <VelionSelect
               value={props.form.kind}
               onChange={(event) => props.onFormChange({ kind: event.currentTarget.value })}
               disabled={props.creating}
             >
-              <option value="crawl">Crawl</option>
-              <option value="scrape">Scrape</option>
-              <option value="search">Search</option>
+              <option value="crawl">{i18n.tr('Crawl', 'Crawl')}</option>
+              <option value="scrape">{i18n.tr('Scrape', 'Scrape')}</option>
+              <option value="search">{i18n.tr('Søk', 'Search')}</option>
             </VelionSelect>
           </label>
           <label class="ingestions-checkbox-field">
@@ -899,7 +973,7 @@ function SourcesPanel(props: {
               onChange={(event) => props.onFormChange({ monitor: event.currentTarget.checked })}
               disabled={props.creating}
             />
-            Monitor for changes (daily)
+            {i18n.tr('Overvåk for endringer (daglig)', 'Monitor for changes (daily)')}
           </label>
           <Button variant="primary" fullWidth type="submit" disabled={!canSubmit()}>
             <Show
@@ -907,19 +981,19 @@ function SourcesPanel(props: {
               fallback={
                 <>
                   <Plus class="size-4" strokeWidth={1.9} />
-                  Add source
+                  {i18n.tr('Legg til kilde', 'Add source')}
                 </>
               }
             >
               <Loader class="size-4 ingestions-spin" strokeWidth={1.9} />
-              Adding…
+              {i18n.tr('Legger til …', 'Adding…')}
             </Show>
           </Button>
         </form>
         <div class="ingestions-card-list">
           <For
             each={props.sources?.quarrySources ?? []}
-            fallback={<div class="ingestions-empty-box">Quarry has no durable source records yet.</div>}
+            fallback={<div class="ingestions-empty-box">{i18n.tr('Quarry har ingen varige kilderegistreringer ennå.', 'Quarry has no durable source records yet.')}</div>}
           >
             {(source) => (
               <article class="ingestions-list-card">
@@ -933,7 +1007,7 @@ function SourcesPanel(props: {
                 <div class="ingestions-meta-row ingestions-meta-row--spread">
                   <span class="ingestions-capitalize">{source.kind}</span>
                   <span class="ingestions-source-meta-actions">
-                    <Show when={source.updatedAt}>{relativeTime(source.updatedAt)}</Show>
+                    <Show when={source.updatedAt}>{relativeTime(source.updatedAt, i18n)}</Show>
                     <Button
                       size="xs"
                       variant="ghost"
@@ -946,7 +1020,7 @@ function SourcesPanel(props: {
                       >
                         <Loader class="size-4 ingestions-spin" strokeWidth={1.9} />
                       </Show>
-                      Remove
+                      {i18n.tr('Fjern', 'Remove')}
                     </Button>
                   </span>
                 </div>
@@ -967,11 +1041,12 @@ function EvidencePanel(props: {
   runs: RunItem[]
   onSelectRun: (runId: string) => void
 }) {
+  const i18n = useI18n()
   return (
     <section class="ingestions-two-column ingestions-two-column--evidence">
       <aside class="velion-panel ingestions-card">
-        <h2>Evidence focus</h2>
-        <p>Inspect provenance and warnings before trusting or operationalizing a result.</p>
+        <h2>{i18n.tr('Bevisfokus', 'Evidence focus')}</h2>
+        <p>{i18n.tr('Inspiser opphav og advarsler før du stoler på eller tar i bruk et resultat.', 'Inspect provenance and warnings before trusting or operationalizing a result.')}</p>
         <div class="ingestions-evidence-list">
           <For each={props.runs.slice(0, 12)}>
             {(run) => (
@@ -993,15 +1068,18 @@ function EvidencePanel(props: {
       <div class="velion-panel ingestions-card">
         <div class="ingestions-card__header">
           <div>
-            <h2>Operational evidence</h2>
+            <h2>{i18n.tr('Driftsbevis', 'Operational evidence')}</h2>
             <p>
-              <Show when={props.selectedRun} fallback="Most recent manual scrape or extract output.">
-                {(run) => `Timeline and warnings for ${run().target}.`}
+              <Show
+                when={props.selectedRun}
+                fallback={i18n.tr('Siste manuelle scrape- eller uttrekksresultat.', 'Most recent manual scrape or extract output.')}
+              >
+                {(run) => i18n.tr(`Tidslinje og advarsler for ${run().target}.`, `Timeline and warnings for ${run().target}.`)}
               </Show>
             </p>
           </div>
           <A href="/knowledge" class="ingestions-inline-link">
-            Send to Knowledge
+            {i18n.tr('Send til Kunnskap', 'Send to Knowledge')}
             <ArrowUpRight class="size-4" strokeWidth={1.9} />
           </A>
         </div>
@@ -1011,7 +1089,7 @@ function EvidencePanel(props: {
             <div class="ingestions-code-card">
               <div class="ingestions-title-row">
                 <Database class="size-4" strokeWidth={1.9} />
-                <h3>Latest manual {evidence().kind}</h3>
+                <h3>{i18n.tr(`Siste manuelle ${evidence().kind}`, `Latest manual ${evidence().kind}`)}</h3>
               </div>
               <pre>{JSON.stringify(evidence(), null, 2)}</pre>
             </div>
@@ -1023,7 +1101,7 @@ function EvidencePanel(props: {
           fallback={
             <Show when={props.selectedRunId}>
               <div class="ingestions-empty-box ingestions-empty-box--spacious">
-                No durable evidence timeline is available for this run yet.
+                {i18n.tr('Ingen varig bevistidslinje er tilgjengelig for denne kjøringen ennå.', 'No durable evidence timeline is available for this run yet.')}
               </div>
             </Show>
           }
@@ -1032,7 +1110,7 @@ function EvidencePanel(props: {
             <div class="ingestions-card-list">
               <Show when={evidence().warnings.length > 0}>
                 <div class="ingestions-warning-box">
-                  <h3>Warnings</h3>
+                  <h3>{i18n.tr('Advarsler', 'Warnings')}</h3>
                   <ul>
                     <For each={evidence().warnings}>
                       {(warning) => <li>{warning.summary}</li>}
@@ -1041,7 +1119,7 @@ function EvidencePanel(props: {
                 </div>
               </Show>
               <div class="ingestions-code-card">
-                <h3>Run timeline</h3>
+                <h3>{i18n.tr('Kjøringstidslinje', 'Run timeline')}</h3>
                 <div class="ingestions-card-list">
                   <For each={evidence().timeline}>
                     {(event) => (
@@ -1051,12 +1129,13 @@ function EvidencePanel(props: {
                             <StatusBadge status={event.status} />
                             <strong class="ingestions-capitalize">{event.stage}</strong>
                           </div>
-                          <span>{relativeTime(event.timestamp)}</span>
+                          <span>{relativeTime(event.timestamp, i18n)}</span>
                         </div>
                         <p>
-                          Completed {event.completed}
-                          {event.total ? ` / ${event.total}` : ''}, queued {event.queued}, discovered {event.discovered},
-                          blocks {event.blocks}
+                          {i18n.tr(
+                            `Fullført ${event.completed}${event.total ? ` / ${event.total}` : ''}, i kø ${event.queued}, oppdaget ${event.discovered}, blokker ${event.blocks}`,
+                            `Completed ${event.completed}${event.total ? ` / ${event.total}` : ''}, queued ${event.queued}, discovered ${event.discovered}, blocks ${event.blocks}`,
+                          )}
                         </p>
                         <Show when={event.payload}>
                           {(payload) => <pre>{JSON.stringify(payload(), null, 2)}</pre>}
@@ -1075,14 +1154,15 @@ function EvidencePanel(props: {
 }
 
 function ProfilesPanel(props: { profiles: ProfilePayload | null }) {
+  const i18n = useI18n()
   return (
     <section class="velion-panel ingestions-card">
-      <h2>Profiles</h2>
-      <p>Browser/session profiles for protected sources and stateful refresh flows.</p>
+      <h2>{i18n.tr('Profiler', 'Profiles')}</h2>
+      <p>{i18n.tr('Nettleser-/øktprofiler for beskyttede kilder og tilstandsbaserte oppdateringsflyter.', 'Browser/session profiles for protected sources and stateful refresh flows.')}</p>
       <div class="ingestions-profile-grid">
         <For
           each={props.profiles?.profiles ?? []}
-          fallback={<div class="ingestions-empty-box">No saved profiles yet.</div>}
+          fallback={<div class="ingestions-empty-box">{i18n.tr('Ingen lagrede profiler ennå.', 'No saved profiles yet.')}</div>}
         >
           {(profile) => (
             <article class="ingestions-list-card">
@@ -1091,10 +1171,10 @@ function ProfilesPanel(props: { profiles: ProfilePayload | null }) {
                 <StatusBadge status={profile.restorable ? 'ready' : 'review'} />
               </div>
               <div class="ingestions-profile-details">
-                <span>Cookies: {profile.cookies}</span>
-                <span>Storage entries: {profile.storage}</span>
+                <span>{i18n.tr('Informasjonskapsler', 'Cookies')}: {profile.cookies}</span>
+                <span>{i18n.tr('Lagringsoppføringer', 'Storage entries')}: {profile.storage}</span>
                 <span>
-                  {profile.locale || 'No locale'} - {profile.timezone || 'No timezone'}
+                  {profile.locale || i18n.tr('Ingen lokalitet', 'No locale')} - {profile.timezone || i18n.tr('Ingen tidssone', 'No timezone')}
                 </span>
               </div>
             </article>
@@ -1116,12 +1196,12 @@ function StatusBadge(props: { status: string }) {
   return <span class={cn('ingestions-status', tone())}>{props.status.replace(/_/g, ' ')}</span>
 }
 
-function relativeTime(value?: string | null) {
-  if (!value) return 'Unknown'
+function relativeTime(value: string | null | undefined, i18n: ReturnType<typeof useI18n>) {
+  if (!value) return i18n.tr('Ukjent', 'Unknown')
   const time = Date.parse(value)
   if (!Number.isFinite(time)) return value
   const deltaMs = time - Date.now()
-  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
+  const rtf = new Intl.RelativeTimeFormat(localeDateTime(i18n.locale()), { numeric: 'auto' })
   const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
     ['day', 86_400_000],
     ['hour', 3_600_000],

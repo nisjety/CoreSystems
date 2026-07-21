@@ -11,6 +11,7 @@ import {
   SettingsButton,
   SettingsField,
 } from '@/features/settings/components/settings-ui'
+import { useI18n } from '@/shared/i18n'
 
 /**
  * Two-factor (TOTP) enrollment.
@@ -41,6 +42,7 @@ function errorMessage(err: unknown, fallback: string): string {
 }
 
 export function TwoFactorEnrollmentSection() {
+  const i18n = useI18n()
   const [step, setStep] = createSignal<EnrollmentStep>('idle')
   const [password, setPassword] = createSignal('')
   const [totpUri, setTotpUri] = createSignal('')
@@ -60,14 +62,14 @@ export function TwoFactorEnrollmentSection() {
     try {
       const enrollment = await enableTwoFactor({ password: password() })
       if (!enrollment.totpURI) {
-        setError('Two-factor enrollment did not return a setup key. Try again.')
+        setError(i18n.tr('Registrering av tofaktorautentisering returnerte ingen oppsettsnøkkel. Prøv igjen.', 'Two-factor enrollment did not return a setup key. Try again.'))
         return
       }
       setTotpUri(enrollment.totpURI)
       setBackupCodes(enrollment.backupCodes)
       setStep('scan')
     } catch (err) {
-      setError(errorMessage(err, 'Could not start two-factor enrollment.'))
+      setError(errorMessage(err, i18n.tr('Kunne ikke starte registrering av tofaktorautentisering.', 'Could not start two-factor enrollment.')))
     } finally {
       setBusy(false)
     }
@@ -93,7 +95,7 @@ export function TwoFactorEnrollmentSection() {
       }
       setStep('done')
     } catch (err) {
-      setError(errorMessage(err, 'That code did not match. Check your authenticator and retry.'))
+      setError(errorMessage(err, i18n.tr('Koden stemte ikke. Sjekk autentiseringsappen din og prøv igjen.', 'That code did not match. Check your authenticator and retry.')))
     } finally {
       setBusy(false)
     }
@@ -117,7 +119,7 @@ export function TwoFactorEnrollmentSection() {
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1800)
     } catch {
-      setError('Could not copy to clipboard. Select and copy the key manually.')
+      setError(i18n.tr('Kunne ikke kopiere til utklippstavlen. Merk og kopier nøkkelen manuelt.', 'Could not copy to clipboard. Select and copy the key manually.'))
     }
   }
 
@@ -136,8 +138,11 @@ export function TwoFactorEnrollmentSection() {
   return (
     <section id="two-factor" class="velion-settings-section">
       <SectionHeader
-        title="Two-factor authentication"
-        description="Add a time-based one-time code (TOTP) from an authenticator app to protect sign-in."
+        title={i18n.tr('Tofaktorautentisering', 'Two-factor authentication')}
+        description={i18n.tr(
+          'Legg til en tidsbasert engangskode (TOTP) fra en autentiseringsapp for å beskytte innloggingen.',
+          'Add a time-based one-time code (TOTP) from an authenticator app to protect sign-in.',
+        )}
       />
 
       <Show when={error()}>
@@ -152,15 +157,15 @@ export function TwoFactorEnrollmentSection() {
         <form class="velion-settings-list-card velion-twofa-step" onSubmit={begin}>
           <div class="velion-settings-list-row">
             <div>
-              <p>Authenticator app</p>
-              <span>Confirm your password to generate a setup key for your authenticator.</span>
+              <p>{i18n.tr('Autentiseringsapp', 'Authenticator app')}</p>
+              <span>{i18n.tr('Bekreft passordet ditt for å generere en oppsettsnøkkel for autentiseringsappen din.', 'Confirm your password to generate a setup key for your authenticator.')}</span>
             </div>
             <ShieldCheck class="size-5" aria-hidden="true" />
           </div>
           <div class="velion-twofa-form-row">
             <SettingsField
               id="twofa-password"
-              label="Account password"
+              label={i18n.tr('Kontopassord', 'Account password')}
               type="text"
               value={password()}
               onInput={(event) => setPassword(event.currentTarget.value)}
@@ -171,7 +176,7 @@ export function TwoFactorEnrollmentSection() {
               settingsSize="sm"
               disabled={busy() || password().length === 0}
             >
-              {busy() ? 'Starting…' : 'Begin setup'}
+              {busy() ? i18n.tr('Starter…', 'Starting…') : i18n.tr('Start oppsett', 'Begin setup')}
             </SettingsButton>
           </div>
         </form>
@@ -181,30 +186,35 @@ export function TwoFactorEnrollmentSection() {
         <div class="velion-settings-list-card velion-twofa-step">
           <div class="velion-twofa-scan">
             <p class="velion-twofa-lead">
-              Add this account to your authenticator app, then enter the 6-digit code it shows.
+              {i18n.tr(
+                'Legg til denne kontoen i autentiseringsappen din, og skriv deretter inn den 6-sifrede koden den viser.',
+                'Add this account to your authenticator app, then enter the 6-digit code it shows.',
+              )}
             </p>
             <div class="velion-twofa-key">
-              <span class="velion-twofa-key__label">Setup key</span>
+              <span class="velion-twofa-key__label">{i18n.tr('Oppsettsnøkkel', 'Setup key')}</span>
               <code class="velion-twofa-key__value">{secret() || totpUri()}</code>
               <SettingsButton settingsSize="xs" onClick={() => void copySecret()}>
-                <Show when={copied()} fallback={<><Copy size={13} aria-hidden="true" /> Copy</>}>
-                  <Check size={13} aria-hidden="true" /> Copied
+                <Show when={copied()} fallback={<><Copy size={13} aria-hidden="true" /> {i18n.tr('Kopier', 'Copy')}</>}>
+                  <Check size={13} aria-hidden="true" /> {i18n.tr('Kopiert', 'Copied')}
                 </Show>
               </SettingsButton>
             </div>
             <p class="velion-settings-subnote">
-              No QR scanner here yet — paste the setup key into your authenticator's "enter key
-              manually" option, or open the otpauth link on the device with the app installed.
+              {i18n.tr(
+                'Ingen QR-skanner her ennå — lim inn oppsettsnøkkelen i autentiseringsappens alternativ for manuell nøkkelinnføring, eller åpne otpauth-lenken på enheten der appen er installert.',
+                'No QR scanner here yet — paste the setup key into your authenticator\'s "enter key manually" option, or open the otpauth link on the device with the app installed.',
+              )}
             </p>
             <a class="velion-twofa-otpauth" href={totpUri()}>
-              Open in authenticator
+              {i18n.tr('Åpne i autentiseringsapp', 'Open in authenticator')}
             </a>
           </div>
 
           <form class="velion-twofa-form-row" onSubmit={confirm}>
             <SettingsField
               id="twofa-code"
-              label="6-digit code"
+              label={i18n.tr('6-sifret kode', '6-digit code')}
               type="text"
               value={code()}
               onInput={(event) => setCode(event.currentTarget.value)}
@@ -217,10 +227,10 @@ export function TwoFactorEnrollmentSection() {
                 settingsSize="sm"
                 disabled={busy() || code().replace(/\s/g, '').length === 0}
               >
-                {busy() ? 'Verifying…' : 'Confirm & enable'}
+                {busy() ? i18n.tr('Verifiserer…', 'Verifying…') : i18n.tr('Bekreft og aktiver', 'Confirm & enable')}
               </SettingsButton>
               <SettingsButton settingsSize="sm" onClick={reset} disabled={busy()}>
-                Cancel
+                {i18n.tr('Avbryt', 'Cancel')}
               </SettingsButton>
             </div>
           </form>
@@ -231,8 +241,8 @@ export function TwoFactorEnrollmentSection() {
         <div class="velion-settings-list-card velion-twofa-step">
           <div class="velion-settings-list-row">
             <div>
-              <p>Two-factor authentication is on</p>
-              <span>You'll be asked for a code from your authenticator at each sign-in.</span>
+              <p>{i18n.tr('Tofaktorautentisering er på', 'Two-factor authentication is on')}</p>
+              <span>{i18n.tr('Du vil bli bedt om en kode fra autentiseringsappen din ved hver innlogging.', "You'll be asked for a code from your authenticator at each sign-in.")}</span>
             </div>
             <ShieldCheck class="size-5" aria-hidden="true" />
           </div>
@@ -241,11 +251,11 @@ export function TwoFactorEnrollmentSection() {
             <div class="velion-twofa-backup">
               <div class="velion-twofa-backup__header">
                 <div>
-                  <p>Backup codes</p>
-                  <span>Store these somewhere safe. Each code works once if you lose your device.</span>
+                  <p>{i18n.tr('Reservekoder', 'Backup codes')}</p>
+                  <span>{i18n.tr('Oppbevar disse på et trygt sted. Hver kode virker én gang hvis du mister enheten din.', 'Store these somewhere safe. Each code works once if you lose your device.')}</span>
                 </div>
                 <SettingsButton settingsSize="sm" onClick={downloadBackupCodes}>
-                  <Download size={14} aria-hidden="true" /> Download
+                  <Download size={14} aria-hidden="true" /> {i18n.tr('Last ned', 'Download')}
                 </SettingsButton>
               </div>
               <ul class="velion-twofa-codes">

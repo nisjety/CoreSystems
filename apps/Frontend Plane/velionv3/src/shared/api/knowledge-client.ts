@@ -452,15 +452,22 @@ export async function discoverCrawlPages(
 /** Crawl exactly the pages the user selected. The gateway hands the list to
  * quarry's durable `/v1/batch`, which ingests only those URLs and emits the same
  * run-event stream as a whole-site crawl — so live progress is scoped to the
- * selection. Returns the run, ready for {@link streamCrawlRunEvents}. */
+ * selection. Returns the run, ready for {@link streamCrawlRunEvents}.
+ *
+ * `ingest` mirrors {@link startCrawl}'s flag: the resolved crawl_ingest_mode
+ * decision (auto→true / never→false / prompt→user's answer). Previously this
+ * was never forwarded at all, so the "Velg sider" picker could never persist
+ * to the knowledge base regardless of the user's preference — quarry's
+ * `/v1/batch` defaults `ingest` to NEVER when the field is absent. */
 export async function crawlSelectedPages(
   orgId: string,
   urls: string[],
+  ingest?: boolean,
   signal?: AbortSignal,
 ): Promise<CrawlJob> {
   const raw = await requestJson<unknown>('/api/v1/knowledge/crawl', {
     method: 'POST',
-    body: JSON.stringify({ urls }),
+    body: JSON.stringify({ urls, ...(ingest === undefined ? {} : { ingest }) }),
     headers: orgHeaders(orgId),
     signal,
   })

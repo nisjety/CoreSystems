@@ -6,6 +6,7 @@ import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { VelionTextarea } from '@/shared/ui/velion/VelionTextarea'
 import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
 import type { SupportIntegrationStatus } from '@/features/agents/lib/use-chatbot-support-status'
+import { useI18n } from '@/shared/i18n'
 
 export type StudioIcon = Component<LucideProps>
 
@@ -36,6 +37,7 @@ export function PlaygroundAccordion(props: {
 }
 
 export function SupportIntegrationBanner(props: { status: SupportIntegrationStatus }) {
+  const i18n = useI18n()
   const connected = () => props.status.status === 'connected'
   const checking = () => props.status.status === 'loading'
 
@@ -50,13 +52,17 @@ export function SupportIntegrationBanner(props: { status: SupportIntegrationStat
     >
       <div class="flex items-center gap-2 font-semibold">
         <span class={cn('size-2 rounded-full', checking() ? 'bg-[#D59F45]' : connected() ? 'bg-[#10B35A]' : 'bg-[#EE7A50]')} />
-        {checking() ? 'Checking live support actions' : connected() ? 'Live support actions connected' : 'Support actions not connected'}
+        {checking()
+          ? i18n.tr('Sjekker live supporthandlinger', 'Checking live support actions')
+          : connected()
+            ? i18n.tr('Live supporthandlinger tilkoblet', 'Live support actions connected')
+            : i18n.tr('Supporthandlinger ikke tilkoblet', 'Support actions not connected')}
       </div>
       <p class="mt-1">{props.status.message}</p>
       <div class="mt-2 flex flex-wrap gap-1.5">
-        <SupportIntegrationPill label="Agents" value={props.status.agents} />
-        <SupportIntegrationPill label="Groups" value={props.status.groups} />
-        <SupportIntegrationPill label="Macros" value={props.status.macros} />
+        <SupportIntegrationPill label={i18n.tr('Agenter', 'Agents')} value={props.status.agents} />
+        <SupportIntegrationPill label={i18n.tr('Grupper', 'Groups')} value={props.status.groups} />
+        <SupportIntegrationPill label={i18n.tr('Makroer', 'Macros')} value={props.status.macros} />
       </div>
     </div>
   )
