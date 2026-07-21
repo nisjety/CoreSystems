@@ -24,8 +24,25 @@
 //! - `AUTH_CORE_JWKS_TTL_SECS`        — optional; default 300s.
 //! - `AUTH_CORE_JWT_LEEWAY_SECS`      — optional; default 30s. Clock-skew
 //!   tolerance applied to `exp` and `nbf` validation.
-//! - `QUARRY_EDGE_AUTH_DEV_BYPASS`    — `1`/`true` to accept any bearer
-//!   and inject a stub `Claims` for local dev. NEVER in production.
+//! - `QUARRY_EDGE_AUTH_DEV_BYPASS`    — `1`/`true` to accept a bearer that
+//!   FAILS real verification and inject a stub `Claims` for local dev, so a
+//!   legacy static/non-JWT caller can still reach protected routes. NEVER in
+//!   production.
+//!
+//! Dev-bypass ordering (P0 fix — Aquatiq crawl-to-KB pipeline, 2026-07-20):
+//! every bearer is run through the SAME real JWKS verification the strict
+//! path uses, REGARDLESS of whether the bypass flag is set. Only when that
+//! verification fails does the bypass flag get consulted, and only then does
+//! the request fall back to the stub `Claims{org_id:"org_placeholder", ...}`.
+//! Previously the bypass short-circuited BEFORE verification, so it silently
+//! discarded every real, correctly-signed, real-org-scoped bearer the gateway
+//! mints per user (`quarry_token()` → `aud=quarry`) and replaced it with the
+//! placeholder identity — corrupting `org_id` end-to-end for every crawl/batch
+//! handoff and any downstream Data Plane ingest keyed off it. Verifying first
+//! means: a real, valid bearer always wins on its own merits; the bypass only
+//! ever covers a bearer that could never have passed verification anyway
+//! (e.g. a shared static dev token), so it can no longer clobber real tenant
+//! identity while remaining available for that legitimate fallback case.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -229,49 +246,19 @@ async fn get_jwks(force_refresh: bool) -> Result<JwkSet, StatusCode> {
     Ok(jwks)
 }
 
-/// Axum middleware that verifies a Bearer JWT and injects [`Claims`] into
-/// the request's extension map. Handlers downstream of this middleware
-/// can recover the claims with `Extension<Claims>`.
+/// Verifies a bearer against the real Auth Core JWKS path: header decode,
+/// algorithm pin, `kid` lookup (with one forced refresh on miss), signature +
+/// `exp`/`nbf`/`iss`/`aud` validation, then principal normalization. This is
+/// the strict path — used unconditionally, regardless of `QUARRY_EDGE_AUTH_DEV_BYPASS`,
+/// so a real bearer is always verified for real before any bypass is consulted.
 ///
 /// # Errors
-/// - [`StatusCode::UNAUTHORIZED`] when no usable token is present, or it
-///   fails header decode / signature / claims validation against the JWKS.
-/// - [`StatusCode::INTERNAL_SERVER_ERROR`] when JWKS cannot be fetched or
-///   the JWK cannot be materialised into a decoding key.
-pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, StatusCode> {
-    let token = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
-    let Some(token) = token else {
-        warn!("missing or invalid Authorization bearer");
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let token = token.as_str();
-
-    if dev_bypass_enabled() {
-        warn!("QUARRY_EDGE_AUTH_DEV_BYPASS enabled — accepting bearer without verification");
-        let claims = Claims {
-            sub: "user_placeholder".to_owned(),
-            iss: "dev".to_owned(),
-            exp: i64::MAX,
-            org_id: "org_placeholder".to_owned(),
-            user_id: "user_placeholder".to_owned(),
-            principal_type: Some("user".to_owned()),
-            service_id: None,
-            nbf: None,
-            aud: None,
-            scopes: Vec::new(),
-        };
-        req.extensions_mut().insert(claims);
-        return Ok(next.run(req).await);
-    }
-
+/// - [`StatusCode::UNAUTHORIZED`] on header decode / algorithm / kid / signature
+///   / claims-validation / principal-normalization failure.
+/// - [`StatusCode::INTERNAL_SERVER_ERROR`] when JWKS cannot be fetched, the JWK
+///   cannot be materialised into a decoding key, or `AUTH_CORE_AUDIENCE` is
+///   unset without `AUTH_CORE_AUDIENCE_OPTIONAL=1`.
+async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     let jwt_header = decode_header(token).map_err(|e| {
         warn!(error = %e, "failed to decode JWT header");
         StatusCode::UNAUTHORIZED
@@ -351,8 +338,75 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    req.extensions_mut().insert(token_data.claims);
-    Ok(next.run(req).await)
+    Ok(token_data.claims)
+}
+
+/// The stub identity injected only when `QUARRY_EDGE_AUTH_DEV_BYPASS` is
+/// enabled AND the presented bearer already failed real JWKS verification.
+/// NEVER used for a bearer that verifies successfully — see [`require_auth`].
+fn dev_bypass_stub_claims() -> Claims {
+    Claims {
+        sub: "user_placeholder".to_owned(),
+        iss: "dev".to_owned(),
+        exp: i64::MAX,
+        org_id: "org_placeholder".to_owned(),
+        user_id: "user_placeholder".to_owned(),
+        principal_type: Some("user".to_owned()),
+        service_id: None,
+        nbf: None,
+        aud: None,
+        scopes: Vec::new(),
+    }
+}
+
+/// Axum middleware that verifies a Bearer JWT and injects [`Claims`] into
+/// the request's extension map. Handlers downstream of this middleware
+/// can recover the claims with `Extension<Claims>`.
+///
+/// Every bearer is verified against the real Auth Core JWKS path FIRST,
+/// regardless of `QUARRY_EDGE_AUTH_DEV_BYPASS`. Only when that verification
+/// fails is the bypass flag consulted, and only then does the request fall
+/// back to a stub `Claims{org_id:"org_placeholder", ...}` for local dev —
+/// so the bypass can never silently discard a real, correctly-signed,
+/// real-org-scoped bearer (see module docs for the incident this fixes).
+///
+/// # Errors
+/// - [`StatusCode::UNAUTHORIZED`] when no usable token is present, or it
+///   fails verification and the bypass is not enabled.
+/// - [`StatusCode::INTERNAL_SERVER_ERROR`] when JWKS cannot be fetched or
+///   the JWK cannot be materialised into a decoding key (and the bypass is
+///   not enabled).
+pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, StatusCode> {
+    let token = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    let Some(token) = token else {
+        warn!("missing or invalid Authorization bearer");
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    match verify_jwt_bearer(&token).await {
+        Ok(claims) => {
+            req.extensions_mut().insert(claims);
+            Ok(next.run(req).await)
+        }
+        Err(status) if dev_bypass_enabled() => {
+            warn!(
+                %status,
+                "QUARRY_EDGE_AUTH_DEV_BYPASS enabled — bearer failed real JWKS \
+                 verification, falling back to stub claims (org_id=org_placeholder)"
+            );
+            req.extensions_mut().insert(dev_bypass_stub_claims());
+            Ok(next.run(req).await)
+        }
+        Err(status) => Err(status),
+    }
 }
 
 /// Returns an Axum middleware that enforces a required scope on the
@@ -685,5 +739,197 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
         clear_env();
+    }
+
+    // -----------------------------------------------------------------
+    // P0 regression — Aquatiq crawl-to-KB pipeline (2026-07-20): dev-bypass
+    // must verify a real bearer first and only ever stub when verification
+    // genuinely fails, so it can never again clobber a real per-org JWT the
+    // gateway mints (as it did in production, stamping every crawl job
+    // "org_placeholder" instead of the real tenant).
+    // -----------------------------------------------------------------
+
+    async fn reset_jwks_cache_for_test() {
+        *JWKS_CACHE.write().await = None;
+    }
+
+    fn echo_org_router() -> Router {
+        async fn echo_org(Extension(claims): Extension<Claims>) -> String {
+            claims.org_id.clone()
+        }
+        Router::new()
+            .route("/", get(echo_org))
+            .layer(middleware::from_fn(require_auth))
+    }
+
+    fn rsa_keypair_pem() -> &'static (String, String) {
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+        static KP: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+        KP.get_or_init(|| {
+            let mut rng = rand::thread_rng();
+            let priv_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+            let pub_key = rsa::RsaPublicKey::from(&priv_key);
+            let priv_pem = priv_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("encode priv pem")
+                .to_string();
+            let pub_pem = pub_key
+                .to_public_key_pem(LineEnding::LF)
+                .expect("encode pub pem");
+            (priv_pem, pub_pem)
+        })
+    }
+
+    fn jwk_n_e() -> (String, String) {
+        use base64::Engine;
+        use rsa::pkcs8::DecodePublicKey;
+        use rsa::traits::PublicKeyParts;
+        let (_, pub_pem) = rsa_keypair_pem();
+        let pk = rsa::RsaPublicKey::from_public_key_pem(pub_pem).expect("decode pub pem");
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pk.n().to_bytes_be());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pk.e().to_bytes_be());
+        (n, e)
+    }
+
+    fn sign_jwt(claims: &Claims, kid: &str) -> String {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+        let (priv_pem, _) = rsa_keypair_pem();
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).expect("load priv key");
+        encode(&header, claims, &key).expect("encode jwt")
+    }
+
+    async fn start_jwks_mock(kid: &str) -> wiremock::MockServer {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let (n, e) = jwk_n_e();
+        let body = serde_json::json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": kid,
+                "n": n,
+                "e": e,
+            }]
+        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn now_secs() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_secs(),
+        )
+        .expect("unix epoch fits in i64")
+    }
+
+    /// The core regression: with the bypass ON, a real, validly-signed,
+    /// real-org bearer must be verified and its REAL claims used — never
+    /// silently replaced by the `org_placeholder` stub. This is the exact
+    /// bug that stamped every Aquatiq crawl job with a placeholder org.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn dev_bypass_prefers_valid_jwt_over_stub_claims() {
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("AUTH_CORE_AUDIENCE_OPTIONAL", "1");
+
+        let kid = "test-kid-real";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var("AUTH_CORE_JWKS_URL", format!("{}/jwks", server.uri()));
+
+        let claims = Claims {
+            sub: "user-real".into(),
+            iss: "auth-core".into(),
+            exp: now_secs() + 3600,
+            org_id: "org-real-aquatiq".into(),
+            user_id: "user-real".into(),
+            principal_type: Some("user".into()),
+            service_id: None,
+            nbf: None,
+            aud: None,
+            scopes: Vec::new(),
+        };
+        let token = sign_jwt(&claims, kid);
+
+        let req = HttpRequest::builder()
+            .uri("/")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = tower::ServiceExt::oneshot(echo_org_router(), req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"org-real-aquatiq");
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    /// Companion case: with the bypass ON, a bearer that genuinely fails
+    /// verification (unknown kid — never issued by the configured JWKS)
+    /// still falls back to the stub, preserving the legitimate local-dev
+    /// escape hatch for non-JWT callers.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn dev_bypass_falls_back_to_stub_when_jwt_verification_fails() {
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("AUTH_CORE_AUDIENCE_OPTIONAL", "1");
+
+        let kid = "test-kid-real-2";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var("AUTH_CORE_JWKS_URL", format!("{}/jwks", server.uri()));
+
+        // Signed with a kid the JWKS mock never advertises — verification
+        // must fail (no matching JWK even after a forced refresh).
+        let claims = Claims {
+            sub: "user-real".into(),
+            iss: "auth-core".into(),
+            exp: now_secs() + 3600,
+            org_id: "org-real-aquatiq".into(),
+            user_id: "user-real".into(),
+            principal_type: Some("user".into()),
+            service_id: None,
+            nbf: None,
+            aud: None,
+            scopes: Vec::new(),
+        };
+        let token = sign_jwt(&claims, "unknown-kid");
+
+        let req = HttpRequest::builder()
+            .uri("/")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = tower::ServiceExt::oneshot(echo_org_router(), req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"org_placeholder");
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
     }
 }

@@ -1,0 +1,203 @@
+name: Data Plane v2 CI
+
+# CI gate for Data Plane v2 (apps/Data Plane v2). GitHub Actions only executes
+# workflows from the repository-root .github/workflows — this file used to
+# live at apps/Data Plane v2/.github/workflows/ci.yml, which GitHub silently
+# never ran. Moved here (git history preserved via `git mv`) so it actually
+# gates merges; paths were already root-relative so no path filters changed.
+on:
+  pull_request:
+    paths:
+      - "apps/Data Plane v2/**"
+  push:
+    branches: [main]
+    paths:
+      - "apps/Data Plane v2/**"
+
+defaults:
+  run:
+    working-directory: "apps/Data Plane v2"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust-check:
+    name: Rust Check + Clippy + Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Data Plane v2 -> target"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (§16.4.5 — deny warnings, all targets including tests)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Check tests compile
+        run: cargo check --workspace --tests
+
+  rust-integration-tests:
+    name: Rust Integration Tests
+    runs-on: ubuntu-latest
+    needs: rust-check
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dataplane
+          POSTGRES_PASSWORD: dataplane
+          POSTGRES_DB: dataplane_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dataplane"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Data Plane v2 -> target"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+
+      - name: Run integration tests
+        # Was previously scoped to `--test grpc_integration` only, which
+        # silently excluded every other integration test file under
+        # tests/ — most importantly cross_org_isolation.rs (the cross-tenant
+        # IDOR/isolation suite for GetDocument/ListDocuments/KnowledgeUnits/
+        # CheckPermissions). Broadened to `--tests` (lib unit tests + every
+        # tests/*.rs binary) so nothing under this crate is silently skipped
+        # going forward. Safe to broaden: every non-canary test in these
+        # files self-gates on `TEST_DATABASE_URL` (`let Some(url) = ... else
+        # { return }`, a no-op pass when unset) and each file's first/canary
+        # test plus cache_dragonfly.rs (needs DPV2_CACHE_TEST_URL) and
+        # pipeline_e2e.rs (needs the full docker-compose stack, exercised
+        # separately by the docker-smoke job) are `#[ignore]`'d and stay
+        # skipped without `--include-ignored`.
+        env:
+          TEST_DATABASE_URL: postgres://dataplane:dataplane@localhost:5432/dataplane_test
+        run: cargo test -p retrieval-engine-rs --tests -- --nocapture
+
+  go-build:
+    name: Go Build + Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: |
+            apps/Data Plane v2/services/documents-api-go/go.sum
+            apps/Data Plane v2/services/wiki-store-go/go.sum
+            apps/Data Plane v2/services/data-orchestrator-go/go.sum
+            apps/Data Plane v2/services/data-quality-go/go.sum
+
+      - name: Build Go services
+        run: |
+          for svc in documents-api-go wiki-store-go data-orchestrator-go data-quality-go; do
+            echo "=== $svc ==="
+            (cd "services/$svc" && go build ./... && go vet ./...)
+          done
+
+  documents-api-postgres-tests:
+    name: documents-api-go Ownership Integration Tests
+    runs-on: ubuntu-latest
+    needs: go-build
+    # ownership_test.go / integration_test.go are built with `//go:build
+    # integration` and gated on TEST_DATABASE_URL (t.Skip when unset) — with
+    # no Postgres wired into CI these per-user ownership/sharing filter-at-
+    # source tests never ran at all, silently.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dataplane
+          POSTGRES_PASSWORD: dataplane
+          POSTGRES_DB: documents_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dataplane"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: apps/Data Plane v2/services/documents-api-go/go.sum
+
+      - name: Run ownership + integration tests (Postgres-gated)
+        working-directory: "apps/Data Plane v2/services/documents-api-go"
+        env:
+          TEST_DATABASE_URL: postgres://dataplane:dataplane@localhost:5432/documents_test?sslmode=disable
+        run: go test -tags=integration -v ./internal/repo/...
+
+  subject-contract:
+    name: NATS subject contract lint (§17.3.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint NATS subjects
+        run: bash scripts/check-subjects.sh
+
+  docker-smoke:
+    name: Docker Compose Smoke Test
+    runs-on: ubuntu-latest
+    needs: [rust-check, go-build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack
+        run: |
+          cp .env.example .env 2>/dev/null || true
+          docker compose up -d --build --wait
+        timeout-minutes: 10
+
+      - name: Wait for services
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8014/health >/dev/null 2>&1; then
+              echo "Services ready after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run smoke tests (HTTP only)
+        run: ./scripts/smoke-test.sh --http-only
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v
