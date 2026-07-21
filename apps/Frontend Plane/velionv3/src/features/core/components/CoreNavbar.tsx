@@ -139,7 +139,12 @@ export function CoreNavbar(props: {
               title={i18n.tr('Gå til hjem', 'Go to home')}
               class="core-navbar__home-mark"
             >
-              {props.workspace.initial}
+              <img
+                src="/velion-mark.svg"
+                alt=""
+                aria-hidden="true"
+                class="core-navbar__home-logo"
+              />
             </A>
 
             <HistoryNav
