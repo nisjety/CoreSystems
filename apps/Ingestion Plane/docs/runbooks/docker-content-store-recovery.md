@@ -1,5 +1,13 @@
 # Docker Content-Store Recovery Runbook
 
+> **2026-07-20 correction:** this incident is resolved. A live `docker ps` on
+> 2026-07-20 shows 94 containers up across CoreSystem with zero
+> unhealthy/restarting, including Ingestion Plane services. Docker/containerd
+> recovery happened around 2026-07-16/17 and this runbook's status line was
+> never updated afterward. The procedure below is kept as reference for a
+> future recurrence of the same failure mode, not as a description of current
+> state.
+
 Status: **restart attempted 2026-07-12; Docker Desktop stopped after the VM disk failed to become ready**. The pre-restart inventory showed 99 containers across the six canonical Compose projects, 82 named volumes, and 10 networks. No prune, reset, volume deletion, or container recreation was performed.
 
 Pre-restart evidence captured 2026-07-12: Docker client/server 29.5.3; canonical

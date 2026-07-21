@@ -1,5 +1,16 @@
 # Ingestion Plane — Current Status
 
+> **2026-07-20 correction:** the "Docker Desktop is currently stopped" /
+> 99%-full-host-volume claim in the Release decision below is stale. A live
+> `docker ps` on 2026-07-20 shows the Ingestion Plane's containers (and 94
+> containers across CoreSystem overall) up and healthy with zero
+> unhealthy/restarting. The Docker maintenance incident this doc describes was
+> resolved around 2026-07-16/17; this status page was never updated. Host disk
+> headroom itself was not re-measured in this pass — only that Docker/containerd
+> is responsive and containers are healthy. All other MVP blockers below
+> (scoped-credential provisioning, live read-only proofs, coverage gates) were
+> not re-verified in this pass and remain open as stated.
+
 Last verified: 2026-07-13 (Application notification consumer contract refresh; broader Ingestion deployment verification remains blocked)
 
 ## Release decision

@@ -1,5 +1,12 @@
 # Ingestion Plane Deep Dive
 
+> **2026-07-20 correction:** the "corrupted containerd store" premise in the
+> 2026-07-11 banner directly below is stale. A live `docker ps` on 2026-07-20
+> shows Ingestion Plane containers healthy (not just "unhealthy healthcheck,
+> serves traffic fine") — the underlying Docker/containerd incident referenced
+> here was resolved around 2026-07-16/17. Service-port/topology details below
+> were not individually re-verified in this pass.
+
 > **Verified 2026-07-11** (host-curl + source + compose): All service ports below confirmed live (200) — quarry-edge `:8082`, quarry-control `:8081`, imports-api `:3025`, integration-api `:3026`, integration-webhook-normalizer `:3036`, finspo-api `:3130`, and shipping-core `:3156`. Quarry stub claims re-confirmed in source. Corrections applied this pass: **shipping-core** and **integration-email-worker** were missing from the topology and have been added; **support-worker** was wrongly described as "not part of the main compose path" — it is a default (non-profile-gated) compose service and is running. autocomplete-core correctly remains absent from the Ingestion compose (it is referenced by velionv3 on `:3219`). Containers report `(unhealthy)` only because their exec-based healthchecks fail against a corrupted containerd store; the processes serve traffic normally.
 
 ## Executive Summary

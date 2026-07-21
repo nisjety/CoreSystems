@@ -1,5 +1,9 @@
 name: ingestion-plane
 
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
 services:
   # ==================== QUARRY v2 (Web Crawler) ====================
   quarry-edge:
@@ -8,6 +12,7 @@ services:
     build:
       context: ./Quarry-v2
       dockerfile: deploy/compose/Dockerfile.edge
+      args: *build-metadata
     container_name: quarry-edge
     restart: unless-stopped
     init: true
@@ -165,6 +170,7 @@ services:
     build:
       context: ./Quarry-v2
       dockerfile: deploy/compose/Dockerfile.control
+      args: *build-metadata
     container_name: quarry-control
     restart: unless-stopped
     init: true
@@ -184,6 +190,13 @@ services:
       TEMPORAL_TASK_QUEUE: quarry-orchestrator
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
+      # GDPR org-erasure purge consumer — narrowly-scoped identity on the
+      # cross-plane control-shared-nats broker (NOT the legacy VELION_NATS_URL/
+      # VELION_NATS_TOKEN velion-nats broker used elsewhere in this plane).
+      # Absent NATS_SHARED_URL the consumer simply stays disabled.
+      NATS_SHARED_URL: nats://control-shared-nats:4222
+      NATS_SHARED_USER: quarry-control-gdpr
+      NATS_SHARED_PASSWORD: ${QUARRY_CONTROL_GDPR_NATS_PASSWORD:?QUARRY_CONTROL_GDPR_NATS_PASSWORD is required}
     entrypoint:
       - /bin/sh
       - -ec
@@ -588,7 +601,8 @@ services:
       CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN: ${CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN:?CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must match Application Plane conversation-ingest}
       EMAIL_SYNC_INTERVAL: ${EMAIL_SYNC_INTERVAL:-60s}
       EMAIL_SYNC_BACKFILL_WINDOW: ${EMAIL_SYNC_BACKFILL_WINDOW:-24h}
-      EMAIL_SYNC_MAX_PER_CYCLE: ${EMAIL_SYNC_MAX_PER_CYCLE:-25}
+      EMAIL_SYNC_GRAPH_FULL_BACKFILL: ${EMAIL_SYNC_GRAPH_FULL_BACKFILL:-true}
+      EMAIL_SYNC_MAX_PER_CYCLE: ${EMAIL_SYNC_MAX_PER_CYCLE:-100}
     deploy:
       resources:
         limits:

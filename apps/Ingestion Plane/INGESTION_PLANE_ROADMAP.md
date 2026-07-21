@@ -1,5 +1,13 @@
 # Ingestion Plane — Roadmap
 
+> **2026-07-20 correction:** item 1 under "Approved maintenance work still to
+> execute" below ("Docker Desktop is stopped") is stale — a live `docker ps` on
+> 2026-07-20 shows Ingestion Plane containers up and healthy, zero
+> unhealthy/restarting. The maintenance incident was resolved around
+> 2026-07-16/17. Items 2-5 (scoped credentials, image/revision labeling,
+> deploy order, post-deploy acceptance matrix) were not re-verified in this pass
+> and remain open as stated.
+
 Read `INGESTION_PLANE_STATUS.md` first. This roadmap separates the secure MVP gate from enterprise-next work.
 
 ## MVP gate
