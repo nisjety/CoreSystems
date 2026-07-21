@@ -1,5 +1,17 @@
 # Model Plane Deep Dive
 
+> **2026-07-20 correction:** the 2026-07-13 banner directly below ("the running
+> gateway/inference gRPC path is broken while health stays green") is itself
+> stale. `MODEL_PLANE_STATUS.md`'s 2026-07-16 reconciliation already restored
+> and live-verified the gateway/inference/execution gRPC listeners (`:9090`,
+> `:9092`, `:9093` — authenticated, reachable), and a fresh `docker ps` on
+> 2026-07-20 reconfirms all 21 Model Plane containers healthy with zero
+> restarts. Do not read the 07-13 banner as current runtime state. This is a
+> runtime-health correction only; the MVP release blockers listed in
+> `MODEL_PLANE_STATUS.md` (rollback artifact, tenant delegation, approval
+> continuation, capability attestation) were not re-verified in this pass and
+> remain open.
+
 > **Current evidence correction — 2026-07-13:** the source architecture remains real, but the running gateway/inference gRPC path is broken while health stays green. Live session/cost/capability auth and semantic memory also fail MVP gates. Source contains substantial undeployed containment and authenticated compatibility work. Read [MODEL_PLANE_STATUS.md](MODEL_PLANE_STATUS.md) and [plane-audit-2026-07-13.md](docs/core-research/plane-audit-2026-07-13.md) before treating any historical “live” statement below as current.
 
 ## Executive Summary

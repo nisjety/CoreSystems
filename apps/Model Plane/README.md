@@ -1,5 +1,18 @@
 # Model Plane
 
+> **2026-07-20 correction:** the "no Model Plane containers, images, or
+> listeners on the audited host" claim in the 2026-07-16 banner directly below
+> is stale — it captured an early-in-the-day preflight failure on 2026-07-16
+> that the same day's later rollout (see `MODEL_PLANE_STATUS.md`'s "Live local
+> reconciliation — 2026-07-16 20:05 CEST") already superseded. A fresh
+> `docker ps` on 2026-07-20 reconfirms the stack live and healthy (94 containers
+> across CoreSystem, zero unhealthy/restarting), including `model-gateway` and
+> `inference-core` with their gRPC listeners reachable. This is a runtime-health
+> correction only — it does **not** mean the plane is production-ready; every
+> MVP release blocker in `MODEL_PLANE_STATUS.md` (rollback artifact, tenant
+> delegation, approval-continuation dispatcher, capability health attestation)
+> remains open and unverified in this pass.
+
 > **Current release status — 2026-07-16:** not production-ready and do not
 > rebuild/deploy yet. There are no Model Plane containers, images, or listeners
 > on the audited host, and no immutable rollback artifact. Source restores
