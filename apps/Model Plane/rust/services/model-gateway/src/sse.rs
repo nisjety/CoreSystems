@@ -999,7 +999,7 @@ pub async fn invoke_stream_sse(
             return;
         }
 
-        if let Some(payload) = grounding.clone() {
+        if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
             if event.should_emit(&features) {
                 let _ = tx.send(Ok(event.to_sse(&req_id))).await;
@@ -2155,7 +2155,7 @@ fn infer_fallback_stream(
         // lifetime; released on task end (Drop), mirroring the streaming path.
         let _idem_guard = idem_guard;
 
-        if let Some(payload) = grounding.clone() {
+        if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
             if event.should_emit(&features) {
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -2779,7 +2779,7 @@ async fn zdr_direct_stream(
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
-        if let Some(payload) = grounding {
+        if let Some(payload) = grounding.filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding {
                 grounding: payload.clone(),
             };
@@ -3392,12 +3392,16 @@ fn agentic_run_stream(
         // the cost-core ledger / cost dashboard), so cost_usd stays null rather
         // than a fabricated 0. Confidence is scored over the run's final answer.
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // HONESTY_CONTRACT: `grounded` reflects whether a knowledge_search call
+        // in this run actually returned org knowledge (execution-core's
+        // `run_agent` sets it from a real "status": "ok" tool outcome, not a
+        // guess) — see agent.rs::knowledge_search_found_grounding.
         let usage_event = crate::sse_events::ChatEvent::Usage {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
             latency_ms,
-            confidence: crate::confidence::score(&final_text, 0, 1024, false),
+            confidence: crate::confidence::score(&final_text, 0, 1024, response.grounded),
         };
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;

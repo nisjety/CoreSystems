@@ -792,12 +792,15 @@ pub async fn retrieve(
 
     match retrieval_result {
         Ok(resp) => {
-            let grounding = with_graph(build_grounding(query, &resp.into_inner()), graph);
-            if grounding.is_empty() {
-                None
-            } else {
-                Some(grounding)
-            }
+            // HONESTY_CONTRACT: report a completed attempt even when empty
+            // (`Grounding::is_empty`), so callers can tell "checked and found
+            // nothing" apart from "never checked" and instruct the model
+            // accordingly via `no_grounding_notice`. This used to collapse an
+            // empty result to `None`, indistinguishable from not asking at
+            // all. The `grounded` bool fed into confidence scoring
+            // (`grounding.is_some_and(|g| !g.citations.is_empty())`) is
+            // unaffected since it already requires non-empty citations.
+            Some(with_graph(build_grounding(query, &resp.into_inner()), graph))
         }
         Err(error) => {
             tracing::warn!(

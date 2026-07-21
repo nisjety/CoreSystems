@@ -9,6 +9,7 @@
 //!   infer(messages + tools) → if `tool_calls`: execute each, append the results
 //!   as a context message, re-infer → repeat (capped) → stream the final answer.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
@@ -489,6 +490,44 @@ fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
         request.metadata_mut().insert("authorization", header);
     }
     request
+}
+
+/// Canonical signature used only to suppress an EXACT repeat of a read-only
+/// research call within one turn (e.g. `fetch_url` on the same URL twice, or
+/// `web_search`/`knowledge_search` with the same query) — a live-verified gap
+/// where the model burned a whole tool round re-fetching an identical URL.
+/// Side-effecting or stateful tools (`recall_memory`, `save_memory`,
+/// `browser_agent`, `brreg_lookup_organization`) are exempt: `None` means no
+/// dedup applies, not that the call is invalid. Mirrors execution-core's
+/// `agent.rs::retrieval_signature`.
+fn duplicate_call_signature(call: &ToolCall) -> Option<String> {
+    match call.name.as_str() {
+        "fetch_url" => {
+            let url = arg_str(&call.arguments_json, "url");
+            let url = url.trim();
+            (!url.is_empty()).then(|| format!("fetch_url|{url}"))
+        }
+        "web_search" => {
+            let query = normalize_tool_query(&arg_str(&call.arguments_json, "query"));
+            (!query.is_empty()).then(|| format!("web_search|{query}"))
+        }
+        "knowledge_search" => {
+            let query = normalize_tool_query(&arg_str(&call.arguments_json, "query"));
+            let top_k = arg_i64(&call.arguments_json, "top_k").unwrap_or(5);
+            (!query.is_empty()).then(|| format!("knowledge_search|{top_k}|{query}"))
+        }
+        _ => None,
+    }
+}
+
+/// Case/whitespace-insensitive normalization so "Aquatiq" and "aquatiq " are
+/// treated as the same repeated query.
+fn normalize_tool_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1058,6 +1097,9 @@ pub async fn run_tool_rounds(
 ) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
     let mut events = Vec::new();
+    // Persists across rounds: an exact repeat later in the same turn is still
+    // suppressed, not just within one round.
+    let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
 
     for _round in 0..MAX_TOOL_ROUNDS {
         let mut client = state.inference_client.clone();
@@ -1100,19 +1142,31 @@ pub async fn run_tool_rounds(
                 name: call.name.clone(),
                 args,
             });
-            let outcome = dispatch_audited_tool(
-                state,
-                request_id,
-                run_id,
-                org_id,
-                user_id,
-                thread_id,
-                data_plane_bearer,
-                session_bearer,
-                zdr,
-                call,
-            )
-            .await?;
+            let is_duplicate = duplicate_call_signature(call)
+                .is_some_and(|signature| !attempted_calls.insert(signature));
+            let outcome = if is_duplicate {
+                err_outcome(
+                    call,
+                    format!(
+                        "duplicate {} call suppressed (identical arguments already tried this turn); use materially different arguments if you still need this",
+                        call.name
+                    ),
+                )
+            } else {
+                dispatch_audited_tool(
+                    state,
+                    request_id,
+                    run_id,
+                    org_id,
+                    user_id,
+                    thread_id,
+                    data_plane_bearer,
+                    session_bearer,
+                    zdr,
+                    call,
+                )
+                .await?
+            };
             events.push(ChatEvent::ToolResult {
                 id: outcome.call_id.clone(),
                 status: if outcome.error.is_some() {
@@ -1223,6 +1277,57 @@ mod tests {
     fn arg_parsers_tolerate_malformed_json() {
         assert_eq!(arg_str("not json", "query"), "");
         assert_eq!(arg_i64("not json", "limit"), None);
+    }
+
+    fn tool_call(name: &str, args_json: &str) -> ToolCall {
+        ToolCall {
+            id: "call-1".to_owned(),
+            name: name.to_owned(),
+            arguments_json: args_json.to_owned(),
+        }
+    }
+
+    #[test]
+    fn duplicate_signature_catches_exact_repeat_fetch_url() {
+        let first = duplicate_call_signature(&tool_call(
+            "fetch_url",
+            r#"{"url":"https://aquatiq.no"}"#,
+        ))
+        .expect("fetch_url signature");
+        let same = duplicate_call_signature(&tool_call(
+            "fetch_url",
+            r#"{"url":"https://aquatiq.no"}"#,
+        ))
+        .expect("fetch_url signature");
+        let different = duplicate_call_signature(&tool_call(
+            "fetch_url",
+            r#"{"url":"https://aquatiq.no/about"}"#,
+        ))
+        .expect("fetch_url signature");
+        assert_eq!(first, same);
+        assert_ne!(first, different);
+    }
+
+    #[test]
+    fn duplicate_signature_web_search_is_case_and_whitespace_insensitive() {
+        let first = duplicate_call_signature(&tool_call(
+            "web_search",
+            r#"{"query":"  Aquatiq   AS "}"#,
+        ))
+        .expect("web_search signature");
+        let same = duplicate_call_signature(&tool_call("web_search", r#"{"query":"aquatiq as"}"#))
+            .expect("web_search signature");
+        assert_eq!(first, same);
+    }
+
+    #[test]
+    fn duplicate_signature_does_not_apply_to_stateful_or_side_effecting_tools() {
+        assert!(duplicate_call_signature(&tool_call("browser_agent", r#"{"objective":"x"}"#))
+            .is_none());
+        assert!(duplicate_call_signature(&tool_call("recall_memory", r#"{"query":"x"}"#))
+            .is_none());
+        assert!(duplicate_call_signature(&tool_call("save_memory", r#"{"content":"x"}"#))
+            .is_none());
     }
 
     #[test]
