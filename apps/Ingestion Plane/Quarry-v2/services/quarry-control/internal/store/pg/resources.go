@@ -67,15 +67,17 @@ func (s *jobsStore) Create(j store.Job) error {
 		rid = &v
 	}
 	_, err := s.pool.Exec(context.Background(),
-		`INSERT INTO jobs(id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		string(j.ID), j.Kind, j.Status, policy, params, sid, j.CreatedAt, rid, j.IdempotencyKey)
+		`INSERT INTO jobs(id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		string(j.ID), j.OrgID, j.Kind, j.Status, policy, params, sid, j.CreatedAt, rid, j.IdempotencyKey)
 	return mapPgErr(err)
 }
 
-// FindByIdempotencyKey returns the existing job for an Idempotency-Key,
-// if any. Uses the partial unique index for an O(log n) lookup.
-func (s *jobsStore) FindByIdempotencyKey(key string) (store.Job, bool) {
+// FindByIdempotencyKey returns the existing job for an Idempotency-Key
+// scoped to orgID, if any. Uses the partial unique index for an O(log n)
+// lookup; the org_id predicate means a key collision with another
+// tenant's job is reported as a miss, never returned across tenants.
+func (s *jobsStore) FindByIdempotencyKey(orgID, key string) (store.Job, bool) {
 	if key == "" {
 		return store.Job{}, false
 	}
@@ -88,9 +90,9 @@ func (s *jobsStore) FindByIdempotencyKey(key string) (store.Job, bool) {
 		idem   *string
 	)
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE idempotency_key=$1`, key,
-	).Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
+		   FROM jobs WHERE idempotency_key=$1 AND org_id=$2`, key, orgID,
+	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
 	if err != nil {
 		return store.Job{}, false
 	}
@@ -120,9 +122,45 @@ func (s *jobsStore) Get(id quarrycontracts.ID) (store.Job, bool) {
 		idem   *string
 	)
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE id=$1`,
+		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE id=$1`,
 		string(id),
-	).Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	if err != nil {
+		return store.Job{}, false
+	}
+	_ = json.Unmarshal(policy, &j.Policy)
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &j.Params)
+	}
+	if sid != nil {
+		v := quarrycontracts.ID(*sid)
+		j.ScheduleID = &v
+	}
+	if rid != nil {
+		v := quarrycontracts.ID(*rid)
+		j.RunID = &v
+	}
+	j.IdempotencyKey = idem
+	return j, true
+}
+
+// GetByOrg returns a job scoped to org — mirrors sourcesStore.GetByOrg's
+// WHERE-clause guard: a cross-tenant id returns (Job{}, false), never
+// another org's row.
+func (s *jobsStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Job, bool) {
+	var (
+		j      store.Job
+		policy []byte
+		params []byte
+		sid    *string
+		rid    *string
+		idem   *string
+	)
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
+		   FROM jobs WHERE id=$1 AND org_id=$2`,
+		string(id), orgID,
+	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
 	if err != nil {
 		return store.Job{}, false
 	}
@@ -168,7 +206,7 @@ func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs`
+	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs`
 	args := []any{}
 	if c != nil {
 		q += ` WHERE (created_at, id) < ($1, $2)`
@@ -192,7 +230,123 @@ func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
 			rid    *string
 			idem   *string
 		)
-		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+			return nil, ""
+		}
+		_ = json.Unmarshal(policy, &j.Policy)
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &j.Params)
+		}
+		if sid != nil {
+			v := quarrycontracts.ID(*sid)
+			j.ScheduleID = &v
+		}
+		if rid != nil {
+			v := quarrycontracts.ID(*rid)
+			j.RunID = &v
+		}
+		j.IdempotencyKey = idem
+		out = append(out, j)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+// ListByOrg returns the org's jobs, newest-first — backs GET /v1/jobs.
+// Mirrors sourcesStore.ListByOrg's WHERE org_id = $1 guard, using the
+// (org_id, kind, created_at) index (migration 010_jobs_org_id.sql).
+func (s *jobsStore) ListByOrg(orgID string, limit int, cur string) ([]store.Job, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+
+	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE org_id = $1`
+	args := []any{orgID}
+	if c != nil {
+		q += ` AND (created_at, id) < ($2, $3)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ` + fmt.Sprint(limit+1)
+
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+
+	out := make([]store.Job, 0, limit)
+	for rows.Next() {
+		var (
+			j      store.Job
+			policy []byte
+			params []byte
+			sid    *string
+			rid    *string
+			idem   *string
+		)
+		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+			return nil, ""
+		}
+		_ = json.Unmarshal(policy, &j.Policy)
+		if len(params) > 0 {
+			_ = json.Unmarshal(params, &j.Params)
+		}
+		if sid != nil {
+			v := quarrycontracts.ID(*sid)
+			j.ScheduleID = &v
+		}
+		if rid != nil {
+			v := quarrycontracts.ID(*rid)
+			j.RunID = &v
+		}
+		j.IdempotencyKey = idem
+		out = append(out, j)
+	}
+	next := ""
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, string(last.ID))
+		out = out[:limit]
+	}
+	return out, next
+}
+
+// ListByKind returns jobs whose kind matches exactly AND whose org_id
+// matches orgID, newest-first, using the (org_id, kind, created_at) index
+// (migration 010_jobs_org_id.sql) so the WHERE + ORDER BY are index-served.
+func (s *jobsStore) ListByKind(orgID, kind string, limit int, cur string) ([]store.Job, string) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, _ := decodeCursor(cur)
+
+	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE org_id = $1 AND kind = $2`
+	args := []any{orgID, kind}
+	if c != nil {
+		q += ` AND (created_at, id) < ($3, $4)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ` + fmt.Sprint(limit+1)
+
+	rows, err := s.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, ""
+	}
+	defer rows.Close()
+
+	out := make([]store.Job, 0, limit)
+	for rows.Next() {
+		var (
+			j      store.Job
+			policy []byte
+			params []byte
+			sid    *string
+			rid    *string
+			idem   *string
+		)
+		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
 			return nil, ""
 		}
 		_ = json.Unmarshal(policy, &j.Policy)
@@ -223,7 +377,7 @@ func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, kind, status, policy, params, schedule_id, created_at FROM jobs WHERE schedule_id = $1`
+	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at FROM jobs WHERE schedule_id = $1`
 	args := []any{string(scheduleID)}
 	if c != nil {
 		q += ` AND (created_at, id) < ($2, $3)`
@@ -245,7 +399,7 @@ func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur
 			params []byte
 			sid    *string
 		)
-		if err := rows.Scan(&j.ID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt); err != nil {
 			return nil, ""
 		}
 		_ = json.Unmarshal(policy, &j.Policy)
@@ -653,6 +807,51 @@ func (s *sourcesStore) Create(v store.Source) error {
 		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0))`,
 		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt)
 	return mapPgErr(err)
+}
+
+// UpsertByOrgAndURL is the idempotent counterpart to Create: a live row for
+// the same (org_id, url) already existing is refreshed (updated_at bumped)
+// and returned as-is rather than erroring, so repeat registrations for the
+// same website — one per crawled page, or a re-run of the same crawl —
+// never duplicate. The `quarry_sources_org_url_uniq` partial unique index
+// (migration 011) backs the ON CONFLICT target; `xmax = 0` is the standard
+// Postgres trick for telling an upsert's INSERT branch apart from its
+// UPDATE branch within a single round trip.
+func (s *sourcesStore) UpsertByOrgAndURL(v store.Source) (store.Source, bool, error) {
+	config := v.Config
+	if config == nil {
+		config = map[string]any{}
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return store.Source{}, false, fmt.Errorf("marshal config: %w", err)
+	}
+	status := v.Status
+	if status == "" {
+		status = "active"
+	}
+	var (
+		out       store.Source
+		outConfig []byte
+		inserted  bool
+	)
+	err = s.pool.QueryRow(context.Background(),
+		`INSERT INTO quarry_sources(source_id, org_id, name, url, kind, status, config, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, to_timestamp($8::double precision / 1000.0), to_timestamp($9::double precision / 1000.0))
+		 ON CONFLICT (org_id, url) WHERE deleted_at IS NULL
+		 DO UPDATE SET updated_at = to_timestamp($9::double precision / 1000.0)
+		 RETURNING source_id, org_id, name, url, kind, status, config,
+		           (extract(epoch from created_at) * 1000)::bigint,
+		           (extract(epoch from updated_at) * 1000)::bigint,
+		           (xmax = 0)`,
+		string(v.ID), v.OrgID, v.Name, v.URL, v.Kind, status, configJSON, v.CreatedAt, v.UpdatedAt,
+	).Scan(&out.ID, &out.OrgID, &out.Name, &out.URL, &out.Kind, &out.Status, &outConfig,
+		&out.CreatedAt, &out.UpdatedAt, &inserted)
+	if err != nil {
+		return store.Source{}, false, mapPgErr(err)
+	}
+	_ = json.Unmarshal(outConfig, &out.Config)
+	return out, inserted, nil
 }
 
 func (s *sourcesStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Source, bool) {

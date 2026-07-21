@@ -23,6 +23,16 @@ pub enum EventType {
     ArtifactWritten,
     SnapshotCreated,
     StoreRecordWritten,
+    /// Emitted when a Data Plane ingest attempt (`DataPlaneIngest::ingest`)
+    /// returns an error — e.g. the service-token mint for the run's `org_id`
+    /// was refused by Auth Core, or documents-api-go rejected the write.
+    /// Previously this failure was ONLY `tracing::warn!`'d as "non-fatal" and
+    /// never surfaced on the job's event stream, so a crawl could show
+    /// "completed" while zero pages were ever durably persisted. Consumers
+    /// (the Home dashboard's crawl-status widget) must treat a job as
+    /// actually indexed only when ingest was requested AND this event was
+    /// never seen (or `StoreRecordWritten` was seen instead).
+    StoreRecordFailed,
     LeaseAcquired,
     LeaseReleased,
     ProfileRestored,

@@ -40,7 +40,7 @@ func TestCreateJob_ReturnsEnvelope(t *testing.T) {
 	h, _ := newTestServer(t)
 
 	body := `{"kind":"crawl","params":{"url":"https://a.com","max_pages":5}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -71,7 +71,7 @@ func TestCreateJob_Idempotency_ReturnsExistingOnDuplicateKey(t *testing.T) {
 
 	body := `{"kind":"crawl","params":{"url":"https://idem.test"}}`
 	post := func(key string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if key != "" {
 			req.Header.Set("Idempotency-Key", key)
@@ -134,7 +134,7 @@ func TestCreateJob_Idempotency_RejectsOverlongKey(t *testing.T) {
 	t.Parallel()
 	h, _ := newTestServer(t)
 	body := `{"kind":"crawl","params":{"url":"https://x"}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", strings.Repeat("a", 200))
 	rec := httptest.NewRecorder()
@@ -188,7 +188,7 @@ func TestGetJob_NotFoundReturnsError(t *testing.T) {
 	t.Parallel()
 	h, _ := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/job_DOESNOTEXIST", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/job_DOESNOTEXIST?org_id=org_test", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -200,6 +200,108 @@ func TestGetJob_NotFoundReturnsError(t *testing.T) {
 	errObj, _ := env["error"].(map[string]any)
 	if errObj == nil || errObj["code"] != "NOT_FOUND" {
 		t.Fatalf("expected NOT_FOUND error, got %s", w.Body.String())
+	}
+}
+
+// TestGetJob_MissingOrgID_Returns400 guards against an unscoped GET
+// silently falling back to an unfiltered lookup.
+func TestGetJob_MissingOrgID_Returns400(t *testing.T) {
+	t.Parallel()
+	h, db := newTestServer(t)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	_ = db.Jobs().Create(store.Job{ID: id, OrgID: "org_test", Kind: "crawl", Status: "accepted"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(id), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 without org_id; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestGetJob_CrossTenantRejected is the IDOR guard: org_b must not be able
+// to read org_a's job by id.
+func TestGetJob_CrossTenantRejected(t *testing.T) {
+	t.Parallel()
+	h, db := newTestServer(t)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	_ = db.Jobs().Create(store.Job{ID: id, OrgID: "org_a", Kind: "crawl", Status: "accepted"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(id)+"?org_id=org_b", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for cross-tenant read; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestJobEvents_CrossTenantRejected guards GET /v1/jobs/{id}/events: an
+// org that doesn't own the job must see 404 for its events, not a mix of
+// missing-org-id and cross-tenant leakage.
+func TestJobEvents_CrossTenantRejected(t *testing.T) {
+	t.Parallel()
+	h, db := newTestServer(t)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	_ = db.Jobs().Create(store.Job{ID: id, OrgID: "org_a", Kind: "crawl", Status: "accepted"})
+	_ = db.Events().Append(quarrycontracts.Event{
+		EventID: quarrycontracts.NewID(quarrycontracts.KindEvent),
+		JobID:   &id,
+		Type:    quarrycontracts.EvtPageFetched,
+		Seq:     1,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(id)+"/events?org_id=org_b", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for cross-tenant read; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestJobEvents_MissingOrgID_Returns400 guards against an unscoped query
+// silently returning the events regardless of org.
+func TestJobEvents_MissingOrgID_Returns400(t *testing.T) {
+	t.Parallel()
+	h, db := newTestServer(t)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	_ = db.Jobs().Create(store.Job{ID: id, OrgID: "org_a", Kind: "crawl", Status: "accepted"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(id)+"/events", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 without org_id; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestJobEvents_OwnerCanRead confirms the org guard doesn't break the
+// legitimate owner's read path.
+func TestJobEvents_OwnerCanRead(t *testing.T) {
+	t.Parallel()
+	h, db := newTestServer(t)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	_ = db.Jobs().Create(store.Job{ID: id, OrgID: "org_a", Kind: "crawl", Status: "accepted"})
+	_ = db.Events().Append(quarrycontracts.Event{
+		EventID: quarrycontracts.NewID(quarrycontracts.KindEvent),
+		JobID:   &id,
+		Type:    quarrycontracts.EvtPageFetched,
+		Seq:     1,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(id)+"/events?org_id=org_a", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data []quarrycontracts.Event `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if len(env.Data) != 1 {
+		t.Fatalf("want 1 event, got %d", len(env.Data))
 	}
 }
 
@@ -269,7 +371,7 @@ func TestAppendTerminalEventUpdatesJobStatus(t *testing.T) {
 
 	createReq := httptest.NewRequest(
 		http.MethodPost,
-		"/v1/jobs",
+		"/v1/jobs?org_id=org_test",
 		strings.NewReader(`{"kind":"crawl","params":{"url":"https://a.com"}}`),
 	)
 	createReq.Header.Set("Content-Type", "application/json")
@@ -305,7 +407,7 @@ func TestAppendTerminalEventUpdatesJobStatus(t *testing.T) {
 
 	getReq := httptest.NewRequest(
 		http.MethodGet,
-		"/v1/jobs/"+string(createEnv.Data.ID),
+		"/v1/jobs/"+string(createEnv.Data.ID)+"?org_id=org_test",
 		nil,
 	)
 	getW := httptest.NewRecorder()
@@ -330,7 +432,7 @@ func TestJobHistory_MergesJobAndEvents(t *testing.T) {
 
 	// Create job via HTTP
 	createBody := `{"kind":"scrape","params":{"url":"https://a.com"}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(createBody))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(createBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -362,7 +464,7 @@ func TestJobHistory_MergesJobAndEvents(t *testing.T) {
 		Seq:     1,
 	})
 
-	histReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(jobID)+"/history", nil)
+	histReq := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+string(jobID)+"/history?org_id=org_test", nil)
 	histW := httptest.NewRecorder()
 	h.ServeHTTP(histW, histReq)
 	if histW.Code != http.StatusOK {

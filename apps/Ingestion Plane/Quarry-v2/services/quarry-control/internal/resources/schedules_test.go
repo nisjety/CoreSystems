@@ -176,10 +176,10 @@ func TestScheduleRuns_ListsJobs_DescOrder(t *testing.T) {
 
 	j1ID := quarrycontracts.NewID(quarrycontracts.KindJob)
 	j2ID := quarrycontracts.NewID(quarrycontracts.KindJob)
-	db.Jobs().Create(store.Job{ID: j1ID, Kind: "scrape", Status: "queued", ScheduleID: &schID, CreatedAt: 1000})
-	db.Jobs().Create(store.Job{ID: j2ID, Kind: "scrape", Status: "queued", ScheduleID: &schID, CreatedAt: 2000})
+	db.Jobs().Create(store.Job{ID: j1ID, OrgID: "org_test", Kind: "scrape", Status: "queued", ScheduleID: &schID, CreatedAt: 1000})
+	db.Jobs().Create(store.Job{ID: j2ID, OrgID: "org_test", Kind: "scrape", Status: "queued", ScheduleID: &schID, CreatedAt: 2000})
 
-	code, env := getRuns(t, h, "/v1/schedules/"+idStr+"/runs")
+	code, env := getRuns(t, h, "/v1/schedules/"+idStr+"/runs?org_id=org_test")
 	if code != http.StatusOK {
 		t.Fatalf("status=%d, want 200; env=%v", code, env)
 	}
@@ -199,7 +199,7 @@ func TestScheduleRuns_ListsJobs_DescOrder(t *testing.T) {
 
 func TestScheduleRuns_UnknownID_Returns404(t *testing.T) {
 	h, _ := newSchedulesServer(t)
-	code, env := getRuns(t, h, "/v1/schedules/sch_missing/runs")
+	code, env := getRuns(t, h, "/v1/schedules/sch_missing/runs?org_id=org_test")
 	if code != http.StatusNotFound {
 		t.Fatalf("status=%d, want 404; env=%v", code, env)
 	}
@@ -211,7 +211,7 @@ func TestScheduleRuns_UnknownID_Returns404(t *testing.T) {
 
 func TestScheduleRuns_WrongKind_Returns400(t *testing.T) {
 	h, _ := newSchedulesServer(t)
-	code, env := getRuns(t, h, "/v1/schedules/job_xxx/runs")
+	code, env := getRuns(t, h, "/v1/schedules/job_xxx/runs?org_id=org_test")
 	if code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400; env=%v", code, env)
 	}
@@ -221,11 +221,36 @@ func TestScheduleRuns_WrongKind_Returns400(t *testing.T) {
 	}
 }
 
-func TestScheduleRuns_Empty_ReturnsEmptyArray(t *testing.T) {
+// TestScheduleRuns_CrossTenantRejected guards the IDOR: an org that
+// doesn't own the schedule must see 404, identical to an unknown id —
+// never another tenant's job history.
+func TestScheduleRuns_CrossTenantRejected(t *testing.T) {
+	h, _ := newSchedulesServer(t)
+	idStr := createSchedule(t, h) // owned by org_test
+
+	code, env := getRuns(t, h, "/v1/schedules/"+idStr+"/runs?org_id=org_other")
+	if code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 for cross-tenant access; env=%v", code, env)
+	}
+}
+
+// TestScheduleRuns_MissingOrgID_Returns400 guards against an unscoped
+// query silently listing whichever org happens to own the schedule.
+func TestScheduleRuns_MissingOrgID_Returns400(t *testing.T) {
 	h, _ := newSchedulesServer(t)
 	idStr := createSchedule(t, h)
 
 	code, env := getRuns(t, h, "/v1/schedules/"+idStr+"/runs")
+	if code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 without org_id; env=%v", code, env)
+	}
+}
+
+func TestScheduleRuns_Empty_ReturnsEmptyArray(t *testing.T) {
+	h, _ := newSchedulesServer(t)
+	idStr := createSchedule(t, h)
+
+	code, env := getRuns(t, h, "/v1/schedules/"+idStr+"/runs?org_id=org_test")
 	if code != http.StatusOK {
 		t.Fatalf("status=%d, want 200; env=%v", code, env)
 	}
@@ -249,13 +274,13 @@ func TestScheduleRuns_CursorPagination(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		jID := quarrycontracts.NewID(quarrycontracts.KindJob)
-		db.Jobs().Create(store.Job{ID: jID, Kind: "scrape", Status: "queued", ScheduleID: &schID, CreatedAt: int64(1000 + i)})
+		db.Jobs().Create(store.Job{ID: jID, OrgID: "org_test", Kind: "scrape", Status: "queued", ScheduleID: &schID, CreatedAt: int64(1000 + i)})
 	}
 
 	seen := 0
 	cursor := ""
 	for page := 0; page < 5; page++ {
-		path := "/v1/schedules/" + idStr + "/runs?limit=1"
+		path := "/v1/schedules/" + idStr + "/runs?org_id=org_test&limit=1"
 		if cursor != "" {
 			path += "&cursor=" + cursor
 		}

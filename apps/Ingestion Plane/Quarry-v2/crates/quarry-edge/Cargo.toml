@@ -94,4 +94,8 @@ http3 = ["quarry-runtime/http3"]
 [dev-dependencies]
 wiremock = "0.6"
 serial_test = "3"
+# Real RS256 JWT+JWKS fixtures for the auth.rs dev-bypass-vs-real-JWT
+# regression test (P0 fix — Aquatiq crawl-to-KB pipeline, 2026-07-20).
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
 

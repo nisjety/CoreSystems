@@ -12,17 +12,33 @@ use quarry_core::error::{ErrorCode, QuarryError};
 
 use crate::routes::HandoffAck;
 
-/// Posts `POST {control}/v1/jobs` with `{kind, policy?}` plus an opaque
-/// `params` blob carrying kind-specific payload (url, urls, max_pages…).
+/// Posts `POST {control}/v1/jobs?org_id=<org>` with `{kind, policy?}` plus an
+/// opaque `params` blob carrying kind-specific payload (url, urls,
+/// max_pages…).
+///
+/// `org_id` rides as a query param — mirroring `resource_routes.rs`'s
+/// `forward_mutation` convention for `/v1/sources` — so control's
+/// `createJob` handler can read the edge-verified org the same way
+/// `createSourceHandler` does, and reject/stamp it without trusting
+/// anything from the JSON body. `params.org_id` (embedded in `payload` by
+/// the caller) is untouched: the orchestrator dispatcher still reads org
+/// from there to build the Temporal workflow input.
 pub async fn forward_to_orchestrator(
     control_base_url: &str,
     _request_id: &str,
+    org_id: &str,
     payload: serde_json::Value,
 ) -> Result<HandoffAck, QuarryError> {
     if control_base_url.is_empty() {
         return Err(QuarryError::new(
             ErrorCode::Internal,
             "control base url empty",
+        ));
+    }
+    if org_id.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "handoff missing org_id",
         ));
     }
 
@@ -46,12 +62,18 @@ pub async fn forward_to_orchestrator(
         .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
 
     let url = format!("{}/v1/jobs", control_base_url.trim_end_matches('/'));
-    let resp = client.post(&url).json(&body).send().await.map_err(|e| {
-        QuarryError::new(
-            ErrorCode::UpstreamBlocked,
-            format!("control unreachable: {e}"),
-        )
-    })?;
+    let resp = client
+        .post(&url)
+        .query(&[("org_id", org_id)])
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            QuarryError::new(
+                ErrorCode::UpstreamBlocked,
+                format!("control unreachable: {e}"),
+            )
+        })?;
 
     let status = resp.status();
     if !status.is_success() {

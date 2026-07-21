@@ -378,6 +378,7 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::ArtifactWritten => "artifact_written",
         EventType::SnapshotCreated => "snapshot_created",
         EventType::StoreRecordWritten => "store_record_written",
+        EventType::StoreRecordFailed => "store_record_failed",
         EventType::LeaseAcquired => "lease_acquired",
         EventType::LeaseReleased => "lease_released",
         EventType::ProfileRestored => "profile_restored",
@@ -422,6 +423,10 @@ mod tests {
         assert_eq!(
             event_type_token(&EventType::StoreRecordWritten),
             "store_record_written"
+        );
+        assert_eq!(
+            event_type_token(&EventType::StoreRecordFailed),
+            "store_record_failed"
         );
     }
 

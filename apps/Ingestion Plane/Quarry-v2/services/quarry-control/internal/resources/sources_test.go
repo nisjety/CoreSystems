@@ -156,6 +156,78 @@ func TestSources_CreateValidation(t *testing.T) {
 	}
 }
 
+// createSourceFull is like createSource but also returns the HTTP status so
+// callers can distinguish the 201-created vs 200-existing branches of the
+// 2026-07-20 crawl-to-KB idempotency fix.
+func createSourceFull(t *testing.T, h http.Handler, org, body string) (code int, id string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/sources?org_id="+org, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var env struct {
+		Data struct {
+			ID string `json:"source_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode created source: %v; body=%s", err, w.Body.String())
+	}
+	return w.Code, env.Data.ID
+}
+
+// TestSources_CreateIsIdempotentByURL proves the fix for the crawl pipeline
+// calling POST /v1/sources once per successfully ingested page: repeat
+// registrations for the SAME (org_id, url) must collapse into one durable
+// row (200 + the original id) instead of duplicating (previously every call
+// would 201 a brand-new row). Cross-tenant and cross-URL calls are
+// unaffected.
+func TestSources_CreateIsIdempotentByURL(t *testing.T) {
+	t.Parallel()
+	h, db := newSourcesServer(t)
+
+	body := `{"name":"example.com","url":"https://example.com","kind":"crawl"}`
+	code1, id1 := createSourceFull(t, h, "org_a", body)
+	if code1 != http.StatusCreated || id1 == "" {
+		t.Fatalf("first registration: code=%d id=%q want=201+id", code1, id1)
+	}
+
+	// Simulate the crawl pipeline registering the same host again for a
+	// second page.
+	code2, id2 := createSourceFull(t, h, "org_a", body)
+	if code2 != http.StatusOK {
+		t.Fatalf("repeat registration: code=%d want=200 (existing row)", code2)
+	}
+	if id2 != id1 {
+		t.Fatalf("repeat registration minted a NEW id=%q, want the original=%q", id2, id1)
+	}
+
+	if ids := listSourceIDs(t, h, "org_a"); len(ids) != 1 {
+		t.Fatalf("expected exactly 1 tracked source after 2 registrations of the same URL, got %v", ids)
+	}
+
+	// A different org registering the identical URL gets its OWN row — no
+	// cross-tenant collapsing.
+	codeB, idB := createSourceFull(t, h, "org_b", body)
+	if codeB != http.StatusCreated || idB == id1 {
+		t.Fatalf("org_b registration: code=%d id=%q must be a fresh 201, distinct from org_a's %q", codeB, idB, id1)
+	}
+
+	// monitor=true on a REPEAT registration must not spin up a second
+	// change_monitor schedule.
+	monitorBody := `{"name":"watch","url":"https://watch.example","kind":"crawl","monitor":true,"preset":"daily"}`
+	if code, _ := createSourceFull(t, h, "org_a", monitorBody); code != http.StatusCreated {
+		t.Fatalf("first monitored registration: code=%d want=201", code)
+	}
+	if code, _ := createSourceFull(t, h, "org_a", monitorBody); code != http.StatusOK {
+		t.Fatalf("repeat monitored registration: code=%d want=200", code)
+	}
+	scheds, _ := db.Schedules().List(50, "")
+	if len(scheds) != 1 {
+		t.Fatalf("expected exactly 1 change_monitor schedule after 2 identical monitor=true registrations, got %d", len(scheds))
+	}
+}
+
 // TestSources_MonitorRegistersChangeSchedule proves the monitor flag also
 // creates a change_monitor schedule (org-stamped) so the orchestrator
 // materializes a Temporal schedule — the source→schedule wiring for PR-7.

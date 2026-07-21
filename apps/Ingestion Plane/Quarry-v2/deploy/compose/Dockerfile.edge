@@ -158,6 +158,11 @@ ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.title="CoreSystem Quarry edge" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
+# Re-expose the build args as runtime ENV so the running process can answer
+# GET /version (crates/quarry-edge/src/routes.rs) without needing
+# Docker/registry access to read the image label above.
+ENV SOURCE_REVISION=${SOURCE_REVISION} \
+    BUILD_DATE=${BUILD_DATE}
 RUN set -e; \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${CHROMIUM_SNAPSHOT}/ bookworm-security main" \

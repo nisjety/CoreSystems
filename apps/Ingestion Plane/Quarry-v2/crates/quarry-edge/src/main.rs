@@ -43,6 +43,7 @@ mod resource_routes;
 mod routes;
 mod schedule_routes;
 mod search_routes;
+mod source_registrar;
 mod state;
 mod telemetry;
 

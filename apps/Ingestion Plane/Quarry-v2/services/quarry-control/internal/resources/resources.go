@@ -133,7 +133,11 @@ func createScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
 }
 
 // scheduleRuns returns the run history (jobs) triggered by a schedule.
-// Contract: GET /v1/schedules/{id}/runs?limit=&cursor=.
+// Contract: GET /v1/schedules/{id}/runs?limit=&cursor=. Scoped to the
+// edge-verified `?org_id`: SchedulesStore has no dedicated GetByOrg (Get +
+// an OrgID equality check is the same guard), and a schedule ID mismatch
+// is reported identically to a genuinely missing one — mirrors the
+// Source/Job GetByOrg pattern.
 func scheduleRuns(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
@@ -141,7 +145,13 @@ func scheduleRuns(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
-		if _, ok := db.Schedules().Get(id); !ok {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		sched, ok := db.Schedules().Get(id)
+		if !ok || sched.OrgID != org {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
 		}
@@ -344,6 +354,16 @@ func mountSimple[T any](r chi.Router, path string, s store.ResourceStore[T]) {
 	})
 }
 
+// listJobs backs GET /v1/jobs. UNSCOPED BY DESIGN: quarry-orchestrator's
+// jobs dispatcher (services/quarry-orchestrator/internal/jobs/dispatcher.go
+// listJobs) polls this exact endpoint with NO org_id — it must see every
+// tenant's `accepted` jobs to start the matching Temporal workflow, the
+// same way the schedules reconciler polls GET /v1/schedules unscoped.
+// There is no tenant-facing caller: quarry-edge never forwards to this
+// bare path (only to the org-scoped GET /v1/{kind}/jobs — see
+// MountJobsByKind), and the GraphQL `jobs` resolver is an inert stub that
+// never reaches control. Scoping this endpoint would silently stop every
+// job from ever leaving "accepted".
 func listJobs(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -355,8 +375,17 @@ func listJobs(db store.DB) http.HandlerFunc {
 	}
 }
 
+// createJob backs POST /v1/jobs. org_id is read from the edge-verified
+// `?org_id` query param (never the request body) and stamped onto the
+// job — mirrors createSourceHandler's guard, which rejects an empty org
+// rather than let a job land unattributed to any tenant.
 func createJob(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
 		var in createJobInput
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
@@ -379,13 +408,14 @@ func createJob(db store.DB) http.HandlerFunc {
 			return
 		}
 		if idemKey != "" {
-			if existing, ok := db.Jobs().FindByIdempotencyKey(idemKey); ok {
+			if existing, ok := db.Jobs().FindByIdempotencyKey(org, idemKey); ok {
 				httpx.WriteJSON(w, r, http.StatusOK, existing)
 				return
 			}
 		}
 		job := store.Job{
 			ID:        quarrycontracts.NewID(quarrycontracts.KindJob),
+			OrgID:     org,
 			Kind:      in.Kind,
 			Status:    "accepted",
 			Policy:    policy,
@@ -401,7 +431,7 @@ func createJob(db store.DB) http.HandlerFunc {
 			// landed between our lookup and our Create. Re-fetch and
 			// return that one.
 			if idemKey != "" {
-				if existing, ok := db.Jobs().FindByIdempotencyKey(idemKey); ok {
+				if existing, ok := db.Jobs().FindByIdempotencyKey(org, idemKey); ok {
 					httpx.WriteJSON(w, r, http.StatusOK, existing)
 					return
 				}
@@ -436,10 +466,18 @@ func resolveJobPolicy(in createJobInput) (quarrycontracts.RunPolicy, error) {
 	return quarrycontracts.DefaultRunPolicy(), nil
 }
 
+// getJob backs GET /v1/jobs/{id}, scoped to the edge-verified `?org_id`
+// query param via GetByOrg — a cross-tenant id reads as 404, same as
+// getSourceHandler-style guards elsewhere in this package.
 func getJob(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
-		v, ok := db.Jobs().Get(id)
+		v, ok := db.Jobs().GetByOrg(org, id)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
@@ -449,11 +487,15 @@ func getJob(db store.DB) http.HandlerFunc {
 }
 
 // updateJob accepts a partial update of the mutable fields on a job
-// (status + run_id). Used by the orchestrator's jobs dispatcher to flip
-// accepted → running and stamp the Temporal workflow's run_id. The
-// existing kind/params/policy/created_at fields are preserved so a
-// caller can send `{"status": "running", "run_id": "run_…"}` without
-// re-sending the original create payload.
+// (status + run_id). UNSCOPED BY DESIGN: it's called only by the
+// orchestrator's jobs dispatcher (markRunning/markFailed in
+// services/quarry-orchestrator/internal/jobs/dispatcher.go) to flip
+// accepted → running/failed and stamp the Temporal run_id — a trusted
+// internal service transition by job ID, not a tenant-facing read, and
+// the dispatcher never sends org_id. The existing kind/params/policy/
+// created_at fields are preserved so a caller can send
+// `{"status": "running", "run_id": "run_…"}` without re-sending the
+// original create payload.
 func updateJob(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
@@ -492,9 +534,24 @@ func updateJob(db store.DB) http.HandlerFunc {
 	}
 }
 
+// jobEvents backs GET /v1/jobs/{id}/events. Confirms the id belongs to the
+// caller's org via GetByOrg before returning any events — quarry-edge's
+// list_job_events already sends the verified org_id on every call
+// (resource_routes.rs's forward_one always includes it), so this adds no
+// new requirement for that caller, only closes the gap for a direct or
+// future caller that omits it.
 func jobEvents(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if _, ok := db.Jobs().GetByOrg(org, id); !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
 		after, _ := strconv.ParseUint(r.URL.Query().Get("after_seq"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if limit <= 0 {
@@ -506,7 +563,8 @@ func jobEvents(db store.DB) http.HandlerFunc {
 }
 
 // jobHistory returns the merged view for a job: job record + its events.
-// Contract §1.2: GET /v1/jobs/{id}/history.
+// Contract §1.2: GET /v1/jobs/{id}/history. Scoped to the edge-verified
+// `?org_id` via GetByOrg, same guard as getJob/jobEvents.
 func jobHistory(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
@@ -514,7 +572,12 @@ func jobHistory(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
 			return
 		}
-		job, ok := db.Jobs().Get(id)
+		org := orgFromQuery(r)
+		if org == "" {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
+		}
+		job, ok := db.Jobs().GetByOrg(org, id)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return

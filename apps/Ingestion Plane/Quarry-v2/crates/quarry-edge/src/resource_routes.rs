@@ -560,6 +560,41 @@ pub async fn create_source(
     Ok(Json(Envelope::ok(request_id, created)))
 }
 
+/// Internal, non-HTTP-handler counterpart to [`create_source`] used by
+/// `PageRunner`'s [`quarry_runtime::source_registrar::SourceRegistrar`] impl
+/// (`crate::source_registrar::EdgeSourceRegistrar`) to materialize a durable
+/// "tracked website" row on crawl-completion. Reuses the exact same
+/// HMAC-signed [`forward_mutation`] path the public `POST /v1/sources`
+/// handler uses — the difference is this is invoked in-process from the
+/// crawl pipeline (no inbound request / JWT claims to extract `org_id`
+/// from), so `org_id` is passed directly instead of read from `claims`.
+///
+/// `monitor` is always `false` here: crawl-completion registration should
+/// not silently spin up a recurring change-monitor schedule the user never
+/// asked for. Best-effort by contract — callers (the registrar impl) log
+/// and swallow errors so a materialization hiccup never fails the ingest
+/// that already succeeded.
+pub(crate) async fn upsert_source_internal(
+    state: &AppState,
+    org_id: &str,
+    name: &str,
+    url: &str,
+    kind: &str,
+) -> Result<(), QuarryError> {
+    let body = CreateSourceRequest {
+        name: name.to_string(),
+        url: url.to_string(),
+        kind: kind.to_string(),
+        monitor: false,
+        preset: None,
+        config: None,
+    };
+    let body_bytes = serde_json::to_vec(&body)
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("encode body: {e}")))?;
+    forward_mutation(state, reqwest::Method::POST, "/v1/sources", org_id, &body_bytes).await?;
+    Ok(())
+}
+
 pub async fn delete_source(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,

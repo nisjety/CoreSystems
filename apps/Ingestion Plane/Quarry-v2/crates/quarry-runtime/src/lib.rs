@@ -73,6 +73,7 @@ pub mod s3_profile_store;
 pub mod serp;
 pub mod service_tokens;
 pub mod smart_router;
+pub mod source_registrar;
 pub mod step_receipts;
 pub mod structured_extract;
 #[cfg(feature = "test-site")]

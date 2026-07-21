@@ -91,7 +91,7 @@ func TestCreateJob_AppliesPresetPolicy(t *testing.T) {
 	t.Parallel()
 	h, _ := newPresetServer(t)
 	body := `{"kind":"scrape","preset":"stealth","params":{"url":"https://x"}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -112,7 +112,7 @@ func TestCreateJob_RejectsUnknownPreset(t *testing.T) {
 	t.Parallel()
 	h, _ := newPresetServer(t)
 	body := `{"kind":"scrape","preset":"nosuch","params":{"url":"https://x"}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs?org_id=org_test", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

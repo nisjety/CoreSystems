@@ -114,6 +114,11 @@ pub enum JobResourceKind {
     Research,
     Agent,
     Batch,
+    /// Single-page fetch. Quarry-control's `store.Job.Kind` produces this
+    /// value constantly (it's the most common kind created via `POST
+    /// /v1/jobs`) — it must have a variant here or every `scrape` job
+    /// fails `JobResourceKind` deserialization the moment it's listed.
+    Scrape,
 }
 
 impl JobResourceKind {
@@ -125,6 +130,7 @@ impl JobResourceKind {
             JobResourceKind::Research => "research",
             JobResourceKind::Agent => "agent",
             JobResourceKind::Batch => "batch",
+            JobResourceKind::Scrape => "scrape",
         }
     }
 
@@ -138,6 +144,7 @@ impl JobResourceKind {
             "research" => Some(JobResourceKind::Research),
             "agent" => Some(JobResourceKind::Agent),
             "batch" => Some(JobResourceKind::Batch),
+            "scrape" => Some(JobResourceKind::Scrape),
             _ => None,
         }
     }
@@ -147,7 +154,13 @@ impl JobResourceKind {
 /// kind-specific status because dashboards filter across kinds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSummary {
-    pub job_id: kinds::RunKind,
+    /// The job's own resource id (`job_<ulid>`), i.e. what `GET
+    /// /v1/jobs/:id` addresses. NOT the Temporal run id — that's a
+    /// separate, optional identity a job only gains once dispatched
+    /// (see quarry-control's `store.Job.RunID`). Uses `kinds::JobKind`
+    /// (prefix `job_`) to match `Event.job_id` and quarry-control's own
+    /// `quarrycontracts.KindJob` prefix.
+    pub job_id: kinds::JobKind,
     pub kind: JobResourceKind,
     pub org_id: String,
     /// `"queued" | "running" | "completed" | "failed" | "cancelled"`.
@@ -375,10 +388,35 @@ mod tests {
             JobResourceKind::Research,
             JobResourceKind::Agent,
             JobResourceKind::Batch,
+            JobResourceKind::Scrape,
         ] {
             let s = k.as_str();
             assert_eq!(JobResourceKind::from_path_segment(s), Some(k));
         }
+    }
+
+    /// Pins the exact wire shape quarry-control's `toJobWire` (Go,
+    /// `services/quarry-control/internal/resources/job_wire.go`) emits
+    /// for `GET /v1/{kind}/jobs`. If either side drifts — a renamed
+    /// field, a prefix mismatch on `job_id`, or a `kind` value missing
+    /// its `JobResourceKind` variant — this test catches it here
+    /// instead of at the SPA.
+    #[test]
+    fn job_summary_deserializes_go_control_wire_shape() {
+        let wire = serde_json::json!({
+            "job_id": "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "kind": "scrape",
+            "org_id": "org_a",
+            "status": "accepted",
+            "created_at": "2026-07-20T12:00:00Z"
+        });
+        let summary: JobSummary = serde_json::from_value(wire)
+            .expect("JobSummary must deserialize quarry-control's job_wire.go shape");
+        assert_eq!(summary.kind, JobResourceKind::Scrape);
+        assert_eq!(summary.job_id.to_string(), "job_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(summary.org_id, "org_a");
+        assert!(summary.started_at.is_none());
+        assert!(summary.completed_at.is_none());
     }
 
     #[test]

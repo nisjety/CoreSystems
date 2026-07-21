@@ -247,7 +247,10 @@ impl EdgeConfig {
         let cfg = config::Config::builder()
             .add_source(config::Environment::with_prefix("QUARRY_EDGE").separator("__"))
             .build()?;
-        let mut edge: Self = cfg.try_deserialize().unwrap_or_else(|_| Self::defaults());
+        let mut edge: Self = cfg.try_deserialize().unwrap_or_else(|err| {
+            tracing::error!(error = %err, "EdgeConfig failed to deserialize from environment; falling back to all-defaults (check for a required field with no #[serde(default)])");
+            Self::defaults()
+        });
         if edge.redis_url.is_none() {
             edge.redis_url = edge.dragonfly_url.clone();
         }

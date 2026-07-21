@@ -111,3 +111,56 @@ func TestMemorySources_CreateConflict(t *testing.T) {
 		t.Fatalf("duplicate create err=%v want=ErrConflict", err)
 	}
 }
+
+// TestMemorySources_UpsertByOrgAndURL_CollapsesDuplicates proves the
+// 2026-07-20 crawl-to-KB fix: repeat upserts for the same (org_id, url) —
+// e.g. one per page of a multi-page crawl of the same host — collapse into
+// a single row instead of duplicating, and the second call correctly
+// reports created=false while returning the ORIGINAL row's identity.
+func TestMemorySources_UpsertByOrgAndURL_CollapsesDuplicates(t *testing.T) {
+	t.Parallel()
+	db := NewMemory()
+	s := db.Sources()
+
+	first := newSource("org_a", "example.com", "https://example.com")
+	got1, created1, err := s.UpsertByOrgAndURL(first)
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if !created1 {
+		t.Fatal("first upsert should report created=true")
+	}
+	if got1.ID != first.ID {
+		t.Fatalf("first upsert id=%s want=%s", got1.ID, first.ID)
+	}
+
+	// Same org + same URL, different minted ID (mirrors a second crawled page
+	// on the same host calling the registrar again) — must NOT create a
+	// second row.
+	second := newSource("org_a", "example.com", "https://example.com")
+	got2, created2, err := s.UpsertByOrgAndURL(second)
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if created2 {
+		t.Fatal("second upsert for the same (org_id, url) should report created=false")
+	}
+	if got2.ID != first.ID {
+		t.Fatalf("second upsert returned a different row: id=%s want=%s (original)", got2.ID, first.ID)
+	}
+
+	list, _ := s.ListByOrg("org_a", 50, "")
+	if len(list) != 1 {
+		t.Fatalf("expected exactly 1 row after 2 upserts of the same URL, got %d", len(list))
+	}
+
+	// Different org, same URL — must NOT collapse across tenants.
+	other := newSource("org_b", "example.com", "https://example.com")
+	_, created3, err := s.UpsertByOrgAndURL(other)
+	if err != nil {
+		t.Fatalf("cross-org upsert: %v", err)
+	}
+	if !created3 {
+		t.Fatal("upsert for a different org with the same URL must create its own row")
+	}
+}

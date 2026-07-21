@@ -19,6 +19,7 @@ pub mod resource_routes;
 pub mod routes;
 pub mod schedule_routes;
 pub mod search_routes;
+pub mod source_registrar;
 pub mod state;
 
 pub use experiments::{Assignments, Experiment, ExperimentRegistry};

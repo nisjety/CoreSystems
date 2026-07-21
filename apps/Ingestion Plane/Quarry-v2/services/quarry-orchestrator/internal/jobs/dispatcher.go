@@ -378,12 +378,21 @@ func (m *Manager) listJobs(ctx context.Context) ([]job, error) {
 // job mirrors the subset of control's `store.Job` we care about. Kept
 // local so the orchestrator doesn't take a runtime dependency on the
 // control plane's internal package layout.
+//
+// CreatedAt is an RFC3339 string, not a Unix-millis int64: control's
+// `store.Job` (services/quarry-control/internal/store/store.go) renders
+// `created_at` on the wire via a custom MarshalJSON as RFC3339 — the
+// convention every other timestamp on this API already follows (Source,
+// Snapshot, and the Rust `quarry_core::resources::JobSummary` all use
+// RFC3339 / `DateTime<Utc>`). This field is unused by the dispatch logic
+// below; it's kept only so decoding a control job into this struct
+// doesn't reject the whole response on a type mismatch.
 type job struct {
 	ID        quarrycontracts.ID `json:"id"`
 	Kind      string             `json:"kind"`
 	Status    string             `json:"status"`
 	Params    map[string]any     `json:"params,omitempty"`
-	CreatedAt int64              `json:"created_at"`
+	CreatedAt string             `json:"created_at"`
 }
 
 func isExecutableKind(k string) bool {

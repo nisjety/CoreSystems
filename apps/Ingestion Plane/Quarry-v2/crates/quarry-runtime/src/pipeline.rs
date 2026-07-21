@@ -31,6 +31,7 @@ use crate::host_scheduler::{BadKind, HostScheduler};
 use crate::ingest_client::DataPlaneIngest;
 use crate::local_index::{LocalDocument, TantivyLocalIndex};
 use crate::policy::RunPolicy;
+use crate::source_registrar::SourceRegistrar;
 
 pub struct PageRunner {
     pub driver: Arc<dyn Driver>,
@@ -87,6 +88,14 @@ pub struct PageRunner {
     /// session), stored in the CAS, and a `page_images.created` event is emitted
     /// for the embedding-engine. `None` (default) disables the visual producer.
     pub page_renderer: Option<Arc<crate::page_renderer::PageRenderer>>,
+    /// P0 fix — Aquatiq crawl-to-KB pipeline (2026-07-20): best-effort
+    /// registrar that materializes a durable "tracked website" `Source` row
+    /// on first successful ingest for a given host, so the Knowledge Base's
+    /// "Tracked web sources" panel reflects crawl-originated content instead
+    /// of staying empty forever (previously only the Ingestions page's
+    /// manual registration flow ever wrote that row). `None` disables
+    /// registration (ad-hoc single-page scrapes, test harnesses).
+    pub source_registrar: Option<Arc<dyn SourceRegistrar>>,
 }
 
 #[cfg(test)]
@@ -662,6 +671,8 @@ impl PageRunner {
                 let render_org = org_id.clone();
                 let render_title = output.metadata.title.clone();
                 let render_zdr = self.zdr;
+                let source_registrar = self.source_registrar.clone();
+                let registrar_org = org_id.clone();
                 tokio::spawn(async move {
                     let ingest_fut = async {
                         match ingest.ingest(&ingest_req).await {
@@ -693,16 +704,67 @@ impl PageRunner {
                                         ingest_run_id,
                                         EventType::StoreRecordWritten,
                                         json!({
-                                            "url": ingest_url,
+                                            "url": ingest_url.clone(),
                                             "document_id": resp.document_id,
                                             "index_status": resp.index_status,
                                         }),
                                         format!("{}:ingest:written", ingest_req.run_id),
                                     )
                                     .await;
+
+                                // P0 fix — Aquatiq crawl-to-KB pipeline
+                                // (2026-07-20), part 2: on a successful
+                                // ingest, best-effort materialize a durable
+                                // "tracked website" Source row for this
+                                // host so the Knowledge Base's "Tracked web
+                                // sources" panel isn't permanently empty for
+                                // crawl-originated content. Keyed on the
+                                // page's host root (not the full page URL)
+                                // so a multi-page crawl of one site collapses
+                                // into a single row via the receiver's
+                                // upsert-by-(org_id, url). Registration
+                                // failure is logged and never fails the
+                                // ingest that already succeeded above.
+                                if let Some(registrar) = &source_registrar {
+                                    if let Ok(parsed) = url::Url::parse(&ingest_url) {
+                                        if let Some(host) = parsed.host_str() {
+                                            let root = format!("{}://{}", parsed.scheme(), host);
+                                            if let Err(e) = registrar
+                                                .register_source(&registrar_org, host, &root, "crawl")
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    url = %root,
+                                                    "tracked-source registration failed (non-fatal)"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "data plane ingest failed (non-fatal)");
+                                // P0 fix — Aquatiq crawl-to-KB pipeline (2026-07-20): a
+                                // failed Data Plane write was previously ONLY logged,
+                                // never surfaced on the job's event stream, so a crawl
+                                // could report "completed"/"indexed" while zero pages
+                                // were ever durably persisted. Emit a distinguishable
+                                // event on the SAME sink `StoreRecordWritten` uses so
+                                // consumers (gateway, SPA status label) can tell real
+                                // ingest failure apart from a page that was never asked
+                                // to ingest in the first place.
+                                event_sink
+                                    .emit(
+                                        ingest_run_id,
+                                        EventType::StoreRecordFailed,
+                                        json!({
+                                            "url": ingest_url,
+                                            "error": e.to_string(),
+                                        }),
+                                        format!("{}:ingest:failed", ingest_req.run_id),
+                                    )
+                                    .await;
                             }
                         }
                     };

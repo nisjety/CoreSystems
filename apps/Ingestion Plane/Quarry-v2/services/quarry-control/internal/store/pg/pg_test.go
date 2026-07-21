@@ -60,6 +60,81 @@ func TestPostgres_JobsCRUD(t *testing.T) {
 	}
 }
 
+// TestPostgres_SourcesUpsertByOrgAndURL is the real-database counterpart to
+// the in-memory `TestMemorySources_UpsertByOrgAndURL_CollapsesDuplicates`
+// (store package). It exercises the actual `ON CONFLICT (org_id, url) WHERE
+// deleted_at IS NULL DO UPDATE ... RETURNING ... (xmax = 0)` SQL against the
+// `quarry_sources_org_url_uniq` partial unique index (migration 011) — the
+// in-memory store's linear scan can't catch a typo in that SQL, only a live
+// Postgres round trip can. 2026-07-20 Aquatiq crawl-to-KB audit fix.
+func TestPostgres_SourcesUpsertByOrgAndURL(t *testing.T) {
+	db := openOrSkip(t)
+	org := "org_upsert_" + quarrycontracts.NewID(quarrycontracts.KindRun).String()
+
+	mk := func() store.Source {
+		now := time.Now().UnixMilli()
+		return store.Source{
+			ID:        quarrycontracts.NewID(quarrycontracts.KindSource),
+			OrgID:     org,
+			Name:      "example.com",
+			URL:       "https://example.com/upsert-test",
+			Kind:      "crawl",
+			Status:    "active",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+
+	first := mk()
+	got1, created1, err := db.Sources().UpsertByOrgAndURL(first)
+	if err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if !created1 {
+		t.Fatal("first upsert should report created=true")
+	}
+	if got1.ID != first.ID {
+		t.Fatalf("first upsert id=%s want=%s", got1.ID, first.ID)
+	}
+
+	// A second page on the same host, same org: must collapse into the
+	// SAME row (created=false, same id) rather than erroring or duplicating.
+	second := mk()
+	got2, created2, err := db.Sources().UpsertByOrgAndURL(second)
+	if err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if created2 {
+		t.Fatal("second upsert for the same (org_id, url) should report created=false")
+	}
+	if got2.ID != first.ID {
+		t.Fatalf("second upsert returned id=%s, want the original=%s", got2.ID, first.ID)
+	}
+
+	list, _ := db.Sources().ListByOrg(org, 50, "")
+	if len(list) != 1 {
+		t.Fatalf("expected exactly 1 row after 2 upserts of the same URL, got %d", len(list))
+	}
+
+	// Soft-delete then re-register the same URL: the partial unique index
+	// (WHERE deleted_at IS NULL) must let a fresh row through instead of
+	// permanently blocking re-registration of a once-deleted source.
+	if err := db.Sources().SoftDeleteByOrg(org, first.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	third := mk()
+	got3, created3, err := db.Sources().UpsertByOrgAndURL(third)
+	if err != nil {
+		t.Fatalf("upsert after soft-delete: %v", err)
+	}
+	if !created3 {
+		t.Fatal("upsert after soft-delete of the prior row should report created=true (fresh row)")
+	}
+	if got3.ID == first.ID {
+		t.Fatal("upsert after soft-delete should mint a NEW row, not resurrect the tombstoned one")
+	}
+}
+
 func TestPostgres_EventAppendDedupe(t *testing.T) {
 	db := openOrSkip(t)
 	runID := quarrycontracts.NewID(quarrycontracts.KindRun)

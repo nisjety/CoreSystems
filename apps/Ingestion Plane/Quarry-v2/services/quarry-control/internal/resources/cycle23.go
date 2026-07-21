@@ -70,9 +70,9 @@ func emptyPage(w http.ResponseWriter, r *http.Request) {
 // param (mirroring the list/forward_json contract), so a client can never
 // register a source under another tenant.
 type sourceCreateBody struct {
-	Name string         `json:"name"`
-	URL  string         `json:"url"`
-	Kind string         `json:"kind"` // crawl | scrape | search
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	Kind string `json:"kind"` // crawl | scrape | search
 	// Monitor, when true, also registers a recurring change_monitor schedule
 	// (preset-driven) so the orchestrator reconcile materializes a Temporal
 	// schedule for this source. Sources without it are durable records only.
@@ -163,7 +163,18 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		if err := db.Sources().Create(src); err != nil {
+		// 2026-07-20 Aquatiq crawl-to-KB audit fix: upsert-by-(org_id, url)
+		// instead of a plain insert. quarry-runtime's crawl pipeline now calls
+		// this endpoint once per successfully ingested page (best-effort,
+		// from PageRunner's SourceRegistrar), so repeat calls for the same
+		// website — one per page of a multi-page crawl, or a re-run of the
+		// same crawl — MUST collapse into a single durable "tracked website"
+		// row rather than duplicating it once per page. The manual
+		// Ingestions-page registration flow goes through this same handler
+		// and benefits identically: registering the same URL twice no longer
+		// creates two rows.
+		result, created, err := db.Sources().UpsertByOrgAndURL(src)
+		if err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeConflict, err.Error(), nil)
 			return
 		}
@@ -171,7 +182,10 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 		// source. The orchestrator reconcile (org-scoped) then materializes a
 		// Temporal schedule; on a detected change the W2 notify leg fires. We
 		// stamp the SAME verified org so the schedule + source stay tenant-aligned.
-		if body.Monitor {
+		// Only on the newly-inserted branch — an idempotent repeat
+		// registration (e.g. the crawl pipeline's per-page calls) must not
+		// spin up a duplicate schedule every time.
+		if body.Monitor && created {
 			preset := strings.TrimSpace(body.Preset)
 			if preset == "" {
 				preset = "daily"
@@ -192,7 +206,11 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 				return
 			}
 		}
-		httpx.WriteJSON(w, r, http.StatusCreated, src)
+		status := http.StatusCreated
+		if !created {
+			status = http.StatusOK
+		}
+		httpx.WriteJSON(w, r, status, result)
 	}
 }
 
@@ -252,27 +270,27 @@ func MountRequestQueues(r chi.Router, _ store.DB) {
 // =============================================================================
 
 type teamCreditUsage struct {
-	OrgID               string  `json:"org_id"`
-	Period              string  `json:"period"`
-	CreditsUsed         float64 `json:"credits_used"`
-	CreditsLimit        *int64  `json:"credits_limit,omitempty"`
-	UtilizationPercent  float64 `json:"utilization_percent"`
+	OrgID              string  `json:"org_id"`
+	Period             string  `json:"period"`
+	CreditsUsed        float64 `json:"credits_used"`
+	CreditsLimit       *int64  `json:"credits_limit,omitempty"`
+	UtilizationPercent float64 `json:"utilization_percent"`
 }
 
 type teamTokenUsage struct {
-	OrgID         string  `json:"org_id"`
-	Period        string  `json:"period"`
-	InputTokens   uint64  `json:"input_tokens"`
-	OutputTokens  uint64  `json:"output_tokens"`
-	TotalTokens   uint64  `json:"total_tokens"`
-	CostMicroUSD  *int64  `json:"cost_micro_usd,omitempty"`
+	OrgID        string `json:"org_id"`
+	Period       string `json:"period"`
+	InputTokens  uint64 `json:"input_tokens"`
+	OutputTokens uint64 `json:"output_tokens"`
+	TotalTokens  uint64 `json:"total_tokens"`
+	CostMicroUSD *int64 `json:"cost_micro_usd,omitempty"`
 }
 
 type hostConcurrency struct {
-	Host           string   `json:"host"`
-	Current        uint32   `json:"current"`
-	Ceiling        uint32   `json:"ceiling"`
-	EWMALatencyMs  *float64 `json:"ewma_latency_ms,omitempty"`
+	Host          string   `json:"host"`
+	Current       uint32   `json:"current"`
+	Ceiling       uint32   `json:"ceiling"`
+	EWMALatencyMs *float64 `json:"ewma_latency_ms,omitempty"`
 }
 
 type teamConcurrency struct {
@@ -283,17 +301,17 @@ type teamConcurrency struct {
 }
 
 type queueStatusEntry struct {
-	QueueID   string `json:"queue_id"`
-	Name      string `json:"name"`
-	Queued    uint64 `json:"queued"`
-	InFlight  uint64 `json:"in_flight"`
+	QueueID  string `json:"queue_id"`
+	Name     string `json:"name"`
+	Queued   uint64 `json:"queued"`
+	InFlight uint64 `json:"in_flight"`
 }
 
 type teamQueueStatus struct {
-	OrgID          string             `json:"org_id"`
-	QueuedTotal    uint64             `json:"queued_total"`
-	InFlightTotal  uint64             `json:"in_flight_total"`
-	ByQueue        []queueStatusEntry `json:"by_queue"`
+	OrgID         string             `json:"org_id"`
+	QueuedTotal   uint64             `json:"queued_total"`
+	InFlightTotal uint64             `json:"in_flight_total"`
+	ByQueue       []queueStatusEntry `json:"by_queue"`
 }
 
 // MountTeam registers /v1/team/{credit-usage,token-usage,concurrency,
@@ -431,37 +449,45 @@ func scheduleBackfillStub(db store.DB) http.HandlerFunc {
 		}
 		windowSecs := int64(body.EndAt.Sub(body.StartAt).Seconds())
 		httpx.WriteJSON(w, r, http.StatusAccepted, map[string]any{
-			"schedule_id":      sched.ID,
-			"status":           "backfill-accepted",
-			"window_secs":      windowSecs,
-			"overlap_policy":   body.OverlapPolicy,
-			"note":             "Temporal SDK not yet wired; backfill is a stub.",
+			"schedule_id":    sched.ID,
+			"status":         "backfill-accepted",
+			"window_secs":    windowSecs,
+			"overlap_policy": body.OverlapPolicy,
+			"note":           "Temporal SDK not yet wired; backfill is a stub.",
 		})
 	}
 }
 
 // =============================================================================
-// Per-kind job lists — /v1/{crawl,search,extract,research,agent,batch}/jobs
+// Per-kind job lists — /v1/{crawl,search,extract,research,agent,batch,scrape}/jobs
 //
-// The existing `/v1/jobs` list is org-agnostic with no kind filter.
-// Cycle 23 adds per-kind aliases that proxy to `/v1/jobs?kind=<kind>`.
+// Each alias filters to its own kind via JobsStore.ListByKind (the `kind`
+// column + jobs_kind_status_created_idx index have existed since the very
+// first jobs migration — this was just never wired up), and projects the
+// result through job_wire.go's toJobWire so the response matches
+// quarry_core::resources::JobSummary field-for-field.
 // =============================================================================
 
 func MountJobsByKind(r chi.Router, db store.DB) {
-	kinds := []string{"crawl", "search", "extract", "research", "agent", "batch"}
+	kinds := []string{"crawl", "search", "extract", "research", "agent", "batch", "scrape"}
 	for _, k := range kinds {
 		kind := k // capture
 		r.Get("/v1/"+kind+"/jobs", func(w http.ResponseWriter, r *http.Request) {
-			// We don't yet store `kind` discriminator on jobs;
-			// return the unfiltered list and let the client filter
-			// client-side. Cycle 24 adds `kind` column + index.
+			orgID := orgFromQuery(r)
+			if orgID == "" {
+				httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+				return
+			}
 			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 			if limit <= 0 {
 				limit = 25
 			}
-			items, next := db.Jobs().List(limit, r.URL.Query().Get("cursor"))
-			if items == nil {
-				items = []store.Job{}
+			raw, next := db.Jobs().ListByKind(orgID, kind, limit, r.URL.Query().Get("cursor"))
+			items := make([]jobWire, 0, len(raw))
+			for _, j := range raw {
+				if wire, ok := toJobWire(j); ok {
+					items = append(items, wire)
+				}
 			}
 			var nextPtr *string
 			if next != "" {

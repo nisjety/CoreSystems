@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/version", get(version))
         .route("/graphql/schema", get(crate::graphql::introspection))
         .route("/graphql/playground", get(crate::graphql::playground));
 
@@ -288,6 +289,21 @@ async fn ready() -> &'static str {
     "ready"
 }
 
+/// Reports what is actually running in this container: the git revision and
+/// build timestamp baked into the image (see `Dockerfile.edge`'s
+/// `SOURCE_REVISION` / `BUILD_DATE` build args, re-exposed as runtime `ENV`
+/// so no Docker/registry access is needed to answer "what SHA is deployed
+/// here"). Falls back to the same `unverified`/`unknown` defaults the image
+/// LABELs use when unset.
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "quarry-edge-rs",
+        "revision": std::env::var("SOURCE_REVISION").unwrap_or_else(|_| "unverified".to_string()),
+        "build_date": std::env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_string()),
+        "cargo_version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScrapeRequest {
     pub url: String,
@@ -411,6 +427,9 @@ async fn scrape(
             .map(RenderHints::from)
             .unwrap_or_default(),
         page_renderer: state.page_renderer.clone(),
+        // Ad-hoc single-page scrape, not a crawl target — don't materialize
+        // a "tracked website" row for it.
+        source_registrar: None,
     };
 
     let run_id: RunKind = quarry_core::ids::Id::new();
@@ -513,6 +532,7 @@ async fn crawl_handoff(
     let ack = crate::handoff::forward_to_orchestrator(
         &state.control_base_url,
         &request_id,
+        &org_id,
         serde_json::json!({
             "kind": "crawl",
             "url": req.url,
@@ -570,6 +590,7 @@ async fn batch_handoff(
     let ack = crate::handoff::forward_to_orchestrator(
         &state.control_base_url,
         &request_id,
+        &claims.org_id,
         serde_json::json!({
             "kind": "batch",
             "urls": req.urls,
@@ -836,6 +857,17 @@ async fn internal_run_page(
             .map(RenderHints::from)
             .unwrap_or_default(),
         page_renderer: state.page_renderer.clone(),
+        // P0 fix — Aquatiq crawl-to-KB pipeline (2026-07-20): this is the
+        // orchestrator-driven per-page route used for durable crawl/batch
+        // execution (quarry-orchestrator calls it once per page). Wiring the
+        // registrar HERE — and only here, not on the ad-hoc /v1/scrape
+        // paths — is what makes crawl-originated ingests materialize a
+        // "tracked website" Source row.
+        source_registrar: Some(std::sync::Arc::new(
+            crate::source_registrar::EdgeSourceRegistrar {
+                state: state.clone(),
+            },
+        )),
     };
 
     let run_id: RunKind = match req.run_id.as_deref() {
@@ -950,6 +982,9 @@ async fn scrape_stream(
             autoscale: Some(quarry_runtime::global_autoscale()),
             render: req.render.clone().map(RenderHints::from).unwrap_or_default(),
             page_renderer: state.page_renderer.clone(),
+            // Ad-hoc streamed single-page scrape, not a crawl target — don't
+            // materialize a "tracked website" row for it.
+            source_registrar: None,
         };
         let run_id = RunKind::new();
         let mut rx = state.event_sink.subscribe(&run_id);

@@ -4,10 +4,12 @@ package store
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 )
@@ -24,6 +26,16 @@ type DB interface {
 	WebhookDeliveries() WebhookDeliveryStore
 	Blocklists() ResourceStore[BlocklistEntry]
 	Events() EventLog
+	// PurgeOrg hard-deletes every row this service holds for orgID across
+	// every org-scoped table (jobs, schedules, quarry_sources,
+	// quarry_benchmarks, quarry_idempotency_keys) — the GDPR cross-plane
+	// erasure fan-out entry point. See gdpr_purge.go for the full scope
+	// rationale (which tables qualify and which deliberately don't) and
+	// SoftDeleteByOrg above for the org-scoping convention this mirrors,
+	// at the opposite (hard/permanent, not soft/reversible) end. Idempotent:
+	// a repeat call for an orgID with nothing left matches zero rows and
+	// returns a zero PurgeResult, never an error.
+	PurgeOrg(orgID string) (PurgeResult, error)
 }
 
 type ResourceStore[T any] interface {
@@ -56,6 +68,16 @@ type SourcesStore interface {
 	// Create inserts a new source. The caller mints the org-prefixed id and
 	// stamps the org id; Create does not derive either.
 	Create(s Source) error
+	// UpsertByOrgAndURL is the idempotent counterpart to Create: when a live
+	// (non-deleted) row already exists for the exact (org_id, url) pair, its
+	// updated_at is refreshed and the EXISTING row is returned instead of
+	// erroring; `created` reports which branch ran. This is what lets
+	// POST /v1/sources be called repeatedly for the same website without
+	// duplicating rows — added 2026-07-20 so quarry-runtime's crawl pipeline
+	// (PageRunner's SourceRegistrar) can call this once per successfully
+	// ingested page and have a multi-page crawl of one host collapse into a
+	// single durable "tracked website" row.
+	UpsertByOrgAndURL(s Source) (result Source, created bool, err error)
 	// GetByOrg returns a single non-deleted source scoped to the org. The org
 	// guard means a cross-tenant id returns (Source{}, false), never another
 	// org's row.
@@ -68,15 +90,30 @@ type SourcesStore interface {
 
 type JobsStore interface {
 	ResourceStore[Job]
+	// ListByOrg returns the org's jobs, newest-first, with an opaque
+	// keyset cursor — backs GET /v1/jobs. Mirrors SourcesStore.ListByOrg.
+	ListByOrg(orgID string, limit int, cursor string) ([]Job, string)
+	// GetByOrg returns a job scoped to the org. A cross-tenant id returns
+	// (Job{}, false) — indistinguishable from a genuinely missing id,
+	// mirroring SourcesStore.GetByOrg's guard.
+	GetByOrg(orgID string, id quarrycontracts.ID) (Job, bool)
 	ListBySchedule(scheduleID quarrycontracts.ID, limit int, cursor string) ([]Job, string)
+	// ListByKind returns jobs whose Kind matches exactly AND whose OrgID
+	// matches orgID, newest-first, with the same opaque keyset cursor
+	// convention as List. Backs GET /v1/{kind}/jobs — mirrors
+	// ListBySchedule's filter pattern. The Postgres impl uses the
+	// (org_id, kind, created_at) index (migration 010_jobs_org_id.sql).
+	ListByKind(orgID, kind string, limit int, cursor string) ([]Job, string)
 	// Update replaces a job record by ID. Used by the orchestrator's
 	// jobs dispatcher to transition accepted → running and stamp the
 	// run_id once a Temporal workflow has been started.
 	Update(j Job) error
-	// FindByIdempotencyKey returns an existing job that was created
-	// with the same Idempotency-Key header, or (Job{}, false) when no
-	// such record exists. Used by createJob to de-dupe client retries.
-	FindByIdempotencyKey(key string) (Job, bool)
+	// FindByIdempotencyKey returns an existing job that was created by
+	// orgID with the same Idempotency-Key header, or (Job{}, false) when
+	// no such record exists FOR THAT ORG — a key collision with another
+	// tenant's job is treated as a miss, never returning a cross-tenant
+	// record. Used by createJob to de-dupe client retries.
+	FindByIdempotencyKey(orgID, key string) (Job, bool)
 }
 
 type EventLog interface {
@@ -92,8 +129,22 @@ type EventLog interface {
 // ---- resource types -------------------------------------------------------
 
 type Job struct {
-	ID         quarrycontracts.ID        `json:"id"`
-	Kind       string                    `json:"kind"` // scrape | crawl | batch | schedule
+	ID quarrycontracts.ID `json:"id"`
+	// OrgID is the tenant that created this job. Stamped server-side from
+	// the edge-verified `?org_id` query param — createJob rejects an empty
+	// value — never trusted from the request body, mirroring Source/
+	// Schedule's org_id. NOT NULL in the DB (migration 010). GET /v1/jobs
+	// and GET /v1/{kind}/jobs filter on this so one org can never see
+	// another's crawl/scrape job history, params, or status.
+	OrgID string `json:"org_id"`
+	// Kind mirrors quarry-core::resources::JobResourceKind's valid
+	// values 1:1 (crawl | search | extract | research | agent | batch |
+	// scrape) — every value GET /v1/{kind}/jobs can forward through
+	// JobSummary. NOT validated against this set at create time
+	// (createJob passes the client-supplied string straight through);
+	// job_wire.go's toJobWire defensively skips any other value rather
+	// than let one bad row break the whole list.
+	Kind       string                    `json:"kind"`
 	Status     string                    `json:"status"`
 	Policy     quarrycontracts.RunPolicy `json:"policy"`
 	Params     map[string]any            `json:"params,omitempty"`
@@ -110,6 +161,100 @@ type Job struct {
 	// exists the handler returns the existing record (200) rather than
 	// creating a duplicate (201). Nil for legacy / schedule-driven jobs.
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+}
+
+// MarshalJSON renders Job.CreatedAt as an RFC3339 string on the wire
+// instead of the raw Unix-millis int64 it's stored as internally.
+//
+// CreatedAt stays `int64` (unix millis) on the Go struct — every
+// internal consumer (Postgres INSERT/SELECT bind params, the
+// (created_at, id) keyset-pagination cursor in store/pg/resources.go,
+// dispatcher/janitor comparisons) depends on that representation and
+// is untouched by this method.
+//
+// The wire format matters because quarry-core::resources::JobSummary
+// (crates/quarry-core/src/resources.rs, the Rust struct every
+// `GET /v1/{kind}/jobs` and `GET /v1/jobs` response is decoded into via
+// quarry-edge's `forward_list`) declares `created_at: DateTime<Utc>`,
+// which serde only accepts as an RFC3339 string — the same convention
+// already used for every sibling resource in that file (Source,
+// Snapshot, RequestQueueSummary, BenchmarkSummary) and for event
+// timestamps on this very API (`quarrycontracts.Event.Timestamp` is a
+// Go `time.Time`, which `encoding/json` already renders as RFC3339).
+// Before this method, Job was the one holdout emitting a bare integer,
+// which quarry-edge failed to parse with "invalid type: integer
+// `<millis>`, expected an RFC 3339 formatted date and time string".
+func (j Job) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		ID             quarrycontracts.ID        `json:"id"`
+		OrgID          string                    `json:"org_id"`
+		Kind           string                    `json:"kind"`
+		Status         string                    `json:"status"`
+		Policy         quarrycontracts.RunPolicy `json:"policy"`
+		Params         map[string]any            `json:"params,omitempty"`
+		ScheduleID     *quarrycontracts.ID       `json:"schedule_id,omitempty"`
+		CreatedAt      string                    `json:"created_at"`
+		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
+		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
+	}
+	return json.Marshal(wire{
+		ID:             j.ID,
+		OrgID:          j.OrgID,
+		Kind:           j.Kind,
+		Status:         j.Status,
+		Policy:         j.Policy,
+		Params:         j.Params,
+		ScheduleID:     j.ScheduleID,
+		CreatedAt:      time.UnixMilli(j.CreatedAt).UTC().Format(time.RFC3339Nano),
+		RunID:          j.RunID,
+		IdempotencyKey: j.IdempotencyKey,
+	})
+}
+
+// UnmarshalJSON is MarshalJSON's symmetric counterpart: it accepts
+// CreatedAt as the RFC3339 string the wire format now uses and converts
+// it back to the internal Unix-millis representation. Nothing in this
+// package decodes a Job from client-supplied JSON today (create/update
+// handlers decode into their own request-shaped structs), but this
+// keeps `Job` round-trippable through encoding/json for tests and any
+// future caller, rather than silently accepting a MarshalJSON without
+// its inverse.
+func (j *Job) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		ID             quarrycontracts.ID        `json:"id"`
+		OrgID          string                    `json:"org_id"`
+		Kind           string                    `json:"kind"`
+		Status         string                    `json:"status"`
+		Policy         quarrycontracts.RunPolicy `json:"policy"`
+		Params         map[string]any            `json:"params,omitempty"`
+		ScheduleID     *quarrycontracts.ID       `json:"schedule_id,omitempty"`
+		CreatedAt      string                    `json:"created_at"`
+		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
+		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
+	}
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*j = Job{
+		ID:             w.ID,
+		OrgID:          w.OrgID,
+		Kind:           w.Kind,
+		Status:         w.Status,
+		Policy:         w.Policy,
+		Params:         w.Params,
+		ScheduleID:     w.ScheduleID,
+		RunID:          w.RunID,
+		IdempotencyKey: w.IdempotencyKey,
+	}
+	if w.CreatedAt != "" {
+		t, err := time.Parse(time.RFC3339Nano, w.CreatedAt)
+		if err != nil {
+			return fmt.Errorf("job.created_at: %w", err)
+		}
+		j.CreatedAt = t.UnixMilli()
+	}
+	return nil
 }
 
 type NamedStore struct {
@@ -148,12 +293,12 @@ type Schedule struct {
 	// from the edge's verified JWT (never trusted from a client body),
 	// it rides into the Temporal workflow Args so every change-monitor
 	// run, baseline, and diff stays org-scoped. NOT NULL in the DB.
-	OrgID      string             `json:"org_id"`
-	Cron       string             `json:"cron"`
-	TargetKind string             `json:"target_kind"` // scrape | crawl | batch | change_monitor
-	TargetRef  string             `json:"target_ref"`  // url | job template id
-	Enabled    bool               `json:"enabled"`
-	CreatedAt  int64              `json:"created_at"`
+	OrgID      string `json:"org_id"`
+	Cron       string `json:"cron"`
+	TargetKind string `json:"target_kind"` // scrape | crawl | batch | change_monitor
+	TargetRef  string `json:"target_ref"`  // url | job template id
+	Enabled    bool   `json:"enabled"`
+	CreatedAt  int64  `json:"created_at"`
 	// CreatedBy is the user_id of whoever created the schedule (stamped
 	// server-side from the edge's verified JWT). It rides into the
 	// change-monitor workflow so the in-product notification on a detected
@@ -303,6 +448,29 @@ func (m *memSources) Create(s Source) error {
 	return nil
 }
 
+// UpsertByOrgAndURL scans the org's live rows for a matching URL (dev-only
+// in-memory store, so a linear scan is fine — the pg impl uses a real unique
+// index). A match refreshes updated_at and is returned as-is; no match
+// inserts `s` the same way Create does.
+func (m *memSources) UpsertByOrgAndURL(s Source) (Source, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		if m.deleted[id] {
+			continue
+		}
+		existing := m.items[id]
+		if existing.OrgID == s.OrgID && existing.URL == s.URL {
+			existing.UpdatedAt = s.UpdatedAt
+			m.items[id] = existing
+			return existing, false, nil
+		}
+	}
+	m.items[s.ID] = s
+	m.order = append(m.order, s.ID)
+	return s, true, nil
+}
+
 func (m *memSources) GetByOrg(orgID string, id quarrycontracts.ID) (Source, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -355,17 +523,19 @@ func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error 
 
 type memJobs struct{ *genericStore[Job] }
 
-// FindByIdempotencyKey scans the in-memory job set for a record with
-// the supplied key. Linear scan is fine — the memory store is dev-only
-// and job counts here are bounded.
-func (m *memJobs) FindByIdempotencyKey(key string) (Job, bool) {
+// FindByIdempotencyKey scans the in-memory job set for a record with the
+// supplied key AND org. Linear scan is fine — the memory store is dev-only
+// and job counts here are bounded. A key match under a different org is
+// not returned — that would leak a cross-tenant job record to createJob's
+// caller.
+func (m *memJobs) FindByIdempotencyKey(orgID, key string) (Job, bool) {
 	if key == "" {
 		return Job{}, false
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, j := range m.items {
-		if j.IdempotencyKey != nil && *j.IdempotencyKey == key {
+		if j.IdempotencyKey != nil && *j.IdempotencyKey == key && j.OrgID == orgID {
 			return j, true
 		}
 	}
@@ -385,6 +555,103 @@ func (m *memJobs) Update(j Job) error {
 	}
 	m.items[j.ID] = j
 	return nil
+}
+
+// GetByOrg returns a job scoped to the org — mirrors memSources.GetByOrg's
+// guard: a cross-tenant id is indistinguishable from a missing one.
+func (m *memJobs) GetByOrg(orgID string, id quarrycontracts.ID) (Job, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	j, ok := m.items[id]
+	if !ok || j.OrgID != orgID {
+		return Job{}, false
+	}
+	return j, true
+}
+
+// ListByOrg returns the org's jobs, newest-first. Mirrors ListByKind's
+// cursor handling — see that method for the encoding.
+func (m *memJobs) ListByOrg(orgID string, limit int, cur string) ([]Job, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var curTS int64
+	var curID string
+	haveCur := false
+	if cur != "" {
+		if raw, err := base64.RawURLEncoding.DecodeString(cur); err == nil {
+			parts := strings.SplitN(string(raw), "|", 2)
+			if len(parts) == 2 {
+				if _, err := fmt.Sscan(parts[0], &curTS); err == nil {
+					curID = parts[1]
+					haveCur = true
+				}
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Job, 0, limit)
+	for i := len(m.order) - 1; i >= 0; i-- {
+		it := m.items[m.order[i]]
+		if it.OrgID != orgID {
+			continue
+		}
+		if haveCur {
+			if !(it.CreatedAt < curTS || (it.CreatedAt == curTS && string(it.ID) < curID)) {
+				continue
+			}
+		}
+		if len(out) == limit {
+			last := out[len(out)-1]
+			return out, base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d|%s", last.CreatedAt, string(last.ID))))
+		}
+		out = append(out, it)
+	}
+	return out, ""
+}
+
+// ListByKind returns jobs whose Kind matches exactly AND whose OrgID
+// matches orgID, newest-first. Mirrors ListBySchedule's cursor handling —
+// see that method for the encoding.
+func (m *memJobs) ListByKind(orgID, kind string, limit int, cur string) ([]Job, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var curTS int64
+	var curID string
+	haveCur := false
+	if cur != "" {
+		if raw, err := base64.RawURLEncoding.DecodeString(cur); err == nil {
+			parts := strings.SplitN(string(raw), "|", 2)
+			if len(parts) == 2 {
+				if _, err := fmt.Sscan(parts[0], &curTS); err == nil {
+					curID = parts[1]
+					haveCur = true
+				}
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Job, 0, limit)
+	for i := len(m.order) - 1; i >= 0; i-- {
+		it := m.items[m.order[i]]
+		if it.Kind != kind || it.OrgID != orgID {
+			continue
+		}
+		if haveCur {
+			if !(it.CreatedAt < curTS || (it.CreatedAt == curTS && string(it.ID) < curID)) {
+				continue
+			}
+		}
+		if len(out) == limit {
+			last := out[len(out)-1]
+			return out, base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d|%s", last.CreatedAt, string(last.ID))))
+		}
+		out = append(out, it)
+	}
+	return out, ""
 }
 
 func (m *memJobs) ListBySchedule(sid quarrycontracts.ID, limit int, cur string) ([]Job, string) {

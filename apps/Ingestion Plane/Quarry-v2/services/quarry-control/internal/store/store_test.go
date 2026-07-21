@@ -125,6 +125,7 @@ func TestMemoryDB_JobsFindByIdempotencyKey(t *testing.T) {
 	key := "velion-crawl-deadbeef"
 	j := Job{
 		ID:             quarrycontracts.NewID(quarrycontracts.KindJob),
+		OrgID:          "org_a",
 		Kind:           "crawl",
 		Status:         "accepted",
 		IdempotencyKey: &key,
@@ -132,16 +133,21 @@ func TestMemoryDB_JobsFindByIdempotencyKey(t *testing.T) {
 	if err := db.Jobs().Create(j); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := db.Jobs().FindByIdempotencyKey(key)
+	got, ok := db.Jobs().FindByIdempotencyKey("org_a", key)
 	if !ok || got.ID != j.ID {
 		t.Fatalf("FindByIdempotencyKey: ok=%v got=%v want=%v", ok, got.ID, j.ID)
 	}
-	if _, ok := db.Jobs().FindByIdempotencyKey("missing"); ok {
+	if _, ok := db.Jobs().FindByIdempotencyKey("org_a", "missing"); ok {
 		t.Fatal("expected miss for unknown key")
 	}
 	// Empty key never matches.
-	if _, ok := db.Jobs().FindByIdempotencyKey(""); ok {
+	if _, ok := db.Jobs().FindByIdempotencyKey("org_a", ""); ok {
 		t.Fatal("expected empty key to never match")
+	}
+	// IDOR guard: the same key under a DIFFERENT org must never resolve —
+	// a cross-tenant key collision is a miss, not a leak.
+	if _, ok := db.Jobs().FindByIdempotencyKey("org_b", key); ok {
+		t.Fatal("IDOR: org_b resolved org_a's idempotency key")
 	}
 }
 

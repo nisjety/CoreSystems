@@ -20,6 +20,12 @@ const (
 	EvtArtifactWritten    EventType = "artifact_written"
 	EvtSnapshotCreated    EventType = "snapshot_created"
 	EvtStoreRecordWritten EventType = "store_record_written"
+	// EvtStoreRecordFailed mirrors quarry_core::event::EventType::StoreRecordFailed
+	// (Rust) — emitted when a Data Plane ingest attempt for a page fails (e.g. the
+	// service-token mint for the run's org_id was refused, or documents-api-go
+	// rejected the write), so job-history consumers can tell a real ingest
+	// failure apart from a page that was never asked to ingest at all.
+	EvtStoreRecordFailed EventType = "store_record_failed"
 	EvtLeaseAcquired      EventType = "lease_acquired"
 	EvtLeaseReleased      EventType = "lease_released"
 	EvtProfileRestored    EventType = "profile_restored"
