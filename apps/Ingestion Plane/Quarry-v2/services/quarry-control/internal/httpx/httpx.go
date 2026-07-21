@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -79,6 +80,32 @@ func Recover(next http.Handler) http.Handler {
 // Health is a liveness probe — process is up and serving requests.
 // It does NOT check downstreams; that's what Ready is for.
 func Health(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }
+
+// Version reports what is actually running in this container: the git
+// revision and build timestamp baked into the image (see the service's
+// Dockerfile `ARG SOURCE_REVISION` / `ARG BUILD_DATE`, re-exposed as
+// runtime ENV so no Docker/registry access is needed to answer "what SHA
+// is deployed here"). Falls back to the same unverified/unknown defaults
+// the image LABELs use when unset. `service` names the binary answering
+// (e.g. "quarry-control").
+func Version(service string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		revision := os.Getenv("SOURCE_REVISION")
+		if revision == "" {
+			revision = "unverified"
+		}
+		buildDate := os.Getenv("BUILD_DATE")
+		if buildDate == "" {
+			buildDate = "unknown"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"service":    service,
+			"revision":   revision,
+			"build_date": buildDate,
+		})
+	}
+}
 
 // Pinger is the slice of pgxpool.Pool the ready handler actually uses.
 // Defining it here (where it's consumed) avoids pulling pgx into this

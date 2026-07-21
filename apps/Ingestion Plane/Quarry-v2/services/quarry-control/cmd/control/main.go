@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/quarry-v2/pkg/quarryotel"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/dispatcher"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/gdpr"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/janitor"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
@@ -142,6 +144,7 @@ func main() {
 	r.Use(httpx.RequestID, httpx.Logger, httpx.Recover)
 
 	r.Get("/health", httpx.Health)
+	r.Get("/version", httpx.Version("quarry-control"))
 	r.Get("/ready", httpx.ReadyWithPing(dbPinger))
 
 	// Internal API routes — every /v1/* path expects HMAC-signed
@@ -180,6 +183,38 @@ func main() {
 	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.
 	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)
 
+	// GDPR cross-plane org-erasure purge consumer — subscribes to
+	// velion.gdpr.erasure.requested (org-core, fanned out over the
+	// control-shared-nats broker) and hard-purges this org's crawl data.
+	// Uses a narrowly-scoped "quarry-control-gdpr" shared-broker identity
+	// (NATS_SHARED_URL/NATS_SHARED_USER/NATS_SHARED_PASSWORD), distinct from
+	// VELION_NATS_URL/VELION_NATS_TOKEN — those names are reserved elsewhere
+	// in this plane for the legacy token-only velion-nats broker, a
+	// different broker from control-shared-nats. Safe by default: absent
+	// NATS_SHARED_URL the consumer is simply not started, same "off by
+	// default, log why" posture as the retention janitor above and the
+	// notify sink.
+	var gdprNC *nats.Conn
+	if sharedURL := strings.TrimSpace(os.Getenv("NATS_SHARED_URL")); sharedURL != "" {
+		sharedUser := strings.TrimSpace(os.Getenv("NATS_SHARED_USER"))
+		sharedPassword := os.Getenv("NATS_SHARED_PASSWORD")
+		nc, err := nats.Connect(sharedURL,
+			nats.Name("quarry-control-gdpr"),
+			nats.UserInfo(sharedUser, sharedPassword),
+			nats.CustomInboxPrefix("_INBOX.QUARRY_CONTROL_GDPR"),
+		)
+		if err != nil {
+			log.Warn().Err(err).Msg("control-shared NATS connect failed — GDPR org-erasure purge consumer disabled")
+		} else if _, err := gdpr.StartSubscriber(nc, db, log.Logger); err != nil {
+			log.Warn().Err(err).Msg("GDPR org-erasure subscriber failed to start")
+			nc.Close()
+		} else {
+			gdprNC = nc
+		}
+	} else {
+		log.Warn().Msg("NATS_SHARED_URL unset — GDPR org-erasure purge consumer disabled (org deletions will not auto-purge this service's crawl data for that org)")
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           r,
@@ -205,6 +240,9 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	dCancel()
+	if gdprNC != nil {
+		gdprNC.Close()
+	}
 	log.Info().Msg("shutdown complete")
 }
 
