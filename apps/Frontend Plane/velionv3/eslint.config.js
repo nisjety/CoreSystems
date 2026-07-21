@@ -5,7 +5,11 @@ export default tseslint.config(
   {
     // `apps/*` are separate sub-projects (the Rust gateway, and any sub-app)
     // with their own tooling — Velion v3's lint only governs its own SPA `src`.
-    ignores: ['dist', 'coverage', 'node_modules', 'apps'],
+    // `.claude/worktrees/**` holds nested full-repo checkouts (git worktrees for
+    // other sessions) that carry their own eslint.config.* with an unrelated
+    // dependency tree — always exclude them regardless of what worktrees exist
+    // on disk.
+    ignores: ['dist', 'coverage', 'node_modules', 'apps', '**/.claude/worktrees/**'],
   },
   ...tseslint.configs.recommended,
   {

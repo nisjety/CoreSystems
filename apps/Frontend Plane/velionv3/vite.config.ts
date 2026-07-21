@@ -57,6 +57,11 @@ export default defineConfig({
       // This gateway coverage gate intentionally uses Node's native test runner
       // and is executed explicitly by `pnpm test` before the Vitest suite.
       'apps/gateway/scripts/**/*.test.mjs',
+      // `.claude/worktrees/**` holds nested full-repo checkouts (git worktrees for
+      // other sessions), e.g. a copy of velionv2 (React) — never collect their
+      // tests against this SolidJS-oriented config, regardless of what
+      // worktrees exist on disk.
+      '**/.claude/worktrees/**',
     ],
     // Default per-test budget. The A8 fabrication-guard test spins up the real
     // ESLint flat config (cold-start ~8s), which exceeds vitest's 5s default when

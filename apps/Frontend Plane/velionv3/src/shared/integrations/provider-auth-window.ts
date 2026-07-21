@@ -28,14 +28,14 @@ type ConnectSessionStatus = {
   errorCode?: string
 }
 
-function openProviderAuthWindow(): Window | null {
+function openProviderAuthWindow(connectUrl: string): Window | null {
   const width = Math.min(540, window.screen.width)
   const height = Math.min(720, window.screen.height)
   const left = Math.max(window.screen.width / 2 - width / 2, 0)
   const top = Math.max(window.screen.height / 2 - height / 2, 0)
 
   return window.open(
-    '',
+    connectUrl,
     '_blank',
     [
       `left=${left}`,
@@ -97,7 +97,7 @@ export async function runDirectOauthWindow(input: {
   sessionToken?: string
 }): Promise<void> {
   const expectedOrigin = new URL(input.connectUrl).origin
-  const authWindow = openProviderAuthWindow()
+  const authWindow = openProviderAuthWindow(input.connectUrl)
   if (!authWindow) {
     throw new Error('The provider sign-in window was blocked by the browser.')
   }
@@ -178,10 +178,5 @@ export async function runDirectOauthWindow(input: {
           settle(() => reject(new Error('The authorization window was closed before the connection finished.')))
         }, 500)
 
-    try {
-      authWindow.location.href = input.connectUrl
-    } catch {
-      settle(() => reject(new Error('The authorization window could not open the provider sign-in page.')))
-    }
   })
 }

@@ -87,3 +87,4 @@ function readInitialLocale(): Locale {
 
 export type { Locale }
 export { localeStorageKey }
+export { translateApiError } from '@/shared/i18n/errors'
