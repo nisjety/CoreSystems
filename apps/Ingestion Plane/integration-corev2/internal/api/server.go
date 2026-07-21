@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -223,6 +224,35 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		)
 		if err != nil && cfg.Logger != nil {
 			cfg.Logger.Warn().Err(err).Str("provider", c.Params("provider")).Msg("oauth callback failed")
+		}
+		if err == nil && result.Success && result.ConnectionID != "" && isMetaWebhookProvider(result.ProviderKey) {
+			connection, connectionErr := cfg.Repo.GetConnection(c.UserContext(), result.ConnectionID)
+			if connectionErr != nil {
+				result.Success = false
+				result.ErrorCode = "meta_connection_unavailable"
+				result.Message = "Authorization succeeded, but the connection could not be loaded for inbox setup. Retry reconnect."
+			} else if isMetaWebhookProvider(connection.ProviderKey) && hasMetaInboxCapability(connection.Capabilities) {
+				if _, syncErr := createSyncJob(c.UserContext(), cfg, connection, syncJobBody{
+					Reason: "oauth_connected", Mode: "incremental",
+				}); syncErr != nil {
+					result.Success = false
+					result.ErrorCode = "meta_inbox_provisioning_failed"
+					result.Message = "Meta authorized successfully, but inbox setup did not finish. Retry reconnect or Sync."
+					if cfg.Logger != nil {
+						cfg.Logger.Warn().Err(syncErr).Str("connection_id", connection.ID).Msg("post-oauth Meta inbox provisioning failed")
+					}
+				}
+			}
+			if result.Success {
+				if finalizeErr := cfg.OAuth.FinalizeConnectedCallback(c.UserContext(), result, connection); finalizeErr != nil {
+					result.Success = false
+					result.ErrorCode = "meta_callback_finalize_failed"
+					result.Message = "Meta inbox setup succeeded, but completion could not be recorded. Retry reconnect."
+				}
+			}
+			if !result.Success {
+				_ = cfg.OAuth.FailCallback(c.UserContext(), result.SessionID, result.ErrorCode, result.Message)
+			}
 		}
 		c.Set("Content-Type", "text/html; charset=utf-8")
 		return c.SendString(callbackHTML(result))
@@ -517,6 +547,55 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"success": true, "data": fiber.Map{"syncJob": job}})
 	})...)
 
+	app.Post("/api/v1/connections/:id/inbox-history", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
+		connection, err := cfg.Repo.GetConnection(c.UserContext(), c.Params("id"))
+		if err != nil {
+			return storeError(c, err, "connection_not_found")
+		}
+		if connection.DeletedAt != nil {
+			return storeError(c, store.ErrNotFound, "connection_not_found")
+		}
+		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+			return authAwareError(c, err)
+		}
+		if !auth.IsInternalCall(c) {
+			principal, ok := auth.PrincipalFromContext(c)
+			role := strings.ToLower(strings.TrimSpace(principal.Role))
+			privileged := role == "owner" || role == "admin"
+			if !ok || (principal.UserID != connection.UserID && !privileged) {
+				return apiError(c, fiber.StatusForbidden, "teams_history_forbidden", "Only the connection owner or a workspace administrator can load this Teams history.")
+			}
+		}
+		teamsReadable := slices.Contains(connection.Capabilities, "teams.messages.read") ||
+			slices.ContainsFunc(connection.Scopes, func(scope string) bool {
+				return strings.EqualFold(scope, "ChannelMessage.Read.All")
+			})
+		if providers.NormalizeKey(connection.ProviderKey) != "microsoft" || !teamsReadable {
+			return apiError(c, fiber.StatusUnprocessableEntity, "teams_history_unavailable", "This connection cannot read Microsoft Teams history.")
+		}
+
+		const (
+			teamsDefaultHistoryDays       = 30
+			teamsHistoryStepDays          = 30
+			teamsMaxAdditionalHistoryDays = 3650
+		)
+		state, err := cfg.Repo.ExtendEmailSyncHistory(
+			c.UserContext(), connection.ID+":teams", "teams",
+			teamsHistoryStepDays, teamsMaxAdditionalHistoryDays,
+		)
+		if err != nil {
+			return apiError(c, fiber.StatusInternalServerError, "teams_history_queue_failed", "The next Teams history window could not be queued.")
+		}
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{"history": fiber.Map{
+				"channel":     "teams",
+				"historyDays": teamsDefaultHistoryDays + state.HistoryBackfillDays,
+				"queued":      true,
+			}},
+		})
+	})...)
+
 	app.Get("/api/v1/sync-jobs", internalOrBearerAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
 		if !auth.IsInternalCall(c) {
@@ -708,38 +787,97 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		// Real provider callbacks carry no Velion org id; without this
 		// resolution the event is stored org-less and every downstream
 		// consumer silently drops it (2026-07-07 verification finding).
-		resolvedConnectionID := ""
-		if normalized.OrganizationID == "" && cfg.WebhookOrg != nil {
-			if resolution, ok := cfg.WebhookOrg.Resolve(c.UserContext(), providerKey, normalized.Payload); ok {
-				normalized.OrganizationID = resolution.OrganizationID
-				resolvedConnectionID = resolution.ConnectionID
+		type delivery struct {
+			organizationID string
+			connectionID   string
+			payload        map[string]any
+			eventID        string
+		}
+		deliveries := []delivery{{
+			organizationID: normalized.OrganizationID,
+			payload:        normalized.Payload,
+			eventID:        normalized.EventID,
+		}}
+		// Meta and Slack signatures authenticate the payload, not caller-supplied
+		// Velion tenant headers. Always discard any normalized org claim and bind
+		// these account-wide callbacks through provider asset ownership.
+		if webhookRequiresResolvedOrganization(providerKey) {
+			deliveries = nil
+			if cfg.WebhookOrg != nil {
+				if isMetaWebhookProvider(providerKey) {
+					if resolved, ok := cfg.WebhookOrg.ResolvePayloads(c.UserContext(), providerKey, normalized.Payload); ok {
+						for _, item := range resolved {
+							deliveries = append(deliveries, delivery{
+								organizationID: item.Resolution.OrganizationID,
+								connectionID:   item.Resolution.ConnectionID,
+								payload:        item.Payload,
+							})
+						}
+					}
+				} else if resolution, ok := cfg.WebhookOrg.Resolve(c.UserContext(), providerKey, normalized.Payload); ok {
+					deliveries = []delivery{{
+						organizationID: resolution.OrganizationID,
+						connectionID:   resolution.ConnectionID,
+						payload:        normalized.Payload,
+					}}
+				}
 			}
 		}
-		event := store.WebhookEvent{
-			ID:             normalized.EventID,
-			OrganizationID: normalized.OrganizationID,
-			ProviderKey:    normalized.ProviderKey,
-			EventType:      normalized.EventType,
-			SignatureHash:  normalized.SignatureHash,
-			Payload:        normalized.Payload,
-			ReceivedAt:     time.Now().UTC(),
+		if (len(deliveries) == 0 || deliveries[0].organizationID == "") && webhookRequiresResolvedOrganization(providerKey) {
+			// Account-wide callbacks do not carry a Velion org. A resolution
+			// miss is often transient (Graph/NATS/Postgres outage) and must be
+			// retried by the provider; accepting it would publish an org-less
+			// event that Conversation Core terminally acknowledges and drops.
+			return apiError(c, fiber.StatusServiceUnavailable, "webhook_tenant_unresolved", "Webhook tenant could not be resolved; retry delivery.")
 		}
-		if err := cfg.Repo.InsertWebhookEvent(c.UserContext(), event); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				return success(c, fiber.Map{"accepted": true, "duplicate": true, "webhookEventId": event.ID})
+		if len(deliveries) == 1 {
+			deliveries[0].eventID = normalized.EventID
+		}
+		duplicate := true
+		webhookEventIDs := make([]string, 0, len(deliveries))
+		for index := range deliveries {
+			item := &deliveries[index]
+			if item.eventID == "" {
+				item.eventID = tenantScopedWebhookEventID(normalized.EventID, item.connectionID)
 			}
-			return apiError(c, fiber.StatusInternalServerError, "webhook_store_failed", err.Error())
+			event := store.WebhookEvent{
+				ID:             item.eventID,
+				OrganizationID: item.organizationID,
+				ProviderKey:    normalized.ProviderKey,
+				EventType:      normalized.EventType,
+				SignatureHash:  normalized.SignatureHash,
+				Payload:        item.payload,
+				ReceivedAt:     time.Now().UTC(),
+			}
+			if err := cfg.Repo.InsertWebhookEvent(c.UserContext(), event); err != nil {
+				if !errors.Is(err, store.ErrConflict) {
+					return apiError(c, fiber.StatusInternalServerError, "webhook_store_failed", err.Error())
+				}
+			} else {
+				duplicate = false
+			}
+			webhookEventIDs = append(webhookEventIDs, event.ID)
+			if cfg.Events != nil {
+				if err := cfg.Events.Publish(c.UserContext(), events.Event{
+					Type:           "velion.ingestion.integration.webhook_received",
+					OrganizationID: event.OrganizationID,
+					ConnectionID:   item.connectionID,
+					ProviderKey:    event.ProviderKey,
+					Data:           map[string]any{"eventType": event.EventType, "webhookEventId": event.ID, "normalizedBy": normalized.NormalizedBy},
+				}); err != nil {
+					// The payload is durably stored, so the provider's retry becomes a
+					// duplicate insert. We intentionally republish duplicates above;
+					// returning 503 here therefore gives at-least-once delivery across
+					// a transient event-bus failure without duplicating conversations
+					// (Conversation Core deduplicates provider message ids).
+					return apiError(c, fiber.StatusServiceUnavailable, "webhook_delivery_unavailable", "Webhook was stored but downstream delivery is temporarily unavailable; retry delivery.")
+				}
+			}
 		}
-		if cfg.Events != nil {
-			_ = cfg.Events.Publish(c.UserContext(), events.Event{
-				Type:           "velion.ingestion.integration.webhook_received",
-				OrganizationID: event.OrganizationID,
-				ConnectionID:   resolvedConnectionID,
-				ProviderKey:    event.ProviderKey,
-				Data:           map[string]any{"eventType": event.EventType, "webhookEventId": event.ID, "normalizedBy": normalized.NormalizedBy},
-			})
-		}
-		return success(c, fiber.Map{"accepted": true, "webhookEventId": event.ID, "normalizedBy": normalized.NormalizedBy})
+		return success(c, fiber.Map{
+			"accepted": true, "duplicate": duplicate, "webhookEventId": webhookEventIDs[0],
+			"webhookEventIds": webhookEventIDs, "normalizedBy": normalized.NormalizedBy,
+		})
 	})...)
 
 	app.Get("/api/v1/webhooks/:provider", chainHandlers(rateLimited, func(c *fiber.Ctx) error {
@@ -1218,6 +1356,7 @@ func normalizeCapabilityUpdate(provider providers.Provider, requested []string) 
 }
 
 func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Connection, body syncJobBody) (store.SyncJob, error) {
+	needsMetaProvisioning := isMetaWebhookProvider(connection.ProviderKey) && hasMetaInboxCapability(connection.Capabilities)
 	reason := strings.TrimSpace(body.Reason)
 	if reason == "" {
 		reason = "manual"
@@ -1272,6 +1411,32 @@ func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conne
 	if err != nil {
 		return store.SyncJob{}, err
 	}
+	if needsMetaProvisioning {
+		var provisionErr error
+		if cfg.WebhookOrg == nil {
+			provisionErr = fmt.Errorf("Meta webhook provisioning is not configured")
+		} else {
+			connection, provisionErr = cfg.WebhookOrg.ProvisionConnection(ctx, connection)
+		}
+		if provisionErr != nil {
+			completedAt := time.Now().UTC()
+			job.Status = "failed"
+			job.UpdatedAt = completedAt
+			job.CompletedAt = &completedAt
+			job.Metadata = mergeMetadata(job.Metadata, map[string]any{
+				"failureCode": "meta_inbox_provisioning_failed", "retryable": true,
+			})
+			if updated, updateErr := cfg.Repo.UpdateSyncJob(ctx, job); updateErr == nil {
+				job = updated
+			}
+			_ = cfg.Repo.InsertSyncEvent(ctx, store.SyncEvent{
+				ID: "sync_evt_" + uuid.NewString(), JobID: job.ID, Type: "sync.failed",
+				Message:  "Meta inbox provisioning failed; retry is required.",
+				Metadata: map[string]any{"failureCode": "meta_inbox_provisioning_failed", "retryable": true}, CreatedAt: completedAt,
+			})
+			return job, fmt.Errorf("provision Meta inbox webhooks: %w", provisionErr)
+		}
+	}
 	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_started", connection, map[string]any{
 		"syncJobId": job.ID,
 		"status":    job.Status,
@@ -1283,6 +1448,16 @@ func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conne
 		"connectionId": connection.ID,
 	})
 	return advanceSyncJob(ctx, cfg, connection, job)
+}
+
+func hasMetaInboxCapability(capabilities []string) bool {
+	for _, capability := range capabilities {
+		switch strings.TrimSpace(strings.ToLower(capability)) {
+		case "social.inbox.read", "social.messenger.manage", "social.whatsapp.manage":
+			return true
+		}
+	}
+	return false
 }
 
 func syncJobInitialCheckpoint(connection store.Connection, body syncJobBody) map[string]any {
@@ -1930,6 +2105,24 @@ func verifyProviderWebhook(c *fiber.Ctx, cfg config.Config, providerKey string) 
 	}
 }
 
+func webhookRequiresResolvedOrganization(providerKey string) bool {
+	switch providerKey {
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads", "slack":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMetaWebhookProvider(providerKey string) bool {
+	switch providerKey {
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		return true
+	default:
+		return false
+	}
+}
+
 func unverifiedWebhookError(cfg config.Config, providerKey string) error {
 	if cfg.AllowUnverifiedWebhooks {
 		return nil
@@ -2133,6 +2326,11 @@ func signatureHash(c *fiber.Ctx) string {
 	}
 	sum := sha256.Sum256([]byte(signature))
 	return hex.EncodeToString(sum[:])
+}
+
+func tenantScopedWebhookEventID(baseID, connectionID string) string {
+	sum := sha256.Sum256([]byte(baseID + "\x00" + connectionID))
+	return baseID + ":tenant:" + hex.EncodeToString(sum[:8])
 }
 
 func webhookEventID(providerKey, eventType, sigHash string, payload map[string]any, body []byte) string {

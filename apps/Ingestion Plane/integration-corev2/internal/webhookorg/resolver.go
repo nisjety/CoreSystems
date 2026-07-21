@@ -25,6 +25,7 @@ package webhookorg
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -53,10 +54,19 @@ type MetaAssetLister interface {
 	ListWebhookAccountIDs(ctx context.Context, conn store.Connection) ([]string, error)
 }
 
+type metaAssetSubscriber interface {
+	SubscribeWebhookAccounts(ctx context.Context, conn store.Connection, accountIDs []string) error
+}
+
 // Resolution is a successful tenant match.
 type Resolution struct {
 	OrganizationID string
 	ConnectionID   string
+}
+
+type ResolvedPayload struct {
+	Resolution Resolution
+	Payload    map[string]any
 }
 
 type cacheEntry struct {
@@ -82,6 +92,63 @@ type Resolver struct {
 	enrichedThisProcess map[string]bool
 }
 
+// ProvisionConnection discovers every Meta inbox asset, subscribes those
+// assets through the provider adapter, and persists the account ids used for
+// tenant resolution. It is intentionally idempotent and is called by the
+// connection Sync action; provider subscription endpoints treat repeats as a
+// refresh of the same app subscription.
+func (r *Resolver) ProvisionConnection(ctx context.Context, conn store.Connection) (store.Connection, error) {
+	if !isMetaFamily(conn.ProviderKey) || !hasInboxCapability(conn.Capabilities) {
+		return conn, nil
+	}
+	if r == nil || r.Store == nil || r.Meta == nil {
+		return store.Connection{}, fmt.Errorf("Meta webhook provisioning is not configured")
+	}
+	ids, err := r.Meta.ListWebhookAccountIDs(ctx, conn)
+	if err != nil {
+		return store.Connection{}, err
+	}
+	if len(ids) == 0 {
+		return store.Connection{}, fmt.Errorf("Meta connection has no accessible Page, Instagram, or WhatsApp Business assets")
+	}
+	if err := r.validateOwnership(ctx, conn.ID, ids); err != nil {
+		return store.Connection{}, err
+	}
+	updatedContext := cloneContext(conn.ProviderContext)
+	updatedContext["webhook_account_ids"] = strings.Join(ids, ",")
+	updated, err := r.Store.UpdateConnectionProviderContext(ctx, conn.ID, updatedContext)
+	if err != nil {
+		return store.Connection{}, fmt.Errorf("claim Meta webhook assets: %w", err)
+	}
+	subscriber, ok := r.Meta.(metaAssetSubscriber)
+	if !ok {
+		return store.Connection{}, fmt.Errorf("Meta webhook subscription adapter is not configured")
+	}
+	if err := subscriber.SubscribeWebhookAccounts(ctx, conn, ids); err != nil {
+		// Best-effort release of the durable claim. The provider subscription is
+		// idempotent, while retaining a failed tenant binding would misroute data.
+		_, _ = r.Store.UpdateConnectionProviderContext(ctx, conn.ID, conn.ProviderContext)
+		return store.Connection{}, fmt.Errorf("subscribe Meta webhook assets: %w", err)
+	}
+	r.markEnriched(conn.ID)
+	return updated, nil
+}
+
+func (r *Resolver) validateOwnership(ctx context.Context, connectionID string, ids []string) error {
+	for _, id := range ids {
+		existing, lookupErr := r.Store.FindConnectionByWebhookAccount(ctx, metaProviderKeys, id)
+		switch {
+		case lookupErr == nil && existing.ID != connectionID:
+			return fmt.Errorf("Meta asset %s is already bound to another connection", id)
+		case lookupErr == store.ErrConflict:
+			return fmt.Errorf("Meta asset %s has ambiguous ownership", id)
+		case lookupErr != nil && lookupErr != store.ErrNotFound:
+			return fmt.Errorf("check Meta asset %s ownership: %w", id, lookupErr)
+		}
+	}
+	return nil
+}
+
 // Resolve returns the owning org + reply connection for a webhook payload, or
 // ok=false when no connection matches. It never errors — webhook ingestion
 // must not fail because resolution had a transient problem; the event is then
@@ -95,35 +162,105 @@ func (r *Resolver) Resolve(ctx context.Context, providerKey string, payload map[
 		return Resolution{}, false
 	}
 
-	for _, accountID := range accountIDs {
-		if resolution, found, cached := r.cached(providerKey, accountID); cached {
-			if found {
-				return resolution, true
-			}
-			continue
-		}
-		conn, err := r.Store.FindConnectionByWebhookAccount(ctx, providerKeys, accountID)
-		if err == nil {
-			resolution := Resolution{OrganizationID: conn.OrganizationID, ConnectionID: conn.ID}
-			r.remember(providerKey, accountID, resolution, true)
-			return resolution, true
-		}
-		if err != store.ErrNotFound {
-			r.logWarn(err, "webhook org lookup failed for account "+accountID)
-			// Transient store failure: do not negative-cache.
-			continue
-		}
-		r.remember(providerKey, accountID, Resolution{}, false)
+	if resolution, ok := r.resolveAllCandidates(ctx, providerKey, providerKeys, accountIDs); ok {
+		return resolution, true
 	}
 
 	// No direct match. For Meta-family webhooks, enrich un-swept connections
 	// with their Graph asset ids and retry once.
 	if isMetaFamily(providerKey) && r.Meta != nil {
-		if resolution, ok := r.enrichAndRetry(ctx, providerKey, accountIDs); ok {
-			return resolution, true
+		if _, enriched := r.enrichAndRetry(ctx, providerKey, accountIDs); enriched {
+			return r.resolveAllCandidates(ctx, providerKey, providerKeys, accountIDs)
 		}
 	}
 	return Resolution{}, false
+}
+
+// ResolvePayloads partitions a multi-entry Meta callback by authoritative
+// owner. Meta may batch Pages belonging to different Velion organizations in
+// one signed delivery; persisting the whole batch under one tenant is unsafe,
+// while rejecting it forever is operationally dead. Every entry must resolve
+// before any partition is returned.
+func (r *Resolver) ResolvePayloads(ctx context.Context, providerKey string, payload map[string]any) ([]ResolvedPayload, bool) {
+	if !isMetaFamily(providerKey) {
+		resolution, ok := r.Resolve(ctx, providerKey, payload)
+		if !ok {
+			return nil, false
+		}
+		return []ResolvedPayload{{Resolution: resolution, Payload: payload}}, true
+	}
+	entries, _ := payload["entry"].([]any)
+	if len(entries) <= 1 {
+		resolution, ok := r.Resolve(ctx, providerKey, payload)
+		if !ok {
+			return nil, false
+		}
+		return []ResolvedPayload{{Resolution: resolution, Payload: payload}}, true
+	}
+	groups := map[string]*ResolvedPayload{}
+	order := []string{}
+	for _, entry := range entries {
+		entryPayload := make(map[string]any, len(payload))
+		maps.Copy(entryPayload, payload)
+		entryPayload["entry"] = []any{entry}
+		resolution, ok := r.Resolve(ctx, providerKey, entryPayload)
+		if !ok {
+			return nil, false
+		}
+		key := resolution.OrganizationID + "\x00" + resolution.ConnectionID
+		group := groups[key]
+		if group == nil {
+			groupPayload := make(map[string]any, len(payload))
+			maps.Copy(groupPayload, payload)
+			groupPayload["entry"] = []any{}
+			group = &ResolvedPayload{Resolution: resolution, Payload: groupPayload}
+			groups[key] = group
+			order = append(order, key)
+		}
+		group.Payload["entry"] = append(group.Payload["entry"].([]any), entry)
+	}
+	resolved := make([]ResolvedPayload, 0, len(order))
+	for _, key := range order {
+		resolved = append(resolved, *groups[key])
+	}
+	return resolved, true
+}
+
+// resolveAllCandidates fails closed unless every provider account id in the
+// batch resolves to the exact same connection and organization. Meta can send
+// multiple entry[] values in one signed callback; assigning the whole payload
+// from the first match could otherwise cross tenant boundaries.
+func (r *Resolver) resolveAllCandidates(ctx context.Context, providerKey string, providerKeys, accountIDs []string) (Resolution, bool) {
+	var matched *Resolution
+	for _, accountID := range accountIDs {
+		// Meta misses are not cached because lazy enrichment may make the binding
+		// durable during this request. Slack has no enrichment and benefits from
+		// a short negative cache during unknown-team bursts.
+		if !isMetaFamily(providerKey) {
+			if _, _, cached := r.cached(providerKey, accountID); cached {
+				return Resolution{}, false
+			}
+		}
+		conn, err := r.Store.FindConnectionByWebhookAccount(ctx, providerKeys, accountID)
+		if err != nil {
+			if err == store.ErrNotFound && !isMetaFamily(providerKey) {
+				r.remember(providerKey, accountID, Resolution{}, false)
+			} else if err != store.ErrNotFound {
+				r.logWarn(err, "webhook org lookup failed for account "+accountID)
+			}
+			return Resolution{}, false
+		}
+		resolution := Resolution{OrganizationID: conn.OrganizationID, ConnectionID: conn.ID}
+		if matched != nil && (matched.OrganizationID != resolution.OrganizationID || matched.ConnectionID != resolution.ConnectionID) {
+			r.logWarn(store.ErrConflict, "webhook batch has multiple tenant owners")
+			return Resolution{}, false
+		}
+		matched = &resolution
+	}
+	if matched == nil {
+		return Resolution{}, false
+	}
+	return *matched, true
 }
 
 // enrichAndRetry sweeps Meta connections that have never been enriched (no
@@ -132,6 +269,7 @@ func (r *Resolver) Resolve(ctx context.Context, providerKey string, payload map[
 // fresh enrichment directly.
 func (r *Resolver) enrichAndRetry(ctx context.Context, providerKey string, accountIDs []string) (Resolution, bool) {
 	wanted := map[string]bool{}
+	var matched *Resolution
 	for _, id := range accountIDs {
 		wanted[id] = true
 	}
@@ -142,13 +280,12 @@ func (r *Resolver) enrichAndRetry(ctx context.Context, providerKey string, accou
 			continue
 		}
 		for _, conn := range connections {
-			if conn.DeletedAt != nil || (conn.Status != "active" && conn.Status != "needs_refresh") {
+			if conn.DeletedAt != nil || (conn.Status != "active" && conn.Status != "needs_refresh") || !hasInboxCapability(conn.Capabilities) {
 				continue
 			}
 			if conn.ProviderContext["webhook_account_ids"] != "" || r.alreadyEnriched(conn.ID) {
 				continue
 			}
-			r.markEnriched(conn.ID)
 			ids, err := r.Meta.ListWebhookAccountIDs(ctx, conn)
 			if err != nil {
 				r.logWarn(err, "webhook org enrichment: graph sweep for connection "+conn.ID)
@@ -157,22 +294,48 @@ func (r *Resolver) enrichAndRetry(ctx context.Context, providerKey string, accou
 			if len(ids) == 0 {
 				continue
 			}
+			if err := r.validateOwnership(ctx, conn.ID, ids); err != nil {
+				r.logWarn(err, "webhook org enrichment: ownership for connection "+conn.ID)
+				continue
+			}
+			// Only suppress future sweeps after Graph returned a usable asset
+			// snapshot. Marking before the call made one transient provider
+			// failure disable tenant resolution for this connection until the
+			// whole API process restarted.
 			updated := cloneContext(conn.ProviderContext)
 			updated["webhook_account_ids"] = strings.Join(ids, ",")
 			if _, err := r.Store.UpdateConnectionProviderContext(ctx, conn.ID, updated); err != nil {
 				r.logWarn(err, "webhook org enrichment: persist for connection "+conn.ID)
-				// Still usable in-memory below even if persistence failed.
+				// Do not suppress the next sweep: the durable binding remains absent.
+				continue
 			}
+			r.markEnriched(conn.ID)
 			for _, id := range ids {
 				if wanted[id] {
 					resolution := Resolution{OrganizationID: conn.OrganizationID, ConnectionID: conn.ID}
-					r.remember(providerKey, id, resolution, true)
-					return resolution, true
+					if matched != nil && (matched.OrganizationID != resolution.OrganizationID || matched.ConnectionID != resolution.ConnectionID) {
+						r.logWarn(store.ErrConflict, "webhook org enrichment found ambiguous ownership for account "+id)
+						return Resolution{}, false
+					}
+					matched = &resolution
 				}
 			}
 		}
 	}
+	if matched != nil {
+		return *matched, true
+	}
 	return Resolution{}, false
+}
+
+func hasInboxCapability(capabilities []string) bool {
+	for _, capability := range capabilities {
+		switch strings.TrimSpace(strings.ToLower(capability)) {
+		case "social.inbox.read", "social.messenger.manage", "social.whatsapp.manage":
+			return true
+		}
+	}
+	return false
 }
 
 // candidateAccountIDs extracts provider-side account ids from a webhook

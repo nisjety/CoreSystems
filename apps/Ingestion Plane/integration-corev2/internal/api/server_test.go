@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
+	"github.com/triodelab/integration-corev2/internal/webhookorg"
 )
 
 func TestProvidersCatalogIsPublic(t *testing.T) {
@@ -1513,6 +1515,69 @@ func TestMicrosoftSyncJobWaitsForFinspoHandoff(t *testing.T) {
 	}
 }
 
+func TestExtendTeamsInboxHistoryQueuesNextThirtyDays(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-ms", ProviderKey: "microsoft", OrganizationID: "org-1", UserID: "user-1",
+		Status: "active", Capabilities: []string{"teams.messages.read"},
+	})
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	for requestNumber, wantDays := range []int{60, 90} {
+		req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms/inbox-history", nil)
+		req.Header.Set("X-Internal-API-Key", "dev-key")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("request %d error: %v", requestNumber+1, err)
+		}
+		if resp.StatusCode != fiber.StatusAccepted {
+			t.Fatalf("request %d status = %d, want 202", requestNumber+1, resp.StatusCode)
+		}
+		var decoded struct {
+			Data struct {
+				History struct {
+					Channel     string `json:"channel"`
+					HistoryDays int    `json:"historyDays"`
+					Queued      bool   `json:"queued"`
+				} `json:"history"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+			t.Fatalf("decode request %d: %v", requestNumber+1, err)
+		}
+		if decoded.Data.History.Channel != "teams" || !decoded.Data.History.Queued || decoded.Data.History.HistoryDays != wantDays {
+			t.Fatalf("request %d history = %#v, want Teams %d days queued", requestNumber+1, decoded.Data.History, wantDays)
+		}
+	}
+}
+
+func TestExtendTeamsInboxHistoryRejectsUnprivilegedNonOwner(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-private-ms", ProviderKey: "microsoft", OrganizationID: "org-1", UserID: "connection-owner",
+		Status: "active", Capabilities: []string{"teams.messages.read"},
+	})
+	app := NewServer(ServerConfig{
+		Config: cfg, Repo: repo, OAuth: service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "other-member", OrganizationID: "org-1", Role: "member", PrincipalType: "user",
+		}},
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/connections/conn-private-ms/inbox-history", nil)
+	req.Header.Set("Authorization", "Bearer member-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if _, err := repo.GetEmailSyncState(t.Context(), "conn-private-ms:teams"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("forbidden request persisted history state: %v", err)
+	}
+}
+
 func TestMicrosoftSyncJobCarriesSharePointSourceIdentifiers(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
@@ -1828,8 +1893,11 @@ func TestStripeWebhookRejectsInvalidSignature(t *testing.T) {
 func TestSlackWebhookSignatureIsVerified(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.SlackSigningSecret = "slack-signing-secret"
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-	body := `{"event":"team_join","organizationId":"org-1"}`
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-slack", ProviderKey: "slack", OrganizationID: "org-1", TenantID: "team-1", Status: "active",
+	})
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, WebhookOrg: &webhookorg.Resolver{Store: repo}})
+	body := `{"type":"event_callback","team_id":"team-1","event":{"type":"team_join"}}`
 	timestamp := time.Now().Unix()
 	base := "v0:" + strconv.FormatInt(timestamp, 10) + ":" + body
 	mac := hmac.New(sha256.New, []byte(cfg.SlackSigningSecret))
@@ -1914,8 +1982,13 @@ func TestMetaWebhookChallengeIsVerified(t *testing.T) {
 func TestMetaWebhookSignatureIsVerified(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.MetaWebhookSecret = "meta-webhook-secret"
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-	body := `{"object":"page","organizationId":"org-1","entry":[{"id":"page-1"}]}`
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-meta", ProviderKey: "meta", OrganizationID: "org-authoritative", Status: "active",
+		ProviderContext: map[string]string{"webhook_account_ids": "page-1"},
+	})
+	publisher := &fakeEventsPublisher{}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Events: publisher, WebhookOrg: &webhookorg.Resolver{Store: repo}})
+	body := `{"object":"page","organizationId":"org-attacker","entry":[{"id":"page-1"}]}`
 	mac := hmac.New(sha256.New, []byte(cfg.MetaWebhookSecret))
 	_, _ = mac.Write([]byte(body))
 	signature := "sha256=" + hex.EncodeToString(mac.Sum(nil))
@@ -1923,12 +1996,167 @@ func TestMetaWebhookSignatureIsVerified(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/webhooks/meta", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Hub-Signature-256", signature)
+	req.Header.Set("X-Org-ID", "org-attacker")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if len(publisher.events) != 1 || publisher.events[0].OrganizationID != "org-authoritative" {
+		t.Fatalf("published events = %+v, want authoritative asset owner", publisher.events)
+	}
+}
+
+func TestMetaWebhook_UnresolvedTenantIsRetryable(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MetaWebhookSecret = "meta-webhook-secret"
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+	body := `{"object":"page","entry":[{"id":"unknown-page"}]}`
+	mac := hmac.New(sha256.New, []byte(cfg.MetaWebhookSecret))
+	_, _ = mac.Write([]byte(body))
+
+	req := httptest.NewRequest("POST", "/api/v1/webhooks/meta", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 so Meta retries unresolved tenant delivery", resp.StatusCode)
+	}
+}
+
+func TestMetaWebhookPartitionsMultiTenantBatch(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MetaWebhookSecret = "meta-webhook-secret"
+	for _, connection := range []store.Connection{
+		{ID: "conn-a", ProviderKey: "meta", OrganizationID: "org-a", Status: "active", ProviderContext: map[string]string{"webhook_account_ids": "page-a"}},
+		{ID: "conn-b", ProviderKey: "meta", OrganizationID: "org-b", Status: "active", ProviderContext: map[string]string{"webhook_account_ids": "page-b"}},
+	} {
+		if _, err := repo.UpsertConnection(t.Context(), connection); err != nil {
+			t.Fatalf("UpsertConnection: %v", err)
+		}
+	}
+	publisher := &fakeEventsPublisher{}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Events: publisher, WebhookOrg: &webhookorg.Resolver{Store: repo}})
+	body := `{"object":"page","entry":[{"id":"page-a","messaging":[]},{"id":"page-b","messaging":[]}]}`
+	mac := hmac.New(sha256.New, []byte(cfg.MetaWebhookSecret))
+	_, _ = mac.Write([]byte(body))
+	req := httptest.NewRequest("POST", "/api/v1/webhooks/meta", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	resp, err := app.Test(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("response status=%v err=%v", resp.StatusCode, err)
+	}
+	if len(publisher.events) != 2 || publisher.events[0].OrganizationID != "org-a" || publisher.events[1].OrganizationID != "org-b" {
+		t.Fatalf("published partitions = %+v", publisher.events)
+	}
+	if publisher.events[0].Data["webhookEventId"] == publisher.events[1].Data["webhookEventId"] {
+		t.Fatalf("partition event ids collided: %+v", publisher.events)
+	}
+}
+
+func TestWebhookPublishFailureIsRetryableAndDuplicateRepublishes(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	cfg.MetaWebhookSecret = "meta-webhook-secret"
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-meta", ProviderKey: "meta", OrganizationID: "org-1", Status: "active",
+		ProviderContext: map[string]string{"webhook_account_ids": "page-1"},
+	})
+	publisher := &fakeEventsPublisher{errs: []error{errors.New("nats unavailable"), nil}}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Events: publisher, WebhookOrg: &webhookorg.Resolver{Store: repo}})
+	body := `{"object":"page","entry":[{"id":"page-1"}]}`
+	mac := hmac.New(sha256.New, []byte(cfg.MetaWebhookSecret))
+	_, _ = mac.Write([]byte(body))
+	signature := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	for attempt, wantStatus := range []int{http.StatusServiceUnavailable, http.StatusOK} {
+		req := httptest.NewRequest("POST", "/api/v1/webhooks/meta", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Hub-Signature-256", signature)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("attempt %d app.Test error: %v", attempt+1, err)
+		}
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("attempt %d status = %d, want %d", attempt+1, resp.StatusCode, wantStatus)
+		}
+	}
+	if len(publisher.events) != 2 {
+		t.Fatalf("publish attempts = %d, want duplicate retry to republish", len(publisher.events))
+	}
+}
+
+func TestCreateSyncJobOnlyRequiresMetaWebhookProvisioningForInboxCapabilities(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	now := time.Now().UTC()
+	base := store.Connection{
+		ID: "conn-meta-publish", ProviderKey: "meta", OrganizationID: "org-1", UserID: "user-1",
+		Status: "active", Capabilities: []string{"social.post.write"}, CreatedAt: now, UpdatedAt: now,
+	}
+	if _, err := repo.UpsertConnection(t.Context(), base); err != nil {
+		t.Fatalf("UpsertConnection: %v", err)
+	}
+	if _, err := createSyncJob(t.Context(), ServerConfig{Repo: repo}, base, syncJobBody{}); err != nil {
+		t.Fatalf("publishing-only Meta sync unexpectedly required webhook provisioning: %v", err)
+	}
+	base.ID = "conn-meta-inbox"
+	base.Capabilities = []string{"social.inbox.read"}
+	failedJob, err := createSyncJob(t.Context(), ServerConfig{Repo: repo}, base, syncJobBody{})
+	if err == nil {
+		t.Fatal("inbox-enabled Meta sync error = nil, want missing provisioning configuration")
+	}
+	if failedJob.Status != "failed" || failedJob.Metadata["failureCode"] != "meta_inbox_provisioning_failed" {
+		t.Fatalf("failed provisioning job was not durable: %+v", failedJob)
+	}
+	persisted, getErr := repo.GetSyncJob(t.Context(), failedJob.ID)
+	if getErr != nil || persisted.Status != "failed" {
+		t.Fatalf("persisted failed job=%+v err=%v", persisted, getErr)
+	}
+}
+
+type fakeMetaWebhookProvisioner struct {
+	ids             []string
+	subscribed      []string
+	subscribeCalled int
+}
+
+func (f *fakeMetaWebhookProvisioner) ListWebhookAccountIDs(context.Context, store.Connection) ([]string, error) {
+	return append([]string(nil), f.ids...), nil
+}
+
+func (f *fakeMetaWebhookProvisioner) SubscribeWebhookAccounts(_ context.Context, _ store.Connection, ids []string) error {
+	f.subscribeCalled++
+	f.subscribed = append([]string(nil), ids...)
+	return nil
+}
+
+func TestCreateSyncJobProvisionsMetaAssetsBeforeQueueing(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	now := time.Now().UTC()
+	connection := store.Connection{
+		ID: "conn-meta-inbox", ProviderKey: "meta", OrganizationID: "org-1", UserID: "user-1",
+		Status: "active", Capabilities: []string{"social.inbox.read"}, CreatedAt: now, UpdatedAt: now,
+	}
+	if _, err := repo.UpsertConnection(t.Context(), connection); err != nil {
+		t.Fatalf("UpsertConnection: %v", err)
+	}
+	provisioner := &fakeMetaWebhookProvisioner{ids: []string{"page-1", "ig-1"}}
+	resolver := &webhookorg.Resolver{Store: repo, Meta: provisioner}
+	job, err := createSyncJob(t.Context(), ServerConfig{Repo: repo, WebhookOrg: resolver}, connection, syncJobBody{Reason: "oauth_connected"})
+	if err != nil {
+		t.Fatalf("createSyncJob: %v", err)
+	}
+	if job.Status != "handoff_data_plane" || provisioner.subscribeCalled != 1 || !slices.Equal(provisioner.subscribed, provisioner.ids) {
+		t.Fatalf("job=%+v provisioner=%+v", job, provisioner)
+	}
+	saved, err := repo.GetConnection(t.Context(), connection.ID)
+	if err != nil || saved.ProviderContext["webhook_account_ids"] != "page-1,ig-1" {
+		t.Fatalf("saved connection=%+v err=%v", saved, err)
 	}
 }
 
@@ -2889,10 +3117,14 @@ func (f fakeVerifier) VerifyToken(context.Context, string) (auth.Principal, erro
 
 type fakeEventsPublisher struct {
 	events []events.Event
+	errs   []error
 }
 
 func (f *fakeEventsPublisher) Publish(_ context.Context, event events.Event) error {
 	f.events = append(f.events, event)
+	if len(f.errs) >= len(f.events) {
+		return f.errs[len(f.events)-1]
+	}
 	return nil
 }
 

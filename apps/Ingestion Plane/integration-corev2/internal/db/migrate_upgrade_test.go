@@ -14,7 +14,7 @@ import (
 )
 
 const authorizationRelationshipsMigration = "0009_action_receipt_authorization_relationships.sql"
-const latestMigration = "0011_audit_outbox_terminal_recovery.sql"
+const latestMigration = "0012_email_sync_history_backfill.sql"
 
 func TestApplyMigrationsLocksBeforeCheckingAppliedVersion(t *testing.T) {
 	pool, err := pgxmock.NewPool()
@@ -67,7 +67,7 @@ func TestApplyMigrationsUpgradesDatabaseWithApplied0008(t *testing.T) {
 	}
 }
 
-func TestApplyMigrationsFreshInstallEndsWithAuditOutbox(t *testing.T) {
+func TestApplyMigrationsFreshInstallEndsWithLatestMigration(t *testing.T) {
 	pool, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatalf("new pgx mock pool: %v", err)

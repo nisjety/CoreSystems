@@ -261,8 +261,24 @@ func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code
 		result.Message = err.Error()
 		return result, err
 	}
-	if err := s.repo.MarkConnectSessionConsumed(ctx, session.ID, "", ""); err != nil {
+	result.Success = true
+	result.ConnectionID = connection.ID
+	result.Message = "Connection completed."
+	// Meta inbox completion is finalized by the API only after provider asset
+	// subscriptions and their durable sync state succeed. This keeps the
+	// connect-session status endpoint and integration.connected event truthful.
+	if isMetaFamilyProvider(connection.ProviderKey) {
+		return result, nil
+	}
+	if err := s.FinalizeConnectedCallback(ctx, result, connection); err != nil {
 		return result, err
+	}
+	return result, nil
+}
+
+func (s *Service) FinalizeConnectedCallback(ctx context.Context, result CallbackResult, connection store.Connection) error {
+	if err := s.repo.MarkConnectSessionConsumed(ctx, result.SessionID, "", ""); err != nil {
+		return err
 	}
 	_ = s.publisher.Publish(ctx, events.Event{
 		Type:           "integration.connected",
@@ -280,10 +296,11 @@ func (s *Service) CompleteCallback(ctx context.Context, providerKey, state, code
 		},
 		CreatedAt: s.now(),
 	})
-	result.Success = true
-	result.ConnectionID = connection.ID
-	result.Message = "Connection completed."
-	return result, nil
+	return nil
+}
+
+func (s *Service) FailCallback(ctx context.Context, sessionID, errorCode, description string) error {
+	return s.repo.MarkConnectSessionConsumed(ctx, sessionID, errorCode, description)
 }
 
 func (s *Service) AccessToken(ctx context.Context, organizationID, connectorType string) (AccessTokenResult, error) {
@@ -481,10 +498,12 @@ func (s *Service) exchangeCode(ctx context.Context, session store.ConnectSession
 func (s *Service) persistConnection(ctx context.Context, session store.ConnectSession, token TokenResult) (store.Connection, error) {
 	connectionID := "conn_" + uuid.NewString()
 	createdAt := s.now()
+	reconnecting := false
 	existing, err := s.repo.FindActiveConnection(ctx, session.OrganizationID, session.ConnectorType)
 	if err == nil {
 		connectionID = existing.ID
 		createdAt = existing.CreatedAt
+		reconnecting = true
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Connection{}, err
 	}
@@ -510,6 +529,18 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 	if displayName == "" {
 		displayName = session.ProviderKey + " connection"
 	}
+	connectionScopes := append([]string(nil), session.Scopes...)
+	connectionCapabilities := append([]string(nil), session.Capabilities...)
+	connectionStatus := "active"
+	if isMetaFamilyProvider(session.ProviderKey) && token.ScopesVerified {
+		connectionScopes = normalizedStrings(token.Scope)
+		if provider, ok := providers.FindOAuth(session.ProviderKey); ok {
+			connectionCapabilities = capabilitiesAllowedByScopes(provider, session.Capabilities, connectionScopes)
+		}
+		if len(connectionCapabilities) != len(session.Capabilities) {
+			connectionStatus = "needs_refresh"
+		}
+	}
 	connection := store.Connection{
 		ID:                    connectionID,
 		ProviderKey:           session.ProviderKey,
@@ -518,13 +549,13 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		WorkspaceID:           session.WorkspaceID,
 		UserID:                session.UserID,
 		UserEmail:             session.UserEmail,
-		Status:                "active",
+		Status:                connectionStatus,
 		DisplayName:           displayName,
 		ProviderAccountID:     profile.ID,
 		TenantID:              profile.TenantID,
-		ProviderContext:       session.ProviderContext,
-		Capabilities:          session.Capabilities,
-		Scopes:                session.Scopes,
+		ProviderContext:       reconnectProviderContext(existing.ProviderContext, session.ProviderContext),
+		Capabilities:          connectionCapabilities,
+		Scopes:                connectionScopes,
 		EncryptedAccessToken:  accessToken,
 		EncryptedRefreshToken: refreshToken,
 		AccessTokenExpiresAt:  token.ExpiresAt,
@@ -536,7 +567,11 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 	var saved store.Connection
 	err = s.repo.WithAuditTransaction(ctx, func(tx store.AuditTransaction) error {
 		var saveErr error
-		saved, saveErr = tx.UpsertConnection(ctx, connection)
+		if reconnecting {
+			saved, saveErr = tx.ReconnectConnection(ctx, connection)
+		} else {
+			saved, saveErr = tx.UpsertConnection(ctx, connection)
+		}
 		if saveErr != nil {
 			return saveErr
 		}
@@ -548,8 +583,10 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 			EventType:      "connection.created",
 			ProviderKey:    session.ProviderKey,
 			Metadata: map[string]any{
-				"capabilities": append([]string(nil), session.Capabilities...),
-				"scopes":       redactScopes(session.Scopes),
+				"requestedCapabilities": append([]string(nil), session.Capabilities...),
+				"requestedScopes":       redactScopes(session.Scopes),
+				"capabilities":          append([]string(nil), saved.Capabilities...),
+				"scopes":                redactScopes(saved.Scopes),
 			},
 			CreatedAt: s.now(),
 		})
@@ -584,7 +621,17 @@ func (s *Service) refresh(ctx context.Context, connection store.Connection, refr
 	connection.AccessTokenExpiresAt = token.ExpiresAt
 	connection.LastRefreshedAt = s.now()
 	connection.Status = "active"
-	saved, err := s.repo.UpsertConnection(ctx, connection)
+	if isMetaFamilyProvider(connection.ProviderKey) && token.ScopesVerified {
+		connection.Scopes = normalizedStrings(token.Scope)
+		if provider, ok := providers.FindOAuth(connection.ProviderKey); ok {
+			grantedCapabilities := capabilitiesAllowedByScopes(provider, connection.Capabilities, connection.Scopes)
+			if len(grantedCapabilities) != len(connection.Capabilities) {
+				connection.Status = "needs_refresh"
+			}
+			connection.Capabilities = grantedCapabilities
+		}
+	}
+	saved, err := s.repo.UpdateConnectionCredentials(ctx, connection)
 	if err != nil {
 		return store.Connection{}, "", err
 	}
@@ -612,7 +659,7 @@ func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string
 	if err != nil {
 		return store.Connection{}, "", err
 	}
-	if connection.DeletedAt != nil || connection.Status == "deleted" {
+	if connection.DeletedAt != nil || (connection.Status != "active" && connection.Status != "needs_refresh") {
 		return store.Connection{}, "", store.ErrNotFound
 	}
 	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
@@ -630,6 +677,26 @@ func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string
 		return store.Connection{}, "", err
 	}
 	return s.refresh(ctx, connection, refreshToken)
+}
+
+func reconnectProviderContext(existing, session map[string]string) map[string]string {
+	merged := make(map[string]string, len(session)+1)
+	for key, value := range session {
+		merged[key] = value
+	}
+	// guild_id is a verified tenant binding. A generic reconnect may replace
+	// ordinary provider-derived context (including webhook account IDs), but
+	// changing the guild requires a dedicated authorized rebind flow.
+	if guildID := strings.TrimSpace(existing["guild_id"]); guildID != "" {
+		merged["guild_id"] = guildID
+	}
+	// Keep the last verified webhook binding through reconnect. Successful Meta
+	// provisioning replaces it atomically; dropping it in the OAuth callback
+	// creates a window where already-subscribed provider events cannot resolve.
+	if accountIDs := strings.TrimSpace(existing["webhook_account_ids"]); accountIDs != "" && strings.TrimSpace(merged["webhook_account_ids"]) == "" {
+		merged["webhook_account_ids"] = accountIDs
+	}
+	return merged
 }
 
 type refreshWork func(context.Context) (store.Connection, string, error)
@@ -657,6 +724,59 @@ func (s *Service) refreshSingleflight(ctx context.Context, connectionID string, 
 	s.refreshMu.Unlock()
 
 	return call.connection, call.accessToken, call.err
+}
+
+func isMetaFamilyProvider(providerKey string) bool {
+	switch strings.TrimSpace(strings.ToLower(providerKey)) {
+	case "meta", "facebook", "instagram", "whatsapp", "meta-ads":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			seen[value] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func capabilitiesAllowedByScopes(provider providers.Provider, requested, grantedScopes []string) []string {
+	granted := map[string]struct{}{}
+	for _, scope := range grantedScopes {
+		granted[strings.TrimSpace(scope)] = struct{}{}
+	}
+	requestedSet := map[string]struct{}{}
+	for _, capability := range requested {
+		requestedSet[capability] = struct{}{}
+	}
+	allowed := make([]string, 0, len(requested))
+	for _, capability := range provider.Capabilities {
+		if _, wanted := requestedSet[capability.Key]; !wanted {
+			continue
+		}
+		allGranted := true
+		for _, required := range capability.Scopes {
+			if _, ok := granted[required]; !ok {
+				allGranted = false
+				break
+			}
+		}
+		if allGranted {
+			allowed = append(allowed, capability.Key)
+		}
+	}
+	slices.Sort(allowed)
+	return allowed
 }
 
 func redactScopes(scopes []string) []string {

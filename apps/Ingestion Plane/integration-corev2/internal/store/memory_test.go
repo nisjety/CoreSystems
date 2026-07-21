@@ -37,6 +37,120 @@ func TestMemoryRepositoryStoresAndDeletesConnections(t *testing.T) {
 	}
 }
 
+func TestMemoryWebhookAccountLookupFailsClosedOnAmbiguousOwnership(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := t.Context()
+	for _, connection := range []Connection{
+		{ID: "conn-a", ProviderKey: "meta", OrganizationID: "org-a", Status: "active", ProviderContext: map[string]string{"webhook_account_ids": "page-shared"}},
+		{ID: "conn-b", ProviderKey: "meta", OrganizationID: "org-b", Status: "active", ProviderContext: map[string]string{"webhook_account_ids": "page-shared"}},
+	} {
+		if _, err := repo.UpsertConnection(ctx, connection); err != nil {
+			t.Fatalf("UpsertConnection(%s): %v", connection.ID, err)
+		}
+	}
+	if _, err := repo.FindConnectionByWebhookAccount(ctx, []string{"meta"}, "page-shared"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("lookup error = %v, want ErrConflict for ambiguous ownership", err)
+	}
+}
+
+func TestMemoryWebhookAccountClaimRejectsConcurrentOwner(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := t.Context()
+	for _, connection := range []Connection{
+		{ID: "conn-a", ProviderKey: "meta", OrganizationID: "org-a", Status: "active"},
+		{ID: "conn-b", ProviderKey: "meta", OrganizationID: "org-b", Status: "active"},
+	} {
+		if _, err := repo.UpsertConnection(ctx, connection); err != nil {
+			t.Fatalf("UpsertConnection(%s): %v", connection.ID, err)
+		}
+	}
+	if _, err := repo.UpdateConnectionProviderContext(ctx, "conn-a", map[string]string{"webhook_account_ids": "page-shared"}); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if _, err := repo.UpdateConnectionProviderContext(ctx, "conn-b", map[string]string{"webhook_account_ids": "page-shared"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second claim error = %v, want ErrConflict", err)
+	}
+}
+
+func TestMemoryCredentialUpdatePreservesContextAndRejectsDisconnected(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	connection := Connection{
+		ID: "conn-discord", ProviderKey: "discord", ConnectorType: "discord",
+		OrganizationID: "org-1", Status: "active",
+		ProviderContext: map[string]string{"oauth_hint": "old"},
+	}
+	if _, err := repo.UpsertConnection(ctx, connection); err != nil {
+		t.Fatalf("initial UpsertConnection: %v", err)
+	}
+	if _, err := repo.BindConnectionProviderContext(ctx, connection.ID, "guild_id", "guild-1"); err != nil {
+		t.Fatalf("BindConnectionProviderContext: %v", err)
+	}
+
+	// Simulate a refresh saving the credential snapshot captured before the
+	// guild was bound. Credential updates must leave all current context intact.
+	connection.ProviderContext = map[string]string{"oauth_hint": "stale"}
+	connection.EncryptedAccessToken = "new-access"
+	connection.Status = "needs_refresh"
+	connection.Capabilities = []string{"profile.read"}
+	connection.Scopes = []string{"profile"}
+	saved, err := repo.UpdateConnectionCredentials(ctx, connection)
+	if err != nil {
+		t.Fatalf("UpdateConnectionCredentials: %v", err)
+	}
+	if saved.ProviderContext["guild_id"] != "guild-1" {
+		t.Fatalf("guild binding = %q, want guild-1", saved.ProviderContext["guild_id"])
+	}
+	if saved.ProviderContext["oauth_hint"] != "old" || saved.EncryptedAccessToken != "new-access" {
+		t.Fatalf("credential/context update = %+v", saved)
+	}
+	if saved.Status != "needs_refresh" || len(saved.Capabilities) != 1 || len(saved.Scopes) != 1 {
+		t.Fatalf("verified grant snapshot was not persisted: %+v", saved)
+	}
+	if _, err := repo.MarkConnectionDeleted(ctx, connection.ID); err != nil {
+		t.Fatalf("MarkConnectionDeleted: %v", err)
+	}
+	if _, err := repo.UpdateConnectionCredentials(ctx, connection); !errors.Is(err, ErrConflict) {
+		t.Fatalf("disconnected credential update error = %v, want ErrConflict", err)
+	}
+}
+
+func TestMemoryReconnectUpsertUsesCurrentGuildAndCannotResurrect(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	connection := Connection{
+		ID: "conn-reconnect", ProviderKey: "discord", ConnectorType: "discord",
+		OrganizationID: "org-1", Status: "active",
+		ProviderContext: map[string]string{"webhook_account_ids": "old-account"},
+	}
+	if _, err := repo.UpsertConnection(ctx, connection); err != nil {
+		t.Fatalf("initial UpsertConnection: %v", err)
+	}
+	if _, err := repo.BindConnectionProviderContext(ctx, connection.ID, "guild_id", "guild-current"); err != nil {
+		t.Fatalf("BindConnectionProviderContext: %v", err)
+	}
+
+	staleReconnect := connection
+	staleReconnect.ProviderContext = map[string]string{
+		"guild_id":            "guild-stale",
+		"webhook_account_ids": "new-account",
+	}
+	saved, err := repo.ReconnectConnection(ctx, staleReconnect)
+	if err != nil {
+		t.Fatalf("reconnect UpsertConnection: %v", err)
+	}
+	if saved.ProviderContext["guild_id"] != "guild-current" || saved.ProviderContext["webhook_account_ids"] != "new-account" {
+		t.Fatalf("atomic reconnect context = %+v", saved.ProviderContext)
+	}
+
+	if _, err := repo.MarkConnectionDeleted(ctx, connection.ID); err != nil {
+		t.Fatalf("MarkConnectionDeleted: %v", err)
+	}
+	if _, err := repo.ReconnectConnection(ctx, staleReconnect); !errors.Is(err, ErrConflict) {
+		t.Fatalf("disconnected reconnect error = %v, want ErrConflict", err)
+	}
+}
+
 func TestMemoryActionReceiptLifecycleAndCompletedReplay(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
@@ -260,5 +374,21 @@ func actionReceiptFixture() ActionReceipt {
 		ActorID:           "user-1",
 		AttestationJTI:    "attestation-1",
 		PayloadSHA256:     "f00dbabe",
+	}
+}
+
+func TestMemoryExtendEmailSyncHistoryAddsFixedWindowsAtomically(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	first, err := repo.ExtendEmailSyncHistory(t.Context(), "conn-ms:teams", "teams", 30, 3650)
+	if err != nil {
+		t.Fatalf("first ExtendEmailSyncHistory error: %v", err)
+	}
+	second, err := repo.ExtendEmailSyncHistory(t.Context(), "conn-ms:teams", "teams", 30, 3650)
+	if err != nil {
+		t.Fatalf("second ExtendEmailSyncHistory error: %v", err)
+	}
+	if first.HistoryBackfillDays != 30 || second.HistoryBackfillDays != 60 {
+		t.Fatalf("history increments = %d then %d, want 30 then 60", first.HistoryBackfillDays, second.HistoryBackfillDays)
 	}
 }

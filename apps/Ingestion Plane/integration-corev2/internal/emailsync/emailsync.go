@@ -67,6 +67,7 @@ type EmailMessage struct {
 	MessageIDHeader   string
 	ReferencesHeader  string
 	InReplyToHeader   string
+	Direction         string
 	Subject           string
 	From              Participant
 	To                []Participant
@@ -80,8 +81,9 @@ type EmailMessage struct {
 // it may be an @odata.nextLink when the per-cycle cap interrupted a page walk
 // (a valid resumption point per the delta contract).
 type FetchResult struct {
-	Messages   []EmailMessage
-	NextCursor string
+	Messages             []EmailMessage
+	NextCursor           string
+	ProviderContextPatch map[string]string
 }
 
 // Fetcher is one provider's inbound message reader (mailbox or chat source).
@@ -91,6 +93,43 @@ type Fetcher interface {
 	// from the backfill window. Implementations return ErrCursorExpired
 	// (possibly wrapped) when the provider rejects the stored cursor.
 	Fetch(ctx context.Context, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error)
+}
+
+// CursorVersioner lets a fetcher invalidate cursor formats or bootstrap
+// policies without a schema migration. A non-empty version is persisted as a
+// prefix; legacy/unversioned cursors are reset once and then upgraded.
+type CursorVersioner interface {
+	CursorVersion() string
+}
+
+const cursorVersionSeparator = "|"
+
+func decodeFetcherCursor(fetcher Fetcher, stored string) string {
+	versioned, ok := fetcher.(CursorVersioner)
+	if !ok {
+		return stored
+	}
+	if strings.TrimSpace(versioned.CursorVersion()) == "" {
+		// A stored version prefix belongs to a different bootstrap policy and is
+		// never a provider URL. Reset it when the versioned mode is disabled.
+		if strings.Contains(stored, cursorVersionSeparator) {
+			return ""
+		}
+		return stored
+	}
+	prefix := strings.TrimSpace(versioned.CursorVersion()) + cursorVersionSeparator
+	if !strings.HasPrefix(stored, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(stored, prefix)
+}
+
+func encodeFetcherCursor(fetcher Fetcher, cursor string) string {
+	versioned, ok := fetcher.(CursorVersioner)
+	if !ok || strings.TrimSpace(versioned.CursorVersion()) == "" {
+		return cursor
+	}
+	return strings.TrimSpace(versioned.CursorVersion()) + cursorVersionSeparator + cursor
 }
 
 // ConnectionFetcher is an optional Fetcher upgrade for sources that need
@@ -115,6 +154,13 @@ type ConnectionSource interface {
 	ListConnections(ctx context.Context, filter store.ConnectionFilter) ([]store.Connection, error)
 	GetEmailSyncState(ctx context.Context, connectionID string) (store.EmailSyncState, error)
 	UpsertEmailSyncState(ctx context.Context, state store.EmailSyncState) error
+}
+
+// ConnectionContextUpdater is the optional store capability used when a
+// provider safely discovers a durable tenant binding during fetch. The
+// binding must be committed before any fetched message is delivered.
+type ConnectionContextUpdater interface {
+	BindConnectionProviderContext(ctx context.Context, id, key, value string) (store.Connection, error)
 }
 
 // TokenSource resolves a fresh (refresh-aware) access token for a connection.
@@ -157,6 +203,10 @@ type IngestClient struct {
 }
 
 func (c *IngestClient) Ingest(ctx context.Context, conn store.Connection, msg EmailMessage) error {
+	direction := strings.TrimSpace(msg.Direction)
+	if direction == "" {
+		direction = "inbound"
+	}
 	event := rawEmailEvent{
 		OrgID:        conn.OrganizationID,
 		ConnectionID: conn.ID,
@@ -170,7 +220,7 @@ func (c *IngestClient) Ingest(ctx context.Context, conn store.Connection, msg Em
 		MessageIDHeader:   msg.MessageIDHeader,
 		ReferencesHeader:  msg.ReferencesHeader,
 		InReplyToHeader:   msg.InReplyToHeader,
-		Direction:         "inbound",
+		Direction:         direction,
 		Subject:           msg.Subject,
 		From:              msg.From,
 		To:                msg.To,
@@ -468,14 +518,21 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 
 	maxMessages := w.MaxPerCycle
 	if maxMessages <= 0 {
-		maxMessages = 25
+		maxMessages = 100
 	}
 	backfill := w.BackfillWindow
 	if backfill <= 0 {
 		backfill = 24 * time.Hour
 	}
+	if plan.fetcherKey == "teams" {
+		// Teams starts with 30 days. Each explicit inbox request adds another
+		// durable 30-day window without changing the live-sync watermark state
+		// until the fetcher begins that bounded replay.
+		backfill = teamsBootstrapBackfill + time.Duration(max(state.HistoryBackfillDays, 0))*24*time.Hour
+	}
 
-	result, err := fetchWith(ctx, fetcher, conn, token.AccessToken, state.Cursor, backfill, maxMessages)
+	fetchCursor := decodeFetcherCursor(fetcher, state.Cursor)
+	result, err := fetchWith(ctx, fetcher, conn, token.AccessToken, fetchCursor, backfill, maxMessages)
 	if errors.Is(err, ErrCursorExpired) {
 		// The provider invalidated our cursor (Gmail >~1 week of history,
 		// Graph sync-state reset). Re-bootstrap immediately, once.
@@ -484,6 +541,20 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 	}
 	if err != nil {
 		return 0, w.recordFailure(ctx, state, fmt.Errorf("fetch %s mailbox: %w", plan.source(), err))
+	}
+
+	if len(result.ProviderContextPatch) > 0 {
+		updater, ok := w.Store.(ConnectionContextUpdater)
+		if !ok {
+			return 0, w.recordFailure(ctx, state, errors.New("persist provider context: store does not support connection context updates"))
+		}
+		for key, value := range result.ProviderContextPatch {
+			updated, updateErr := updater.BindConnectionProviderContext(ctx, conn.ID, key, value)
+			if updateErr != nil {
+				return 0, w.recordFailure(ctx, state, fmt.Errorf("persist provider context: %w", updateErr))
+			}
+			conn = updated
+		}
 	}
 
 	// deliveryConn is what the ingestor sees: chat plans stamp their channel
@@ -499,7 +570,7 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 		// Self-echo guard: replies our own send ops produce also land in the
 		// mailbox (Gmail threads them into INBOX conversations); skip mail
 		// authored by the connected account itself.
-		if msg.From.Email != "" && strings.EqualFold(msg.From.Email, conn.UserEmail) {
+		if msg.Direction != "outbound" && msg.From.Email != "" && strings.EqualFold(msg.From.Email, conn.UserEmail) {
 			continue
 		}
 		if err := w.Ingest.Ingest(ctx, deliveryConn, msg); err != nil {
@@ -511,7 +582,7 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 		ingested++
 	}
 
-	state.Cursor = result.NextCursor
+	state.Cursor = encodeFetcherCursor(fetcher, result.NextCursor)
 	state.LastSyncedAt = time.Now().UTC()
 	state.LastError = ""
 	state.FailureCount = 0

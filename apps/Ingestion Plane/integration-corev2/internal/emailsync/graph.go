@@ -17,23 +17,35 @@ import (
 // instead — both link kinds are valid resumption points per the delta
 // contract. 410 Gone (or a SyncStateNotFound 40x) → ErrCursorExpired.
 type GraphFetcher struct {
-	BaseURL string // default https://graph.microsoft.com/v1.0
-	HTTP    *http.Client
+	BaseURL      string // default https://graph.microsoft.com/v1.0
+	HTTP         *http.Client
+	FullBackfill bool // omit the initial receivedDateTime filter
 }
 
 const graphDefaultBaseURL = "https://graph.microsoft.com/v1.0"
+
+const graphFullBackfillCursorVersion = "graph-full-v1"
 
 // graphMaxPages bounds one cycle's pagination (the nextLink cursor carries
 // the remainder into the next cycle).
 const graphMaxPages = 10
 
+func (f *GraphFetcher) CursorVersion() string {
+	if f.FullBackfill {
+		return graphFullBackfillCursorVersion
+	}
+	return ""
+}
+
 func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error) {
 	nextURL := cursor
 	if nextURL == "" {
-		since := time.Now().UTC().Add(-backfill).Format(time.RFC3339)
 		query := url.Values{}
 		query.Set("changeType", "created")
-		query.Set("$filter", fmt.Sprintf("receivedDateTime ge %s", since))
+		if !f.FullBackfill {
+			since := time.Now().UTC().Add(-backfill).Format(time.RFC3339)
+			query.Set("$filter", fmt.Sprintf("receivedDateTime ge %s", since))
+		}
 		nextURL = f.baseURL() + "/me/mailFolders/inbox/messages/delta?" + query.Encode()
 	}
 
@@ -60,19 +72,21 @@ func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 				continue
 			}
 			messages = append(messages, msg)
-			if len(messages) >= maxMessages {
-				// Interrupted mid-walk: resume from the pending link next
-				// cycle. Prefer nextLink; if this was the final page the
-				// deltaLink is already in hand.
-				cursorOut := response.NextLink
-				if cursorOut == "" {
-					cursorOut = response.DeltaLink
-				}
-				if cursorOut == "" {
-					cursorOut = nextURL
-				}
-				return FetchResult{Messages: messages, NextCursor: cursorOut}, nil
+		}
+
+		// Graph cursors only identify page boundaries. Stopping in the middle
+		// of response.Value and saving response.NextLink would permanently skip
+		// the unprocessed remainder of this page. Finish the provider page, then
+		// allow a bounded overshoot of maxMessages before resuming next cycle.
+		if len(messages) >= maxMessages {
+			cursorOut := response.NextLink
+			if cursorOut == "" {
+				cursorOut = response.DeltaLink
 			}
+			if cursorOut == "" {
+				cursorOut = nextURL
+			}
+			return FetchResult{Messages: messages, NextCursor: cursorOut}, nil
 		}
 
 		if response.DeltaLink != "" {
@@ -123,7 +137,7 @@ type graphEmailAddress struct {
 }
 
 // normalize maps a Graph message to the bridge shape. ok=false means skip
-// (tombstones from the delta feed, drafts, or bodiless items).
+// tombstones from the delta feed or drafts.
 func (m graphMessage) normalize() (EmailMessage, bool) {
 	if m.Removed != nil || m.IsDraft || m.ID == "" {
 		return EmailMessage{}, false
@@ -154,7 +168,9 @@ func (m graphMessage) normalize() (EmailMessage, bool) {
 		msg.BodyText = m.BodyPreview
 	}
 	if msg.BodyText == "" && msg.BodyHTML == "" {
-		return EmailMessage{}, false
+		// Valid Outlook items can be attachment-only or calendar/system messages.
+		// Keep them in the inbox and satisfy the canonical bridge's body contract.
+		msg.BodyText = "(No message body)"
 	}
 	return msg, true
 }

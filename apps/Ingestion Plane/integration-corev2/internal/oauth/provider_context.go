@@ -8,11 +8,21 @@ import (
 
 var shopifyShopPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*\.myshopify\.com$`)
 
+var serverDerivedProviderContextKeys = map[string]struct{}{
+	"webhook_account_ids": {},
+	"guild_id":            {},
+	"team_id":             {},
+	"tenant_id":           {},
+}
+
 func NormalizeProviderContext(providerKey string, input map[string]string) (map[string]string, error) {
 	context := map[string]string{}
 	for key, value := range input {
 		key = strings.TrimSpace(strings.ToLower(key))
 		value = strings.TrimSpace(value)
+		if _, reserved := serverDerivedProviderContextKeys[key]; reserved {
+			continue
+		}
 		if key != "" && value != "" {
 			context[key] = value
 		}

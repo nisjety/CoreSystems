@@ -206,7 +206,42 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	}
 }
 
-func TestGraph_CapMidWalkPersistsNextLink(t *testing.T) {
+func TestGraph_FullBackfillOmitsReceivedDateFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("changeType") != "created" {
+			t.Errorf("changeType = %q, want created", r.URL.Query().Get("changeType"))
+		}
+		if r.URL.Query().Has("$filter") {
+			t.Errorf("full backfill must not send a receivedDateTime filter: %s", r.URL.RawQuery)
+		}
+		fmt.Fprint(w, `{"value": [], "@odata.deltaLink": "delta-complete"}`)
+	}))
+	defer server.Close()
+
+	f := &GraphFetcher{BaseURL: server.URL, HTTP: server.Client(), FullBackfill: true}
+	result, err := f.Fetch(context.Background(), "tok", "", 24*time.Hour, 25)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if result.NextCursor != "delta-complete" {
+		t.Fatalf("cursor = %q, want delta-complete", result.NextCursor)
+	}
+}
+
+func TestGraph_BodylessMessageIsRetained(t *testing.T) {
+	raw := graphMessage{ID: "bodyless-1", Subject: "Attachment only", ReceivedDateTime: "2026-07-08T09:00:00Z"}
+	raw.From.EmailAddress = graphEmailAddress{Name: "Ola", Address: "ola@example.com"}
+
+	message, ok := raw.normalize()
+	if !ok {
+		t.Fatal("bodyless non-draft message was dropped")
+	}
+	if message.BodyText != "(No message body)" {
+		t.Fatalf("body text = %q, want safe bodyless placeholder", message.BodyText)
+	}
+}
+
+func TestGraph_CapStopsAtPageBoundaryWithoutDroppingMessages(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/page2") {
@@ -214,9 +249,10 @@ func TestGraph_CapMidWalkPersistsNextLink(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		fmt.Fprintf(w, `{"value": [%s, %s], "@odata.nextLink": %q}`,
+		fmt.Fprintf(w, `{"value": [%s, %s, %s], "@odata.nextLink": %q}`,
 			graphMessageJSON("g1", "S1", "a@x.no", "<p>1</p>", ""),
 			graphMessageJSON("g2", "S2", "b@x.no", "<p>2</p>", ""),
+			graphMessageJSON("g3", "S3", "c@x.no", "<p>3</p>", ""),
 			server.URL+"/page2")
 	}))
 	defer server.Close()
@@ -226,8 +262,8 @@ func TestGraph_CapMidWalkPersistsNextLink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if len(result.Messages) != 2 {
-		t.Fatalf("messages = %d, want capped 2", len(result.Messages))
+	if len(result.Messages) != 3 {
+		t.Fatalf("messages = %d, want the complete provider page", len(result.Messages))
 	}
 	if result.NextCursor != server.URL+"/page2" {
 		t.Errorf("cursor = %q, want pending nextLink for resumption", result.NextCursor)

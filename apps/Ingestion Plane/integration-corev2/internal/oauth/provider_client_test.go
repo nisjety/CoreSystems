@@ -65,6 +65,11 @@ func TestSlackAuthorizationURLUsesCommaSeparatedScopes(t *testing.T) {
 
 func TestSlackProviderClientSendsClientSecretInTokenBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/me/permissions" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"permission": "pages_show_list", "status": "granted"}}})
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm error: %v", err)
 		}
@@ -233,13 +238,13 @@ func TestMetaAuthorizationURLSelectsNamedBusinessLoginConfig(t *testing.T) {
 		providerContext map[string]string
 		wantConfigID    string
 	}{
-		{"defaults when unset", nil, "instagram-registrering-id"},
+		{"classic requested scopes when unset", nil, ""},
 		{"explicit default", map[string]string{"business_login_config": "default"}, "instagram-registrering-id"},
 		{"conversions", map[string]string{"business_login_config": "conversions"}, "conversions-partner-id"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rawURL, err := client.AuthorizationURL("state", "https://app.test/callback", "", nil, tt.providerContext)
+			rawURL, err := client.AuthorizationURL("state", "https://app.test/callback", "", []string{"pages_show_list"}, tt.providerContext)
 			if err != nil {
 				t.Fatalf("AuthorizationURL error: %v", err)
 			}
@@ -250,7 +255,11 @@ func TestMetaAuthorizationURLSelectsNamedBusinessLoginConfig(t *testing.T) {
 			if got := parsed.Query().Get("config_id"); got != tt.wantConfigID {
 				t.Fatalf("config_id = %q, want %q", got, tt.wantConfigID)
 			}
-			if parsed.Query().Get("override_default_response_type") != "true" {
+			if tt.wantConfigID == "" {
+				if parsed.Query().Get("scope") != "pages_show_list" {
+					t.Fatalf("scope = %q, want classic requested scope", parsed.Query().Get("scope"))
+				}
+			} else if parsed.Query().Get("override_default_response_type") != "true" {
 				t.Fatal("expected override_default_response_type=true when a config_id is used")
 			}
 		})
@@ -283,6 +292,11 @@ func TestMetaAuthorizationURLFallsBackToScopeWhenConfigUnknown(t *testing.T) {
 func TestMetaExchangeCodePersistsLongLivedTokenAsRefreshHandle(t *testing.T) {
 	requests := []url.Values{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/me/permissions" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"permission": "pages_show_list", "status": "granted"}}})
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm error: %v", err)
 		}
@@ -316,7 +330,8 @@ func TestMetaExchangeCodePersistsLongLivedTokenAsRefreshHandle(t *testing.T) {
 		ClientSecret:     "client-secret",
 		AuthorizationURL: "https://facebook.test/dialog/oauth",
 		TokenURL:         server.URL,
-		APIBaseURL:       "https://graph.test",
+		APIBaseURL:       server.URL,
+		HTTPClient:       server.Client(),
 	}, nil)
 
 	token, err := client.ExchangeCode(context.Background(), "code", "https://app.test/oauth/callback/meta", "", nil, nil)
@@ -337,6 +352,11 @@ func TestMetaExchangeCodePersistsLongLivedTokenAsRefreshHandle(t *testing.T) {
 func TestMetaBusinessLoginExchangeCodeKeepsReturnedToken(t *testing.T) {
 	requests := []url.Values{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/me/permissions" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"permission": "pages_show_list", "status": "granted"}}})
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("ParseForm error: %v", err)
 		}
@@ -358,10 +378,11 @@ func TestMetaBusinessLoginExchangeCodeKeepsReturnedToken(t *testing.T) {
 		ClientSecret:     "client-secret",
 		AuthorizationURL: "https://facebook.test/dialog/oauth",
 		TokenURL:         server.URL,
-		APIBaseURL:       "https://graph.test",
+		APIBaseURL:       server.URL,
+		HTTPClient:       server.Client(),
 	}, map[string]string{"default": "business-login-config-id"})
 
-	token, err := client.ExchangeCode(context.Background(), "code", "https://app.test/oauth/callback/meta", "", nil, nil)
+	token, err := client.ExchangeCode(context.Background(), "code", "https://app.test/oauth/callback/meta", "", nil, map[string]string{"business_login_config": "default"})
 	if err != nil {
 		t.Fatalf("ExchangeCode error: %v", err)
 	}
@@ -373,6 +394,85 @@ func TestMetaBusinessLoginExchangeCodeKeepsReturnedToken(t *testing.T) {
 	}
 	if len(requests) != 1 {
 		t.Fatalf("token endpoint calls = %d, want 1", len(requests))
+	}
+}
+
+func TestMetaExchangeCodeReadsGrantedPermissions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/oauth/access_token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "meta-token",
+				"token_type":   "bearer",
+			})
+		case "/me/permissions":
+			if r.Header.Get("Authorization") != "Bearer meta-token" {
+				t.Fatalf("Authorization = %q", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{
+				{"permission": "public_profile", "status": "granted"},
+				{"permission": "pages_show_list", "status": "granted"},
+				{"permission": "instagram_manage_messages", "status": "declined"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewMetaOAuthClient(OAuth2ClientConfig{
+		ProviderKey:      "meta",
+		ClientID:         "client-id",
+		ClientSecret:     "client-secret",
+		AuthorizationURL: server.URL + "/dialog/oauth",
+		TokenURL:         server.URL + "/oauth/access_token",
+		APIBaseURL:       server.URL,
+		HTTPClient:       server.Client(),
+	}, map[string]string{"default": "business-login-config-id"})
+
+	token, err := client.ExchangeCode(context.Background(), "code", "https://app.test/oauth/callback/meta", "", nil, map[string]string{"business_login_config": "default"})
+	if err != nil {
+		t.Fatalf("ExchangeCode error: %v", err)
+	}
+	if len(token.Scope) != 2 || token.Scope[0] != "pages_show_list" || token.Scope[1] != "public_profile" {
+		t.Fatalf("granted scopes = %v, want only granted provider permissions", token.Scope)
+	}
+	if !token.ScopesVerified {
+		t.Fatal("ScopesVerified = false, want authoritative provider grant snapshot")
+	}
+}
+
+func TestMetaGrantedPermissionsRejectsOffOriginPagination(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":   []any{},
+			"paging": map[string]string{"next": "https://attacker.invalid/steal"},
+		})
+	}))
+	defer server.Close()
+	client := NewMetaOAuthClient(OAuth2ClientConfig{APIBaseURL: server.URL, HTTPClient: server.Client()}, nil)
+	if _, err := client.grantedPermissions(t.Context(), "secret-token"); err == nil {
+		t.Fatal("grantedPermissions error = nil, want off-origin pagination rejection")
+	}
+}
+
+func TestMetaGrantedPermissionsRejectsOffOriginRedirect(t *testing.T) {
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetCalls++ }))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer source.Close()
+	client := NewMetaOAuthClient(OAuth2ClientConfig{APIBaseURL: source.URL, HTTPClient: source.Client()}, nil)
+	if _, err := client.grantedPermissions(t.Context(), "secret-token"); err == nil {
+		t.Fatal("grantedPermissions error = nil, want off-origin redirect rejection")
+	}
+	if targetCalls != 0 {
+		t.Fatalf("off-origin redirect target calls = %d, want 0", targetCalls)
 	}
 }
 

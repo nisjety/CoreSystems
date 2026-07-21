@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -664,7 +665,13 @@ const defaultMetaBusinessLoginConfig = "default"
 func (c *MetaOAuthClient) businessLoginConfigID(providerContext map[string]string) string {
 	key := strings.TrimSpace(providerContext["business_login_config"])
 	if key == "" {
-		key = defaultMetaBusinessLoginConfig
+		// General Meta connects use classic Facebook Login so the exact
+		// requested bundle scopes are visible in the dialog. A Business Login
+		// configuration is selected only when the caller explicitly names one
+		// (for example the narrower Conversions API configuration). Treating a
+		// configured "default" id as implicit caused misconfigured dashboard
+		// presets to silently issue public_profile-only tokens.
+		return ""
 	}
 	return c.configIDs[key]
 }
@@ -702,6 +709,11 @@ func (c *MetaOAuthClient) ExchangeCode(ctx context.Context, code, redirectURI, c
 		if token.RefreshToken == "" {
 			token.RefreshToken = token.AccessToken
 		}
+		token.Scope, err = c.grantedPermissions(ctx, token.AccessToken)
+		if err != nil {
+			return TokenResult{}, err
+		}
+		token.ScopesVerified = true
 		return token, nil
 	}
 	longLived, err := c.Refresh(ctx, token.AccessToken, scopes, providerContext)
@@ -709,6 +721,97 @@ func (c *MetaOAuthClient) ExchangeCode(ctx context.Context, code, redirectURI, c
 		return TokenResult{}, err
 	}
 	return longLived, nil
+}
+
+func (c *MetaOAuthClient) grantedPermissions(ctx context.Context, accessToken string) ([]string, error) {
+	next := strings.TrimRight(c.base.cfg.APIBaseURL, "/") + "/me/permissions?limit=100"
+	granted := map[string]struct{}{}
+	for page := 0; next != "" && page < 10; page++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build Meta permissions request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		resp, err := sameOriginHTTPClient(c.base.httpClient, c.base.cfg.APIBaseURL).Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("read Meta granted permissions: %w", err)
+		}
+		var payload struct {
+			Data []struct {
+				Permission string `json:"permission"`
+				Status     string `json:"status"`
+			} `json:"data"`
+			Paging struct {
+				Next string `json:"next"`
+			} `json:"paging"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode Meta granted permissions: %w", decodeErr)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 || payload.Error != nil {
+			message := "provider rejected permission inspection"
+			if payload.Error != nil && strings.TrimSpace(payload.Error.Message) != "" {
+				message = payload.Error.Message
+			}
+			return nil, fmt.Errorf("read Meta granted permissions: %s", message)
+		}
+		for _, permission := range payload.Data {
+			if permission.Status == "granted" && strings.TrimSpace(permission.Permission) != "" {
+				granted[permission.Permission] = struct{}{}
+			}
+		}
+		next, err = c.safeGraphPageURL(payload.Paging.Next)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out := make([]string, 0, len(granted))
+	for permission := range granted {
+		out = append(out, permission)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+func sameOriginHTTPClient(client *http.Client, baseURL string) *http.Client {
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	cloned := *client
+	configured, _ := url.Parse(baseURL)
+	previous := client.CheckRedirect
+	cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 || configured == nil || req.URL.Scheme != configured.Scheme || req.URL.Host != configured.Host {
+			return fmt.Errorf("provider redirect left the configured origin")
+		}
+		if previous != nil {
+			return previous(req, via)
+		}
+		return nil
+	}
+	return &cloned
+}
+
+func (c *MetaOAuthClient) safeGraphPageURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	base, err := url.Parse(c.base.cfg.APIBaseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse Meta Graph base URL: %w", err)
+	}
+	next, err := url.Parse(raw)
+	if err != nil || !next.IsAbs() || next.Scheme != base.Scheme || next.Host != base.Host || next.User != nil {
+		return "", fmt.Errorf("read Meta granted permissions: provider returned an off-origin pagination URL")
+	}
+	next.Fragment = ""
+	return next.String(), nil
 }
 
 // Refresh upgrades/renews a Meta user token via fb_exchange_token (Meta issues
@@ -727,6 +830,11 @@ func (c *MetaOAuthClient) Refresh(ctx context.Context, refreshToken string, _ []
 	if token.RefreshToken == "" {
 		token.RefreshToken = token.AccessToken
 	}
+	token.Scope, err = c.grantedPermissions(ctx, token.AccessToken)
+	if err != nil {
+		return TokenResult{}, err
+	}
+	token.ScopesVerified = true
 	return token, nil
 }
 

@@ -151,6 +151,37 @@ func TestRunOnce_MailAndTeamsPlansShareOneConnection(t *testing.T) {
 	}
 }
 
+func TestRunOnce_TeamsKeepsConnectedUsersOutboundMessages(t *testing.T) {
+	conn := planConnection("conn_ms", "microsoft", "teams.messages.read")
+	conn.UserEmail = "ima@aquatiq.com"
+	st := &fakeStore{connections: []store.Connection{conn}}
+	teams := &fakeFetcher{results: map[string]FetchResult{
+		"": {
+			Messages: []EmailMessage{{
+				ProviderEventID: "chat-self-1",
+				Direction:       "outbound",
+				From:            Participant{Name: "Ima", Email: "ima@aquatiq.com"},
+				To:              []Participant{{Name: "Robert", Email: "robert@example.com"}},
+				BodyText:        "My reply",
+			}},
+			NextCursor: "2026-07-18T10:00:00Z",
+		},
+	}}
+	ing := &fakeIngestor{}
+	w := Worker{Store: st, Tokens: fakeTokens{}, Ingest: ing, Teams: teams}
+
+	n, err := w.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if n != 1 || len(ing.events) != 1 {
+		t.Fatalf("ingested = %d, events = %d, want the outbound Teams message", n, len(ing.events))
+	}
+	if ing.events[0].Direction != "outbound" {
+		t.Fatalf("direction = %q, want outbound", ing.events[0].Direction)
+	}
+}
+
 // TestRunOnce_ChannelProviderStampedOnDelivery locks the outbound provider
 // override: chat plans deliver under their channel provider while email plans
 // keep the connection's own provider key.

@@ -16,6 +16,30 @@ import (
 	"github.com/triodelab/integration-corev2/internal/store"
 )
 
+func TestReconnectProviderContextReplacesDerivedContextButPreservesGuildBinding(t *testing.T) {
+	existing := map[string]string{
+		"guild_id":            "guild-1",
+		"webhook_account_ids": "old-page,old-waba",
+		"stale":               "remove-me",
+	}
+	session := map[string]string{
+		"webhook_account_ids": "new-page,new-waba",
+		"fresh":               "keep-me",
+		"guild_id":            "unverified-replacement",
+	}
+
+	got := reconnectProviderContext(existing, session)
+	if got["guild_id"] != "guild-1" {
+		t.Fatalf("guild_id = %q, want sticky verified binding", got["guild_id"])
+	}
+	if got["webhook_account_ids"] != "new-page,new-waba" || got["fresh"] != "keep-me" {
+		t.Fatalf("session context was not applied: %+v", got)
+	}
+	if _, retained := got["stale"]; retained {
+		t.Fatalf("stale provider-derived context survived reconnect: %+v", got)
+	}
+}
+
 func TestCreateSessionSupportsOAuthProviderCatalog(t *testing.T) {
 	cfg := testOAuthConfig()
 	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
@@ -278,6 +302,116 @@ func TestCompleteCallbackReconnectReusesConnectionAndUpgradesScopes(t *testing.T
 	}
 	if token.AccessToken != "new-access-token" {
 		t.Fatalf("AccessToken = %q, want new access token", token.AccessToken)
+	}
+}
+
+func TestPersistMetaConnectionUsesGrantedScopesAndRemovesUngrantableCapabilities(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	meta, ok := providers.FindOAuth("meta")
+	if !ok {
+		t.Fatal("catalog missing Meta")
+	}
+	requestedCapabilities := providers.ResolveCapabilities(meta, nil, []string{"inbox"})
+	session := store.ConnectSession{
+		ID: "session-meta-grants", ProviderKey: "meta", ConnectorType: "meta",
+		OrganizationID: "org-1", UserID: "user-1",
+		Capabilities: requestedCapabilities,
+		Scopes:       providers.ResolveScopes(meta, requestedCapabilities),
+	}
+
+	connection, err := service.persistConnection(t.Context(), session, TokenResult{
+		AccessToken:    "meta-access-token",
+		Scope:          []string{"public_profile"},
+		ScopesVerified: true,
+		ExpiresAt:      time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("persistConnection error: %v", err)
+	}
+	if len(connection.Capabilities) != 0 {
+		t.Fatalf("capabilities = %v, want none without the required Meta grants", connection.Capabilities)
+	}
+	if len(connection.Scopes) != 1 || connection.Scopes[0] != "public_profile" {
+		t.Fatalf("scopes = %v, want only provider-verified public_profile", connection.Scopes)
+	}
+	if connection.Status != "needs_refresh" {
+		t.Fatalf("status = %q, want needs_refresh for incomplete Meta authorization", connection.Status)
+	}
+}
+
+func TestMetaCallbackDefersAuthoritativeCompletionUntilProvisioningFinalizes(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	publisher := &capturePublisher{}
+	service.SetEventPublisher(publisher)
+	provider, _ := providers.FindOAuth("meta")
+	requested := providers.ResolveCapabilities(provider, nil, []string{"inbox"})
+	granted := providers.ResolveScopes(provider, requested)
+	service.clients["meta"] = &callbackClient{token: TokenResult{
+		AccessToken: "meta-token", Scope: granted, ScopesVerified: true, ExpiresAt: time.Now().Add(time.Hour),
+	}}
+	created, err := service.CreateSession(t.Context(), CreateSessionInput{
+		ProviderKey: "meta", OrganizationID: "org-1", UserID: "user-1", Capabilities: requested,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	result, err := service.CompleteCallback(t.Context(), "meta", stateFromAuthURL(t, created.AuthorizationURL), "code", "", "")
+	if err != nil || !result.Success {
+		t.Fatalf("CompleteCallback result=%+v err=%v", result, err)
+	}
+	session, _ := repo.GetConnectSessionByID(t.Context(), result.SessionID)
+	if session.ConsumedAt != nil || len(publisher.events) != 0 {
+		t.Fatalf("Meta completion was emitted before provisioning: session=%+v events=%+v", session, publisher.events)
+	}
+	connection, _ := repo.GetConnection(t.Context(), result.ConnectionID)
+	if err := service.FinalizeConnectedCallback(t.Context(), result, connection); err != nil {
+		t.Fatalf("FinalizeConnectedCallback: %v", err)
+	}
+	session, _ = repo.GetConnectSessionByID(t.Context(), result.SessionID)
+	if session.ConsumedAt == nil || session.ErrorCode != "" || len(publisher.events) != 1 || publisher.events[0].Type != "integration.connected" {
+		t.Fatalf("finalization was not authoritative: session=%+v events=%+v", session, publisher.events)
+	}
+}
+
+func TestPersistLegacyInstagramConnectionTreatsVerifiedEmptyGrantAsAuthoritative(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	provider, ok := providers.FindOAuth("instagram")
+	if !ok {
+		t.Fatal("catalog missing Instagram")
+	}
+	requested := providers.ResolveCapabilities(provider, nil, []string{"inbox"})
+	session := store.ConnectSession{
+		ID: "session-instagram-empty", ProviderKey: "instagram", ConnectorType: "instagram",
+		OrganizationID: "org-1", UserID: "user-1", Capabilities: requested,
+		Scopes: providers.ResolveScopes(provider, requested),
+	}
+
+	connection, err := service.persistConnection(t.Context(), session, TokenResult{
+		AccessToken: "meta-access-token", ScopesVerified: true, ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("persistConnection error: %v", err)
+	}
+	if len(connection.Scopes) != 0 || len(connection.Capabilities) != 0 || connection.Status != "needs_refresh" {
+		t.Fatalf("connection = %+v, want authoritative empty grants and needs_refresh", connection)
 	}
 }
 

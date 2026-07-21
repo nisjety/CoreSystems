@@ -27,8 +27,12 @@ type TokenResult struct {
 	RefreshToken string
 	TokenType    string
 	Scope        []string
-	ExpiresAt    time.Time
-	Raw          map[string]any
+	// ScopesVerified distinguishes an authoritative provider grant snapshot
+	// (including an empty grant set) from token endpoints that simply omit the
+	// optional scope field.
+	ScopesVerified bool
+	ExpiresAt      time.Time
+	Raw            map[string]any
 }
 
 type MicrosoftProfile struct {

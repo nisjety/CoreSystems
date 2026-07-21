@@ -128,6 +128,42 @@ func (r *MemoryRepository) UpsertConnection(_ context.Context, connection Connec
 	return connection, nil
 }
 
+func (r *MemoryRepository) ReconnectConnection(_ context.Context, connection Connection) (Connection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing, ok := r.connections[connection.ID]
+	if !ok || existing.DeletedAt != nil || (existing.Status != "active" && existing.Status != "needs_refresh") {
+		return Connection{}, ErrConflict
+	}
+	connection.CreatedAt = existing.CreatedAt
+	connection.UpdatedAt = time.Now().UTC()
+	connection.ProviderContext = cloneStringMap(connection.ProviderContext)
+	if guildID := existing.ProviderContext["guild_id"]; guildID != "" {
+		connection.ProviderContext["guild_id"] = guildID
+	}
+	r.connections[connection.ID] = connection
+	return connection, nil
+}
+
+func (r *MemoryRepository) UpdateConnectionCredentials(_ context.Context, connection Connection) (Connection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.connections[connection.ID]
+	if !ok || current.DeletedAt != nil || (current.Status != "active" && current.Status != "needs_refresh") {
+		return Connection{}, ErrConflict
+	}
+	current.EncryptedAccessToken = connection.EncryptedAccessToken
+	current.EncryptedRefreshToken = connection.EncryptedRefreshToken
+	current.AccessTokenExpiresAt = connection.AccessTokenExpiresAt
+	current.LastRefreshedAt = connection.LastRefreshedAt
+	current.Status = connection.Status
+	current.Capabilities = append([]string(nil), connection.Capabilities...)
+	current.Scopes = append([]string(nil), connection.Scopes...)
+	current.UpdatedAt = time.Now().UTC()
+	r.connections[connection.ID] = current
+	return current, nil
+}
+
 func (r *MemoryRepository) ListConnections(_ context.Context, filter ConnectionFilter) ([]Connection, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -744,9 +780,27 @@ func (r *MemoryRepository) UpsertEmailSyncState(_ context.Context, state EmailSy
 	if r.emailSyncStates == nil {
 		r.emailSyncStates = map[string]EmailSyncState{}
 	}
+	if current, ok := r.emailSyncStates[state.ConnectionID]; ok && current.HistoryBackfillDays > state.HistoryBackfillDays {
+		state.HistoryBackfillDays = current.HistoryBackfillDays
+	}
 	state.UpdatedAt = time.Now().UTC()
 	r.emailSyncStates[state.ConnectionID] = state
 	return nil
+}
+
+func (r *MemoryRepository) ExtendEmailSyncHistory(_ context.Context, connectionID, providerKey string, days, maxDays int) (EmailSyncState, error) {
+	if strings.TrimSpace(connectionID) == "" || strings.TrimSpace(providerKey) == "" || days <= 0 || maxDays <= 0 {
+		return EmailSyncState{}, ErrConflict
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.emailSyncStates[connectionID]
+	state.ConnectionID = connectionID
+	state.ProviderKey = providerKey
+	state.HistoryBackfillDays = min(state.HistoryBackfillDays+days, maxDays)
+	state.UpdatedAt = time.Now().UTC()
+	r.emailSyncStates[connectionID] = state
+	return state, nil
 }
 
 func (r *MemoryRepository) FindConnectionByWebhookAccount(_ context.Context, providerKeys []string, accountID string) (Connection, error) {
@@ -760,7 +814,7 @@ func (r *MemoryRepository) FindConnectionByWebhookAccount(_ context.Context, pro
 	for _, key := range providerKeys {
 		allowed[key] = true
 	}
-	var best *Connection
+	var matched *Connection
 	for _, conn := range r.connections {
 		if !allowed[conn.ProviderKey] || conn.DeletedAt != nil {
 			continue
@@ -771,15 +825,16 @@ func (r *MemoryRepository) FindConnectionByWebhookAccount(_ context.Context, pro
 		if !connectionMatchesWebhookAccount(conn, accountID) {
 			continue
 		}
-		if best == nil || conn.UpdatedAt.After(best.UpdatedAt) {
-			matched := conn
-			best = &matched
+		if matched != nil {
+			return Connection{}, ErrConflict
 		}
+		candidate := conn
+		matched = &candidate
 	}
-	if best == nil {
+	if matched == nil {
 		return Connection{}, ErrNotFound
 	}
-	return *best, nil
+	return *matched, nil
 }
 
 func connectionMatchesWebhookAccount(conn Connection, accountID string) bool {
@@ -805,7 +860,50 @@ func (r *MemoryRepository) UpdateConnectionProviderContext(_ context.Context, id
 	if !ok {
 		return Connection{}, ErrNotFound
 	}
+	claimedIDs := splitWebhookAccountIDs(providerContext["webhook_account_ids"])
+	metaFamily := map[string]bool{"meta": true, "facebook": true, "instagram": true, "whatsapp": true}
+	if len(claimedIDs) > 0 && metaFamily[conn.ProviderKey] {
+		for otherID, other := range r.connections {
+			if otherID == id || !metaFamily[other.ProviderKey] || other.DeletedAt != nil || (other.Status != "active" && other.Status != "needs_refresh") {
+				continue
+			}
+			for _, claimedID := range claimedIDs {
+				if connectionMatchesWebhookAccount(other, claimedID) {
+					return Connection{}, ErrConflict
+				}
+			}
+		}
+	}
 	conn.ProviderContext = cloneStringMap(providerContext)
+	conn.UpdatedAt = time.Now().UTC()
+	r.connections[id] = conn
+	return conn, nil
+}
+
+func splitWebhookAccountIDs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if id := strings.TrimSpace(part); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func (r *MemoryRepository) BindConnectionProviderContext(_ context.Context, id, key, value string) (Connection, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	conn, ok := r.connections[id]
+	if !ok || conn.DeletedAt != nil || (conn.Status != "active" && conn.Status != "needs_refresh") {
+		return Connection{}, ErrConflict
+	}
+	if existing := conn.ProviderContext[key]; existing != "" && existing != value {
+		return Connection{}, ErrConflict
+	}
+	providerContext := cloneStringMap(conn.ProviderContext)
+	providerContext[key] = value
+	conn.ProviderContext = providerContext
 	conn.UpdatedAt = time.Now().UTC()
 	r.connections[id] = conn
 	return conn, nil

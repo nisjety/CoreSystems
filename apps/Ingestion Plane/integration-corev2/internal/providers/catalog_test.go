@@ -285,3 +285,20 @@ func TestGoogleKnowledgeBundleUsesDriveReadScope(t *testing.T) {
 		t.Fatalf("knowledge scopes = %#v, should not include gmail.send", scopes)
 	}
 }
+
+func TestMetaInboxScopesIncludeInstagramMessaging(t *testing.T) {
+	meta, ok := FindOAuth("meta")
+	if !ok {
+		t.Fatal("catalog missing unified meta provider")
+	}
+
+	for _, bundle := range []string{"inbox", "full"} {
+		capabilities := ResolveCapabilities(meta, nil, []string{bundle})
+		scopes := ResolveScopes(meta, capabilities)
+		for _, want := range []string{"instagram_basic", "instagram_manage_messages"} {
+			if !slices.Contains(scopes, want) {
+				t.Errorf("Meta %s bundle scopes = %v, want %q", bundle, scopes, want)
+			}
+		}
+	}
+}

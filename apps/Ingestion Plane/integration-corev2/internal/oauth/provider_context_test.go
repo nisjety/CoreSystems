@@ -18,3 +18,18 @@ func TestNormalizeProviderContextRejectsInvalidShopifyShop(t *testing.T) {
 		t.Fatalf("expected invalid shopify shop error")
 	}
 }
+
+func TestNormalizeProviderContextStripsServerDerivedTenantBindings(t *testing.T) {
+	context, err := NormalizeProviderContext("meta", map[string]string{
+		"webhook_account_ids": "victim-page", "guild_id": "victim-guild", "business_login_config": "default",
+	})
+	if err != nil {
+		t.Fatalf("NormalizeProviderContext: %v", err)
+	}
+	if context["webhook_account_ids"] != "" || context["guild_id"] != "" {
+		t.Fatalf("server-derived bindings survived normalization: %+v", context)
+	}
+	if context["business_login_config"] != "default" {
+		t.Fatalf("legitimate Meta context was removed: %+v", context)
+	}
+}

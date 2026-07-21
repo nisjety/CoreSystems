@@ -565,8 +565,7 @@ func (r *PostgresRepository) FindConnectionByWebhookAccount(ctx context.Context,
 	if accountID == "" || len(providerKeys) == 0 {
 		return Connection{}, ErrNotFound
 	}
-	var connection Connection
-	err := r.pool.QueryRow(ctx, `
+	rows, err := r.pool.Query(ctx, `
 		SELECT `+connectionColumns+`
 		FROM integration_connections
 		WHERE provider_key = ANY($1)
@@ -578,15 +577,30 @@ func (r *PostgresRepository) FindConnectionByWebhookAccount(ctx context.Context,
 			OR ',' || COALESCE(provider_context->>'webhook_account_ids', '') || ',' LIKE '%,' || $2 || ',%'
 		  )
 		ORDER BY updated_at DESC
-		LIMIT 1
-	`, providerKeys, accountID).Scan(connectionScanDest(&connection)...)
+		LIMIT 2
+	`, providerKeys, accountID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Connection{}, ErrNotFound
-		}
 		return Connection{}, fmt.Errorf("find connection by webhook account: %w", err)
 	}
-	return connection, nil
+	defer rows.Close()
+	var matched *Connection
+	for rows.Next() {
+		var connection Connection
+		if err := rows.Scan(connectionScanDest(&connection)...); err != nil {
+			return Connection{}, fmt.Errorf("scan connection by webhook account: %w", err)
+		}
+		if matched != nil {
+			return Connection{}, ErrConflict
+		}
+		matched = &connection
+	}
+	if err := rows.Err(); err != nil {
+		return Connection{}, fmt.Errorf("list connections by webhook account: %w", err)
+	}
+	if matched == nil {
+		return Connection{}, ErrNotFound
+	}
+	return *matched, nil
 }
 
 func (r *PostgresRepository) UpdateConnectionProviderContext(ctx context.Context, id string, providerContext map[string]string) (Connection, error) {
@@ -594,8 +608,37 @@ func (r *PostgresRepository) UpdateConnectionProviderContext(ctx context.Context
 	if err != nil {
 		return Connection{}, fmt.Errorf("marshal provider context: %w", err)
 	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Connection{}, fmt.Errorf("begin provider context update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('integration_webhook_account_bindings'))`); err != nil {
+		return Connection{}, fmt.Errorf("lock webhook account bindings: %w", err)
+	}
+	for _, accountID := range splitWebhookAccountIDs(providerContext["webhook_account_ids"]) {
+		var conflictingID string
+		err := tx.QueryRow(ctx, `
+			SELECT id FROM integration_connections
+			WHERE id <> $1
+			  AND provider_key = ANY($2)
+			  AND deleted_at IS NULL
+			  AND status IN ('active', 'needs_refresh')
+			  AND (
+				provider_account_id = $3 OR tenant_id = $3 OR
+				',' || COALESCE(provider_context->>'webhook_account_ids', '') || ',' LIKE '%,' || $3 || ',%'
+			  )
+			LIMIT 1
+		`, id, []string{"meta", "facebook", "instagram", "whatsapp"}, accountID).Scan(&conflictingID)
+		if err == nil {
+			return Connection{}, ErrConflict
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, fmt.Errorf("check webhook account binding: %w", err)
+		}
+	}
 	var connection Connection
-	err = r.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		UPDATE integration_connections
 		SET provider_context = $2, updated_at = now()
 		WHERE id = $1
@@ -606,6 +649,33 @@ func (r *PostgresRepository) UpdateConnectionProviderContext(ctx context.Context
 			return Connection{}, ErrNotFound
 		}
 		return Connection{}, fmt.Errorf("update connection provider context: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Connection{}, fmt.Errorf("commit provider context update: %w", err)
+	}
+	return connection, nil
+}
+
+func (r *PostgresRepository) BindConnectionProviderContext(ctx context.Context, id, key, value string) (Connection, error) {
+	var connection Connection
+	err := r.pool.QueryRow(ctx, `
+		UPDATE integration_connections
+		SET provider_context = COALESCE(provider_context, '{}'::jsonb) || jsonb_build_object($2::text, $3::text),
+		    updated_at = now()
+		WHERE id = $1
+		  AND deleted_at IS NULL
+		  AND status IN ('active', 'needs_refresh')
+		  AND (
+			COALESCE(provider_context, '{}'::jsonb)->>$2 IS NULL
+			OR COALESCE(provider_context, '{}'::jsonb)->>$2 = $3
+		  )
+		RETURNING `+connectionColumns,
+		id, key, value).Scan(connectionScanDest(&connection)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, ErrConflict
+		}
+		return Connection{}, fmt.Errorf("bind connection provider context: %w", err)
 	}
 	return connection, nil
 }

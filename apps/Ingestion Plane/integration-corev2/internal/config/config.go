@@ -42,6 +42,7 @@ type Config struct {
 	ConversationIngestServiceToken   string
 	EmailSyncInterval                time.Duration
 	EmailSyncBackfillWindow          time.Duration
+	EmailSyncGraphFullBackfill       bool
 	EmailSyncMaxPerCycle             int
 	DataPlaneDocumentsURL            string
 	IntegrationServiceID             string
@@ -225,7 +226,8 @@ func Load() (Config, error) {
 		ConversationIngestServiceToken:   strings.TrimSpace(os.Getenv("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN")),
 		EmailSyncInterval:                envDuration("EMAIL_SYNC_INTERVAL", 60*time.Second),
 		EmailSyncBackfillWindow:          envDuration("EMAIL_SYNC_BACKFILL_WINDOW", 24*time.Hour),
-		EmailSyncMaxPerCycle:             envInt("EMAIL_SYNC_MAX_PER_CYCLE", 25),
+		EmailSyncGraphFullBackfill:       envBool("EMAIL_SYNC_GRAPH_FULL_BACKFILL", true),
+		EmailSyncMaxPerCycle:             envInt("EMAIL_SYNC_MAX_PER_CYCLE", 100),
 		DataPlaneDocumentsURL:            envOr("DATA_PLANE_DOCUMENTS_URL", envOr("DATA_PLANE_DOCUMENTS_BASE_URL", "http://dpv2-documents-api:8010")),
 		IntegrationServiceID:             envOr("INTEGRATION_SERVICE_ID", "integration-corev2"),
 		IntegrationServiceAPIKey:         strings.TrimSpace(os.Getenv("INTEGRATION_SERVICE_API_KEY")),

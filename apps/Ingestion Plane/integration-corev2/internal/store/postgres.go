@@ -138,6 +138,93 @@ func (r *PostgresRepository) UpsertConnection(ctx context.Context, connection Co
 	return connection, nil
 }
 
+func (r *PostgresRepository) ReconnectConnection(ctx context.Context, connection Connection) (Connection, error) {
+	providerContext, err := json.Marshal(connection.ProviderContext)
+	if err != nil {
+		return Connection{}, fmt.Errorf("marshal reconnect provider context: %w", err)
+	}
+	var saved Connection
+	err = r.pool.QueryRow(ctx, `
+		UPDATE integration_connections
+		SET status = $2,
+		    display_name = $3,
+		    provider_account_id = $4,
+		    tenant_id = $5,
+		    provider_context = CASE
+				WHEN COALESCE(provider_context, '{}'::jsonb) ? 'guild_id' THEN
+					COALESCE($6::jsonb, '{}'::jsonb)
+					|| jsonb_build_object('guild_id', provider_context->>'guild_id')
+				ELSE COALESCE($6::jsonb, '{}'::jsonb)
+			END,
+		    capabilities = $7,
+		    scopes = $8,
+		    encrypted_access_token = $9,
+		    encrypted_refresh_token = $10,
+		    access_token_expires_at = $11,
+		    last_refreshed_at = $12,
+		    last_sync_status = $13,
+		    updated_at = now()
+		WHERE id = $1
+		  AND deleted_at IS NULL
+		  AND status IN ('active', 'needs_refresh')
+		RETURNING `+connectionColumns,
+		connection.ID,
+		connection.Status,
+		connection.DisplayName,
+		connection.ProviderAccountID,
+		connection.TenantID,
+		providerContext,
+		connection.Capabilities,
+		connection.Scopes,
+		connection.EncryptedAccessToken,
+		connection.EncryptedRefreshToken,
+		connection.AccessTokenExpiresAt,
+		nullableTime(connection.LastRefreshedAt),
+		connection.LastSyncStatus,
+	).Scan(connectionScanDest(&saved)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, ErrConflict
+		}
+		return Connection{}, fmt.Errorf("reconnect connection: %w", err)
+	}
+	return saved, nil
+}
+
+func (r *PostgresRepository) UpdateConnectionCredentials(ctx context.Context, connection Connection) (Connection, error) {
+	var saved Connection
+	err := r.pool.QueryRow(ctx, `
+		UPDATE integration_connections
+		SET encrypted_access_token = $2,
+		    encrypted_refresh_token = $3,
+		    access_token_expires_at = $4,
+		    last_refreshed_at = $5,
+		    status = $6,
+		    capabilities = $7,
+		    scopes = $8,
+		    updated_at = now()
+		WHERE id = $1
+		  AND deleted_at IS NULL
+		  AND status IN ('active', 'needs_refresh')
+		RETURNING `+connectionColumns,
+		connection.ID,
+		connection.EncryptedAccessToken,
+		connection.EncryptedRefreshToken,
+		connection.AccessTokenExpiresAt,
+		nullableTime(connection.LastRefreshedAt),
+		connection.Status,
+		connection.Capabilities,
+		connection.Scopes,
+	).Scan(connectionScanDest(&saved)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, ErrConflict
+		}
+		return Connection{}, fmt.Errorf("update connection credentials: %w", err)
+	}
+	return saved, nil
+}
+
 func (r *PostgresRepository) ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error) {
 	query := `SELECT ` + connectionColumns + ` FROM integration_connections WHERE ($1 = '' OR organization_id = $1) AND ($2 = '' OR provider_key = $2) AND ($3 = '' OR connector_type = $3) AND ($4 = '' OR user_id = $4) ORDER BY created_at DESC`
 	rows, err := r.pool.Query(ctx, query, filter.OrganizationID, filter.ProviderKey, filter.ConnectorType, filter.UserID)
@@ -593,12 +680,12 @@ func (r *PostgresRepository) GetEmailSyncState(ctx context.Context, connectionID
 	var state EmailSyncState
 	var lastSyncedAt *time.Time
 	err := r.pool.QueryRow(ctx, `
-		SELECT connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, updated_at
+		SELECT connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, history_backfill_days, updated_at
 		FROM email_sync_state
 		WHERE connection_id = $1
 	`, connectionID).Scan(
 		&state.ConnectionID, &state.ProviderKey, &state.Cursor,
-		&lastSyncedAt, &state.LastError, &state.FailureCount, &state.UpdatedAt,
+		&lastSyncedAt, &state.LastError, &state.FailureCount, &state.HistoryBackfillDays, &state.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -614,17 +701,45 @@ func (r *PostgresRepository) GetEmailSyncState(ctx context.Context, connectionID
 
 func (r *PostgresRepository) UpsertEmailSyncState(ctx context.Context, state EmailSyncState) error {
 	if _, err := r.pool.Exec(ctx, `
-		INSERT INTO email_sync_state (connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, now())
+		INSERT INTO email_sync_state (connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, history_backfill_days, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now())
 		ON CONFLICT (connection_id) DO UPDATE SET
 			provider_key = EXCLUDED.provider_key,
 			cursor = EXCLUDED.cursor,
 			last_synced_at = EXCLUDED.last_synced_at,
 			last_error = EXCLUDED.last_error,
 			failure_count = EXCLUDED.failure_count,
+			history_backfill_days = GREATEST(email_sync_state.history_backfill_days, EXCLUDED.history_backfill_days),
 			updated_at = now()
-	`, state.ConnectionID, state.ProviderKey, state.Cursor, nullableTime(state.LastSyncedAt), state.LastError, state.FailureCount); err != nil {
+	`, state.ConnectionID, state.ProviderKey, state.Cursor, nullableTime(state.LastSyncedAt), state.LastError, state.FailureCount, state.HistoryBackfillDays); err != nil {
 		return fmt.Errorf("upsert email sync state: %w", err)
 	}
 	return nil
+}
+
+func (r *PostgresRepository) ExtendEmailSyncHistory(ctx context.Context, connectionID, providerKey string, days, maxDays int) (EmailSyncState, error) {
+	if strings.TrimSpace(connectionID) == "" || strings.TrimSpace(providerKey) == "" || days <= 0 || maxDays <= 0 {
+		return EmailSyncState{}, ErrConflict
+	}
+	var state EmailSyncState
+	var lastSyncedAt *time.Time
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO email_sync_state (connection_id, provider_key, history_backfill_days)
+		VALUES ($1, $2, LEAST($3::integer, $4::integer))
+		ON CONFLICT (connection_id) DO UPDATE SET
+			provider_key = EXCLUDED.provider_key,
+			history_backfill_days = LEAST($4::integer, email_sync_state.history_backfill_days + $3::integer),
+			updated_at = now()
+		RETURNING connection_id, provider_key, cursor, last_synced_at, last_error, failure_count, history_backfill_days, updated_at
+	`, connectionID, providerKey, days, maxDays).Scan(
+		&state.ConnectionID, &state.ProviderKey, &state.Cursor, &lastSyncedAt,
+		&state.LastError, &state.FailureCount, &state.HistoryBackfillDays, &state.UpdatedAt,
+	)
+	if err != nil {
+		return EmailSyncState{}, fmt.Errorf("extend email sync history: %w", err)
+	}
+	if lastSyncedAt != nil {
+		state.LastSyncedAt = *lastSyncedAt
+	}
+	return state, nil
 }

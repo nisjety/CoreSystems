@@ -1027,9 +1027,9 @@ func Meta() Provider {
 			},
 			{
 				Key:         "social.inbox.read",
-				Label:       "Page conversations",
-				Description: "Read Page comments and conversation metadata for unified inbox workflows.",
-				Scopes:      []string{"pages_read_user_content", "pages_manage_metadata"},
+				Label:       "Page & Instagram conversations",
+				Description: "Read Page comments plus Instagram professional-account conversations for unified inbox workflows.",
+				Scopes:      []string{"pages_read_user_content", "pages_manage_metadata", "instagram_basic", "instagram_manage_messages"},
 				Sensitive:   true,
 			},
 			{

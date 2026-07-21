@@ -210,6 +210,7 @@ type ActionReceipt struct {
 // repository while constructing a security-sensitive unit of work.
 type AuditTransaction interface {
 	UpsertConnection(ctx context.Context, connection Connection) (Connection, error)
+	ReconnectConnection(ctx context.Context, connection Connection) (Connection, error)
 	ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error)
 	MarkConnectionDeleted(ctx context.Context, id string) (Connection, error)
 	UpdateConnectionCapabilities(ctx context.Context, id string, capabilities []string) (Connection, error)
@@ -237,6 +238,10 @@ type Repository interface {
 	GetConnectSessionByID(ctx context.Context, id string) (ConnectSession, error)
 	MarkConnectSessionConsumed(ctx context.Context, id string, errorCode, errorDescription string) error
 	UpsertConnection(ctx context.Context, connection Connection) (Connection, error)
+	// UpdateConnectionCredentials updates OAuth credential and provider-verified
+	// grant fields (status, capabilities, scopes) while the connection remains
+	// active. It must not replace provider context or resurrect a deleted row.
+	UpdateConnectionCredentials(ctx context.Context, connection Connection) (Connection, error)
 	ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error)
 	GetConnection(ctx context.Context, id string) (Connection, error)
 	FindActiveConnection(ctx context.Context, organizationID, connectorType string) (Connection, error)
@@ -283,6 +288,9 @@ type Repository interface {
 	// per connection, read + advanced by the email sync worker each cycle.
 	GetEmailSyncState(ctx context.Context, connectionID string) (EmailSyncState, error)
 	UpsertEmailSyncState(ctx context.Context, state EmailSyncState) error
+	// ExtendEmailSyncHistory atomically adds a fixed provider-history window.
+	// maxDays bounds repeated UI requests without exposing arbitrary ranges.
+	ExtendEmailSyncHistory(ctx context.Context, connectionID, providerKey string, days, maxDays int) (EmailSyncState, error)
 	// FindConnectionByWebhookAccount resolves the tenant that owns an
 	// account-wide provider webhook: matches accountID against
 	// provider_account_id, tenant_id (Slack team_id lives there), or the
@@ -292,6 +300,10 @@ type Repository interface {
 	// UpdateConnectionProviderContext replaces a connection's provider
 	// context (used to persist webhook-account enrichment).
 	UpdateConnectionProviderContext(ctx context.Context, id string, providerContext map[string]string) (Connection, error)
+	// BindConnectionProviderContext atomically sets one tenant-binding value
+	// when it is absent or already equal. It rejects deleted/inactive
+	// connections and never replaces unrelated context written concurrently.
+	BindConnectionProviderContext(ctx context.Context, id, key, value string) (Connection, error)
 	Close()
 }
 
@@ -306,7 +318,10 @@ type EmailSyncState struct {
 	LastSyncedAt time.Time `json:"lastSyncedAt"`
 	LastError    string    `json:"lastError,omitempty"`
 	FailureCount int       `json:"failureCount"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	// HistoryBackfillDays is additional history beyond the provider's default
+	// bootstrap window. It is advanced only by an explicit, org-scoped action.
+	HistoryBackfillDays int       `json:"historyBackfillDays"`
+	UpdatedAt           time.Time `json:"updatedAt"`
 }
 
 type ConnectionRefreshLocker interface {
