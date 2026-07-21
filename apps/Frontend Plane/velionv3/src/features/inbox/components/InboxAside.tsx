@@ -41,6 +41,7 @@ import {
 import { runAssist, type AssistMessage, type AssistMode, type AssistSource } from '@/features/inbox/lib/inbox-ai'
 import { listTicketMacros, type TicketMacro } from '@/shared/api/tickets-client'
 import { cn } from '@/shared/lib/cn'
+import { localeDateTime, useI18n } from '@/shared/i18n'
 
 type AsideTab = 'details' | 'velion' | 'calendar' | 'activity'
 
@@ -54,18 +55,20 @@ export function InboxAside(props: {
   onOpenModal: (modal: InboxModalRequest) => void
   selectedTicket: ZammadTicket | null
 }) {
+  const i18n = useI18n()
   const [activeTab, setActiveTab] = createSignal<AsideTab>('details')
+  const tabs = createMemo(() => [
+    { id: 'details' as const, label: i18n.tr('Detaljer', 'Details') },
+    { id: 'velion' as const, label: 'Velion' },
+    { id: 'calendar' as const, label: i18n.tr('Kalender', 'Calendar') },
+    { id: 'activity' as const, label: i18n.tr('Aktivitet', 'Activity') },
+  ])
 
   return (
-    <aside aria-label="AI and customer context" class="velion-inbox-aside">
+    <aside aria-label={i18n.tr('AI og kundekontekst', 'AI and customer context')} class="velion-inbox-aside">
       <div class="velion-inbox-aside__header">
         <div class="velion-inbox-aside__tabs">
-          <For each={[
-            { id: 'details' as const, label: 'Details' },
-            { id: 'velion' as const, label: 'Velion' },
-            { id: 'calendar' as const, label: 'Calendar' },
-            { id: 'activity' as const, label: 'Activity' },
-          ]}>
+          <For each={tabs()}>
             {(tab) => (
               <AsideTabButton active={activeTab() === tab.id} onClick={() => setActiveTab(tab.id)}>
                 {tab.label}
@@ -116,6 +119,7 @@ function DetailsPanel(props: {
   recent: RecentConversationRef[]
   selectedTicket: ZammadTicket | null
 }) {
+  const i18n = useI18n()
   return (
     <div class="velion-inbox-aside-scroll">
       <Show
@@ -123,8 +127,11 @@ function DetailsPanel(props: {
         fallback={
           <EmptyAsideState
             icon={<UserRound class="size-6" />}
-            title="No customer selected"
-            body="Open a ticket to see customer details, tags, and recent conversations."
+            title={i18n.tr('Ingen kunde valgt', 'No customer selected')}
+            body={i18n.tr(
+              'Åpne en sak for å se kundedetaljer, tagger og nylige samtaler.',
+              'Open a ticket to see customer details, tags, and recent conversations.',
+            )}
           />
         }
       >
@@ -144,27 +151,30 @@ function DetailsPanel(props: {
               </div>
 
               <div class="velion-inbox-field-stack">
-                <FieldRow label="Channel" value={titleCase(ticket().channel ?? 'email')} />
+                <FieldRow label={i18n.tr('Kanal', 'Channel')} value={titleCase(ticket().channel ?? 'email')} />
                 <FieldRow label="Status" value={titleCase(ticket().state?.name ?? 'open')} />
-                <FieldRow label="Priority" value={titleCase(ticket().priority?.name ?? 'normal')} />
-                <FieldRow label="Assignee" value={ticket().owner ? `${ticket().owner?.firstname} ${ticket().owner?.lastname}`.trim() : 'Unassigned'} />
-                <FieldRow label="Team inbox" value={ticket().group?.name ?? 'Support'} />
+                <FieldRow label={i18n.tr('Prioritet', 'Priority')} value={titleCase(ticket().priority?.name ?? 'normal')} />
+                <FieldRow
+                  label={i18n.tr('Tildelt', 'Assignee')}
+                  value={ticket().owner ? `${ticket().owner?.firstname} ${ticket().owner?.lastname}`.trim() : i18n.tr('Ikke tildelt', 'Unassigned')}
+                />
+                <FieldRow label={i18n.tr('Team-innboks', 'Team inbox')} value={ticket().group?.name ?? 'Support'} />
               </div>
             </section>
 
-            <AccordionSection defaultOpen icon={<FileText class="size-4" />} title="Conversation">
-              <FieldRow label="Reference" value={ticket().number} />
-              <FieldRow label="Subject" value={ticket().title} />
+            <AccordionSection defaultOpen icon={<FileText class="size-4" />} title={i18n.tr('Samtale', 'Conversation')}>
+              <FieldRow label={i18n.tr('Referanse', 'Reference')} value={ticket().number} />
+              <FieldRow label={i18n.tr('Emne', 'Subject')} value={ticket().title} />
               <Show when={ticket().customer?.email}>
-                <FieldRow label="Email" value={ticket().customer!.email} />
+                <FieldRow label={i18n.tr('E-post', 'Email')} value={ticket().customer!.email} />
               </Show>
-              <FieldRow label="Opened" value={formatRelativeTime(ticket().created_at)} />
+              <FieldRow label={i18n.tr('Åpnet', 'Opened')} value={formatRelativeTime(ticket().created_at)} />
             </AccordionSection>
 
-            <AccordionSection defaultOpen icon={<Sparkles class="size-4" />} title="Tags">
+            <AccordionSection defaultOpen icon={<Sparkles class="size-4" />} title={i18n.tr('Tagger', 'Tags')}>
               <Show
                 when={(ticket().tags ?? []).length}
-                fallback={<p class="velion-inbox-muted">No tags on this conversation yet.</p>}
+                fallback={<p class="velion-inbox-muted">{i18n.tr('Ingen tagger på denne samtalen ennå.', 'No tags on this conversation yet.')}</p>}
               >
                 <div class="velion-inbox-detail-tags">
                   <For each={ticket().tags ?? []}>{(tag) => <span class="velion-inbox-detail-tag">{tag}</span>}</For>
@@ -172,17 +182,20 @@ function DetailsPanel(props: {
               </Show>
             </AccordionSection>
 
-            <AccordionSection icon={<MessageCircle class="size-4" />} title={`Recent conversations${(props.recent?.length ?? 0) ? ` (${props.recent!.length})` : ''}`}>
+            <AccordionSection
+              icon={<MessageCircle class="size-4" />}
+              title={`${i18n.tr('Nylige samtaler', 'Recent conversations')}${(props.recent?.length ?? 0) ? ` (${props.recent!.length})` : ''}`}
+            >
               <Show
                 when={(props.recent?.length ?? 0) > 0}
-                fallback={<p class="velion-inbox-muted">No other conversations from this contact.</p>}
+                fallback={<p class="velion-inbox-muted">{i18n.tr('Ingen andre samtaler fra denne kontakten.', 'No other conversations from this contact.')}</p>}
               >
                 <ul class="velion-inbox-recent-list">
                   <For each={props.recent ?? []}>
                     {(item) => (
                       <li>
                         <button type="button" onClick={() => props.onSelectRecent(item.conversationId)}>
-                          <span class="velion-inbox-recent-list__title">{item.title || '(no subject)'}</span>
+                          <span class="velion-inbox-recent-list__title">{item.title || i18n.tr('(uten emne)', '(no subject)')}</span>
                           <span class="velion-inbox-recent-list__meta">
                             {titleCase(item.channel)} · {formatRelativeTime(item.createdAt)}
                           </span>
@@ -208,6 +221,7 @@ function VelionPanel(props: {
   onOpenModal: (modal: InboxModalRequest) => void
   selectedTicket: ZammadTicket | null
 }) {
+  const i18n = useI18n()
   const [draft, setDraft] = createSignal<string | null>(null)
   const [draftLoading, setDraftLoading] = createSignal(false)
   const [summary, setSummary] = createSignal<string | null>(null)
@@ -238,10 +252,10 @@ function VelionPanel(props: {
     setError(null)
     try {
       const res = await runAssist(props.orgId, 'draft', transcript(), { instruction, customer: customer() })
-      setDraft(res.text || 'Velion returned an empty reply.')
+      setDraft(res.text || i18n.tr('Velion returnerte et tomt svar.', 'Velion returned an empty reply.'))
       applySources(res.sources)
     } catch {
-      setError('Velion could not generate a reply. Try again.')
+      setError(i18n.tr('Velion kunne ikke generere et svar. Prøv igjen.', 'Velion could not generate a reply. Try again.'))
     } finally {
       setDraftLoading(false)
     }
@@ -253,9 +267,9 @@ function VelionPanel(props: {
     setError(null)
     try {
       const res = await runAssist(props.orgId, 'summarize', transcript(), { customer: customer() })
-      setSummary(res.text || 'No summary available.')
+      setSummary(res.text || i18n.tr('Ingen oppsummering tilgjengelig.', 'No summary available.'))
     } catch {
-      setError('Velion could not summarize. Try again.')
+      setError(i18n.tr('Velion kunne ikke oppsummere. Prøv igjen.', 'Velion could not summarize. Try again.'))
     } finally {
       setSummaryLoading(false)
     }
@@ -271,7 +285,7 @@ function VelionPanel(props: {
       if (mode === 'draft') setDraft(res.text)
       else setAnswer(res.text)
     } catch {
-      setError('Velion action failed. Try again.')
+      setError(i18n.tr('Velion-handlingen feilet. Prøv igjen.', 'Velion action failed. Try again.'))
     } finally {
       setRunningCard(null)
     }
@@ -284,10 +298,10 @@ function VelionPanel(props: {
     setError(null)
     try {
       const res = await runAssist(props.orgId, 'ask', transcript(), { question: q, customer: customer() })
-      setAnswer(res.text || 'Velion had no answer.')
+      setAnswer(res.text || i18n.tr('Velion hadde ikke noe svar.', 'Velion had no answer.'))
       applySources(res.sources)
     } catch {
-      setError('Velion could not answer. Try again.')
+      setError(i18n.tr('Velion kunne ikke svare. Prøv igjen.', 'Velion could not answer. Try again.'))
     } finally {
       setAnswerLoading(false)
     }
@@ -301,8 +315,11 @@ function VelionPanel(props: {
           fallback={
             <EmptyAsideState
               icon={<Bot class="size-6" />}
-              title="Select a ticket"
-              body="Velion can draft replies, summarize context, and surface relevant sources once a conversation is open."
+              title={i18n.tr('Velg en sak', 'Select a ticket')}
+              body={i18n.tr(
+                'Velion kan utkaste svar, oppsummere kontekst og finne relevante kilder når en samtale er åpen.',
+                'Velion can draft replies, summarize context, and surface relevant sources once a conversation is open.',
+              )}
             />
           }
         >
@@ -316,18 +333,21 @@ function VelionPanel(props: {
             <section class="velion-inbox-aside-card">
               <div class="velion-inbox-card-heading">
                 <Bot class="size-4" />
-                <h2>Velion action plan</h2>
+                <h2>{i18n.tr('Velion handlingsplan', 'Velion action plan')}</h2>
               </div>
               <ActionSuggestion
-                title="Confirm intent"
-                body="Detect the customer's primary intent and the best next action."
-                actionLabel={runningCard() === 'intent' ? 'Running…' : 'Run'}
+                title={i18n.tr('Bekreft hensikt', 'Confirm intent')}
+                body={i18n.tr("Oppdag kundens primære hensikt og beste neste handling.", "Detect the customer's primary intent and the best next action.")}
+                actionLabel={runningCard() === 'intent' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
                 onRun={() => void runCard('intent', 'intent')}
               />
               <ActionSuggestion
-                title="Source-backed reply"
-                body="Draft a reply grounded only in facts supported by the conversation."
-                actionLabel={runningCard() === 'source' ? 'Running…' : 'Run'}
+                title={i18n.tr('Kildebasert svar', 'Source-backed reply')}
+                body={i18n.tr(
+                  'Utkast et svar som kun er basert på fakta som støttes av samtalen.',
+                  'Draft a reply grounded only in facts supported by the conversation.',
+                )}
+                actionLabel={runningCard() === 'source' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
                 onRun={() =>
                   void runCard(
                     'source',
@@ -337,14 +357,17 @@ function VelionPanel(props: {
                 }
               />
               <ActionSuggestion
-                title="Assess & route"
-                body="Recommend whether to escalate or route, based on urgency and status."
-                actionLabel={runningCard() === 'route' ? 'Running…' : 'Run'}
+                title={i18n.tr('Vurder og rut', 'Assess & route')}
+                body={i18n.tr(
+                  'Anbefal om saken skal eskaleres eller rutes, basert på hastegrad og status.',
+                  'Recommend whether to escalate or route, based on urgency and status.',
+                )}
+                actionLabel={runningCard() === 'route' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
                 onRun={() =>
                   void runCard(
                     'route',
                     'ask',
-                    undefined,
+                    'Assess urgency and recommend whether this conversation should be routed or escalated. Name the best destination and explain the reason briefly.',
                   )
                 }
               />
@@ -357,8 +380,8 @@ function VelionPanel(props: {
                     <Bot class="size-4" />
                     <h2>Velion</h2>
                   </div>
-                  <button type="button" onClick={() => setAnswer(null)} aria-label="Dismiss answer">
-                    Clear
+                  <button type="button" onClick={() => setAnswer(null)} aria-label={i18n.tr('Lukk svar', 'Dismiss answer')}>
+                    {i18n.tr('Fjern', 'Clear')}
                   </button>
                 </div>
                 <p class="velion-inbox-ai-text">{answer()}</p>
@@ -369,11 +392,11 @@ function VelionPanel(props: {
               <div class="velion-inbox-card-heading velion-inbox-card-heading--between">
                 <div>
                   <Sparkles class="size-4" />
-                  <h2>Reply assistance</h2>
+                  <h2>{i18n.tr('Svarhjelp', 'Reply assistance')}</h2>
                 </div>
                 <button type="button" disabled={draftLoading()} onClick={() => void generateDraft()}>
                   <RefreshCw class={cn('size-3.5', draftLoading() && 'velion-inbox-spin')} />
-                  {draftLoading() ? 'Drafting…' : 'Generate'}
+                  {draftLoading() ? i18n.tr('Lager utkast …', 'Drafting…') : i18n.tr('Generer', 'Generate')}
                 </button>
               </div>
               <Show
@@ -385,14 +408,14 @@ function VelionPanel(props: {
                   </div>
                 }
               >
-                <Show when={draft()} fallback={<p>Generate a suggested reply grounded in this conversation.</p>}>
+                <Show when={draft()} fallback={<p>{i18n.tr('Generer et forslag til svar basert på denne samtalen.', 'Generate a suggested reply grounded in this conversation.')}</p>}>
                   <p class="velion-inbox-ai-text">{draft()}</p>
                   <div class="velion-inbox-draft-actions">
                     <button type="button" class="velion-inbox-btn-primary" onClick={() => props.onInsertQuickReply(draft() ?? '')}>
-                      Insert into reply
+                      {i18n.tr('Sett inn i svar', 'Insert into reply')}
                     </button>
                     <button type="button" onClick={() => void generateDraft('Rewrite this differently.')}>
-                      Regenerate
+                      {i18n.tr('Generer på nytt', 'Regenerate')}
                     </button>
                   </div>
                 </Show>
@@ -401,26 +424,26 @@ function VelionPanel(props: {
 
             <section class="velion-inbox-aside-card">
               <div class="velion-inbox-card-heading velion-inbox-card-heading--between">
-                <h2>Conversation summary</h2>
+                <h2>{i18n.tr('Samtalesammendrag', 'Conversation summary')}</h2>
                 <button type="button" disabled={summaryLoading()} onClick={() => void generateSummary()}>
-                  {summaryLoading() ? 'Summarizing…' : 'Summarize'}
+                  {summaryLoading() ? i18n.tr('Oppsummerer …', 'Summarizing…') : i18n.tr('Oppsummer', 'Summarize')}
                 </button>
               </div>
               <p class="velion-inbox-ai-text">
                 {summaryLoading()
-                  ? 'Generating summary…'
-                  : summary() ?? 'Summarize the conversation and extract the customer intent.'}
+                  ? i18n.tr('Genererer sammendrag …', 'Generating summary…')
+                  : summary() ?? i18n.tr('Oppsummer samtalen og finn kundens hensikt.', 'Summarize the conversation and extract the customer intent.')}
               </p>
             </section>
 
             <section class="velion-inbox-aside-card">
-              <h2>Relevant sources</h2>
+              <h2>{i18n.tr('Relevante kilder', 'Relevant sources')}</h2>
               <Show
                 when={sources().length}
-                fallback={<p class="velion-inbox-muted">Sources appear here when Velion grounds an answer in your knowledge base.</p>}
+                fallback={<p class="velion-inbox-muted">{i18n.tr('Kilder vises her når Velion baserer et svar på kunnskapsbasen din.', 'Sources appear here when Velion grounds an answer in your knowledge base.')}</p>}
               >
                 <div class="velion-inbox-source-stack">
-                  <For each={sources()}>{(s) => <SourceRow title={s.title || s.uri || 'Source'} />}</For>
+                  <For each={sources()}>{(s) => <SourceRow title={s.title || s.uri || i18n.tr('Kilde', 'Source')} />}</For>
                 </div>
               </Show>
             </section>
@@ -443,11 +466,11 @@ function VelionPanel(props: {
             onKeyDown={(event) => {
               if (event.key === 'Enter') void askVelion()
             }}
-            placeholder="Ask Velion about this conversation"
-            aria-label="Ask Velion a question"
+            placeholder={i18n.tr('Spør Velion om denne samtalen', 'Ask Velion about this conversation')}
+            aria-label={i18n.tr('Spør Velion et spørsmål', 'Ask Velion a question')}
             disabled={!ready()}
           />
-          <button type="button" disabled={answerLoading() || !ready()} onClick={() => void askVelion()} aria-label="Send Velion question">
+          <button type="button" disabled={answerLoading() || !ready()} onClick={() => void askVelion()} aria-label={i18n.tr('Send spørsmål til Velion', 'Send Velion question')}>
             <Send class={cn('size-3.5', answerLoading() && 'velion-inbox-spin')} />
           </button>
         </div>
@@ -468,6 +491,7 @@ function stripToText(value: string): string {
 }
 
 function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
+  const i18n = useI18n()
   const [events, setEvents] = createSignal<CalendarEvent[]>([])
   const [notes, setNotes] = createSignal<CalendarNote[]>([])
   const [selectedDate, setSelectedDate] = createSignal(new Date('2026-06-12T09:00:00.000Z'))
@@ -479,7 +503,10 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
   const upcomingEvents = createMemo(() => [...events()].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()).slice(0, 4))
 
   const saveFollowUp = () => {
-    const title = (eventTitle().trim() || (props.selectedTicket ? `Follow up: ${props.selectedTicket.title}` : 'Inbox follow-up')).slice(0, 160)
+    const fallbackTitle = props.selectedTicket
+      ? i18n.tr(`Oppfølging: ${props.selectedTicket.title}`, `Follow up: ${props.selectedTicket.title}`)
+      : i18n.tr('Inbox-oppfølging', 'Inbox follow-up')
+    const title = (eventTitle().trim() || fallbackTitle).slice(0, 160)
     const start = new Date(selectedDate())
     start.setHours(9, 0, 0, 0)
     const end = new Date(start)
@@ -499,8 +526,8 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
     <div class="velion-inbox-aside-scroll velion-inbox-calendar-panel">
       <div class="velion-inbox-panel-title">
         <div>
-          <h2>Inbox calendar</h2>
-          <p>Follow-ups, notes, and scheduled support work.</p>
+          <h2>{i18n.tr('Innboks-kalender', 'Inbox calendar')}</h2>
+          <p>{i18n.tr('Oppfølginger, notater og planlagt support-arbeid.', 'Follow-ups, notes, and scheduled support work.')}</p>
         </div>
         <CalendarDays class="size-5" />
       </div>
@@ -509,10 +536,10 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
 
       <section class="velion-inbox-aside-card">
         <div class="velion-inbox-card-heading velion-inbox-card-heading--between">
-          <h3>{selectedDate().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</h3>
+          <h3>{selectedDate().toLocaleDateString(localeDateTime(i18n.locale()), { weekday: 'short', month: 'short', day: 'numeric' })}</h3>
         </div>
         <div class="velion-inbox-calendar-day-list">
-          <Show when={selectedEvents().length || selectedNotes().length} fallback={<p>No events for this day.</p>}>
+          <Show when={selectedEvents().length || selectedNotes().length} fallback={<p>{i18n.tr('Ingen hendelser denne dagen.', 'No events for this day.')}</p>}>
             <For each={selectedEvents()}>{(event) => <CalendarEventRow event={event} />}</For>
             <For each={selectedNotes()}>{(note) => <CalendarNoteRow note={note} />}</For>
           </Show>
@@ -520,38 +547,38 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
       </section>
 
       <section class="velion-inbox-aside-card velion-inbox-aside-card--muted">
-        <h3>Schedule follow-up</h3>
-        <p>Create a calendar item from the selected ticket.</p>
+        <h3>{i18n.tr('Planlegg oppfølging', 'Schedule follow-up')}</h3>
+        <p>{i18n.tr('Opprett et kalenderelement fra den valgte saken.', 'Create a calendar item from the selected ticket.')}</p>
         <div class="velion-inbox-inline-entry">
           <Plus class="size-4" />
           <input
             value={eventTitle()}
             onInput={(event) => setEventTitle(event.currentTarget.value)}
             onKeyDown={(event) => { if (event.key === 'Enter') saveFollowUp() }}
-            placeholder={props.selectedTicket ? `Follow up: ${props.selectedTicket.title}` : 'Follow-up title'}
-            aria-label="Follow-up title"
+            placeholder={props.selectedTicket ? i18n.tr(`Oppfølging: ${props.selectedTicket.title}`, `Follow up: ${props.selectedTicket.title}`) : i18n.tr('Tittel på oppfølging', 'Follow-up title')}
+            aria-label={i18n.tr('Tittel på oppfølging', 'Follow-up title')}
           />
-          <button type="button" onClick={saveFollowUp}>Add</button>
+          <button type="button" onClick={saveFollowUp}>{i18n.tr('Legg til', 'Add')}</button>
         </div>
       </section>
 
       <section class="velion-inbox-aside-card">
-        <h3>Calendar note</h3>
+        <h3>{i18n.tr('Kalendernotat', 'Calendar note')}</h3>
         <textarea
           rows={3}
           value={noteText()}
           onInput={(event) => setNoteText(event.currentTarget.value)}
-          placeholder="Add a private follow-up note..."
-          aria-label="Private follow-up note"
+          placeholder={i18n.tr('Legg til et privat oppfølgingsnotat …', 'Add a private follow-up note...')}
+          aria-label={i18n.tr('Privat oppfølgingsnotat', 'Private follow-up note')}
         />
         <button type="button" disabled={!noteText().trim()} onClick={saveNote} class="velion-inbox-button velion-inbox-button--primary velion-inbox-button--xs">
-          Save note
+          {i18n.tr('Lagre notat', 'Save note')}
         </button>
       </section>
 
       <section class="velion-inbox-aside-card">
-        <h3>Upcoming</h3>
-        <Show when={upcomingEvents().length} fallback={<p>No upcoming calendar events.</p>}>
+        <h3>{i18n.tr('Kommende', 'Upcoming')}</h3>
+        <Show when={upcomingEvents().length} fallback={<p>{i18n.tr('Ingen kommende kalenderhendelser.', 'No upcoming calendar events.')}</p>}>
           <For each={upcomingEvents()}>{(event) => <CalendarEventRow event={event} />}</For>
         </Show>
       </section>
@@ -560,14 +587,18 @@ function CalendarPanel(props: { selectedTicket: ZammadTicket | null }) {
 }
 
 function ActivityPanel(props: { selectedTicket: ZammadTicket | null }) {
+  const i18n = useI18n()
   return (
     <Show
       when={props.selectedTicket}
       fallback={
         <EmptyAsideState
           icon={<Clock3 class="size-6" />}
-          title="No activity selected"
-          body="Open a ticket to see workflow health, collaboration state, and follow-up automation."
+          title={i18n.tr('Ingen aktivitet valgt', 'No activity selected')}
+          body={i18n.tr(
+            'Åpne en sak for å se arbeidsflythelse, samarbeidsstatus og oppfølgingsautomatisering.',
+            'Open a ticket to see workflow health, collaboration state, and follow-up automation.',
+          )}
         />
       }
     >
@@ -576,35 +607,57 @@ function ActivityPanel(props: { selectedTicket: ZammadTicket | null }) {
           <section class="velion-inbox-aside-card">
             <div class="velion-inbox-card-heading">
               <CheckCircle2 class="size-4 velion-inbox-success" />
-              <h2>Workflow health</h2>
+              <h2>{i18n.tr('Arbeidsflythelse', 'Workflow health')}</h2>
             </div>
             <div class="velion-inbox-field-stack">
-              <HealthRow label="SLA status" value="On track" tone="success" />
-              <HealthRow label="Ownership" value={ticket().owner ? `${ticket().owner?.firstname} ${ticket().owner?.lastname}` : 'Needs owner'} tone={ticket().owner ? 'neutral' : 'warning'} />
-              <HealthRow label="Queue" value={ticket().group?.name ?? 'Support'} tone="neutral" />
+              <HealthRow label={i18n.tr('SLA-status', 'SLA status')} value={i18n.tr('På sporet', 'On track')} tone="success" />
+              <HealthRow
+                label={i18n.tr('Eierskap', 'Ownership')}
+                value={ticket().owner ? `${ticket().owner?.firstname} ${ticket().owner?.lastname}` : i18n.tr('Trenger eier', 'Needs owner')}
+                tone={ticket().owner ? 'neutral' : 'warning'}
+              />
+              <HealthRow label={i18n.tr('Kø', 'Queue')} value={ticket().group?.name ?? 'Support'} tone="neutral" />
             </div>
           </section>
 
           <section class="velion-inbox-aside-card">
             <div class="velion-inbox-card-heading">
               <UserRound class="size-4" />
-              <h2>Team collaboration</h2>
+              <h2>{i18n.tr('Teamsamarbeid', 'Team collaboration')}</h2>
             </div>
             <div class="velion-inbox-activity-stack">
-              <ActivityItem title="No teammate is drafting" body="Show collision state here when another agent is viewing or replying." />
-              <ActivityItem title="Internal comments" body="Add Front-style internal thread notes without changing the customer conversation." />
-              <ActivityItem title="Subscribe teammate" body="Notify a teammate when customer replies or SLA changes." />
+              <ActivityItem
+                title={i18n.tr('Ingen kollega skriver utkast', 'No teammate is drafting')}
+                body={i18n.tr('Vis kollisjonsstatus her når en annen agent ser på eller svarer.', 'Show collision state here when another agent is viewing or replying.')}
+              />
+              <ActivityItem
+                title={i18n.tr('Interne kommentarer', 'Internal comments')}
+                body={i18n.tr('Legg til interne tråd-notater i Front-stil uten å endre kundesamtalen.', 'Add Front-style internal thread notes without changing the customer conversation.')}
+              />
+              <ActivityItem
+                title={i18n.tr('Abonner kollega', 'Subscribe teammate')}
+                body={i18n.tr('Varsle en kollega når kunden svarer eller SLA endres.', 'Notify a teammate when customer replies or SLA changes.')}
+              />
             </div>
           </section>
 
           <section class="velion-inbox-aside-card velion-inbox-aside-card--soft">
             <div class="velion-inbox-card-heading">
               <AlertCircle class="size-4" />
-              <h2>Automation hooks</h2>
+              <h2>{i18n.tr('Automatiseringsregler', 'Automation hooks')}</h2>
             </div>
-            <ActionSuggestion title="Create split rule" body="Move this sender, domain, or topic to Focused or Other." />
-            <ActionSuggestion title="Auto reminder" body="Return this conversation when the follow-up date arrives." />
-            <ActionSuggestion title="SLA escalation" body="Escalate when waiting time or priority exceeds policy." />
+            <ActionSuggestion
+              title={i18n.tr('Opprett delingsregel', 'Create split rule')}
+              body={i18n.tr('Flytt denne avsenderen, domenet eller temaet til Fokusert eller Annet.', 'Move this sender, domain, or topic to Focused or Other.')}
+            />
+            <ActionSuggestion
+              title={i18n.tr('Automatisk påminnelse', 'Auto reminder')}
+              body={i18n.tr('Returner denne samtalen når oppfølgingsdatoen kommer.', 'Return this conversation when the follow-up date arrives.')}
+            />
+            <ActionSuggestion
+              title={i18n.tr('SLA-eskalering', 'SLA escalation')}
+              body={i18n.tr('Eskaler når ventetid eller prioritet overskrider policy.', 'Escalate when waiting time or priority exceeds policy.')}
+            />
           </section>
         </div>
       )}
@@ -644,6 +697,7 @@ function MacrosPanel(props: {
   onMacroExecuted: () => void
   selectedTicket: ZammadTicket | null
 }) {
+  const i18n = useI18n()
   const [expanded, setExpanded] = createSignal(false)
   const [macrosRes] = createResource(
     () => (expanded() && props.orgId ? props.orgId : ''),
@@ -661,19 +715,19 @@ function MacrosPanel(props: {
   return (
     <section class="velion-inbox-macros">
       <button type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded()}>
-        <span>Macros</span>
+        <span>{i18n.tr('Makroer', 'Macros')}</span>
         <ChevronDown class={cn('size-4', expanded() && 'rotate-180')} />
       </button>
       <Show when={expanded()}>
-        <Show when={!macrosRes.loading} fallback={<p class="velion-inbox-macros__empty">Loading macros…</p>}>
+        <Show when={!macrosRes.loading} fallback={<p class="velion-inbox-macros__empty">{i18n.tr('Laster makroer …', 'Loading macros…')}</p>}>
           <ul>
-            <For each={macros()} fallback={<li class="velion-inbox-macros__empty">No macros configured. Create them in Settings → Macros.</li>}>
+            <For each={macros()} fallback={<li class="velion-inbox-macros__empty">{i18n.tr('Ingen makroer konfigurert. Opprett dem under Innstillinger → Makroer.', 'No macros configured. Create them in Settings → Macros.')}</li>}>
               {(macro) => (
                 <li>
                   <span title={macro.description}>{macro.name}</span>
                   <button type="button" disabled={!props.selectedTicket} onClick={() => applyMacro(macro)}>
                     <Play class="size-3" />
-                    Apply
+                    {i18n.tr('Bruk', 'Apply')}
                   </button>
                 </li>
               )}

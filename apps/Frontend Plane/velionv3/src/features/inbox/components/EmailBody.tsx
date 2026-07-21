@@ -1,4 +1,5 @@
-import { createSignal, onCleanup, Show } from 'solid-js'
+import { createSignal, For, onCleanup, Show } from 'solid-js'
+import { useI18n } from '@/shared/i18n'
 
 /**
  * Gmail/Outlook-grade rendering of a message body.
@@ -58,10 +59,10 @@ function splitQuotedHtml(html: string): { main: string; quoted: string } {
   return { main: html.slice(0, at), quoted: html.slice(at) }
 }
 
-function buildSrcDoc(html: string): string {
+function buildSrcDoc(html: string, quoteLabel: string): string {
   const { main, quoted } = splitQuotedHtml(sanitizeEmailHtml(html))
   const quotedBlock = quoted
-    ? `<details class="vln-quote"><summary aria-label="Show quoted text">&#8230;</summary>${quoted}</details>`
+    ? `<details class="vln-quote"><summary aria-label="${quoteLabel}">&#8230;</summary>${quoted}</details>`
     : ''
   return `<!doctype html><html><head><meta charset="utf-8">
 <base target="_blank" rel="noopener noreferrer">
@@ -89,6 +90,7 @@ function buildSrcDoc(html: string): string {
 }
 
 function SafeEmailFrame(props: { html: string }) {
+  const i18n = useI18n()
   const [height, setHeight] = createSignal(120)
   let frame: HTMLIFrameElement | undefined
   let observer: ResizeObserver | undefined
@@ -125,10 +127,10 @@ function SafeEmailFrame(props: { html: string }) {
       ref={frame}
       class="velion-inbox-email-frame"
       sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-      srcdoc={buildSrcDoc(props.html)}
+      srcdoc={buildSrcDoc(props.html, i18n.tr('Vis sitert tekst', 'Show quoted text'))}
       onLoad={onLoad}
       style={{ height: `${height()}px` }}
-      title="Message content"
+      title={i18n.tr('Meldingsinnhold', 'Message content')}
       loading="lazy"
     />
   )
@@ -150,6 +152,7 @@ export function EmailBody(props: { html?: string; text?: string }) {
 
 // Plain-text fallback: preserve line breaks and turn bare URLs into links.
 function PlainTextBody(props: { text: string }) {
+  const i18n = useI18n()
   const segments = () => {
     const clean = props.text.trim()
     if (!clean) return [] as Array<{ url: boolean; value: string }>
@@ -159,17 +162,19 @@ function PlainTextBody(props: { text: string }) {
     }))
   }
   return (
-    <Show when={props.text.trim()} fallback={<span class="velion-inbox-article__empty">No message body.</span>}>
+    <Show when={props.text.trim()} fallback={<span class="velion-inbox-article__empty">{i18n.tr('Ingen meldingstekst.', 'No message body.')}</span>}>
       <div class="velion-inbox-email-plain">
-        {segments().map((seg) =>
-          seg.url ? (
-            <a href={seg.value} target="_blank" rel="noopener noreferrer">
-              {seg.value}
-            </a>
-          ) : (
-            <span>{seg.value}</span>
-          ),
-        )}
+        <For each={segments()}>
+          {(segment) =>
+            segment.url ? (
+              <a href={segment.value} target="_blank" rel="noopener noreferrer">
+                {segment.value}
+              </a>
+            ) : (
+              <span>{segment.value}</span>
+            )
+          }
+        </For>
       </div>
     </Show>
   )

@@ -7,12 +7,14 @@ import {
 } from '@/features/inbox/lib/inbox-model'
 import type { InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import { cn } from '@/shared/lib/cn'
+import { localeDateTime, useI18n } from '@/shared/i18n'
 
 export function MiniCalendarGrid(props: {
   events: CalendarEvent[]
   onSelect: (date: Date) => void
   selectedDate: Date
 }) {
+  const i18n = useI18n()
   const days = () => buildCalendarDays(props.selectedDate)
   const eventDates = () => new Set(props.events.map((event) => formatDateKey(new Date(event.start))))
   const todayKey = () => formatDateKey(new Date())
@@ -20,13 +22,13 @@ export function MiniCalendarGrid(props: {
   return (
     <section class="velion-inbox-mini-calendar">
       <div class="velion-inbox-mini-calendar__header">
-        <h3>{props.selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h3>
+        <h3>{props.selectedDate.toLocaleDateString(localeDateTime(i18n.locale()), { month: 'long', year: 'numeric' })}</h3>
         <div class="velion-inbox-mini-calendar__actions">
-          <button type="button" onClick={() => props.onSelect(shiftDate(props.selectedDate, -7))} aria-label="Previous week">
+          <button type="button" onClick={() => props.onSelect(shiftDate(props.selectedDate, -7))} aria-label={i18n.tr('Forrige uke', 'Previous week')}>
             <ChevronDown class="size-4 rotate-90" />
           </button>
-          <button type="button" onClick={() => props.onSelect(new Date())}>Today</button>
-          <button type="button" onClick={() => props.onSelect(shiftDate(props.selectedDate, 7))} aria-label="Next week">
+          <button type="button" onClick={() => props.onSelect(new Date())}>{i18n.tr('I dag', 'Today')}</button>
+          <button type="button" onClick={() => props.onSelect(shiftDate(props.selectedDate, 7))} aria-label={i18n.tr('Neste uke', 'Next week')}>
             <ChevronDown class="size-4 -rotate-90" />
           </button>
         </div>
@@ -44,7 +46,7 @@ export function MiniCalendarGrid(props: {
                 onClick={() => props.onSelect(day)}
                 classList={{ 'velion-inbox-mini-calendar__day--selected': selected() }}
               >
-                <span>{day.toLocaleDateString('en-US', { weekday: 'short' }).slice(0, 1)}</span>
+                <span>{day.toLocaleDateString(localeDateTime(i18n.locale()), { weekday: 'short' }).slice(0, 1)}</span>
                 <strong classList={{ 'velion-inbox-mini-calendar__today': isToday() && !selected() }}>{day.getDate()}</strong>
                 <em classList={{ 'velion-inbox-mini-calendar__event-dot': eventDates().has(key()) }} />
               </button>
@@ -57,6 +59,7 @@ export function MiniCalendarGrid(props: {
 }
 
 export function CalendarEventRow(props: { event: CalendarEvent }) {
+  const i18n = useI18n()
   const start = () => new Date(props.event.start)
   const end = () => new Date(props.event.end)
 
@@ -66,7 +69,7 @@ export function CalendarEventRow(props: { event: CalendarEvent }) {
       <div>
         <p>{props.event.title}</p>
         <small>
-          {start().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} - {end().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+          {start().toLocaleTimeString(localeDateTime(i18n.locale()), { hour: 'numeric', minute: '2-digit' })} - {end().toLocaleTimeString(localeDateTime(i18n.locale()), { hour: 'numeric', minute: '2-digit' })}
         </small>
       </div>
     </div>
@@ -74,12 +77,13 @@ export function CalendarEventRow(props: { event: CalendarEvent }) {
 }
 
 export function CalendarNoteRow(props: { note: CalendarNote }) {
+  const i18n = useI18n()
   return (
     <div class="velion-inbox-calendar-row velion-inbox-calendar-row--note">
       <span class="velion-inbox-calendar-row__dot velion-inbox-calendar-row__dot--note" />
       <div>
         <p>{props.note.text}</p>
-        <small>{new Date(props.note.createdAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</small>
+        <small>{new Date(props.note.createdAt).toLocaleTimeString(localeDateTime(i18n.locale()), { hour: 'numeric', minute: '2-digit' })}</small>
       </div>
     </div>
   )
@@ -126,6 +130,7 @@ export function AccordionSection(props: {
   icon: JSX.Element
   title: string
 }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(Boolean(props.defaultOpen))
 
   return (
@@ -135,12 +140,13 @@ export function AccordionSection(props: {
         <span>{props.title}</span>
         <ChevronDown class={cn('size-4 velion-inbox-accordion__chevron', open() && 'rotate-180')} />
       </button>
-      {open() ? <div class="velion-inbox-accordion__body">{props.children ?? <p>No data yet.</p>}</div> : null}
+      {open() ? <div class="velion-inbox-accordion__body">{props.children ?? <p>{i18n.tr('Ingen data ennå.', 'No data yet.')}</p>}</div> : null}
     </section>
   )
 }
 
 export function LinkRow(props: { label: string; onOpenModal: (modal: InboxModalRequest) => void }) {
+  const i18n = useI18n()
   return (
     <div class="velion-inbox-link-row">
       <span>{props.label}</span>
@@ -149,10 +155,13 @@ export function LinkRow(props: { label: string; onOpenModal: (modal: InboxModalR
         onClick={() => props.onOpenModal({
           type: 'work',
           title: props.label,
-          description: `Create or attach ${props.label.toLowerCase()} from this ticket without navigating away from the inbox.`,
-          primaryAction: 'Attach link',
+          description: i18n.tr(
+            `Opprett eller knytt ${props.label.toLowerCase()} til denne saken uten å forlate innboksen.`,
+            `Create or attach ${props.label.toLowerCase()} from this ticket without navigating away from the inbox.`,
+          ),
+          primaryAction: i18n.tr('Fest lenke', 'Attach link'),
         })}
-        aria-label={`Add ${props.label}`}
+        aria-label={i18n.tr(`Legg til ${props.label}`, `Add ${props.label}`)}
       >
         <Plus class="size-4" />
       </button>

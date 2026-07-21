@@ -48,6 +48,7 @@ export type LiveTicket = ZammadTicket & { conversationId: string }
 export interface InboxConversationsResult {
   tickets: LiveTicket[]
   total: number
+  nextCursor: { updated: string; id: string } | null
 }
 
 export interface ConversationListParams {
@@ -55,6 +56,8 @@ export interface ConversationListParams {
   state?: string
   assigned?: string
   channel?: string
+  cursorUpdated?: string
+  cursorId?: string
 }
 
 function orgHeaders(orgId: string): Record<string, string> {
@@ -140,6 +143,8 @@ export function toLiveTicket(conversation: ConversationSummary | ConversationDet
     updated_at: conversation.updated_at,
     article_count: 'messages' in conversation ? conversation.messages.length : undefined,
     channel: conversation.channel,
+    provider: conversation.provider,
+    lastMessagePreview: conversation.last_message_preview,
     agentState: agentStateFromConversation(conversation),
   }
 }
@@ -173,13 +178,19 @@ export async function listConversations(
   if (params.state) query.set('state', params.state)
   if (params.assigned) query.set('assigned', params.assigned)
   if (params.channel && params.channel !== 'all') query.set('channel', params.channel)
+  if (params.cursorUpdated) query.set('cursor_updated', params.cursorUpdated)
+  if (params.cursorId) query.set('cursor_id', params.cursorId)
 
   const data = await requestJson<ConversationSummary[]>(`/api/v1/inbox/conversations?${query}`, {
     headers: orgHeaders(orgId),
     signal,
   })
   const list = Array.isArray(data) ? data : []
-  return { tickets: list.map(toLiveTicket), total: list.length }
+  const last = list.at(-1)
+  const nextCursor = last && list.length === (params.limit ?? 50)
+    ? { updated: last.updated_at, id: last.id }
+    : null
+  return { tickets: list.map(toLiveTicket), total: list.length, nextCursor }
 }
 
 export async function getConversationDetail(
@@ -292,18 +303,85 @@ export async function listAiActions(
   return Array.isArray(data) ? data : []
 }
 
+/** The ticket fields a reviewer may edit in place before approving a
+ * `ticket_classification` suggestion. Only non-empty strings are sent — an
+ * omitted key leaves the AI's original suggestion for that field untouched. */
+export interface AiActionFieldEdits {
+  category?: string
+  intent?: string
+  priority?: string
+}
+
+export interface ReviewAiActionOptions {
+  comment?: string
+  /** Reviewer-edited ticket fields, sent only alongside an `approve` decision.
+   * The executor applies these instead of the AI's original suggestion when
+   * present — see conversation-core-go's ReviewAIAction. */
+  editedFields?: AiActionFieldEdits
+}
+
 /** Record a human review decision on a model-proposed action. The gateway forces
  * the decision from the route (`approve` → approved, `reject` → rejected); the
- * optional comment is the only body the reviewer supplies. Resolves only on a 2xx
- * — a missing/foreign-org action id surfaces as a thrown 404. */
+ * optional comment and (on approve) edited fields are the only body the reviewer
+ * supplies. Resolves only on a 2xx — a missing/foreign-org action id surfaces as
+ * a thrown 404. */
 export async function reviewAiAction(
   aiActionId: string,
   decision: 'approve' | 'reject',
-  comment?: string,
+  options: ReviewAiActionOptions = {},
 ): Promise<void> {
+  const body: { comment?: string; edited_fields?: AiActionFieldEdits } = {}
+  if (options.comment && options.comment.trim()) {
+    body.comment = options.comment.trim()
+  }
+  if (decision === 'approve' && options.editedFields) {
+    const cleaned = Object.fromEntries(
+      Object.entries(options.editedFields).filter(
+        ([, value]) => typeof value === 'string' && value.trim() !== '',
+      ),
+    ) as AiActionFieldEdits
+    if (Object.keys(cleaned).length > 0) {
+      body.edited_fields = cleaned
+    }
+  }
   await requestJson(`/api/v1/inbox/ai-actions/${encodeURIComponent(aiActionId)}/${decision}`, {
     method: 'POST',
-    body: JSON.stringify(comment && comment.trim() ? { comment: comment.trim() } : {}),
+    body: JSON.stringify(body),
+  })
+}
+
+// ── pilot feedback ────────────────────────────────────────────────────────────
+//
+// The shell's persistent "Send feedback" control. Lands as a new conversation
+// in the org's own Inbox, tagged "pilot-feedback" by conversation-core-go's
+// Service.SubmitFeedback -- no separate feedback store. SubmitFeedback also
+// mirrors the submission into the team's monitored org so feedback from an
+// external pilot org's own isolated tenant stays visible to the team.
+
+export interface SubmitFeedbackInput {
+  bodyText: string
+  fromName?: string
+  fromEmail?: string
+  // The route the submitter was on when they opened the widget (e.g.
+  // "/inbox?view=mine"). Best-effort context only -- see
+  // conversation-core-go's FeedbackInput.PageURL.
+  pageUrl?: string
+}
+
+export async function submitFeedback(orgId: string, input: SubmitFeedbackInput): Promise<void> {
+  await requestJson('/api/v1/inbox/feedback', {
+    method: 'POST',
+    // A fresh key per call: this is a new ticket every submission, not a
+    // thread to append to -- see conversation-core-go's Service.SubmitFeedback,
+    // which requires one (no provider event/message id to derive a fallback).
+    body: JSON.stringify({
+      body_text: input.bodyText,
+      from_name: input.fromName,
+      from_email: input.fromEmail,
+      page_url: input.pageUrl,
+      idempotency_key: crypto.randomUUID(),
+    }),
+    headers: orgHeaders(orgId),
   })
 }
 

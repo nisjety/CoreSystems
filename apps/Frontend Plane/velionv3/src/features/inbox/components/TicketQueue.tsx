@@ -4,44 +4,35 @@ import {
   ArrowDownUp,
   ArrowUp,
   AtSign,
+  Camera,
   Check,
   CheckCheck,
   Clock3,
+  Gamepad2,
+  Hash,
   Inbox,
   Mail,
   MailOpen,
   MessageCircle,
+  MessagesSquare,
   MoreHorizontal,
   PanelLeft,
   Pin,
   SlidersHorizontal,
+  Users,
   type LucideProps,
 } from 'lucide-solid'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component, type JSX } from 'solid-js'
+import { Dynamic } from 'solid-js/web'
 import type { InboxModalRequest } from '@/features/inbox/components/InboxWorkModal'
 import {
-  customerName,
   formatRelativeTime,
   type InboxTab,
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
+import type { ConnectedInboxSource } from '@/features/inbox/lib/inbox-sources'
 import { cn } from '@/shared/lib/cn'
-
-const inboxTabs: Array<{ id: InboxTab; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'open', label: 'Open' },
-  { id: 'pending', label: 'Pending' },
-  { id: 'solved', label: 'Solved' },
-]
-
-const filterMenuItems = [
-  { label: 'Your inbox', href: '/inbox?view=mine', description: 'Conversations assigned to you, kept inside the active inbox workspace.' },
-  { label: 'All conversations', href: '/inbox?view=all', description: 'A full team queue view for monitoring every active conversation.' },
-  { label: 'Unassigned', href: '/inbox?view=unassigned', description: 'Tickets that Velion or a human operator should route to an owner.' },
-  { label: 'Mentions', href: '/inbox?view=mentions', description: 'Conversation threads where an operator or AI workflow was mentioned.' },
-  { label: 'Messenger', href: '/inbox?view=view-messenger', description: 'Messenger-channel conversations without leaving the inbox surface.' },
-  { label: 'Email', href: '/inbox?view=view-email', description: 'Email-channel conversations without opening a separate page.' },
-] as const
+import { useI18n } from '@/shared/i18n'
 
 type SortKey =
   | 'last-message-desc'
@@ -51,31 +42,33 @@ type SortKey =
   | 'priority-desc'
   | 'priority-asc'
 
-const sortOptions: Array<{ id: SortKey; label: string; icon: Component<LucideProps> }> = [
-  { id: 'last-message-desc', label: 'Last message', icon: ArrowDown },
-  { id: 'last-message-asc', label: 'Last message', icon: ArrowUp },
-  { id: 'created-desc', label: 'Created', icon: ArrowDown },
-  { id: 'created-asc', label: 'Created', icon: ArrowUp },
-  { id: 'priority-desc', label: 'Priority', icon: ArrowDown },
-  { id: 'priority-asc', label: 'Priority', icon: ArrowUp },
-]
-
 type FocusLane = 'focused' | 'other'
 type QuickFilter = 'all' | 'unread' | 'mentions' | 'pinned'
 
-const quickFilters: Array<{ id: QuickFilter; label: string; icon?: Component<LucideProps> }> = [
-  { id: 'all', label: 'All' },
-  { id: 'unread', label: 'Unread', icon: MailOpen },
-  { id: 'mentions', label: 'Mentions', icon: AtSign },
-  { id: 'pinned', label: 'Pinned', icon: Pin },
-]
+export function ticketDisplayTitle(ticket: Pick<ZammadTicket, 'channel' | 'title'>) {
+  if (ticket.channel !== 'email') return ticket.title
+  return ticket.title.startsWith('Re:') ? ticket.title : `Re: ${ticket.title}`
+}
+
+export function ticketCustomerLabel(ticket: Pick<ZammadTicket, 'channel' | 'customer'>) {
+  const contactName = ticket.customer
+    ? `${ticket.customer.firstname} ${ticket.customer.lastname}`.trim() || ticket.customer.email || 'Unknown'
+    : 'Unknown'
+  if (ticket.channel !== 'email') return contactName
+  return ticket.customer?.email ?? contactName
+}
 
 export function TicketQueue(props: {
+  activeChannel: string | null
   activeTab: InboxTab
+  connectedSources: ConnectedInboxSource[]
   error: string | null
+  hasMore: boolean
   label: string
   loading: boolean
+  loadingMore: boolean
   onActiveTabChange: (tab: InboxTab) => void
+  onLoadMore: () => void
   onOpenModal: (modal: InboxModalRequest) => void
   onSearchChange: (query: string) => void
   onSelectTicket: (ticket: ZammadTicket) => void
@@ -95,6 +88,14 @@ export function TicketQueue(props: {
   const [snoozedIds, setSnoozedIds] = createSignal(new Set<number>())
   const [sortKey, setSortKey] = createSignal<SortKey>('last-message-desc')
   const [sortOpen, setSortOpen] = createSignal(false)
+  const i18n = useI18n()
+
+  const quickFilters = createMemo<Array<{ id: QuickFilter; label: string; icon?: Component<LucideProps> }>>(() => [
+    { id: 'all', label: i18n.tr('Alle', 'All') },
+    { id: 'unread', label: i18n.tr('Ulest', 'Unread'), icon: MailOpen },
+    { id: 'mentions', label: i18n.tr('Omtaler', 'Mentions'), icon: AtSign },
+    { id: 'pinned', label: i18n.tr('Festet', 'Pinned'), icon: Pin },
+  ])
 
   const laneCounts = createMemo(() => ({
     focused: props.tickets.filter((ticket) => !archivedIds().has(ticket.id) && !snoozedIds().has(ticket.id) && isFocusedTicket(ticket)).length,
@@ -113,6 +114,19 @@ export function TicketQueue(props: {
   const sortedTickets = createMemo(() => sortTickets(visibleTickets(), sortKey(), pinnedIds()))
   const allVisibleSelected = createMemo(() => sortedTickets().length > 0 && sortedTickets().every((ticket) => selectedIds().has(ticket.id)))
   const selectedCount = createMemo(() => sortedTickets().filter((ticket) => selectedIds().has(ticket.id)).length)
+  const activeSources = createMemo(() => props.connectedSources.filter((source) => source.channel === props.activeChannel))
+  const connectedEmptyState = createMemo(() => {
+    if (props.tickets.length > 0 || activeSources().length === 0) return null
+    const labels = activeSources().map((source) => source.label)
+    const sourceList = formatSourceList(labels, i18n)
+    return {
+      title: i18n.tr(`${sourceList} er tilkoblet`, `${sourceList} ${labels.length === 1 ? 'is' : 'are'} connected`),
+      body: i18n.tr(
+        'Ingen samtaler har kommet inn i denne kilden ennå. Nye meldinger vises her så snart innhentingen leverer dem.',
+        'No conversations have arrived in this source yet. New messages will appear here as soon as ingestion delivers them.',
+      ),
+    }
+  })
 
   createEffect(() => {
     const visibleIds = new Set(sortedTickets().map((ticket) => ticket.id))
@@ -155,7 +169,7 @@ export function TicketQueue(props: {
         <div class="velion-inbox-queue__title">
           <PanelLeft class="size-4" strokeWidth={2} />
           <Inbox class="size-4" strokeWidth={2} />
-          <h1>Inbox</h1>
+          <h1>{i18n.tr('Innboks', 'Inbox')}</h1>
         </div>
 
         <div class="velion-inbox-queue__tools">
@@ -168,8 +182,8 @@ export function TicketQueue(props: {
               }}
               class={cn('velion-inbox-icon-action', filtersOpen() && 'velion-inbox-icon-action--active')}
               aria-expanded={filtersOpen()}
-              aria-label="Open inbox filters"
-              title="Open inbox filters"
+              aria-label={i18n.tr('Åpne innboksfiltre', 'Open inbox filters')}
+              title={i18n.tr('Åpne innboksfiltre', 'Open inbox filters')}
             >
               <SlidersHorizontal class="size-4" strokeWidth={1.9} />
             </button>
@@ -194,8 +208,8 @@ export function TicketQueue(props: {
               }}
               class={cn('velion-inbox-icon-action', sortOpen() && 'velion-inbox-icon-action--active')}
               aria-expanded={sortOpen()}
-              aria-label="Sort conversations"
-              title="Sort conversations"
+              aria-label={i18n.tr('Sorter samtaler', 'Sort conversations')}
+              title={i18n.tr('Sorter samtaler', 'Sort conversations')}
             >
               <ArrowDownUp class="size-4" strokeWidth={1.9} />
             </button>
@@ -214,11 +228,11 @@ export function TicketQueue(props: {
 
       <div class="velion-inbox-queue__lanes">
         <div class="velion-inbox-focus-switch">
-          <FocusLaneButton active={focusLane() === 'focused'} count={laneCounts().focused} label="Focused" onClick={() => setFocusLane('focused')} />
-          <FocusLaneButton active={focusLane() === 'other'} count={laneCounts().other} label="Other" onClick={() => setFocusLane('other')} />
+          <FocusLaneButton active={focusLane() === 'focused'} count={laneCounts().focused} label={i18n.tr('Fokusert', 'Focused')} onClick={() => setFocusLane('focused')} />
+          <FocusLaneButton active={focusLane() === 'other'} count={laneCounts().other} label={i18n.tr('Annet', 'Other')} onClick={() => setFocusLane('other')} />
         </div>
         <div class="velion-inbox-quick-filters">
-          <For each={quickFilters}>
+          <For each={quickFilters()}>
             {(filter) => {
               const Icon = filter.icon
               const textFilter = filter.id === 'all'
@@ -232,8 +246,8 @@ export function TicketQueue(props: {
                     quickFilter() === filter.id && 'velion-inbox-quick-filter--active',
                   )}
                   aria-pressed={quickFilter() === filter.id}
-                  aria-label={`Show ${filter.label.toLowerCase()} conversations`}
-                  title={`Show ${filter.label.toLowerCase()} conversations`}
+                  aria-label={i18n.tr(`Vis ${filter.label.toLowerCase()} samtaler`, `Show ${filter.label.toLowerCase()} conversations`)}
+                  title={i18n.tr(`Vis ${filter.label.toLowerCase()} samtaler`, `Show ${filter.label.toLowerCase()} conversations`)}
                 >
                   {Icon ? <Icon class="size-3.5" strokeWidth={1.9} /> : null}
                   <span classList={{ 'sr-only': !textFilter }}>{filter.label}</span>
@@ -251,15 +265,15 @@ export function TicketQueue(props: {
             checked={allVisibleSelected()}
             onChange={toggleAllVisible}
           />
-          {selectedCount() ? `${selectedCount()} selected` : 'Select all'}
+          {selectedCount() ? i18n.tr(`${selectedCount()} valgt`, `${selectedCount()} selected`) : i18n.tr('Velg alle', 'Select all')}
         </label>
         <div class={cn('velion-inbox-bulk-actions', selectedCount() ? 'velion-inbox-bulk-actions--active' : '')}>
-          <BulkActionButton disabled={!selectedCount()} label="Mark selected as read" onClick={() => setReadIds((current) => addManyToSet(current, selectedIds()))}>
+          <BulkActionButton disabled={!selectedCount()} label={i18n.tr('Merk valgte som lest', 'Mark selected as read')} onClick={() => setReadIds((current) => addManyToSet(current, selectedIds()))}>
             <CheckCheck class="size-3.5" />
           </BulkActionButton>
           <BulkActionButton
             disabled={!selectedCount()}
-            label="Snooze selected"
+            label={i18n.tr('Utsett valgte', 'Snooze selected')}
             onClick={() => {
               setSnoozedIds((current) => addManyToSet(current, selectedIds()))
               setSelectedIds(new Set<number>())
@@ -269,7 +283,7 @@ export function TicketQueue(props: {
           </BulkActionButton>
           <BulkActionButton
             disabled={!selectedCount()}
-            label="Archive selected"
+            label={i18n.tr('Arkiver valgte', 'Archive selected')}
             onClick={() => {
               setArchivedIds((current) => addManyToSet(current, selectedIds()))
               setSelectedIds(new Set<number>())
@@ -285,13 +299,16 @@ export function TicketQueue(props: {
           <LoadingRows />
         </Show>
         <Show when={!props.loading && props.error}>
-          <QueueEmptyState tone="error" title="Support is not connected" body={props.error ?? ''} />
+          <QueueEmptyState tone="error" title={i18n.tr('Support er ikke tilkoblet', 'Support is not connected')} body={props.error ?? ''} />
         </Show>
         <Show when={!props.loading && !props.error && sortedTickets().length === 0}>
-          <QueueEmptyState title="No items" body="This view is clear for now. Change filters or switch lanes to see more conversations." />
+          <QueueEmptyState
+            title={connectedEmptyState()?.title ?? i18n.tr('Ingen elementer', 'No items')}
+            body={connectedEmptyState()?.body ?? i18n.tr('Denne visningen er tom for nå. Endre filtre eller bytt felt for å se flere samtaler.', 'This view is clear for now. Change filters or switch lanes to see more conversations.')}
+          />
         </Show>
         <Show when={!props.loading && !props.error && sortedTickets().length > 0}>
-          <ul aria-label="Tickets" class="velion-inbox-ticket-list">
+          <ul aria-label={i18n.tr('Saker', 'Tickets')} class="velion-inbox-ticket-list">
             <For each={sortedTickets()}>
               {(ticket) => (
                 <li>
@@ -321,9 +338,25 @@ export function TicketQueue(props: {
             </For>
           </ul>
         </Show>
+        <Show when={!props.loading && !props.error && props.hasMore}>
+          <button
+            type="button"
+            class="velion-inbox-load-more"
+            disabled={props.loadingMore}
+            onClick={props.onLoadMore}
+          >
+            {props.loadingMore ? i18n.tr('Laster eldre samtaler …', 'Loading older conversations…') : i18n.tr('Last inn eldre samtaler', 'Load older conversations')}
+          </button>
+        </Show>
       </div>
     </section>
   )
+}
+
+function formatSourceList(labels: string[], i18n: ReturnType<typeof useI18n>): string {
+  if (labels.length < 2) return labels[0] ?? i18n.tr('Denne kilden', 'This source')
+  if (labels.length === 2) return labels.join(i18n.tr(' og ', ' and '))
+  return `${labels.slice(0, -1).join(', ')}${i18n.tr(', og ', ', and ')}${labels.at(-1)}`
 }
 
 function FiltersMenu(props: {
@@ -334,11 +367,26 @@ function FiltersMenu(props: {
   onSearchChange: (query: string) => void
   searchQuery: string
 }) {
+  const i18n = useI18n()
+  const inboxTabs = createMemo<Array<{ id: InboxTab; label: string }>>(() => [
+    { id: 'all', label: i18n.tr('Alle', 'All') },
+    { id: 'open', label: i18n.tr('Åpen', 'Open') },
+    { id: 'pending', label: i18n.tr('Venter', 'Pending') },
+    { id: 'solved', label: i18n.tr('Løst', 'Solved') },
+  ])
+  const filterMenuItems = createMemo(() => [
+    { label: i18n.tr('Din innboks', 'Your inbox'), href: '/inbox?view=mine', description: i18n.tr('Samtaler tildelt deg, holdt inne i det aktive innboks-arbeidsområdet.', 'Conversations assigned to you, kept inside the active inbox workspace.') },
+    { label: i18n.tr('Alle samtaler', 'All conversations'), href: '/inbox?view=all', description: i18n.tr('En full team-kø-visning for å overvåke alle aktive samtaler.', 'A full team queue view for monitoring every active conversation.') },
+    { label: i18n.tr('Ikke tildelt', 'Unassigned'), href: '/inbox?view=unassigned', description: i18n.tr('Saker som Velion eller en menneskelig operatør bør rute til en eier.', 'Tickets that Velion or a human operator should route to an owner.') },
+    { label: i18n.tr('Omtaler', 'Mentions'), href: '/inbox?view=mentions', description: i18n.tr('Samtaletråder der en operatør eller AI-arbeidsflyt ble nevnt.', 'Conversation threads where an operator or AI workflow was mentioned.') },
+    { label: 'Messenger', href: '/inbox?view=view-messenger', description: i18n.tr('Messenger-kanal-samtaler uten å forlate innboksflaten.', 'Messenger-channel conversations without leaving the inbox surface.') },
+    { label: i18n.tr('E-post', 'Email'), href: '/inbox?view=view-email', description: i18n.tr('E-post-kanal-samtaler uten å åpne en egen side.', 'Email-channel conversations without opening a separate page.') },
+  ])
   return (
     <div class="velion-popover velion-inbox-menu velion-inbox-menu--filters">
       <div class="velion-inbox-menu__label">Status</div>
       <div class="velion-inbox-menu__group">
-        <For each={inboxTabs}>
+        <For each={inboxTabs()}>
           {(tab) => (
             <button
               type="button"
@@ -357,9 +405,9 @@ function FiltersMenu(props: {
         </For>
       </div>
       <div class="velion-inbox-menu__divider" />
-      <div class="velion-inbox-menu__label">Views</div>
+      <div class="velion-inbox-menu__label">{i18n.tr('Visninger', 'Views')}</div>
       <div class="velion-inbox-menu__group">
-        <For each={filterMenuItems}>
+        <For each={filterMenuItems()}>
           {(item) => (
             <button
               type="button"
@@ -389,7 +437,7 @@ function FiltersMenu(props: {
           }}
           class="velion-inbox-menu__row velion-inbox-menu__row--full"
         >
-          Clear search
+          {i18n.tr('Fjern søk', 'Clear search')}
         </button>
       </Show>
     </div>
@@ -397,9 +445,18 @@ function FiltersMenu(props: {
 }
 
 function SortMenu(props: { activeSort: SortKey; onSelect: (sort: SortKey) => void }) {
+  const i18n = useI18n()
+  const sortOptions = createMemo<Array<{ id: SortKey; label: string; icon: Component<LucideProps> }>>(() => [
+    { id: 'last-message-desc', label: i18n.tr('Siste melding', 'Last message'), icon: ArrowDown },
+    { id: 'last-message-asc', label: i18n.tr('Siste melding', 'Last message'), icon: ArrowUp },
+    { id: 'created-desc', label: i18n.tr('Opprettet', 'Created'), icon: ArrowDown },
+    { id: 'created-asc', label: i18n.tr('Opprettet', 'Created'), icon: ArrowUp },
+    { id: 'priority-desc', label: i18n.tr('Prioritet', 'Priority'), icon: ArrowDown },
+    { id: 'priority-asc', label: i18n.tr('Prioritet', 'Priority'), icon: ArrowUp },
+  ])
   return (
     <div class="velion-popover velion-inbox-menu velion-inbox-menu--sort">
-      <For each={sortOptions}>
+      <For each={sortOptions()}>
         {(option) => {
           const Icon = option.icon
           return (
@@ -462,13 +519,14 @@ function TicketRow(props: {
   ticket: ZammadTicket
   unread: boolean
 }) {
+  const i18n = useI18n()
   return (
     <div class={cn('velion-inbox-ticket-row', props.active && 'velion-inbox-ticket-row--active')}>
       <input
         type="checkbox"
         checked={props.checked}
         onChange={() => props.onToggleSelected()}
-        aria-label={`Select ${props.ticket.title}`}
+        aria-label={i18n.tr(`Velg ${props.ticket.title}`, `Select ${props.ticket.title}`)}
       />
       <button
         type="button"
@@ -480,36 +538,36 @@ function TicketRow(props: {
         <div>
           <div class="velion-inbox-ticket-row__meta">
             <Show when={props.unread}>
-              <span class="velion-inbox-ticket-row__unread" aria-label="Unread conversation" />
+              <span class="velion-inbox-ticket-row__unread" aria-label={i18n.tr('Ulest samtale', 'Unread conversation')} />
             </Show>
             <span class={cn('velion-inbox-ticket-row__customer', props.unread && 'velion-inbox-ticket-row__customer--unread')}>
-              {props.ticket.customer?.email ?? customerName(props.ticket)}
+              {ticketCustomerLabel(props.ticket)}
             </span>
             <Show when={props.pinned}>
               <Pin class="size-3 velion-inbox-ticket-row__pin" strokeWidth={1.8} />
             </Show>
-            <Mail class="size-3 velion-inbox-ticket-row__mail" strokeWidth={1.7} />
+            <ChannelMark channel={props.ticket.channel} provider={props.ticket.provider} />
             <span class="velion-inbox-ticket-row__more">
               <MoreHorizontal class="size-3" strokeWidth={1.8} />
             </span>
-            <span>{formatRelativeTime(props.ticket.updated_at)} ago</span>
+            <span>{i18n.tr(`for ${formatRelativeTime(props.ticket.updated_at)} siden`, `${formatRelativeTime(props.ticket.updated_at)} ago`)}</span>
           </div>
           <div class={cn('velion-inbox-ticket-row__subject', props.unread && 'velion-inbox-ticket-row__subject--unread')}>
-            {props.ticket.title.startsWith('Re:') ? props.ticket.title : `Re: ${props.ticket.title}`}
+            {ticketDisplayTitle(props.ticket)}
           </div>
           <div class="velion-inbox-ticket-row__preview">
-            {ticketPreview(props.ticket)}
+            {ticketPreview(props.ticket, i18n)}
           </div>
         </div>
       </button>
       <div class="velion-inbox-ticket-row__actions">
-        <RowActionButton label={props.pinned ? 'Unpin conversation' : 'Pin conversation'} onClick={props.onTogglePinned}>
+        <RowActionButton label={props.pinned ? i18n.tr('Løsne samtale', 'Unpin conversation') : i18n.tr('Fest samtale', 'Pin conversation')} onClick={props.onTogglePinned}>
           <Pin class={cn('size-3.5', props.pinned && 'velion-inbox-ticket-row__pin')} />
         </RowActionButton>
-        <RowActionButton label="Snooze conversation" onClick={props.onSnooze}>
+        <RowActionButton label={i18n.tr('Utsett samtale', 'Snooze conversation')} onClick={props.onSnooze}>
           <Clock3 class="size-3.5" />
         </RowActionButton>
-        <RowActionButton label="Archive conversation" onClick={props.onArchive}>
+        <RowActionButton label={i18n.tr('Arkiver samtale', 'Archive conversation')} onClick={props.onArchive}>
           <Archive class="size-3.5" />
         </RowActionButton>
       </div>
@@ -530,6 +588,49 @@ function BulkActionButton(props: { children: JSX.Element; disabled?: boolean; la
       {props.children}
     </button>
   )
+}
+
+function ChannelMark(props: { channel?: string; provider?: string }) {
+  const i18n = useI18n()
+  const config = createMemo(() => channelMarkConfig((props.provider || props.channel || 'email').toLowerCase(), i18n))
+
+  return (
+    <span
+      class="velion-inbox-ticket-row__channel"
+      aria-label={i18n.tr(`${config().label} samtale`, `${config().label} conversation`)}
+      title={config().label}
+    >
+      <Dynamic component={config().icon} class="size-3" strokeWidth={1.7} />
+      <span>{config().label}</span>
+    </span>
+  )
+}
+
+function channelMarkConfig(key: string, i18n: ReturnType<typeof useI18n>): { icon: Component<LucideProps>; label: string } {
+  switch (key) {
+    case 'google':
+      return { icon: Mail, label: 'Gmail' }
+    case 'microsoft':
+    case 'outlook':
+      return { icon: Mail, label: 'Outlook' }
+    case 'slack':
+      return { icon: Hash, label: 'Slack' }
+    case 'teams':
+      return { icon: Users, label: 'Teams' }
+    case 'discord':
+      return { icon: Gamepad2, label: 'Discord' }
+    case 'whatsapp':
+      return { icon: MessageCircle, label: 'WhatsApp' }
+    case 'messenger':
+      return { icon: MessagesSquare, label: 'Messenger' }
+    case 'instagram':
+      return { icon: Camera, label: 'Instagram' }
+    case 'x':
+    case 'twitter':
+      return { icon: AtSign, label: 'X' }
+    default:
+      return { icon: Mail, label: key === 'email' ? i18n.tr('E-post', 'Email') : key }
+  }
 }
 
 function RowActionButton(props: { children: JSX.Element; label: string; onClick: () => void }) {
@@ -653,14 +754,6 @@ function isMentionedTicket(ticket: ZammadTicket) {
   return text.includes('@') || text.includes('mention') || text.includes('urgent') || text.includes('vip')
 }
 
-function ticketPreview(ticket: ZammadTicket) {
-  if (ticket.tags?.length) {
-    return `Regarding your ${ticket.tags.join(', ')} request, we are checking the details and will follow up shortly.`
-  }
-
-  if (ticket.group?.name) {
-    return `Could you please confirm the status with ${ticket.group.name} and let me know when I can expect an update?`
-  }
-
-  return 'Could you please confirm the status and let me know when I can expect an update?'
+function ticketPreview(ticket: ZammadTicket, i18n: ReturnType<typeof useI18n>) {
+  return ticket.lastMessagePreview?.trim() || i18n.tr('Ingen forhåndsvisning tilgjengelig', 'No message preview available')
 }

@@ -74,9 +74,10 @@ function buildPrompt(mode: AssistMode, messages: AssistMessage[], opts: AssistOp
         `recommend the single best next action for the agent (e.g. reply, escalate, refund, ask for info).`
       )
     case 'ask':
+      const question = opts.question || opts.instruction || 'What is the status of this conversation?'
       return (
         header +
-        `The support agent asks: "${opts.question || 'What is the status of this conversation?'}". ` +
+        `The support agent asks: "${question}". ` +
         `Answer specifically using only the transcript. If the transcript lacks the answer, say so.`
       )
   }

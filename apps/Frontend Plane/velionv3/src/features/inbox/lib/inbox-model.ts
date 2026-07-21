@@ -1,5 +1,13 @@
 export type InboxTab = 'all' | 'open' | 'pending' | 'solved'
 
+// FEEDBACK_TAG mirrors conversation-core-go's conversation.FeedbackTag --
+// applied to every conversation created by the "Send feedback" widget
+// (submitter's own org) and to its mirrored copy in the team's monitored org
+// (see Service.mirrorFeedback). Drives the default "Feedback" saved view
+// below so mirrored pilot feedback surfaces automatically, without anyone
+// needing to know to filter for it manually.
+export const FEEDBACK_TAG = 'pilot-feedback'
+
 export type InboxSidebarView =
   | 'mine'
   | 'mentions'
@@ -16,6 +24,7 @@ export type InboxSidebarView =
   | 'view-messenger'
   | 'view-email'
   | 'view-social'
+  | 'view-feedback'
   | 'manage'
 
 export type SupportTicketReference = {
@@ -41,6 +50,8 @@ export type ZammadTicket = {
   updated_at: string
   article_count?: number
   channel?: string
+  provider?: string
+  lastMessagePreview?: string
   agentState?: string
   supportTicket?: SupportTicketReference | null
 }
@@ -181,6 +192,11 @@ export function resolveInboxRouteFilter(searchParams: URLSearchParams): InboxRou
       return { activeTab: 'all', agentState: 'abandoned', label: 'Abandoned' }
     case 'team-admin-support':
       return { activeTab: 'open', queue: 'Admin Support', label: 'Admin Support' }
+    case 'view-feedback':
+      // Default saved view for mirrored + own-org pilot feedback (see
+      // FEEDBACK_TAG above). Shows every status, like Mentions -- a feedback
+      // note is not itself "open/pending/solved" support work.
+      return { activeTab: 'all', assigned: 'all', queue: 'feedback', label: 'Feedback' }
     case 'view-messenger':
       return { activeTab: 'open', assigned: 'all', channel: 'messenger', label: 'Messenger' }
     case 'view-email':

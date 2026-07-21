@@ -11,6 +11,7 @@ import {
   LayoutGrid,
   List,
   Mail,
+  MessageCircleMore,
   MessageSquare,
   MessagesSquare,
   PenLine,
@@ -47,6 +48,7 @@ type InboxSidebarView =
   | 'view-messenger'
   | 'view-email'
   | 'view-social'
+  | 'view-feedback'
   | 'manage'
 
 type InboxSidebarItem = {
@@ -97,7 +99,7 @@ const inboxMentionChannels: InboxSidebarSubItem[] = [
   { id: 'mentions-all', label: 'All mentions', href: '/inbox?view=mentions' },
   { id: 'mentions-facebook', label: 'Facebook', href: '/inbox?view=mentions&channel=facebook' },
   { id: 'mentions-instagram', label: 'Instagram', href: '/inbox?view=mentions&channel=instagram' },
-  { id: 'mentions-twitter', label: 'Twitter / X', href: '/inbox?view=mentions&channel=twitter' },
+  { id: 'mentions-twitter', label: 'Twitter / X', href: '/inbox?view=mentions&channel=x' },
   { id: 'mentions-linkedin', label: 'LinkedIn', href: '/inbox?view=mentions&channel=linkedin' },
 ]
 
@@ -113,6 +115,12 @@ const inboxSidebarGroups: InboxSidebarGroup[] = [
       { id: 'all', label: 'All', icon: List, href: '/inbox?view=all' },
       { id: 'unassigned', label: 'Unassigned', icon: UserRound, href: '/inbox?view=unassigned' },
       { id: 'spam', label: 'Spam', icon: ShieldAlert, href: '/inbox?view=spam' },
+      // Default saved view surfacing every conversation tagged with the
+      // pilot-feedback tag -- both filed directly in this org and mirrored in
+      // from an external pilot org (see conversation-core-go's
+      // Service.mirrorFeedback) -- so the team sees it without knowing to
+      // filter manually.
+      { id: 'view-feedback', label: 'Feedback', icon: MessageCircleMore, href: '/inbox?view=view-feedback' },
       { id: 'dashboard', label: 'Dashboard', icon: LayoutGrid, href: '/inbox?view=dashboard' },
     ],
   },
@@ -445,6 +453,7 @@ const inboxLabels: Record<string, readonly [string, string]> = {
   'item:all': ['Alle', 'All'],
   'item:unassigned': ['Uten eier', 'Unassigned'],
   'item:spam': ['Spam', 'Spam'],
+  'item:view-feedback': ['Tilbakemelding', 'Feedback'],
   'item:dashboard': ['Dashboard', 'Dashboard'],
   'item:ai-all': ['Alle samtaler', 'All conversations'],
   'item:ai-resolved': ['Løst', 'Resolved'],
