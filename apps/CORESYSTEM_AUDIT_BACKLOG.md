@@ -1,5 +1,23 @@
 # CoreSystem Audit Backlog
 
+> **2026-07-20 correction:** two items below are stale.
+> 1. **Item #0 ("INFRASTRUCTURE, now blocking everything" — Docker containerd
+>    corrupted / `application-postgres` volume corrupted)** is resolved. A live
+>    `docker ps` on 2026-07-20 shows 94 containers up with zero
+>    unhealthy/restarting, across all six planes. The stack was repaired around
+>    2026-07-16/17; this backlog entry was never updated. Treat Docker/host
+>    health as currently green, not as a gating blocker.
+> 2. **The P0 row "documents-api still has observe-mode `authctx`... unimplemented
+>    signature verification"** (line ~96) and its Data Plane v2 duplicate (line
+>    ~124) are stale. `documents-api-go`'s JWT/JWKS verification is implemented,
+>    `docker-compose.yml` sets `AUTHCTX_ENFORCE=1` for it, and the live container
+>    was re-verified this pass to genuinely reject missing/invalid bearer tokens
+>    with 401. This is confirmed for `documents-api-go` only, not for
+>    `data-orchestrator-go`/`data-quality-go`/`wiki-store-go`/`graph-index-rs`.
+>
+> Not re-verified in this pass, so left as-is: the Model Plane deploy-landmine
+> item, the velionv3 `graph-preview` IDOR, `cost-core` auth, and every other row.
+
 Updated: 2026-07-12 (six-plane audit)
 
 ## 2026-07-11/12 — Six-plane audit: consolidated open items

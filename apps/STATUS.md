@@ -1,5 +1,18 @@
 # CoreSystem Status
 
+> **2026-07-20 correction:** this file's Model Plane claim of **"All 30 verification
+> gates closed (100%)"** and **"no architectural drift"** is stale and superseded.
+> Live 2026-07-16 through 2026-07-20 evidence (`apps/Model Plane/MODEL_PLANE_STATUS.md`,
+> `docs/core-research/plane-audit-2026-07-16.md`,
+> `docs/core-research/grpc-safe-rebuild-decision-2026-07-16.md`) shows the Model Plane
+> is a working local integration stack (all 21 containers healthy, gRPC listeners
+> authenticated and reachable as of 2026-07-20) but is **not production-ready**:
+> approval-continuation has no restartable dispatcher/receipt, capability health has
+> no attested reporter, tenant delegation (`allowAnyOrg`) is incomplete, and no signed
+> release artifact/rollback exists. Do not treat the "30/30 gates" figure below as
+> current. Everything under "Quarry V2 — detailed" was not re-verified in this pass;
+> treat it as historical unless cross-checked against `Ingestion Plane/INGESTION_PLANE_STATUS.md`.
+
 **Last updated:** 2026-04-23
 
 Single source of truth across both in-flight planes. Points back at per-app docs for detail.

@@ -1,5 +1,17 @@
 # CoreSystem — Production-Readiness Roadmap (2026-07-13)
 
+> **2026-07-20 correction:** this is a dated point-in-time inventory (evidence
+> captured 2026-07-13) and several of its findings are now stale. In particular,
+> the inference-core/model-gateway gRPC unreachability (e.g. the `:9092`
+> `ListPendingApprovals` cascade, `/readyz` masking downstream failure) and any
+> "host disk critically low" framing as an active outage no longer describe the
+> current runtime: a live `docker ps` on 2026-07-20 shows 94 containers healthy
+> across CoreSystem, including `model-gateway`/`inference-core` with reachable
+> gRPC listeners (see `apps/Model Plane/MODEL_PLANE_STATUS.md`, 2026-07-16
+> reconciliation). Host disk headroom itself was not re-measured in this pass.
+> Findings not about Docker/inference availability (security, correctness,
+> coverage gaps, etc.) were not re-verified and should still be treated as open.
+
 **Companion to:** [SYSTEM_PRODUCTION_READINESS_2026-07-13.md](SYSTEM_PRODUCTION_READINESS_2026-07-13.md)
 **Purpose:** document **every** issue, error, bug, warning, missing implementation, and improvement — no matter how light — with a phased plan toward enterprise readiness.
 **Nature:** documentation only. No code was changed and nothing was deleted in producing this. Every recommendation below is a *proposal to schedule*, not an applied change.
