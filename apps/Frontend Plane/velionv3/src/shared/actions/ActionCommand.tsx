@@ -4,6 +4,7 @@ import type { ActionId } from '@/shared/actions/action-registry'
 import type { ActionActor, ActionExecution, ActionPreview } from '@/shared/actions/types'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
+import { translateApiError, useI18n } from '@/shared/i18n'
 
 type ActionCommandProps = {
   actionId: ActionId
@@ -15,6 +16,7 @@ type ActionCommandProps = {
 
 // Human clicks and model-initiated commands both pass through this component contract.
 export function ActionCommand(props: ActionCommandProps) {
+  const i18n = useI18n()
   const [preview, setPreview] = createSignal<ActionPreview>()
   const [execution, setExecution] = createSignal<ActionExecution>()
   const [error, setError] = createSignal<string>()
@@ -31,7 +33,9 @@ export function ActionCommand(props: ActionCommandProps) {
     try {
       setExecution(await executeAction(props.actionId, props.actor, props.input))
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Action failed')
+      setError(
+        translateApiError(err, i18n.tr, { no: 'Handlingen feilet.', en: 'Action failed.' }),
+      )
     }
   }
 

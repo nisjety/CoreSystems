@@ -42,6 +42,13 @@ import { agentBlueprints } from '@/features/agents/lib/velion-agent-blueprints'
 import type { AgentBlueprint } from '@/features/agents/lib/velion-agent-page-types'
 import { controlFocusClass } from '@/features/agents/lib/velion-agent-page-styles'
 import {
+  getPresetAgent,
+  presetAgentChatActions,
+  presetAgents,
+  type PresetAgent,
+  type PresetAgentId,
+} from '@/shared/actions/preset-agents'
+import {
   streamChat,
   VELION_BALANCE_MODE_ID,
   VELION_MODES,
@@ -70,6 +77,7 @@ import {
   summarizeToolArgs,
   summarizeToolResult,
 } from '@/features/chat/components/chat-normalizers'
+import { useI18n } from '@/shared/i18n'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -133,10 +141,14 @@ type ConsoleState = {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function AgentRunConsole() {
+  const i18n = useI18n()
   const [goal, setGoal] = createSignal('')
   const [blueprintId, setBlueprintId] = createSignal<AgentBlueprint['id']>(agentBlueprints[0]!.id)
   const [modeId, setModeId] = createSignal<string>(VELION_BALANCE_MODE_ID)
   const [browseWeb, setBrowseWeb] = createSignal(false)
+  // The active preset (if any) fixes which action-registry tools ride along on
+  // the next `runTask()` call — see `selectPreset` and its use in `runTask`.
+  const [presetId, setPresetId] = createSignal<PresetAgentId | null>(null)
 
   const [state, setState] = createStore<ConsoleState>({
     status: 'idle',
@@ -295,7 +307,7 @@ export default function AgentRunConsole() {
       }
     } catch {
       // Surface the failure and re-sync from the source of truth.
-      setState('error', 'Could not record your decision — try again.')
+      setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
       if (runId) void refreshApprovals(runId)
     } finally {
       setState('decidingIds', (prev) => prev.filter((id) => id !== approvalId))
@@ -315,7 +327,7 @@ export default function AgentRunConsole() {
         upsertById({
           id: event.id ?? `step-${state.timeline.length}`,
           kind: 'step',
-          title: event.title ?? 'Step',
+          title: event.title ?? i18n.tr('Steg', 'Step'),
           detail: event.detail ?? '',
           status: event.status,
           at: new Date().toISOString(),
@@ -325,8 +337,8 @@ export default function AgentRunConsole() {
         append({
           id: `plan-${event.planId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'plan',
-          title: 'Plan',
-          detail: `${event.from ? `${event.from} → ` : ''}${event.to ?? 'updated'}`,
+          title: i18n.tr('Plan', 'Plan'),
+          detail: `${event.from ? `${event.from} → ` : ''}${event.to ?? i18n.tr('oppdatert', 'updated')}`,
           status: event.to,
           at: event.at ?? new Date().toISOString(),
         })
@@ -335,8 +347,8 @@ export default function AgentRunConsole() {
         append({
           id: `todo-${event.todoId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'todo',
-          title: 'Todo',
-          detail: `${event.from ? `${event.from} → ` : ''}${event.to ?? 'updated'}`,
+          title: i18n.tr('Oppgave', 'Todo'),
+          detail: `${event.from ? `${event.from} → ` : ''}${event.to ?? i18n.tr('oppdatert', 'updated')}`,
           status: event.to,
           at: event.at ?? new Date().toISOString(),
         })
@@ -346,8 +358,8 @@ export default function AgentRunConsole() {
         append({
           id: `approval-${event.approvalId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'pause',
-          title: 'Approval',
-          detail: `${event.approvalKind ?? 'Action'} · ${event.to ?? 'requested'}`,
+          title: i18n.tr('Godkjenning', 'Approval'),
+          detail: `${event.approvalKind ?? i18n.tr('Handling', 'Action')} · ${event.to ?? i18n.tr('forespurt', 'requested')}`,
           status: event.to,
           at: event.at ?? new Date().toISOString(),
         })
@@ -358,8 +370,8 @@ export default function AgentRunConsole() {
         append({
           id: `paused-${event.approvalId ?? state.timeline.length}`,
           kind: 'pause',
-          title: 'Paused for approval',
-          detail: 'The agent is waiting for your decision before the next step.',
+          title: i18n.tr('Satt på pause for godkjenning', 'Paused for approval'),
+          detail: i18n.tr('Agenten venter på avgjørelsen din før neste steg.', 'The agent is waiting for your decision before the next step.'),
           status: 'paused',
           at: event.at ?? new Date().toISOString(),
         })
@@ -369,8 +381,8 @@ export default function AgentRunConsole() {
         append({
           id: `resumed-${event.approvalId ?? state.timeline.length}`,
           kind: 'resume',
-          title: 'Resumed',
-          detail: 'Decision recorded — the run continues.',
+          title: i18n.tr('Gjenopptatt', 'Resumed'),
+          detail: i18n.tr('Avgjørelse registrert — kjøringen fortsetter.', 'Decision recorded — the run continues.'),
           status: 'resumed',
           at: event.at ?? new Date().toISOString(),
         })
@@ -379,7 +391,7 @@ export default function AgentRunConsole() {
         append({
           id: `browse-act-${event.actionId ?? state.timeline.length}`,
           kind: 'browser',
-          title: `Browser · ${event.actionType ?? 'navigate'}`,
+          title: `${i18n.tr('Nettleser', 'Browser')} · ${event.actionType ?? i18n.tr('naviger', 'navigate')}`,
           detail: event.url ?? '',
           status: 'dispatched',
           at: event.at ?? new Date().toISOString(),
@@ -389,7 +401,7 @@ export default function AgentRunConsole() {
         append({
           id: `browse-obs-${event.actionId ?? state.timeline.length}`,
           kind: 'browser',
-          title: event.pageTitle ? `Observed · ${event.pageTitle}` : 'Browser observation',
+          title: event.pageTitle ? `${i18n.tr('Observert', 'Observed')} · ${event.pageTitle}` : i18n.tr('Nettleserobservasjon', 'Browser observation'),
           detail: event.pageUrl ?? '',
           status: event.status ?? 'received',
           at: event.at ?? new Date().toISOString(),
@@ -399,8 +411,8 @@ export default function AgentRunConsole() {
         append({
           id: `subagent-on-${event.childRunId ?? state.timeline.length}`,
           kind: 'subagent',
-          title: `Sub-agent attached${event.role ? ` · ${event.role}` : ''}`,
-          detail: event.childRunId ? `run ${shortId(event.childRunId)}` : '',
+          title: `${i18n.tr('Underagent koblet til', 'Sub-agent attached')}${event.role ? ` · ${event.role}` : ''}`,
+          detail: event.childRunId ? `${i18n.tr('kjøring', 'run')} ${shortId(event.childRunId)}` : '',
           status: 'attached',
           at: event.at ?? new Date().toISOString(),
         })
@@ -409,8 +421,8 @@ export default function AgentRunConsole() {
         append({
           id: `subagent-off-${event.childRunId ?? state.timeline.length}`,
           kind: 'subagent',
-          title: 'Sub-agent stopped',
-          detail: event.childRunId ? `run ${shortId(event.childRunId)}` : '',
+          title: i18n.tr('Underagent stoppet', 'Sub-agent stopped'),
+          detail: event.childRunId ? `${i18n.tr('kjøring', 'run')} ${shortId(event.childRunId)}` : '',
           status: event.status ?? 'stopped',
           at: event.at ?? new Date().toISOString(),
         })
@@ -478,7 +490,7 @@ export default function AgentRunConsole() {
         upsertById({
           id: event.id ?? `chat-step-${state.timeline.length}`,
           kind: 'step',
-          title: event.title ?? 'Step',
+          title: event.title ?? i18n.tr('Steg', 'Step'),
           detail: event.detail ?? '',
           status: event.status,
           at: new Date().toISOString(),
@@ -504,8 +516,8 @@ export default function AgentRunConsole() {
         upsertById({
           id: `tool-${event.id}`,
           kind: 'tool',
-          title: humanizeToolName(event.name ?? 'Tool call'),
-          detail: summary || 'Running…',
+          title: humanizeToolName(event.name ?? i18n.tr('Verktøykall', 'Tool call')),
+          detail: summary || i18n.tr('Kjører …', 'Running…'),
           status: 'running',
           at: new Date().toISOString(),
         })
@@ -519,7 +531,7 @@ export default function AgentRunConsole() {
         upsertById({
           id: `tool-${event.id}`,
           kind: 'tool',
-          title: priorTitle ?? 'Tool result',
+          title: priorTitle ?? i18n.tr('Verktøyresultat', 'Tool result'),
           detail: summarizeToolResult(event),
           status: event.error ? 'error' : (event.status ?? 'done'),
           at: new Date().toISOString(),
@@ -570,8 +582,22 @@ export default function AgentRunConsole() {
       },
     }
 
+    // A selected preset's fixed action-registry subset rides along as real
+    // `ChatAction` tool references, so the model actually receives those tool
+    // contracts (and their approval gating) instead of only the free-text goal.
+    // `planMode: true` is never overridden by a preset — every action still runs
+    // through the console's normal HITL/approval deck.
+    const preset = presetId() ? getPresetAgent(presetId()!) : undefined
+    const presetActions = preset ? presetAgentChatActions(preset) : undefined
+
     void streamChat(
-      { content, model: modeId(), planMode: true, browseWeb: browseWeb() },
+      {
+        content,
+        model: modeId(),
+        planMode: true,
+        browseWeb: browseWeb(),
+        actions: presetActions,
+      },
       chatHandlers,
       controller.signal,
     ).then(() => {
@@ -589,7 +615,23 @@ export default function AgentRunConsole() {
 
   const useExample = (text: string) => {
     if (isActive()) return
+    setPresetId(null)
     setGoal(text)
+  }
+
+  // Selecting a preset seeds the composer + launch controls from its defaults.
+  // Clicking the already-active preset again deselects it (goal text is left
+  // as-is; only the fixed action subset stops riding along on the next run).
+  const selectPreset = (preset: PresetAgent) => {
+    if (isActive()) return
+    if (presetId() === preset.id) {
+      setPresetId(null)
+      return
+    }
+    setPresetId(preset.id)
+    setGoal(preset.goalTemplate)
+    setModeId(preset.defaults.modeId)
+    setBrowseWeb(preset.defaults.browseWeb)
   }
 
   const working = () => state.status === 'running'
@@ -628,7 +670,7 @@ export default function AgentRunConsole() {
         />
 
         <div class="velion-run-console__grid">
-          <section class="velion-run-console__launcher" aria-label="Task launcher">
+          <section class="velion-run-console__launcher" aria-label={i18n.tr('Oppgavestarter', 'Task launcher')}>
             <Launcher
               blueprintId={blueprintId()}
               browseWeb={browseWeb()}
@@ -636,11 +678,13 @@ export default function AgentRunConsole() {
               goal={goal()}
               isActive={isActive()}
               modeId={modeId()}
+              presetId={presetId()}
               onBlueprint={setBlueprintId}
               onBrowseWeb={setBrowseWeb}
               onCancel={cancel}
               onGoal={setGoal}
               onMode={setModeId}
+              onPreset={selectPreset}
               onRun={runTask}
             />
 
@@ -658,7 +702,7 @@ export default function AgentRunConsole() {
               'velion-run-console__live--active': isActive(),
               'velion-run-console__live--awaiting': awaiting(),
             }}
-            aria-label="Live run"
+            aria-label={i18n.tr('Aktiv kjøring', 'Live run')}
           >
             <Show when={pendingApprovals().length > 0}>
               <div ref={deckRef}>
@@ -711,13 +755,17 @@ export default function AgentRunConsole() {
 
 // ── Header ──────────────────────────────────────────────────────────────────
 
-const STATUS_LABEL: Record<RunStatus, string> = {
-  idle: 'Ready',
-  running: 'Running',
-  paused: 'Paused for approval',
-  done: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+/** Localized label for a run status; call inside a component so it reacts to locale changes. */
+function statusLabelFor(i18n: ReturnType<typeof useI18n>, status: RunStatus): string {
+  switch (status) {
+    case 'idle': return i18n.tr('Klar', 'Ready')
+    case 'running': return i18n.tr('Kjører', 'Running')
+    case 'paused': return i18n.tr('Satt på pause for godkjenning', 'Paused for approval')
+    case 'done': return i18n.tr('Fullført', 'Completed')
+    case 'failed': return i18n.tr('Feilet', 'Failed')
+    case 'cancelled': return i18n.tr('Kansellert', 'Cancelled')
+    default: return status
+  }
 }
 
 function RunConsoleHeader(props: {
@@ -726,27 +774,28 @@ function RunConsoleHeader(props: {
   runId: string | null
   status: RunStatus
 }) {
+  const i18n = useI18n()
   const Icon = createMemo(() => props.blueprint.Icon)
   return (
     <header class="velion-run-console__topbar">
       <div class="velion-run-console__title-group">
-        <A href="/agents" class={cn('velion-run-console__back', controlFocusClass)} aria-label="Back to agents">
+        <A href="/agents" class={cn('velion-run-console__back', controlFocusClass)} aria-label={i18n.tr('Tilbake til agenter', 'Back to agents')}>
           <ArrowLeft size={16} />
         </A>
         <div>
           <p class="velion-run-console__eyebrow">
-            <Sparkles size={13} strokeWidth={2.1} /> Task console
+            <Sparkles size={13} strokeWidth={2.1} /> {i18n.tr('Oppgavekonsoll', 'Task console')}
           </p>
-          <h1 class="velion-run-console__title">Agent Run Console</h1>
+          <h1 class="velion-run-console__title">{i18n.tr('Agent Run Console', 'Agent Run Console')}</h1>
         </div>
       </div>
       <div class="velion-run-console__status-row">
         <span class={cn('velion-run-console__status', `velion-run-console__status--${props.status}`)}>
           <StatusDot status={props.status} />
-          {STATUS_LABEL[props.status]}
+          {statusLabelFor(i18n, props.status)}
         </span>
         <Show when={props.runId}>
-          {(runId) => <span class="velion-run-console__run-id">run {shortId(runId())}</span>}
+          {(runId) => <span class="velion-run-console__run-id">{i18n.tr('kjøring', 'run')} {shortId(runId())}</span>}
         </Show>
         <span class="velion-run-console__meta-chip">
           {(() => {
@@ -794,26 +843,35 @@ function Launcher(props: {
   goal: string
   isActive: boolean
   modeId: string
+  presetId: PresetAgentId | null
   onBlueprint: (id: AgentBlueprint['id']) => void
   onBrowseWeb: (value: boolean) => void
   onCancel: () => void
   onGoal: (value: string) => void
   onMode: (id: string) => void
+  onPreset: (preset: PresetAgent) => void
   onRun: () => void
 }) {
+  const i18n = useI18n()
   const blueprint = () => agentBlueprints.find((item) => item.id === props.blueprintId) ?? agentBlueprints[0]!
   const mode = () => VELION_MODES.find((item) => item.id === props.modeId) ?? VELION_MODES[1]!
   const advancedLabel = () =>
-    `${blueprint().shortTitle} · ${mode().label} · Web ${props.browseWeb ? 'on' : 'off'}`
+    `${blueprint().shortTitle} · ${mode().label} · ${i18n.tr('Nett', 'Web')} ${props.browseWeb ? i18n.tr('på', 'on') : i18n.tr('av', 'off')}`
 
   return (
     <div class="velion-run-launcher">
+      <PresetPicker
+        activeId={props.presetId}
+        disabled={props.isActive}
+        onSelect={props.onPreset}
+      />
+
       <div class="velion-run-launcher__field">
-        <label class="velion-run-launcher__label" for="run-goal">What should the agent do?</label>
+        <label class="velion-run-launcher__label" for="run-goal">{i18n.tr('Hva skal agenten gjøre?', 'What should the agent do?')}</label>
         <textarea
           id="run-goal"
           class={cn('velion-run-launcher__textarea', controlFocusClass)}
-          placeholder="e.g. Research our top 3 competitors' pricing and draft a comparison summary."
+          placeholder={i18n.tr("f.eks. Undersøk prisene til våre 3 største konkurrenter og lag et sammenligningssammendrag.", "e.g. Research our top 3 competitors' pricing and draft a comparison summary.")}
           rows={4}
           value={props.goal}
           disabled={props.isActive}
@@ -829,13 +887,13 @@ function Launcher(props: {
 
       <details class="velion-run-launcher__advanced" open>
         <summary>
-          <span class="velion-run-launcher__advanced-title">Configuration</span>
+          <span class="velion-run-launcher__advanced-title">{i18n.tr('Konfigurasjon', 'Configuration')}</span>
           <span class="velion-run-launcher__advanced-value">{advancedLabel()}</span>
         </summary>
 
         <div class="velion-run-launcher__field">
-          <p class="velion-run-launcher__label">Agent blueprint</p>
-          <div class="velion-run-launcher__blueprints" role="radiogroup" aria-label="Agent blueprint">
+          <p class="velion-run-launcher__label">{i18n.tr('Agent-blueprint', 'Agent blueprint')}</p>
+          <div class="velion-run-launcher__blueprints" role="radiogroup" aria-label={i18n.tr('Agent-blueprint', 'Agent blueprint')}>
             <For each={agentBlueprints}>
               {(item, index) => {
                 const Icon = item.Icon
@@ -875,8 +933,8 @@ function Launcher(props: {
         </div>
 
         <div class="velion-run-launcher__field">
-          <p class="velion-run-launcher__label">Velion mode</p>
-          <div class="velion-run-launcher__modes" role="radiogroup" aria-label="Velion mode">
+          <p class="velion-run-launcher__label">{i18n.tr('Velion-modus', 'Velion mode')}</p>
+          <div class="velion-run-launcher__modes" role="radiogroup" aria-label={i18n.tr('Velion-modus', 'Velion mode')}>
             <For each={VELION_MODES}>
               {(item, index) => {
                 const selected = () => props.modeId === item.id
@@ -903,7 +961,7 @@ function Launcher(props: {
                     <span class="velion-run-mode__head">
                       <span class="velion-run-mode__label">{item.label}</span>
                       <span class={cn('velion-run-mode__badge', `velion-run-mode__badge--${item.badge}`)}>
-                        {item.badge === 'premium' ? 'Premium' : 'Cheap'}
+                        {item.badge === 'premium' ? i18n.tr('Premium', 'Premium') : i18n.tr('Billig', 'Cheap')}
                       </span>
                     </span>
                     <span class="velion-run-mode__desc">{item.description}</span>
@@ -922,13 +980,13 @@ function Launcher(props: {
             onChange={(event) => props.onBrowseWeb(event.currentTarget.checked)}
           />
           <Globe2 size={14} strokeWidth={2.1} />
-          Allow web browsing
+          {i18n.tr('Tillat nettleser-søk', 'Allow web browsing')}
         </label>
       </details>
 
       <p class="velion-run-launcher__note">
         <ShieldCheck size={13} strokeWidth={2.1} />
-        Risky tools pause for your approval before they run.
+        {i18n.tr('Risikable verktøy settes på pause for din godkjenning før de kjøres.', 'Risky tools pause for your approval before they run.')}
       </p>
 
       <div class="velion-run-launcher__actions">
@@ -944,7 +1002,7 @@ function Launcher(props: {
               onClick={() => props.onRun()}
             >
               <Play size={15} strokeWidth={2.2} />
-              Run task
+              {i18n.tr('Kjør oppgave', 'Run task')}
             </Button>
           )}
         >
@@ -956,9 +1014,51 @@ function Launcher(props: {
             onClick={() => props.onCancel()}
           >
             <Square size={13} strokeWidth={2.4} />
-            Cancel run
+            {i18n.tr('Avbryt kjøring', 'Cancel run')}
           </Button>
         </Show>
+      </div>
+    </div>
+  )
+}
+
+// ── Preset picker ─────────────────────────────────────────────────────────────
+// Quick-launch buttons for the curated presets in `shared/actions/preset-agents`.
+// Selecting one seeds the goal + launch controls from its defaults; the fixed
+// action-registry subset it carries is wired into the request by `runTask`
+// (see `AgentRunConsole`), not here — this component only picks and displays.
+
+function PresetPicker(props: {
+  activeId: PresetAgentId | null
+  disabled: boolean
+  onSelect: (preset: PresetAgent) => void
+}) {
+  const i18n = useI18n()
+  return (
+    <div class="velion-run-launcher__field">
+      <p class="velion-run-launcher__label">{i18n.tr('Hurtigstart en forhåndsdefinert agent', 'Quick-launch a preset agent')}</p>
+      <div class="velion-run-launcher__presets" role="group" aria-label={i18n.tr('Forhåndsdefinerte agenter', 'Preset agents')}>
+        <For each={presetAgents}>
+          {(preset) => {
+            const active = () => props.activeId === preset.id
+            return (
+              <button
+                type="button"
+                aria-pressed={active()}
+                disabled={props.disabled}
+                onClick={() => props.onSelect(preset)}
+                class={cn(
+                  'velion-run-preset',
+                  active() && 'velion-run-preset--active',
+                  controlFocusClass,
+                )}
+              >
+                <span class="velion-run-preset__label">{preset.label}</span>
+                <span class="velion-run-preset__desc">{preset.description}</span>
+              </button>
+            )
+          }}
+        </For>
       </div>
     </div>
   )
@@ -971,8 +1071,9 @@ function ApprovalDeck(props: {
   deciding: (approvalId: string) => boolean
   onDecide: (approvalId: string, decision: ApprovalDecision) => void
 }) {
+  const i18n = useI18n()
   return (
-    <div class="velion-run-approvals" role="group" aria-label="Pending approvals">
+    <div class="velion-run-approvals" role="group" aria-label={i18n.tr('Ventende godkjenninger', 'Pending approvals')}>
       <For each={props.approvals}>
         {(approval) => {
           const busy = () => props.deciding(approval.id)
@@ -981,15 +1082,15 @@ function ApprovalDeck(props: {
             <div class="velion-run-approval__head">
               <span class="velion-run-approval__badge">
                 <PauseCircle size={13} strokeWidth={2.2} />
-                Approval required
+                {i18n.tr('Godkjenning kreves', 'Approval required')}
               </span>
-              <span class="velion-run-approval__kind">{approval.kind ?? 'Gated action'}</span>
+              <span class="velion-run-approval__kind">{approval.kind ?? i18n.tr('Sperret handling', 'Gated action')}</span>
             </div>
             <p class="velion-run-approval__detail">
-              {approval.detail ?? 'The agent is waiting for your decision before the next step.'}
+              {approval.detail ?? i18n.tr('Agenten venter på avgjørelsen din før neste steg.', 'The agent is waiting for your decision before the next step.')}
             </p>
             <Show when={approval.requestedBy}>
-              <p class="velion-run-approval__meta">Requested by {approval.requestedBy}</p>
+              <p class="velion-run-approval__meta">{i18n.tr(`Forespurt av ${approval.requestedBy}`, `Requested by ${approval.requestedBy}`)}</p>
             </Show>
             <div class="velion-run-approval__actions">
               <button
@@ -1001,7 +1102,7 @@ function ApprovalDeck(props: {
                 <Show when={busy()} fallback={<CheckCircle2 size={14} strokeWidth={2.2} />}>
                   <Loader2 size={14} strokeWidth={2.2} class="velion-run-spin" />
                 </Show>
-                Approve
+                {i18n.tr('Godkjenn', 'Approve')}
               </button>
               <button
                 type="button"
@@ -1012,7 +1113,7 @@ function ApprovalDeck(props: {
                 <Show when={busy()} fallback={<Square size={12} strokeWidth={2.4} />}>
                   <Loader2 size={13} strokeWidth={2.2} class="velion-run-spin" />
                 </Show>
-                Reject
+                {i18n.tr('Avvis', 'Reject')}
               </button>
             </div>
           </div>
@@ -1025,14 +1126,6 @@ function ApprovalDeck(props: {
 
 // ── Answer panel ──────────────────────────────────────────────────────────────
 
-const ONBOARD_FLOW: readonly string[] = ['Plan', 'Act', 'Approve', 'Answer']
-
-const ONBOARD_EXAMPLES: readonly string[] = [
-  "Research our top 3 competitors' pricing and draft a comparison summary.",
-  'Find the 5 most recent support tickets about refunds and summarize the themes.',
-  'Pull this quarter’s revenue numbers and draft a short status update for the team.',
-]
-
 function AnswerPanel(props: {
   answer: string
   reasoning: string
@@ -1040,6 +1133,18 @@ function AnswerPanel(props: {
   streaming: boolean
   onUseExample: (text: string) => void
 }) {
+  const i18n = useI18n()
+  const onboardFlow = createMemo(() => [
+    i18n.tr('Plan', 'Plan'),
+    i18n.tr('Handle', 'Act'),
+    i18n.tr('Godkjenn', 'Approve'),
+    i18n.tr('Svar', 'Answer'),
+  ])
+  const onboardExamples = createMemo(() => [
+    i18n.tr("Undersøk prisene til våre 3 største konkurrenter og lag et sammenligningssammendrag.", "Research our top 3 competitors' pricing and draft a comparison summary."),
+    i18n.tr('Finn de 5 nyeste supportsakene om refusjoner og oppsummer temaene.', 'Find the 5 most recent support tickets about refunds and summarize the themes.'),
+    i18n.tr('Hent inntektstallene for dette kvartalet og skriv en kort statusoppdatering til teamet.', 'Pull this quarter’s revenue numbers and draft a short status update for the team.'),
+  ])
   const working = () => props.status === 'running' || props.status === 'paused'
   const emptyWorking = () => working() && props.answer.trim().length === 0
   const terminal = () =>
@@ -1048,11 +1153,11 @@ function AnswerPanel(props: {
   return (
     <div class="velion-run-panel velion-run-answer">
       <div class="velion-run-panel__head">
-        <span class="velion-run-panel__eyebrow"><Bot size={14} strokeWidth={2.1} /> Answer</span>
+        <span class="velion-run-panel__eyebrow"><Bot size={14} strokeWidth={2.1} /> {i18n.tr('Svar', 'Answer')}</span>
       </div>
       <Show when={props.reasoning.trim()}>
         <details class="velion-run-answer__reasoning">
-          <summary><Brain size={13} strokeWidth={2.1} /> Reasoning</summary>
+          <summary><Brain size={13} strokeWidth={2.1} /> {i18n.tr('Resonnement', 'Reasoning')}</summary>
           <p>{props.reasoning}</p>
         </details>
       </Show>
@@ -1061,7 +1166,7 @@ function AnswerPanel(props: {
         fallback={(
           <div class="velion-run-answer__working" aria-live="polite">
             <Loader2 size={15} strokeWidth={2.2} class="velion-run-spin" />
-            <span>Agent is working…</span>
+            <span>{i18n.tr('Agenten jobber …', 'Agent is working…')}</span>
           </div>
         )}
       >
@@ -1070,24 +1175,24 @@ function AnswerPanel(props: {
           fallback={(
             <Show
               when={props.status === 'idle'}
-              fallback={<p class="velion-run-answer__empty">No answer was produced for this run.</p>}
+              fallback={<p class="velion-run-answer__empty">{i18n.tr('Ingen svar ble produsert for denne kjøringen.', 'No answer was produced for this run.')}</p>}
             >
               <div class="velion-run-answer__onboard">
                 <div class="velion-run-answer__how">
-                  <For each={ONBOARD_FLOW}>
+                  <For each={onboardFlow()}>
                     {(label, index) => (
                       <>
                         <span class="velion-run-answer__how-step">{label}</span>
-                        <Show when={index() < ONBOARD_FLOW.length - 1}>
+                        <Show when={index() < onboardFlow().length - 1}>
                           <span class="velion-run-answer__how-arrow" aria-hidden="true">→</span>
                         </Show>
                       </>
                     )}
                   </For>
                 </div>
-                <p class="velion-run-answer__empty">Launch a task to watch the agent plan, act, and report here. Try one:</p>
+                <p class="velion-run-answer__empty">{i18n.tr('Start en oppgave for å se agenten planlegge, handle og rapportere her. Prøv en:', 'Launch a task to watch the agent plan, act, and report here. Try one:')}</p>
                 <div class="velion-run-answer__examples">
-                  <For each={ONBOARD_EXAMPLES}>
+                  <For each={onboardExamples()}>
                     {(example) => (
                       <button
                         type="button"
@@ -1130,12 +1235,12 @@ function AnswerPanel(props: {
               fallback={(
                 <>
                   <CheckCircle2 size={14} strokeWidth={2.2} />
-                  <span>Completed</span>
+                  <span>{i18n.tr('Fullført', 'Completed')}</span>
                 </>
               )}
             >
               <Square size={13} strokeWidth={2.4} />
-              <span>Run cancelled — partial output above</span>
+              <span>{i18n.tr('Kjøring kansellert — delvis output over', 'Run cancelled — partial output above')}</span>
             </Show>
           </div>
         </Show>
@@ -1147,37 +1252,38 @@ function AnswerPanel(props: {
 // ── Trust panel ───────────────────────────────────────────────────────────────
 
 function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
+  const i18n = useI18n()
   return (
     <div class="velion-run-panel velion-run-trust">
       <div class="velion-run-panel__head">
-        <span class="velion-run-panel__eyebrow"><Link2 size={14} strokeWidth={2.1} /> Sources &amp; cost</span>
+        <span class="velion-run-panel__eyebrow"><Link2 size={14} strokeWidth={2.1} /> {i18n.tr('Kilder og kostnad', 'Sources & cost')}</span>
       </div>
       <Show when={props.usage}>
         {(usage) => (
           <>
-            <p class="velion-run-trust__subhead">Usage</p>
+            <p class="velion-run-trust__subhead">{i18n.tr('Bruk', 'Usage')}</p>
             <div class="velion-run-trust__usage">
               <Show when={usage().confidence != null}>
-                <UsageStat label="Confidence" value={`${Math.round((usage().confidence ?? 0) * 100)}%`} />
+                <UsageStat label={i18n.tr('Konfidens', 'Confidence')} value={`${Math.round((usage().confidence ?? 0) * 100)}%`} />
               </Show>
               <Show when={usage().inputTokens != null || usage().outputTokens != null}>
                 <UsageStat
-                  label="Tokens"
-                  value={`${usage().inputTokens ?? 0} in · ${usage().outputTokens ?? 0} out`}
+                  label={i18n.tr('Tokens', 'Tokens')}
+                  value={i18n.tr(`${usage().inputTokens ?? 0} inn · ${usage().outputTokens ?? 0} ut`, `${usage().inputTokens ?? 0} in · ${usage().outputTokens ?? 0} out`)}
                 />
               </Show>
               <Show when={usage().costUsd != null}>
-                <UsageStat label="Cost" value={`$${(usage().costUsd ?? 0).toFixed(4)}`} />
+                <UsageStat label={i18n.tr('Kostnad', 'Cost')} value={`$${(usage().costUsd ?? 0).toFixed(4)}`} />
               </Show>
               <Show when={usage().latencyMs != null}>
-                <UsageStat label="Latency" value={`${usage().latencyMs} ms`} />
+                <UsageStat label={i18n.tr('Ventetid', 'Latency')} value={`${usage().latencyMs} ms`} />
               </Show>
             </div>
           </>
         )}
       </Show>
       <Show when={props.citations.length > 0}>
-        <p class="velion-run-trust__subhead">Sources</p>
+        <p class="velion-run-trust__subhead">{i18n.tr('Kilder', 'Sources')}</p>
         <div class="velion-run-trust__citations">
           <For each={props.citations}>
             {(citation, index) => (
@@ -1227,20 +1333,21 @@ const TIMELINE_ICON: Record<TimelineKind, IconComponent> = {
 }
 
 /** Humanize raw orchestration status strings for the timeline pill. */
-function statusLabel(status: string): string {
+function statusLabel(i18n: ReturnType<typeof useI18n>, status: string): string {
   const value = status.toLowerCase()
-  if (value === 'dispatched') return 'Sent'
-  if (value === 'received' || value === 'attached') return 'Done'
-  if (value === 'paused') return 'Waiting'
-  if (value === 'resumed') return 'Resumed'
+  if (value === 'dispatched') return i18n.tr('Sendt', 'Sent')
+  if (value === 'received' || value === 'attached') return i18n.tr('Ferdig', 'Done')
+  if (value === 'paused') return i18n.tr('Venter', 'Waiting')
+  if (value === 'resumed') return i18n.tr('Gjenopptatt', 'Resumed')
   return status
 }
 
 function TimelinePanel(props: { entries: TimelineEntry[]; status: RunStatus }) {
+  const i18n = useI18n()
   return (
     <div class="velion-run-panel velion-run-timeline">
       <div class="velion-run-panel__head">
-        <span class="velion-run-panel__eyebrow"><ListChecks size={14} strokeWidth={2.1} /> Timeline</span>
+        <span class="velion-run-panel__eyebrow"><ListChecks size={14} strokeWidth={2.1} /> {i18n.tr('Tidslinje', 'Timeline')}</span>
         <span class="velion-run-timeline__count">{props.entries.length}</span>
       </div>
       <Show
@@ -1249,10 +1356,10 @@ function TimelinePanel(props: { entries: TimelineEntry[]; status: RunStatus }) {
           <div class="velion-run-timeline__empty">
             <Show
               when={props.status === 'running'}
-              fallback={<p>Live plan transitions, tool calls, and browser steps will appear here during a run.</p>}
+              fallback={<p>{i18n.tr('Live planoverganger, verktøykall og nettleser-steg vises her under en kjøring.', 'Live plan transitions, tool calls, and browser steps will appear here during a run.')}</p>}
             >
               <Loader2 size={15} strokeWidth={2.2} class="velion-run-spin" />
-              <p>Agent is working… orchestration steps will stream in if the run emits them.</p>
+              <p>{i18n.tr('Agenten jobber … orkestreringssteg strømmes inn hvis kjøringen sender dem.', 'Agent is working… orchestration steps will stream in if the run emits them.')}</p>
             </Show>
           </div>
         )}
@@ -1268,13 +1375,14 @@ function TimelinePanel(props: { entries: TimelineEntry[]; status: RunStatus }) {
 }
 
 function TimelineRow(props: { entry: TimelineEntry }) {
+  const i18n = useI18n()
   const Icon = createMemo(() => TIMELINE_ICON[props.entry.kind])
   const statusTone = () => normalizeStatusTone(props.entry.status)
   const time = () => formatClock(props.entry.at)
   const pill = () => {
     const status = props.entry.status
     if (!status) return null
-    const label = statusLabel(status)
+    const label = statusLabel(i18n, status)
     // Suppress the pill when it merely echoes the title (e.g. "Plan" / "Todo").
     if (label.toLowerCase() === props.entry.title.toLowerCase()) return null
     return label
@@ -1366,7 +1474,7 @@ function statusToRunStatus(status: string): RunStatus {
 type RunGroup = { label: string; runs: RunDetail[] }
 
 /** Group runs into Today / This week / Earlier by their creation date. */
-function groupRunsByRecency(runs: RunDetail[]): RunGroup[] {
+function groupRunsByRecency(i18n: ReturnType<typeof useI18n>, runs: RunDetail[]): RunGroup[] {
   const now = Date.now()
   const startOfToday = new Date()
   startOfToday.setHours(0, 0, 0, 0)
@@ -1385,25 +1493,25 @@ function groupRunsByRecency(runs: RunDetail[]): RunGroup[] {
   }
 
   return [
-    { label: 'Today', runs: today },
-    { label: 'This week', runs: week },
-    { label: 'Earlier', runs: earlier },
+    { label: i18n.tr('I dag', 'Today'), runs: today },
+    { label: i18n.tr('Denne uken', 'This week'), runs: week },
+    { label: i18n.tr('Tidligere', 'Earlier'), runs: earlier },
   ].filter((group) => group.runs.length > 0)
 }
 
 /** Relative "x ago" for the history row time; falls back to a clock. */
-function formatRelative(at?: string): string {
+function formatRelative(i18n: ReturnType<typeof useI18n>, at?: string): string {
   if (!at) return ''
   const time = new Date(at).getTime()
   if (Number.isNaN(time)) return ''
   const diff = Date.now() - time
   const min = Math.floor(diff / 60_000)
-  if (min < 1) return 'just now'
-  if (min < 60) return `${min}m ago`
+  if (min < 1) return i18n.tr('akkurat nå', 'just now')
+  if (min < 60) return i18n.tr(`${min}m siden`, `${min}m ago`)
   const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr}h ago`
+  if (hr < 24) return i18n.tr(`${hr}t siden`, `${hr}h ago`)
   const day = Math.floor(hr / 24)
-  if (day < 7) return `${day}d ago`
+  if (day < 7) return i18n.tr(`${day}d siden`, `${day}d ago`)
   return new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
@@ -1434,12 +1542,13 @@ function HistoryRail(props: {
   runs: RunDetail[]
   onSelect: (run: RunDetail) => void
 }) {
-  const groups = createMemo(() => groupRunsByRecency(props.runs))
+  const i18n = useI18n()
+  const groups = createMemo(() => groupRunsByRecency(i18n, props.runs))
 
   return (
-    <div class="velion-run-panel velion-run-history" aria-label="Run history">
+    <div class="velion-run-panel velion-run-history" aria-label={i18n.tr('Kjøringshistorikk', 'Run history')}>
       <div class="velion-run-panel__head">
-        <span class="velion-run-panel__eyebrow"><History size={14} strokeWidth={2.1} /> History</span>
+        <span class="velion-run-panel__eyebrow"><History size={14} strokeWidth={2.1} /> {i18n.tr('Historikk', 'History')}</span>
         <Show when={props.runs.length > 0}>
           <span class="velion-run-timeline__count">{props.runs.length}</span>
         </Show>
@@ -1449,8 +1558,8 @@ function HistoryRail(props: {
         when={props.runs.length > 0}
         fallback={(
           <p class="velion-run-history__empty">
-            <Show when={props.loading} fallback="Past runs for this conversation will appear here.">
-              Loading runs…
+            <Show when={props.loading} fallback={i18n.tr('Tidligere kjøringer for denne samtalen vises her.', 'Past runs for this conversation will appear here.')}>
+              {i18n.tr('Laster kjøringer …', 'Loading runs…')}
             </Show>
           </p>
         )}
@@ -1471,10 +1580,10 @@ function HistoryRail(props: {
                           aria-current={run.runId === props.activeRunId ? 'true' : undefined}
                           onClick={() => props.onSelect(run)}
                         >
-                          <span class="velion-run-history__goal">{run.goal || 'Untitled run'}</span>
+                          <span class="velion-run-history__goal">{run.goal || i18n.tr('Uten navn', 'Untitled run')}</span>
                           <span class="velion-run-history__meta">
                             <RunStatusPill status={run.status} />
-                            <span class="velion-run-history__time">{formatRelative(run.createdAt)}</span>
+                            <span class="velion-run-history__time">{formatRelative(i18n, run.createdAt)}</span>
                           </span>
                         </button>
                       </li>
@@ -1492,10 +1601,11 @@ function HistoryRail(props: {
 
 /** Compact status pill for a history row, toned by the run's terminal state. */
 function RunStatusPill(props: { status: string }) {
+  const i18n = useI18n()
   const tone = createMemo(() => normalizeStatusTone(props.status))
   return (
     <span class="velion-run-history__pill" data-tone={tone()}>
-      {statusLabel(props.status)}
+      {statusLabel(i18n, props.status)}
     </span>
   )
 }
@@ -1509,6 +1619,7 @@ function TelemetryPanel(props: {
   status: RunStatus
   onResume: () => void
 }) {
+  const i18n = useI18n()
   // Step N of M: completed steps from the durable detail; total prefers the
   // checkpoint count when it leads the completed count (Rox-style progress).
   const stepLabel = createMemo(() => {
@@ -1516,7 +1627,9 @@ function TelemetryPanel(props: {
     if (!detail) return null
     const done = detail.stepsCompleted
     const total = Math.max(done, detail.checkpointIndex)
-    return total > 0 ? `Step ${done} of ${total}` : `${done} steps`
+    return total > 0
+      ? i18n.tr(`Steg ${done} av ${total}`, `Step ${done} of ${total}`)
+      : i18n.tr(`${done} steg`, `${done} steps`)
   })
 
   // ETA is only meaningful for an in-flight run with known progress.
@@ -1527,7 +1640,7 @@ function TelemetryPanel(props: {
     const total = Math.max(done, detail.checkpointIndex)
     if (total <= done) return null
     const remaining = total - done
-    return `~${remaining} step${remaining === 1 ? '' : 's'} left`
+    return i18n.tr(`~${remaining} steg igjen`, `~${remaining} step${remaining === 1 ? '' : 's'} left`)
   })
 
   const tokens = createMemo(() => {
@@ -1536,7 +1649,7 @@ function TelemetryPanel(props: {
     const input = live?.inputTokens ?? detail?.inputTokens ?? 0
     const output = live?.outputTokens ?? detail?.outputTokens ?? 0
     if (input === 0 && output === 0) return null
-    return `${input} in · ${output} out`
+    return i18n.tr(`${input} inn · ${output} ut`, `${input} in · ${output} out`)
   })
 
   // The mode this run was launched under: stored mode string on the detail, else
@@ -1551,40 +1664,40 @@ function TelemetryPanel(props: {
   return (
     <div class="velion-run-panel velion-run-telemetry">
       <div class="velion-run-panel__head">
-        <span class="velion-run-panel__eyebrow"><Gauge size={14} strokeWidth={2.1} /> Run telemetry</span>
+        <span class="velion-run-panel__eyebrow"><Gauge size={14} strokeWidth={2.1} /> {i18n.tr('Kjøretelemetri', 'Run telemetry')}</span>
         <span class="velion-run-telemetry__status" data-tone={normalizeStatusTone(props.status)}>
-          {STATUS_LABEL[props.status]}
+          {statusLabelFor(i18n, props.status)}
         </span>
       </div>
 
       <div class="velion-run-telemetry__grid">
         <Show when={stepLabel()}>
           {(label) => (
-            <TelemetryStat Icon={ListChecks} label="Progress" value={label()} hint={eta() ?? undefined} />
+            <TelemetryStat Icon={ListChecks} label={i18n.tr('Fremdrift', 'Progress')} value={label()} hint={eta() ?? undefined} />
           )}
         </Show>
         <Show when={props.live?.costUsd != null}>
-          <TelemetryStat Icon={Coins} label="Cost" value={`$${(props.live?.costUsd ?? 0).toFixed(4)}`} />
+          <TelemetryStat Icon={Coins} label={i18n.tr('Kostnad', 'Cost')} value={`$${(props.live?.costUsd ?? 0).toFixed(4)}`} />
         </Show>
         <Show when={runTime()}>
-          {(value) => <TelemetryStat Icon={Timer} label="Run time" value={value()} />}
+          {(value) => <TelemetryStat Icon={Timer} label={i18n.tr('Kjøretid', 'Run time')} value={value()} />}
         </Show>
         <Show when={props.live?.latencyMs != null}>
-          <TelemetryStat Icon={Clock} label="Latency" value={`${props.live?.latencyMs} ms`} />
+          <TelemetryStat Icon={Clock} label={i18n.tr('Ventetid', 'Latency')} value={`${props.live?.latencyMs} ms`} />
         </Show>
         <Show when={tokens()}>
-          {(value) => <TelemetryStat Icon={CircleDot} label="Tokens" value={value()} />}
+          {(value) => <TelemetryStat Icon={CircleDot} label={i18n.tr('Tokens', 'Tokens')} value={value()} />}
         </Show>
-        <TelemetryStat Icon={Sparkles} label="Mode" value={launchedMode()} />
+        <TelemetryStat Icon={Sparkles} label={i18n.tr('Modus', 'Mode')} value={launchedMode()} />
       </div>
 
       <div class="velion-run-telemetry__provenance">
         <ShieldCheck size={13} strokeWidth={2.1} />
         <Show
           when={residency()}
-          fallback={<span>Grounded in your workspace · EU data residency</span>}
+          fallback={<span>{i18n.tr('Forankret i arbeidsområdet ditt · EU-databeliggenhet', 'Grounded in your workspace · EU data residency')}</span>}
         >
-          {(region) => <span>Processed in {region()} · grounded in your workspace</span>}
+          {(region) => <span>{i18n.tr(`Behandlet i ${region()} · forankret i arbeidsområdet ditt`, `Processed in ${region()} · grounded in your workspace`)}</span>}
         </Show>
       </div>
 
@@ -1592,7 +1705,7 @@ function TelemetryPanel(props: {
         <div class="velion-run-telemetry__actions">
           <Button variant="primary" size="sm" shape="pill" onClick={() => props.onResume()}>
             <RotateCcw class="size-3.5" />
-            Resume run
+            {i18n.tr('Gjenoppta kjøring', 'Resume run')}
           </Button>
         </div>
       </Show>
