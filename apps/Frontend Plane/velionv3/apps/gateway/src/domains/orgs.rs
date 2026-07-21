@@ -1,3 +1,4 @@
+mod deletion;
 mod info;
 mod members;
 mod roles;
@@ -53,5 +54,24 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // Custom role writes are intentionally not exposed: Auth Core owns
         // canonical memberships and the MVP supports its built-in roles only.
         .route("/api/v1/orgs/:id/roles", get(roles::list_roles))
+        // GDPR org deletion (Flow C — 30-day soft-delete grace window). See
+        // `orgs::deletion` for the org-core contract and gating rationale.
+        .route(
+            "/api/v1/orgs/:id/gdpr/soft-delete",
+            delete(deletion::soft_delete),
+        )
+        .route("/api/v1/orgs/:id/gdpr/restore", post(deletion::restore))
+        .route(
+            "/api/v1/orgs/:id/gdpr/deletion/mark-exported",
+            post(deletion::mark_exported),
+        )
+        .route(
+            "/api/v1/orgs/:id/gdpr/deletion/acknowledge",
+            post(deletion::acknowledge),
+        )
+        .route(
+            "/api/v1/orgs/:id/gdpr/deletion/status",
+            get(deletion::get_status),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

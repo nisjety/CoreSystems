@@ -326,14 +326,25 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByText('Konkurrentovervåking')).toBeTruthy()
     expect(screen.getByText('Evergreen-kø')).toBeTruthy()
 
+    // Closed-demo nav gate (sidebar-navigation.ts `applyDemoModeNavGate`):
+    // Insights keeps only its Overview item — the other 5 (Social, Inbox,
+    // Agents, Campaigns, Experiments) are design-prototype/no-backend-yet
+    // surfaces and stay reachable by direct URL, just not from this panel.
     renderSidebar('/insights/social')
-    expect(screen.getByRole('navigation', { name: 'Innsikt navigasjon' })).toBeTruthy()
-    expect(screen.getByText('Eksperimenter')).toBeTruthy()
-    expect(screen.getByText('Kampanjer')).toBeTruthy()
+    const insightsNavigation = screen.getByRole('navigation', { name: 'Innsikt navigasjon' })
+    expect(insightsNavigation).toBeTruthy()
+    expect(within(insightsNavigation).getByRole('link', { name: 'Oversikt' })).toBeTruthy()
+    expect(within(insightsNavigation).queryByRole('link', { name: 'Eksperimenter' })).toBeNull()
+    expect(within(insightsNavigation).queryByRole('link', { name: 'Kampanjer' })).toBeNull()
 
+    // The Agents section (builder/ChatbotStudio/Playground) is fully hidden —
+    // confirmed design-prototype only, every role shows "Blueprint / not yet
+    // configured for this org". The sidebar falls back to Overview rather
+    // than rendering the dedicated Agents panel.
     renderSidebar('/agents')
-    expect(screen.getByRole('navigation', { name: 'Agentfaner' })).toBeTruthy()
-    expect(screen.getByText('Alle roller')).toBeTruthy()
+    expect(screen.queryByRole('navigation', { name: 'Agentfaner' })).toBeNull()
+    expect(screen.queryByText('Alle roller')).toBeNull()
+    expect(screen.getByRole('navigation', { name: 'Oversikt navigasjon' })).toBeTruthy()
 
     renderSidebar('/settings/workspace')
     expect(screen.getByRole('navigation', { name: 'Innstillingsseksjoner' })).toBeTruthy()

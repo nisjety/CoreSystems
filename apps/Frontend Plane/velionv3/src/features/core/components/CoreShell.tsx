@@ -1,8 +1,10 @@
 import { useLocation } from '@solidjs/router'
-import { createEffect, createMemo, createResource, createSignal, onCleanup, type JSX } from 'solid-js'
+import { createEffect, createMemo, createResource, createSignal, onCleanup, Show, type JSX } from 'solid-js'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
+import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
+import { OrgDeletionBanner } from '@/features/core/components/OrgDeletionBanner'
 import {
   fallbackWorkspaceIdentity,
   formatPlanLabel,
@@ -11,7 +13,13 @@ import {
 } from '@/features/core/lib/shell-data'
 import { CoreWorkspaceContext } from '@/features/core/lib/workspace-context'
 import { getNavbarData, type NavbarPayload } from '@/shared/api/navbar-client'
+import { getDeletionStatus } from '@/shared/api/org-deletion-client'
 import { getSession, type SessionState } from '@/shared/session/session-store'
+
+/** Extra height the fixed org-deletion banner (Flow C) occupies below the
+ * navbar — added to `--dashboard-navbar-height` so `.core-main`'s top
+ * padding reflows content below the banner instead of it being covered. */
+const DELETION_BANNER_HEIGHT_PX = 40
 
 export function CoreShell(props: { children?: JSX.Element }) {
   const location = useLocation()
@@ -20,8 +28,15 @@ export function CoreShell(props: { children?: JSX.Element }) {
   const [sidebarExpanded, setSidebarExpanded] = createSignal(defaultSidebarExpandedForRoute(initialRoute))
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [navbarData, { refetch: refetchNavbar }] = createResource(fetchNavbarData)
+  const orgId = createMemo(() => session.activeOrg?.id ?? null)
+  const [deletionStatus, { refetch: refetchDeletionStatus }] = createResource(
+    orgId,
+    fetchDeletionStatus,
+  )
+  const deletionBannerVisible = createMemo(() => Boolean(deletionStatus.latest?.pending ?? deletionStatus()?.pending))
   const activeRoute = createMemo(() => routeFromPath(location.pathname))
-  const expandedSidebarWidth = () => activeRoute() === '/inbox' ? 356 : SIDEBAR_EXPANDED_WIDTH
+  // Inbox previously used 356px. Reclaim 15% for the conversation workspace.
+  const expandedSidebarWidth = () => activeRoute() === '/inbox' ? 303 : SIDEBAR_EXPANDED_WIDTH
   const sidebarWidth = () => (sidebarExpanded() ? expandedSidebarWidth() : SIDEBAR_MINIMIZED_WIDTH)
   const workspace = createMemo(() => resolveWorkspaceIdentity(session, navbarData.latest ?? navbarData()))
 
@@ -57,7 +72,9 @@ export function CoreShell(props: { children?: JSX.Element }) {
       <div
         class="core-product-shell"
         style={{
-          '--dashboard-navbar-height': '56px',
+          '--dashboard-navbar-height': deletionBannerVisible()
+            ? `${56 + DELETION_BANNER_HEIGHT_PX}px`
+            : '56px',
           '--dashboard-rail-width': `${sidebarWidth()}px`,
           // Only override when the workspace has its own accent; otherwise fall
           // through to the :root default (--velion-accent, warm) to match v2.
@@ -72,6 +89,12 @@ export function CoreShell(props: { children?: JSX.Element }) {
           onSearchOpenChange={setSearchOpen}
           workspace={workspace()}
         />
+        <Show when={deletionBannerVisible()}>
+          <OrgDeletionBanner
+            status={deletionStatus.latest ?? deletionStatus()}
+            onRefetch={() => void refetchDeletionStatus()}
+          />
+        </Show>
         <CoreSidebar
           activeRoute={activeRoute()}
           expanded={sidebarExpanded()}
@@ -86,9 +109,21 @@ export function CoreShell(props: { children?: JSX.Element }) {
             </CoreWorkspaceContext.Provider>
           </div>
         </main>
+        <FeedbackWidget />
       </div>
     </AgentsProvider>
   )
+}
+
+/** `null` orgId (no active org yet) or a transient org-core failure both
+ * resolve to `null` — the banner must never block the shell from rendering. */
+async function fetchDeletionStatus(orgId: string | null) {
+  if (!orgId) return null
+  try {
+    return await getDeletionStatus(orgId)
+  } catch {
+    return null
+  }
 }
 
 async function fetchNavbarData(): Promise<NavbarPayload | null> {

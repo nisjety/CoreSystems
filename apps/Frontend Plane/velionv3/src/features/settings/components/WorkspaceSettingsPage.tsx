@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js'
 import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
+import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletionDangerZone'
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
@@ -32,12 +33,7 @@ import {
   updateMemberRole,
   type MembershipRole,
 } from '@/shared/api/membership-client'
-import {
-  ensureMetaLogin,
-  isMetaFacebookSdkEnabled,
-  loadMetaFacebookSdk,
-  type MetaFacebookSdkConfig,
-} from '@/shared/integrations/meta-facebook-sdk'
+import type { MetaFacebookSdkConfig } from '@/shared/integrations/meta-facebook-sdk'
 import { getSession } from '@/shared/session/session-store'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import {
@@ -68,6 +64,7 @@ import {
   ToggleRow,
   type StatusCard,
 } from '@/features/settings/components/settings-ui'
+import { useI18n } from '@/shared/i18n'
 
 export type { WorkspaceSettingsSectionId }
 export { getWorkspaceSettingsSection, isWorkspaceSettingsSection, workspaceSettingsSectionIds, workspaceSettingsSections }
@@ -109,6 +106,7 @@ type IntegrationSettingsConnection = {
   capabilities: string[]
   scopeCount: number
   syncStatus: string
+  deletedAt?: string
   latestSyncJob?: { status: string; updatedAt?: string }
 }
 
@@ -149,20 +147,31 @@ type IntegrationSettingsRow = {
 // render as honest, DISABLED "not configured" controls — a security control is
 // never shown enabled from a literal. (No boolean-`true` posture remains, so
 // the A8 no-fabricated-state guard needs no suppression here.)
-const securityControls: { title: string; description: string }[] = [
-  {
-    title: 'Require MFA for admins',
-    description: 'Admins must use multi-factor authentication before accessing organization settings.',
-  },
-  {
-    title: 'Restrict sign-in to verified domains',
-    description: 'Only users with approved workspace domains can sign in.',
-  },
-  {
-    title: 'Log admin configuration changes',
-    description: 'Keep an audit trail for billing, member, SSO, and integration changes.',
-  },
-]
+function getSecurityControls(i18n: ReturnType<typeof useI18n>): { title: string; description: string }[] {
+  return [
+    {
+      title: i18n.tr('Krev MFA for administratorer', 'Require MFA for admins'),
+      description: i18n.tr(
+        'Administratorer må bruke flerfaktorautentisering før de får tilgang til organisasjonsinnstillinger.',
+        'Admins must use multi-factor authentication before accessing organization settings.',
+      ),
+    },
+    {
+      title: i18n.tr('Begrens innlogging til verifiserte domener', 'Restrict sign-in to verified domains'),
+      description: i18n.tr(
+        'Kun brukere med godkjente arbeidsområdedomener kan logge inn.',
+        'Only users with approved workspace domains can sign in.',
+      ),
+    },
+    {
+      title: i18n.tr('Loggfør endringer i administratorkonfigurasjon', 'Log admin configuration changes'),
+      description: i18n.tr(
+        'Behold en revisjonslogg for endringer i fakturering, medlemmer, SSO og integrasjoner.',
+        'Keep an audit trail for billing, member, SSO, and integration changes.',
+      ),
+    },
+  ]
+}
 
 const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   // Phase 4 PR-2 de-fake: the workspace + integrations status grids carried a
@@ -195,10 +204,12 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   cron: [],
 }
 
-const businessHourRows = [
-  { day: 'Monday-Friday', hours: '08:00-17:00', inbox: 'Priority support' },
-  { day: 'Saturday', hours: '10:00-14:00', inbox: 'Overflow' },
-]
+function getBusinessHourRows(i18n: ReturnType<typeof useI18n>) {
+  return [
+    { day: i18n.tr('Mandag-fredag', 'Monday-Friday'), hours: '08:00-17:00', inbox: i18n.tr('Prioritert support', 'Priority support') },
+    { day: i18n.tr('Lørdag', 'Saturday'), hours: '10:00-14:00', inbox: i18n.tr('Overflow-kø', 'Overflow') },
+  ]
+}
 
 function recordFrom(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -251,6 +262,7 @@ function normalizeMemberList(payload: unknown): LiveMember[] {
 export function VelionWorkspaceSettingsPage(props: {
   section?: WorkspaceSettingsSectionId
 }) {
+  const i18n = useI18n()
   const session = getSession()
   const section = () => props.section ?? 'workspace'
   const details = () => getWorkspaceSettingsSection(section())
@@ -266,7 +278,7 @@ export function VelionWorkspaceSettingsPage(props: {
       setBillingAccount(await loadBillingAccount(signal))
     } catch (reason) {
       if (reason instanceof Error && reason.name === 'AbortError') return
-      setBillingError(reason instanceof Error ? reason.message : 'Could not load billing account.')
+      setBillingError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke laste faktureringskonto.', 'Could not load billing account.'))
     } finally {
       if (!signal?.aborted) setBillingLoading(false)
     }
@@ -282,27 +294,27 @@ export function VelionWorkspaceSettingsPage(props: {
 
   const billingStatusCards = (): StatusCard[] => [
     {
-      label: 'Current plan',
+      label: i18n.tr('Gjeldende plan', 'Current plan'),
       value: billingAccount() ? planLabel(billingAccount()?.plan) : '—',
       detail: billingError() ?? (billingAccount()?.subscription_state
-        ? `Status: ${billingAccount()?.subscription_state}`
+        ? `${i18n.tr('Status', 'Status')}: ${billingAccount()?.subscription_state}`
         : billingLoading()
-          ? 'Loading plan information...'
-          : 'Plan information unavailable'),
+          ? i18n.tr('Laster planinformasjon …', 'Loading plan information...')
+          : i18n.tr('Planinformasjon utilgjengelig', 'Plan information unavailable')),
       tone: billingAccount()?.subscription_state === 'past_due' ? 'warn' : billingAccount() ? 'ok' : 'neutral',
     },
     {
-      label: 'Credits',
+      label: i18n.tr('Kreditter', 'Credits'),
       value: billingAccount()?.credits != null ? String(billingAccount()?.credits) : '—',
-      detail: 'Available credits on this plan',
+      detail: i18n.tr('Tilgjengelige kreditter på denne planen', 'Available credits on this plan'),
       tone: 'neutral',
     },
     {
-      label: 'Payment method',
-      value: billingAccount()?.provider_customer_id?.payment ? 'Stored' : '—',
+      label: i18n.tr('Betalingsmetode', 'Payment method'),
+      value: billingAccount()?.provider_customer_id?.payment ? i18n.tr('Lagret', 'Stored') : '—',
       detail: billingAccount()?.provider_customer_id?.payment
-        ? 'Payment customer is synced.'
-        : 'Add a payment method through checkout.',
+        ? i18n.tr('Betalingskunde er synkronisert.', 'Payment customer is synced.')
+        : i18n.tr('Legg til en betalingsmetode gjennom kassen.', 'Add a payment method through checkout.'),
       tone: billingAccount()?.provider_customer_id?.payment ? 'ok' : 'neutral',
     },
   ]
@@ -348,12 +360,13 @@ function WorkspaceSettingsChrome(props: {
   liveStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]>
   onRefreshBilling: () => Promise<void>
 }) {
+  const i18n = useI18n()
   const details = () => props.details
   const section = () => props.section
   return (
     <SettingsSurface contentVariant="workspace">
       <SettingsHero
-        eyebrow="Admin"
+        eyebrow={i18n.tr('Administrator', 'Admin')}
         title={details().title}
         description={details().description}
       />
@@ -439,59 +452,74 @@ function WorkspaceSettingsSection(props: {
 }
 
 function WorkspaceSection() {
+  const i18n = useI18n()
   return (
     <>
-      <SectionHeader title="Workspace basics" description="Shared workspace fields that affect URLs, defaults, and support routing." />
+      <SectionHeader
+        title={i18n.tr('Grunnleggende arbeidsområde', 'Workspace basics')}
+        description={i18n.tr(
+          'Delte arbeidsområdefelt som påvirker URL-er, standardverdier og support-ruting.',
+          'Shared workspace fields that affect URLs, defaults, and support routing.',
+        )}
+      />
       <div class="velion-settings-field-grid">
-        <SettingsField id="workspace-name" label="Workspace name" value="aquatiq-as" />
-        <SettingsField id="workspace-url" label="Workspace URL" value="aquatiq-as.velion.ai" />
-        <SettingsField id="primary-domain" label="Primary domain" value="aquatiq.no" />
+        <SettingsField id="workspace-name" label={i18n.tr('Arbeidsområdenavn', 'Workspace name')} value="aquatiq-as" />
+        <SettingsField id="workspace-url" label={i18n.tr('Arbeidsområde-URL', 'Workspace URL')} value="aquatiq-as.velion.ai" />
+        <SettingsField id="primary-domain" label={i18n.tr('Primært domene', 'Primary domain')} value="aquatiq.no" />
         <SettingsSelect
           id="data-region"
-          label="Data region"
+          label={i18n.tr('Dataregion', 'Data region')}
           value="europe"
           options={[
-            { value: 'europe', label: 'Europe' },
-            { value: 'us', label: 'United States' },
+            { value: 'europe', label: i18n.tr('Europa', 'Europe') },
+            { value: 'us', label: i18n.tr('USA', 'United States') },
           ]}
         />
         <SettingsSelect
           id="default-language"
-          label="Default language"
+          label={i18n.tr('Standardspråk', 'Default language')}
           value="english"
           options={[
-            { value: 'english', label: 'English' },
-            { value: 'norwegian', label: 'Norwegian' },
-            { value: 'french', label: 'French' },
+            { value: 'english', label: i18n.tr('Engelsk', 'English') },
+            { value: 'norwegian', label: i18n.tr('Norsk', 'Norwegian') },
+            { value: 'french', label: i18n.tr('Fransk', 'French') },
           ]}
         />
-        <SettingsField id="admin-owner" label="Admin owner" value="Author Name" />
+        <SettingsField id="admin-owner" label={i18n.tr('Administratoreier', 'Admin owner')} value="Author Name" />
       </div>
       <div class="velion-settings-feature-grid">
         <FeaturePanel
-          title="Verified domains"
-          description="Domain records ready for DNS verification and customer-facing links."
-          actionLabel="Add domain"
+          title={i18n.tr('Verifiserte domener', 'Verified domains')}
+          description={i18n.tr(
+            'Domeneoppføringer klare for DNS-verifisering og kundevendte lenker.',
+            'Domain records ready for DNS verification and customer-facing links.',
+          )}
+          actionLabel={i18n.tr('Legg til domene', 'Add domain')}
         >
-          <p class="velion-settings-panel-note">No domains have been verified for this organization.</p>
+          <p class="velion-settings-panel-note">{i18n.tr('Ingen domener er verifisert for denne organisasjonen.', 'No domains have been verified for this organization.')}</p>
         </FeaturePanel>
         <FeaturePanel
-          title="Business hours"
-          description="Workspace-wide routing windows for support inbox ownership."
-          actionLabel="Edit schedule"
+          title={i18n.tr('Åpningstider', 'Business hours')}
+          description={i18n.tr(
+            'Arbeidsområdeomfattende rutingvinduer for eierskap av support-innboks.',
+            'Workspace-wide routing windows for support inbox ownership.',
+          )}
+          actionLabel={i18n.tr('Rediger tidsplan', 'Edit schedule')}
         >
           <div class="velion-settings-row-divider">
-            <For each={businessHourRows}>
+            <For each={getBusinessHourRows(i18n)}>
               {(row) => <DataRow primary={row.day} secondary={row.inbox} meta={row.hours} />}
             </For>
           </div>
         </FeaturePanel>
       </div>
+      <OrgDeletionDangerZone />
     </>
   )
 }
 
 function MembersSection(props: { orgId: string | null }) {
+  const i18n = useI18n()
   const session = getSession()
   const [members, setMembers] = createSignal<LiveMember[]>([])
   const [loading, setLoading] = createSignal(false)
@@ -529,7 +557,7 @@ function MembersSection(props: { orgId: string | null }) {
       })
       .catch((reason: unknown) => {
         if (reason instanceof Error && reason.name === 'AbortError') return
-        setError('Could not load members.')
+        setError(i18n.tr('Kunne ikke laste medlemmer.', 'Could not load members.'))
         setLoading(false)
       })
 
@@ -540,7 +568,7 @@ function MembersSection(props: { orgId: string | null }) {
     const orgId = props.orgId
     const email = inviteEmail().trim().toLowerCase()
     if (!orgId || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || actionBusy()) {
-      setActionError('Enter a valid email address before inviting a member.')
+      setActionError(i18n.tr('Skriv inn en gyldig e-postadresse før du inviterer et medlem.', 'Enter a valid email address before inviting a member.'))
       return
     }
     setActionBusy(true)
@@ -550,7 +578,7 @@ function MembersSection(props: { orgId: string | null }) {
       setInviteEmail('')
       await loadMembers(orgId)
     } catch {
-      setActionError('The invitation could not be sent. Verify your admin access and try again.')
+      setActionError(i18n.tr('Invitasjonen kunne ikke sendes. Kontroller administratortilgangen din og prøv igjen.', 'The invitation could not be sent. Verify your admin access and try again.'))
     } finally {
       setActionBusy(false)
     }
@@ -565,7 +593,7 @@ function MembersSection(props: { orgId: string | null }) {
       await updateMemberRole(orgId, member.userId, role)
       await loadMembers(orgId)
     } catch {
-      setActionError('The member role could not be changed. The owner invariant is preserved.')
+      setActionError(i18n.tr('Medlemsrollen kunne ikke endres. Eierens rolle er beskyttet og forblir uendret.', 'The member role could not be changed. The owner invariant is preserved.'))
     } finally {
       setActionBusy(false)
     }
@@ -585,7 +613,7 @@ function MembersSection(props: { orgId: string | null }) {
       setConfirmRemoveId(null)
       await loadMembers(orgId)
     } catch {
-      setActionError('The member could not be removed. Auth Core kept the organization owner invariant intact.')
+      setActionError(i18n.tr('Medlemmet kunne ikke fjernes. Auth Core beholdt organisasjonseierens rolle intakt.', 'The member could not be removed. Auth Core kept the organization owner invariant intact.'))
     } finally {
       setActionBusy(false)
     }
@@ -593,11 +621,14 @@ function MembersSection(props: { orgId: string | null }) {
 
   return (
     <>
-      <SectionHeader title="Members & roles" description="Invite teammates, assign access, and review seat status." />
+      <SectionHeader
+        title={i18n.tr('Medlemmer og roller', 'Members & roles')}
+        description={i18n.tr('Inviter kollegaer, tildel tilgang og se status på seter.', 'Invite teammates, assign access, and review seat status.')}
+      />
       <div class="velion-settings-invite-grid">
         <SettingsField
           id="invite-email"
-          label="Invite by email"
+          label={i18n.tr('Inviter via e-post', 'Invite by email')}
           type="email"
           placeholder="teammate@company.com"
           value={inviteEmail()}
@@ -605,12 +636,12 @@ function MembersSection(props: { orgId: string | null }) {
         />
         <SettingsSelect
           id="invite-role"
-          label="Role"
+          label={i18n.tr('Rolle', 'Role')}
           value={inviteRole()}
           onChange={(event) => setInviteRole(event.currentTarget.value as MembershipRole)}
           options={[
-            { value: 'member', label: 'Member' },
-            { value: 'admin', label: 'Admin' },
+            { value: 'member', label: i18n.tr('Medlem', 'Member') },
+            { value: 'admin', label: i18n.tr('Administrator', 'Admin') },
           ]}
         />
         <SettingsButton
@@ -618,16 +649,16 @@ function MembersSection(props: { orgId: string | null }) {
           disabled={actionBusy() || !props.orgId}
           onClick={() => void invite()}
         >
-          Invite member
+          {i18n.tr('Inviter medlem', 'Invite member')}
         </SettingsButton>
       </div>
       <Show when={actionError()}>
         <p role="alert" class="velion-settings-empty-row">{actionError()}</p>
       </Show>
       <div class="velion-settings-list-card">
-        <Show when={!loading()} fallback={<p class="velion-settings-empty-row">Loading members...</p>}>
+        <Show when={!loading()} fallback={<p class="velion-settings-empty-row">{i18n.tr('Laster medlemmer …', 'Loading members...')}</p>}>
           <Show when={!error()} fallback={<p class="velion-settings-empty-row">{error()}</p>}>
-            <Show when={members().length > 0} fallback={<p class="velion-settings-empty-row">No members found.</p>}>
+            <Show when={members().length > 0} fallback={<p class="velion-settings-empty-row">{i18n.tr('Ingen medlemmer funnet.', 'No members found.')}</p>}>
               <For each={members()}>
                 {(member) => (
                   <div class="velion-settings-member-row">
@@ -636,16 +667,16 @@ function MembersSection(props: { orgId: string | null }) {
                       <span>{member.email}</span>
                     </div>
                     <select
-                      aria-label={`Role for ${member.name ?? member.email}`}
+                      aria-label={`${i18n.tr('Rolle for', 'Role for')} ${member.name ?? member.email}`}
                       value={member.role}
                       disabled={actionBusy() || member.role === 'owner'}
                       onChange={(event) => void changeRole(member, event.currentTarget.value as MembershipRole)}
                     >
                       <Show when={member.role === 'owner'}>
-                        <option value="owner">Owner</option>
+                        <option value="owner">{i18n.tr('Eier', 'Owner')}</option>
                       </Show>
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
+                      <option value="member">{i18n.tr('Medlem', 'Member')}</option>
+                      <option value="admin">{i18n.tr('Administrator', 'Admin')}</option>
                     </select>
                     <span>{member.status}</span>
                     <button
@@ -657,13 +688,13 @@ function MembersSection(props: { orgId: string | null }) {
                       }
                       aria-label={
                         confirmRemoveId() === member.userId
-                          ? `Confirm remove ${member.name ?? member.email}`
-                          : `Remove ${member.name ?? member.email}`
+                          ? `${i18n.tr('Bekreft fjerning av', 'Confirm remove')} ${member.name ?? member.email}`
+                          : `${i18n.tr('Fjern', 'Remove')} ${member.name ?? member.email}`
                       }
                       class="velion-settings-icon-button"
                       onClick={() => void remove(member)}
                     >
-                      {confirmRemoveId() === member.userId ? 'Confirm' : 'Remove'}
+                      {confirmRemoveId() === member.userId ? i18n.tr('Bekreft', 'Confirm') : i18n.tr('Fjern', 'Remove')}
                     </button>
                   </div>
                 )}
@@ -675,10 +706,12 @@ function MembersSection(props: { orgId: string | null }) {
       <div class="velion-settings-feature-panel velion-settings-feature-panel--spaced">
         <div class="velion-settings-feature-panel__header">
           <div>
-            <h3>Built-in roles</h3>
+            <h3>{i18n.tr('Innebygde roller', 'Built-in roles')}</h3>
             <p>
-              Auth Core currently supports owner, admin, and member. Owner transfer and
-              custom role administration require separate explicit contracts.
+              {i18n.tr(
+                'Auth Core støtter for øyeblikket eier, administrator og medlem. Overføring av eierskap og administrasjon av egendefinerte roller krever egne, eksplisitte avtaler.',
+                'Auth Core currently supports owner, admin, and member. Owner transfer and custom role administration require separate explicit contracts.',
+              )}
             </p>
           </div>
         </div>
@@ -721,6 +754,7 @@ function normalizePlatformUsers(data: ListUsersResponse | unknown[]): PlatformUs
  * a non-admin who reaches this section sees the 403 message instead of data.
  */
 function PlatformUsersSection() {
+  const i18n = useI18n()
   const [users, setUsers] = createSignal<PlatformUser[]>([])
   const [loading, setLoading] = createSignal(true)
   const [error, setError] = createSignal<string | null>(null)
@@ -739,7 +773,7 @@ function PlatformUsersSection() {
       })
       .catch((reason: unknown) => {
         if (reason instanceof Error && reason.name === 'AbortError') return
-        setError('Could not load users. This view requires a platform super-admin.')
+        setError(i18n.tr('Kunne ikke laste brukere. Denne visningen krever plattform-superadministrator.', 'Could not load users. This view requires a platform super-admin.'))
         setLoading(false)
       })
     onCleanup(() => controller.abort())
@@ -748,13 +782,13 @@ function PlatformUsersSection() {
   return (
     <>
       <SectionHeader
-        title="All users"
-        description="Every user across all organizations. Platform super-admin only."
+        title={i18n.tr('Alle brukere', 'All users')}
+        description={i18n.tr('Alle brukere på tvers av alle organisasjoner. Kun for plattform-superadministrator.', 'Every user across all organizations. Platform super-admin only.')}
       />
       <div class="velion-settings-list-card">
-        <Show when={!loading()} fallback={<p class="velion-settings-empty-row">Loading users...</p>}>
+        <Show when={!loading()} fallback={<p class="velion-settings-empty-row">{i18n.tr('Laster brukere …', 'Loading users...')}</p>}>
           <Show when={!error()} fallback={<p class="velion-settings-empty-row">{error()}</p>}>
-            <Show when={users().length > 0} fallback={<p class="velion-settings-empty-row">No users found.</p>}>
+            <Show when={users().length > 0} fallback={<p class="velion-settings-empty-row">{i18n.tr('Ingen brukere funnet.', 'No users found.')}</p>}>
               <For each={users()}>
                 {(user) => (
                   <div class="velion-settings-member-row">
@@ -763,7 +797,7 @@ function PlatformUsersSection() {
                       <span>{user.email}</span>
                     </div>
                     <strong>{user.role}</strong>
-                    <span>{user.banned ? 'banned' : user.emailVerified ? 'verified' : 'unverified'}</span>
+                    <span>{user.banned ? i18n.tr('utestengt', 'banned') : user.emailVerified ? i18n.tr('verifisert', 'verified') : i18n.tr('ikke verifisert', 'unverified')}</span>
                   </div>
                 )}
               </For>
@@ -785,9 +819,9 @@ function quotaValue(account: BillingAccount | null, metric: string): number | nu
   return typeof value === 'number' ? value : null
 }
 
-function quotaDisplay(value: number | null): string {
+function quotaDisplay(value: number | null, i18n: ReturnType<typeof useI18n>): string {
   if (value == null) return '—'
-  if (value < 0) return 'Unlimited'
+  if (value < 0) return i18n.tr('Ubegrenset', 'Unlimited')
   return String(value)
 }
 
@@ -814,6 +848,7 @@ function BillingSection(props: {
   loading: boolean
   onRefresh: () => Promise<void>
 }) {
+  const i18n = useI18n()
   const [selectedPlan, setSelectedPlan] = createSignal<BillingPlanId>('standard')
   const [checkoutSession, setCheckoutSession] = createSignal<CheckoutSession>()
   const [startingCheckout, setStartingCheckout] = createSignal(false)
@@ -843,7 +878,7 @@ function BillingSection(props: {
 
     if (checkoutState === 'cancel') {
       setSelectedPlan(planParam)
-      setMessage('Payment was cancelled.')
+      setMessage(i18n.tr('Betalingen ble avbrutt.', 'Payment was cancelled.'))
       clearCheckoutParams()
       return
     }
@@ -856,7 +891,7 @@ function BillingSection(props: {
     setSelectedPlan(planParam)
 
     if (!paymentId && !clientSecret) {
-      setCheckoutError('Payment reference is missing. Start checkout again.')
+      setCheckoutError(i18n.tr('Betalingsreferanse mangler. Start kassen på nytt.', 'Payment reference is missing. Start checkout again.'))
       clearCheckoutParams()
       return
     }
@@ -872,7 +907,7 @@ function BillingSection(props: {
   async function startPlanCheckout(planId: BillingPlanId) {
     const planOption = billingPlans.find((item) => item.id === planId)
     if (!planOption?.checkoutEnabled) {
-      setMessage('Custom plan changes are handled by sales.')
+      setMessage(i18n.tr('Egendefinerte planendringer håndteres av salgsavdelingen.', 'Custom plan changes are handled by sales.'))
       return
     }
 
@@ -899,10 +934,10 @@ function BillingSection(props: {
           window.location.assign(session.url!)
           return
         default:
-          throw new Error('Checkout session did not include a valid payment surface.')
+          throw new Error(i18n.tr('Kasseøkten inneholdt ikke en gyldig betalingsflate.', 'Checkout session did not include a valid payment surface.'))
       }
     } catch (reason) {
-      setCheckoutError(reason instanceof Error ? reason.message : 'Could not start checkout.')
+      setCheckoutError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke starte kassen.', 'Could not start checkout.'))
     } finally {
       setStartingCheckout(false)
     }
@@ -927,17 +962,17 @@ function BillingSection(props: {
       })
 
       if (!isCheckoutActivatingStatus(result.status)) {
-        throw new Error(`Payment status is ${result.status}.`)
+        throw new Error(`${i18n.tr('Betalingsstatus er', 'Payment status is')} ${result.status}.`)
       }
 
       setCheckoutSession(undefined)
       setMessage(result.status === 'processing'
-        ? 'Payment is processing. Your plan will stay active while confirmation completes.'
-        : 'Payment confirmed. Your billing plan is active.')
+        ? i18n.tr('Betalingen behandles. Planen din forblir aktiv mens bekreftelsen fullføres.', 'Payment is processing. Your plan will stay active while confirmation completes.')
+        : i18n.tr('Betaling bekreftet. Faktureringsplanen din er aktiv.', 'Payment confirmed. Your billing plan is active.'))
       await props.onRefresh()
       clearCheckoutParams()
     } catch (reason) {
-      setCheckoutError(reason instanceof Error ? reason.message : 'Could not confirm checkout.')
+      setCheckoutError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke bekrefte kassen.', 'Could not confirm checkout.'))
     } finally {
       setConfirmingCheckout(false)
     }
@@ -945,19 +980,23 @@ function BillingSection(props: {
 
   return (
     <>
-      <SectionHeader title="Plan & usage" description="Review plan, usage, payment method, and invoices." />
+      <SectionHeader title={i18n.tr('Plan og bruk', 'Plan & usage')} description={i18n.tr('Se gjennom plan, bruk, betalingsmetode og fakturaer.', 'Review plan, usage, payment method, and invoices.')} />
       <Show when={props.error}>
         {(error) => <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">{error()}</p>}
       </Show>
       <div class="velion-settings-metric-grid">
-        <Metric label="Plan" value={plan()} detail={`Status: ${status()}`} />
-        <Metric label="Seats" value={quotaDisplay(seatLimit())} detail={seatLimit() != null ? 'Seats included on this plan' : 'Seat quota unavailable'} />
-        <Metric label="Credits" value={credits()} detail="Available on this plan" />
+        <Metric label={i18n.tr('Plan', 'Plan')} value={plan()} detail={`${i18n.tr('Status', 'Status')}: ${status()}`} />
+        <Metric
+          label={i18n.tr('Seter', 'Seats')}
+          value={quotaDisplay(seatLimit(), i18n)}
+          detail={seatLimit() != null ? i18n.tr('Seter inkludert i denne planen', 'Seats included on this plan') : i18n.tr('Setekvote utilgjengelig', 'Seat quota unavailable')}
+        />
+        <Metric label={i18n.tr('Kreditter', 'Credits')} value={credits()} detail={i18n.tr('Tilgjengelig på denne planen', 'Available on this plan')} />
       </div>
       <section class="velion-settings-plan-picker" aria-labelledby="settings-billing-plan-heading">
         <div class="velion-settings-section-header velion-settings-section-header--compact">
-          <h2 id="settings-billing-plan-heading">Choose plan</h2>
-          <p>Change the workspace plan through billing-core checkout. Paid plans open the configured secure payment provider.</p>
+          <h2 id="settings-billing-plan-heading">{i18n.tr('Velg plan', 'Choose plan')}</h2>
+          <p>{i18n.tr('Endre arbeidsområdets plan gjennom billing-core-kassen. Betalte planer åpner den konfigurerte, sikre betalingsleverandøren.', 'Change the workspace plan through billing-core checkout. Paid plans open the configured secure payment provider.')}</p>
         </div>
         <div class="velion-settings-plan-list">
           <For each={billingPlans}>
@@ -984,7 +1023,7 @@ function BillingSection(props: {
                   </div>
                   <div class="velion-settings-plan-row__actions">
                     <Show when={active()}>
-                      <span class="velion-settings-plan-pill">Current plan</span>
+                      <span class="velion-settings-plan-pill">{i18n.tr('Gjeldende plan', 'Current plan')}</span>
                     </Show>
                     <SettingsButton
                       settingsSize="sm"
@@ -993,10 +1032,10 @@ function BillingSection(props: {
                       onClick={() => void startPlanCheckout(billingPlan.id)}
                     >
                       {active()
-                        ? 'Active'
+                        ? i18n.tr('Aktiv', 'Active')
                         : billingPlan.checkoutEnabled
-                          ? `${startingCheckout() && selected() ? 'Starting' : 'Activate'} ${billingPlan.name}`
-                          : 'Contact sales'}
+                          ? `${startingCheckout() && selected() ? i18n.tr('Starter', 'Starting') : i18n.tr('Aktiver', 'Activate')} ${billingPlan.name}`
+                          : i18n.tr('Kontakt salg', 'Contact sales')}
                     </SettingsButton>
                   </div>
                 </article>
@@ -1049,41 +1088,41 @@ function BillingSection(props: {
         {(text) => <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">{text()}</p>}
       </Show>
       <div class="velion-settings-field-grid velion-settings-field-grid--spaced">
-        <SettingsField id="billing-email" label="Billing email" type="email" placeholder="billing@yourcompany.com" />
+        <SettingsField id="billing-email" label={i18n.tr('Faktureringsepost', 'Billing email')} type="email" placeholder="billing@yourcompany.com" />
         <SettingsSelect
           id="usage-cap"
-          label="Usage cap"
+          label={i18n.tr('Bruksgrense', 'Usage cap')}
           value="notify"
           options={[
-            { value: 'notify', label: 'Notify at 80%' },
-            { value: 'pause', label: 'Pause at limit' },
-            { value: 'none', label: 'No cap' },
+            { value: 'notify', label: i18n.tr('Varsle ved 80 %', 'Notify at 80%') },
+            { value: 'pause', label: i18n.tr('Sett på pause ved grense', 'Pause at limit') },
+            { value: 'none', label: i18n.tr('Ingen grense', 'No cap') },
           ]}
         />
       </div>
       <div class="velion-settings-billing-grid">
         <FeaturePanel
-          title="Invoice history"
-          description="Workspace invoice history and downloadable billing records."
-          actionLabel="Download CSV"
+          title={i18n.tr('Fakturahistorikk', 'Invoice history')}
+          description={i18n.tr('Arbeidsområdets fakturahistorikk og nedlastbare faktureringsposter.', 'Workspace invoice history and downloadable billing records.')}
+          actionLabel={i18n.tr('Last ned CSV', 'Download CSV')}
         >
-          <p class="velion-settings-panel-note">Ingen fakturaer ennå - invoices will appear here once a paid plan is active.</p>
+          <p class="velion-settings-panel-note">{i18n.tr('Ingen fakturaer ennå - de vises her når en betalt plan er aktiv.', 'No invoices yet - invoices will appear here once a paid plan is active.')}</p>
         </FeaturePanel>
         <FeaturePanel
-          title="Spend controls"
-          description="Plan limits and quota details for this workspace."
-          actionLabel="Configure"
+          title={i18n.tr('Forbrukskontroller', 'Spend controls')}
+          description={i18n.tr('Plangrenser og kvotedetaljer for dette arbeidsområdet.', 'Plan limits and quota details for this workspace.')}
+          actionLabel={i18n.tr('Konfigurer', 'Configure')}
         >
           <Show
             when={props.account != null}
-            fallback={<p class="velion-settings-panel-note">Loading plan details...</p>}
+            fallback={<p class="velion-settings-panel-note">{i18n.tr('Laster plandetaljer …', 'Loading plan details...')}</p>}
           >
             <div class="velion-settings-key-values">
-              <p><span>Plan</span><strong>{plan()}</strong></p>
-              <p><span>Status</span><strong>{status()}</strong></p>
-              <p><span>Credits</span><strong>{credits()}</strong></p>
-              <p><span>API calls</span><strong>{quotaDisplay(apiCallLimit())}</strong></p>
-              <p><span>Storage</span><strong>{quotaDisplay(storageLimit())}</strong></p>
+              <p><span>{i18n.tr('Plan', 'Plan')}</span><strong>{plan()}</strong></p>
+              <p><span>{i18n.tr('Status', 'Status')}</span><strong>{status()}</strong></p>
+              <p><span>{i18n.tr('Kreditter', 'Credits')}</span><strong>{credits()}</strong></p>
+              <p><span>{i18n.tr('API-kall', 'API calls')}</span><strong>{quotaDisplay(apiCallLimit(), i18n)}</strong></p>
+              <p><span>{i18n.tr('Lagring', 'Storage')}</span><strong>{quotaDisplay(storageLimit(), i18n)}</strong></p>
             </div>
           </Show>
         </FeaturePanel>
@@ -1093,19 +1132,25 @@ function BillingSection(props: {
 }
 
 function SsoSection() {
+  const i18n = useI18n()
   return (
     <>
-      <SectionHeader title="SSO configuration" description="Configure organization sign-in, domains, and provisioning." />
+      <SectionHeader
+        title={i18n.tr('SSO-konfigurasjon', 'SSO configuration')}
+        description={i18n.tr('Konfigurer organisasjonens innlogging, domener og provisjonering.', 'Configure organization sign-in, domains, and provisioning.')}
+      />
       <p class="velion-settings-panel-note">
-        Single sign-on is not configured for this organization. No identity
-        provider, allowed domain, SCIM token, or attribute mapping is set up, and
-        SSO/SCIM configuration is not available in this build.
+        {i18n.tr(
+          'Enkel pålogging (SSO) er ikke konfigurert for denne organisasjonen. Ingen identitetsleverandør, godkjent domene, SCIM-token eller attributt-mapping er satt opp, og SSO/SCIM-konfigurasjon er ikke tilgjengelig i denne versjonen.',
+          'Single sign-on is not configured for this organization. No identity provider, allowed domain, SCIM token, or attribute mapping is set up, and SSO/SCIM configuration is not available in this build.',
+        )}
       </p>
     </>
   )
 }
 
 function RecentSecurityEvents() {
+  const i18n = useI18n()
   const [events, setEvents] = createSignal<AuditEvent[]>([])
   const [loading, setLoading] = createSignal(true)
   const [loadFailed, setLoadFailed] = createSignal(false)
@@ -1129,9 +1174,9 @@ function RecentSecurityEvents() {
   })
 
   return (
-    <Show when={!loading()} fallback={<p class="velion-settings-panel-note">Loading security events...</p>}>
-      <Show when={!loadFailed()} fallback={<p class="velion-settings-panel-note" role="alert">Could not load security events.</p>}>
-      <Show when={events().length > 0} fallback={<p class="velion-settings-panel-note">Ingen sikkerhetshendelser ennå</p>}>
+    <Show when={!loading()} fallback={<p class="velion-settings-panel-note">{i18n.tr('Laster sikkerhetshendelser …', 'Loading security events...')}</p>}>
+      <Show when={!loadFailed()} fallback={<p class="velion-settings-panel-note" role="alert">{i18n.tr('Kunne ikke laste sikkerhetshendelser.', 'Could not load security events.')}</p>}>
+      <Show when={events().length > 0} fallback={<p class="velion-settings-panel-note">{i18n.tr('Ingen sikkerhetshendelser ennå', 'No security events yet')}</p>}>
         <div class="velion-settings-row-divider">
           <For each={events()}>
             {(event, index) => {
@@ -1147,7 +1192,7 @@ function RecentSecurityEvents() {
               ].filter(Boolean).join(' · ')
               return (
                 <DataRow
-                  primary={`${event.event ?? 'Event'}${event.outcome ? ` - ${event.outcome}` : ''}`}
+                  primary={`${event.event ?? i18n.tr('Hendelse', 'Event')}${event.outcome ? ` - ${event.outcome}` : ''}`}
                   secondary={secondary()}
                   meta={dateStr() || event.requestId || String(index())}
                 />
@@ -1161,10 +1206,15 @@ function RecentSecurityEvents() {
   )
 }
 
-const ZDR_TOOLTIP =
-  'Zero Data Retention (ZDR): when on, interactive AI content is not retained and does not leave the service. Turn it on for maximum privacy (zero retention). Your organization’s posture is applied through Velion’s managed, attested retention policy.'
+function zdrTooltip(i18n: ReturnType<typeof useI18n>): string {
+  return i18n.tr(
+    'Zero Data Retention (ZDR): når dette er på, blir ikke interaktivt AI-innhold lagret, og det forlater ikke tjenesten. Slå det på for maksimalt personvern (null lagring). ZDR er et frivillig, betalt tillegg tilgjengelig på kvalifiserende (Pro/Enterprise) planer — av som standard til organisasjonen din aktiverer det.',
+    'Zero Data Retention (ZDR): when on, interactive AI content is not retained and does not leave the service. Turn it on for maximum privacy (zero retention). ZDR is an opt-in, paid add-on available on qualifying (Pro/Enterprise) plans — off by default until your organization enables it.',
+  )
+}
 
 function OrgSecuritySection() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = () => session.activeOrg?.id ?? null
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
@@ -1207,10 +1257,10 @@ function OrgSecuritySection() {
     } catch (reason) {
       setZdr(previous) // revert on failure
       if (reason instanceof ApiError && reason.code === 'plan_upgrade_required') {
-        setZdrError('Zero Data Retention is available on a higher plan. Upgrade to enable it.')
+        setZdrError(i18n.tr('Zero Data Retention er tilgjengelig på en høyere plan. Oppgrader for å aktivere det.', 'Zero Data Retention is available on a higher plan. Upgrade to enable it.'))
       } else {
         setZdrError(
-          reason instanceof Error ? reason.message : 'Could not update Zero Data Retention.',
+          reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere Zero Data Retention.', 'Could not update Zero Data Retention.'),
         )
       }
     } finally {
@@ -1224,17 +1274,23 @@ function OrgSecuritySection() {
 
   return (
     <>
-      <SectionHeader title="Security policy" description="Set organization-wide security requirements and audit controls." />
+      <SectionHeader
+        title={i18n.tr('Sikkerhetspolicy', 'Security policy')}
+        description={i18n.tr('Angi organisasjonsomfattende sikkerhetskrav og revisjonskontroller.', 'Set organization-wide security requirements and audit controls.')}
+      />
       <div class="velion-settings-divided-list">
         <ToggleRow
-          title={zdrLocked() ? 'Zero Data Retention (premium)' : 'Zero Data Retention'}
-          description="When on, interactive AI content is not retained. Turn off to let Velion store conversation history and power memory."
-          info={ZDR_TOOLTIP}
+          title={zdrLocked() ? i18n.tr('Zero Data Retention (premiumfunksjon)', 'Zero Data Retention (premium)') : i18n.tr('Zero Data Retention', 'Zero Data Retention')}
+          description={i18n.tr(
+            'Når dette er på, blir ikke interaktivt AI-innhold lagret. Slå av for å la Velion lagre samtalehistorikk og drive minnefunksjoner.',
+            'When on, interactive AI content is not retained. Turn off to let Velion store conversation history and power memory.',
+          )}
+          info={zdrTooltip(i18n)}
           enabled={zdr()}
           disabled={!isAdmin() || zdrBusy() || !zdrLoaded() || !orgId() || zdrLocked()}
           onChange={(value) => void toggleZdr(value)}
         />
-        <For each={securityControls}>
+        <For each={getSecurityControls(i18n)}>
           {(control) => (
             <ToggleRow title={control.title} description={control.description} enabled={false} disabled />
           )}
@@ -1244,30 +1300,38 @@ function OrgSecuritySection() {
         <p class="velion-settings-panel-note" role="alert">{zdrError()}</p>
       </Show>
       <Show when={zdrLoaded() && zdrLocked()}>
-        <p class="velion-settings-panel-note">Zero Data Retention is a premium privacy feature. Upgrade your plan to enable zero-retention processing.</p>
+        <p class="velion-settings-panel-note">
+          {i18n.tr(
+            'Zero Data Retention er en personvernfunksjon for premiumplaner. Oppgrader planen din for å aktivere nullbevaringsbehandling.',
+            'Zero Data Retention is a premium privacy feature. Upgrade your plan to enable zero-retention processing.',
+          )}
+        </p>
       </Show>
       <Show when={!isAdmin()}>
-        <p class="velion-settings-panel-note">Only organization owners and admins can change Zero Data Retention.</p>
+        <p class="velion-settings-panel-note">{i18n.tr('Bare organisasjonseiere og administratorer kan endre Zero Data Retention.', 'Only organization owners and admins can change Zero Data Retention.')}</p>
       </Show>
       <p class="velion-settings-panel-note">
-        The MFA, domain-restriction, and admin-audit controls below are not yet connected to a live source for this workspace, so they are shown unconfigured. They will reflect real policy state once an org-security backend is wired.
+        {i18n.tr(
+          'MFA-, domenebegrensnings- og administratorrevisjonskontrollene under er ennå ikke koblet til en aktiv kilde for dette arbeidsområdet, så de vises som ikke konfigurert. De vil vise reell policytilstand så snart en org-sikkerhetsbackend er koblet til.',
+          'The MFA, domain-restriction, and admin-audit controls below are not yet connected to a live source for this workspace, so they are shown unconfigured. They will reflect real policy state once an org-security backend is wired.',
+        )}
       </p>
       <div class="velion-settings-field-grid velion-settings-field-grid--spaced">
         <SettingsSelect
           id="session-duration"
-          label="Session duration"
+          label={i18n.tr('Øktvarighet', 'Session duration')}
           value="30-days"
           options={[
-            { value: '7-days', label: '7 days' },
-            { value: '30-days', label: '30 days' },
-            { value: '90-days', label: '90 days' },
+            { value: '7-days', label: i18n.tr('7 dager', '7 days') },
+            { value: '30-days', label: i18n.tr('30 dager', '30 days') },
+            { value: '90-days', label: i18n.tr('90 dager', '90 days') },
           ]}
         />
       </div>
       <FeaturePanel
-        title="Recent security events"
-        description="Recent organization changes that administrators should review."
-        actionLabel="Open audit log"
+        title={i18n.tr('Nylige sikkerhetshendelser', 'Recent security events')}
+        description={i18n.tr('Nylige organisasjonsendringer som administratorer bør gjennomgå.', 'Recent organization changes that administrators should review.')}
+        actionLabel={i18n.tr('Åpne revisjonslogg', 'Open audit log')}
         class="velion-settings-feature-panel--spaced"
       >
         <RecentSecurityEvents />
@@ -1277,6 +1341,7 @@ function OrgSecuritySection() {
 }
 
 function IntegrationsSection() {
+  const i18n = useI18n()
   const session = getSession()
   const [summary, setSummary] = createSignal<IntegrationSettingsSummary | null>(null)
   const [actionBusy, setActionBusy] = createSignal<string | null>(null)
@@ -1286,17 +1351,32 @@ function IntegrationsSection() {
   const eventSources: EventSource[] = []
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
 
-  const refresh = async () => {
+  let refreshGeneration = 0
+
+  const refresh = async (targetOrgId = orgId(), generation = refreshGeneration) => {
     try {
-      setSummary(await loadIntegrationSettingsSummary(orgId()))
+      const nextSummary = await loadIntegrationSettingsSummary(targetOrgId)
+      if (generation !== refreshGeneration || targetOrgId !== orgId()) return
+      setSummary(nextSummary)
       setLoadFailed(false)
     } catch {
+      if (generation !== refreshGeneration || targetOrgId !== orgId()) return
       setLoadFailed(true)
     }
   }
 
-  onMount(() => {
-    void refresh()
+  createEffect(() => {
+    const targetOrgId = orgId()
+    const generation = ++refreshGeneration
+
+    for (const source of eventSources) source.close()
+    eventSources.splice(0, eventSources.length)
+    setSummary(null)
+    setSyncProgress({})
+    setNotice(null)
+    setLoadFailed(false)
+
+    void refresh(targetOrgId, generation)
   })
 
   onCleanup(() => {
@@ -1304,17 +1384,9 @@ function IntegrationsSection() {
     eventSources.splice(0, eventSources.length)
   })
 
-  const rows = createMemo(() => buildIntegrationRows(summary()))
+  const rows = createMemo(() => buildIntegrationRows(summary(), i18n))
   const socialRows = createMemo(() => rows().filter(isSocialIntegrationRow))
   const socialStats = createMemo(() => buildSocialIntegrationStats(summary()))
-
-  createEffect(() => {
-    const config = socialRows()
-      .map((row) => row.provider.metaSdk)
-      .find(isMetaFacebookSdkEnabled)
-    if (!config) return
-    void loadMetaFacebookSdk(config).catch(() => undefined)
-  })
 
   const runAction = async (
     row: IntegrationSettingsRow,
@@ -1326,19 +1398,17 @@ function IntegrationsSection() {
 
     try {
       if (action === 'connect') {
-        await prepareMetaSdkLogin(row.provider)
         const session = await requestJson<ConnectSessionResult>(
           `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
           {
             method: 'POST',
-            body: JSON.stringify({ bundles: connectBundlesFor(row.provider) }),
+            body: JSON.stringify({ bundles: connectBundlesFor() }),
             headers: integrationHeaders(orgId()),
           },
         )
         await runSettingsOAuth(session)
-        setNotice(`${row.name} connected.`)
+        setNotice(`${row.name} ${i18n.tr('tilkoblet.', 'connected.')}`)
       } else if (action === 'reconnect' && row.connection) {
-        await prepareMetaSdkLogin(row.provider)
         // Reconnect === re-run the provider connect-session with the FULL bundle.
         // There is no /connections/:id/reconnect-session route (gateway + v2
         // integration-core only expose /providers/:provider/{connect,reconnect}-
@@ -1352,18 +1422,18 @@ function IntegrationsSection() {
           `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
           {
             method: 'POST',
-            body: JSON.stringify({ bundles: connectBundlesFor(row.provider) }),
+            body: JSON.stringify({ bundles: connectBundlesFor() }),
             headers: integrationHeaders(orgId()),
           },
         )
         await runSettingsOAuth(session)
-        setNotice(`${row.name} reconnected.`)
+        setNotice(`${row.name} ${i18n.tr('koblet til på nytt.', 'reconnected.')}`)
       } else if (action === 'disconnect' && row.connection) {
         await requestJson<{ disconnected: boolean }>(
           `/api/v1/integrations/connections/${encodeURIComponent(row.connection.id)}`,
           { method: 'DELETE', headers: integrationHeaders(orgId()) },
         )
-        setNotice(`${row.name} disconnected.`)
+        setNotice(`${row.name} ${i18n.tr('koblet fra.', 'disconnected.')}`)
       } else if (action === 'sync' && row.connection) {
         const result = await requestJson<{ syncJob?: { id?: string; status?: string } }>(
           '/api/v1/integrations/sync-jobs',
@@ -1382,7 +1452,7 @@ function IntegrationsSection() {
       }
       await refresh()
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Integration action failed.')
+      setNotice(error instanceof Error ? error.message : i18n.tr('Integrasjonshandlingen mislyktes.', 'Integration action failed.'))
     } finally {
       setActionBusy(null)
     }
@@ -1390,24 +1460,24 @@ function IntegrationsSection() {
 
   return (
     <>
-      <SectionHeader title="Workspace integrations" description="Connect shared systems used by the workspace." />
+      <SectionHeader title={i18n.tr('Arbeidsområdeintegrasjoner', 'Workspace integrations')} description={i18n.tr('Koble til delte systemer som brukes av arbeidsområdet.', 'Connect shared systems used by the workspace.')} />
       <Show when={summary()}>
         {(current) => (
           <div class="velion-settings-metric-grid">
             <Metric
-              label="Connected"
+              label={i18n.tr('Tilkoblet', 'Connected')}
               value={String(current().metrics.connected)}
-              detail={`${current().metrics.readyProviders} providers configured`}
+              detail={`${current().metrics.readyProviders} ${i18n.tr('leverandører konfigurert', 'providers configured')}`}
             />
             <Metric
-              label="Syncing"
+              label={i18n.tr('Synkroniserer', 'Syncing')}
               value={String(current().metrics.syncing)}
-              detail="Live sync jobs visible from integration-corev2"
+              detail={i18n.tr('Aktive synkroniseringsjobber synlige fra integration-corev2', 'Live sync jobs visible from integration-corev2')}
             />
             <Metric
-              label="Attention"
+              label={i18n.tr('Krever oppmerksomhet', 'Attention')}
               value={String(current().metrics.failed)}
-              detail="Sources needing reconnect or review"
+              detail={i18n.tr('Kilder som trenger ny tilkobling eller gjennomgang', 'Sources needing reconnect or review')}
             />
           </div>
         )}
@@ -1415,35 +1485,38 @@ function IntegrationsSection() {
       <section class="velion-settings-social-layer" aria-labelledby="velion-settings-social-title">
         <div class="velion-settings-social-layer__header">
           <div>
-            <span>Social layer</span>
-            <h3 id="velion-settings-social-title">Publishing, inbox, and campaign adapters</h3>
+            <span>{i18n.tr('Sosialt lag', 'Social layer')}</span>
+            <h3 id="velion-settings-social-title">{i18n.tr('Publisering, innboks og kampanjeadaptere', 'Publishing, inbox, and campaign adapters')}</h3>
             <p>
-              integration-core owns OAuth and token leases; social-core consumes scoped capabilities for provider-specific workflows.
+              {i18n.tr(
+                'integration-core eier OAuth og token-leier; social-core bruker avgrensede kapabiliteter for leverandørspesifikke arbeidsflyter.',
+                'integration-core owns OAuth and token leases; social-core consumes scoped capabilities for provider-specific workflows.',
+              )}
             </p>
           </div>
-          <a class="velion-settings-button velion-settings-button--sm" href="/social/calendar">Open calendar</a>
+          <a class="velion-settings-button velion-settings-button--sm" href="/social/calendar">{i18n.tr('Åpne kalender', 'Open calendar')}</a>
         </div>
         <div class="velion-settings-social-summary">
           <div>
             <strong>{socialStats().providers}</strong>
-            <span>social providers</span>
+            <span>{i18n.tr('sosiale leverandører', 'social providers')}</span>
           </div>
           <div>
             <strong>{socialStats().connected}</strong>
-            <span>connected</span>
+            <span>{i18n.tr('tilkoblet', 'connected')}</span>
           </div>
           <div>
             <strong>{socialStats().publishingReady}</strong>
-            <span>publish-ready</span>
+            <span>{i18n.tr('klar for publisering', 'publish-ready')}</span>
           </div>
           <div>
             <strong>{socialStats().inboxReady}</strong>
-            <span>inbox-ready</span>
+            <span>{i18n.tr('klar for innboks', 'inbox-ready')}</span>
           </div>
         </div>
         <Show
           when={socialRows().length > 0}
-          fallback={<p class="velion-settings-subnote">Social providers have not been exposed by integration-core yet.</p>}
+          fallback={<p class="velion-settings-subnote">{i18n.tr('Sosiale leverandører er ennå ikke eksponert av integration-core.', 'Social providers have not been exposed by integration-core yet.')}</p>}
         >
           <div class="velion-settings-social-provider-grid">
             <For each={socialRows()}>
@@ -1452,13 +1525,13 @@ function IntegrationsSection() {
                   <div class="velion-settings-social-provider__top">
                     <div>
                       <p>{integration.name}</p>
-                      <span>{socialProviderRole(integration.provider)}</span>
+                      <span>{socialProviderRole(integration.provider, i18n)}</span>
                     </div>
                     <span class="velion-settings-integration-status">{integration.status}</span>
                   </div>
                   <p>{integration.detail}</p>
                   <div class="velion-settings-social-capabilities">
-                    <For each={socialCapabilityLabels(integration)}>
+                    <For each={socialCapabilityLabels(integration, i18n)}>
                       {(capability) => <span>{capability}</span>}
                     </For>
                   </div>
@@ -1482,7 +1555,7 @@ function IntegrationsSection() {
               'connection' in integration && integration.connection
                 ? syncProgress()[integration.connection.id]
                 : undefined
-            const groups = createMemo(() => capabilityGroups(integration.provider))
+            const groups = createMemo(() => capabilityGroups(integration.provider, integration.connection?.capabilities))
             const twoWay = () => groups().reads.length > 0 && groups().writes.length > 0
             return (
               <div class="velion-settings-integration-row">
@@ -1491,7 +1564,7 @@ function IntegrationsSection() {
                     <p>{integration.name}</p>
                     <Show when={groups().reads.length || groups().writes.length}>
                       <span class="velion-settings-integration-direction">
-                        {twoWay() ? 'Toveis' : groups().writes.length ? 'Skriver' : 'Leser'}
+                        {twoWay() ? i18n.tr('Toveis', 'Two-way') : groups().writes.length ? i18n.tr('Skriver', 'Writes') : i18n.tr('Leser', 'Reads')}
                       </span>
                     </Show>
                   </div>
@@ -1499,12 +1572,12 @@ function IntegrationsSection() {
                   <div class="velion-settings-integration-caps">
                     <Show when={groups().reads.length}>
                       <span class="velion-settings-integration-caps__group">
-                        <em>Leser</em> {groups().reads.join(' · ')}
+                        <em>{i18n.tr('Leser', 'Reads')}</em> {groups().reads.join(' · ')}
                       </span>
                     </Show>
                     <Show when={groups().writes.length}>
                       <span class="velion-settings-integration-caps__group">
-                        <em>Skriver</em> {groups().writes.join(' · ')}
+                        <em>{i18n.tr('Skriver', 'Writes')}</em> {groups().writes.join(' · ')}
                       </span>
                     </Show>
                   </div>
@@ -1525,20 +1598,23 @@ function IntegrationsSection() {
         </For>
       </div>
       <p class="velion-settings-subnote">
-        Source contents and graph edits are managed later in Knowledge, where changes can be reviewed and audited.
-        {loadFailed() ? ' Integration state could not be refreshed from the local services.' : ''}
+        {i18n.tr(
+          'Kildeinnhold og graf-endringer administreres senere i Kunnskap, der endringer kan gjennomgås og revideres.',
+          'Source contents and graph edits are managed later in Knowledge, where changes can be reviewed and audited.',
+        )}
+        {loadFailed() ? ` ${i18n.tr('Integrasjonstilstanden kunne ikke oppdateres fra de lokale tjenestene.', 'Integration state could not be refreshed from the local services.')}` : ''}
       </p>
       <Show when={notice()}>
         {(message) => <p class="velion-settings-status-message" role="status">{message()}</p>}
       </Show>
       <FeaturePanel
-        title="Webhook delivery"
-        description="Delivery health for shared workspace automations."
-        actionLabel="View logs"
+        title={i18n.tr('Webhook-levering', 'Webhook delivery')}
+        description={i18n.tr('Leveringshelse for delte arbeidsområdeautomasjoner.', 'Delivery health for shared workspace automations.')}
+        actionLabel={i18n.tr('Vis logger', 'View logs')}
         class="velion-settings-feature-panel--spaced"
       >
         <p class="velion-settings-panel-note">
-          No webhook delivery telemetry is available for this workspace yet.
+          {i18n.tr('Ingen telemetri for webhook-levering er tilgjengelig for dette arbeidsområdet ennå.', 'No webhook delivery telemetry is available for this workspace yet.')}
         </p>
       </FeaturePanel>
     </>
@@ -1553,11 +1629,13 @@ async function loadIntegrationSettingsSummary(orgId: string): Promise<Integratio
       .catch(() => ({ connections: [] })),
   ])
   const providers = arrayValue(providersResult.providers).map(normalizeIntegrationProvider)
-  const connections = arrayValue(connectionsResult.connections).map(normalizeIntegrationConnection)
+  const connections = arrayValue(connectionsResult.connections)
+    .map(normalizeIntegrationConnection)
+    .filter((connection) => !connection.deletedAt)
 
   return {
     metrics: {
-      connected: connections.length,
+      connected: connections.filter((connection) => isConnectedIntegrationStatus(connection.status)).length,
       failed: connections.filter((connection) => isFailedIntegrationStatus(connection.status)).length,
       readyProviders: providers.filter((provider) => provider.configured && provider.directOAuthReady).length,
       syncing: connections.filter((connection) => isSyncingIntegrationStatus(connection.syncStatus, connection.latestSyncJob?.status)).length,
@@ -1641,6 +1719,7 @@ function normalizeIntegrationConnection(value: unknown): IntegrationSettingsConn
     capabilities: stringArrayValue(connection.capabilities),
     scopeCount: typeof connection.scopeCount === 'number' ? connection.scopeCount : scopes.length,
     syncStatus: stringValue(connection, 'syncStatus', 'sync_status', 'lastSyncStatus', 'last_sync_status') || 'unknown',
+    deletedAt: stringValue(connection, 'deletedAt', 'deleted_at') || undefined,
     latestSyncJob: normalizeLatestSyncJob(connection.latestSyncJob ?? connection.latest_sync_job),
   }
 }
@@ -1658,7 +1737,11 @@ function integrationHeaders(orgId: string): HeadersInit | undefined {
 }
 
 function isFailedIntegrationStatus(status: string): boolean {
-  return ['failed', 'error', 'needs_reconnect', 'revoked', 'expired'].includes(status.trim().toLowerCase())
+  return ['failed', 'error', 'needs_reconnect', 'needs_refresh', 'revoked', 'expired'].includes(status.trim().toLowerCase())
+}
+
+function isConnectedIntegrationStatus(status: string): boolean {
+  return ['active', 'connected'].includes(status.trim().toLowerCase())
 }
 
 function isSyncingIntegrationStatus(syncStatus: string, latestJobStatus?: string): boolean {
@@ -1667,7 +1750,7 @@ function isSyncingIntegrationStatus(syncStatus: string, latestJobStatus?: string
   )
 }
 
-function buildIntegrationRows(summary: IntegrationSettingsSummary | null): IntegrationSettingsRow[] {
+function buildIntegrationRows(summary: IntegrationSettingsSummary | null, i18n: ReturnType<typeof useI18n>): IntegrationSettingsRow[] {
   if (!summary) return []
 
   const connectionsByProvider = new Map(summary.connections.map((connection) => [connection.providerKey, connection]))
@@ -1677,24 +1760,26 @@ function buildIntegrationRows(summary: IntegrationSettingsSummary | null): Integ
     // "meta" card) are hidden from the new-connection list; they only surface
     // while an existing legacy connection is still attached.
     if (provider.supersededBy && !connection) return []
-    return [buildIntegrationRow(provider, connection)]
+    return [buildIntegrationRow(provider, connection, i18n)]
   })
 }
 
 function buildIntegrationRow(
   provider: IntegrationSettingsProvider,
   connection: IntegrationSettingsConnection | undefined,
+  i18n: ReturnType<typeof useI18n>,
 ): IntegrationSettingsRow {
   if (connection) {
+      const needsReconnect = isFailedIntegrationStatus(connection.status)
       return {
         name: provider.label,
         detail: [
           connection.displayName,
-          connection.capabilities.length > 0 ? `${connection.capabilities.length} capabilities` : null,
-          connection.scopeCount > 0 ? `${connection.scopeCount} scopes` : null,
-          connection.latestSyncJob?.status ? `sync ${connection.latestSyncJob.status}` : null,
+          connection.capabilities.length > 0 ? `${connection.capabilities.length} ${i18n.tr('kapabiliteter', 'capabilities')}` : null,
+          connection.scopeCount > 0 ? `${connection.scopeCount} ${i18n.tr('tilganger', 'scopes')}` : null,
+          connection.latestSyncJob?.status ? `${i18n.tr('synk', 'sync')} ${connection.latestSyncJob.status}` : null,
         ].filter(Boolean).join(' · '),
-        status: 'Connected',
+        status: needsReconnect ? i18n.tr('Krever ny tilkobling', 'Needs reconnect') : i18n.tr('Tilkoblet', 'Connected'),
         action: 'connected',
         connection,
         provider,
@@ -1705,9 +1790,9 @@ function buildIntegrationRow(
     return {
       name: provider.label,
       detail: provider.missingConfig.length > 0
-        ? `Missing ${provider.missingConfig.slice(0, 2).join(', ')}`
-        : 'Provider credentials are not configured',
-      status: 'Missing config',
+        ? `${i18n.tr('Mangler', 'Missing')} ${provider.missingConfig.slice(0, 2).join(', ')}`
+        : i18n.tr('Leverandørens legitimasjon er ikke konfigurert', 'Provider credentials are not configured'),
+      status: i18n.tr('Mangler konfigurasjon', 'Missing config'),
       action: 'missing',
       provider,
     }
@@ -1716,8 +1801,8 @@ function buildIntegrationRow(
   if (!provider.directOAuthReady) {
     return {
       name: provider.label,
-      detail: `${provider.category} adapter is configured for admin setup`,
-      status: 'Admin setup',
+      detail: `${provider.category} ${i18n.tr('adapter er konfigurert for administratoroppsett', 'adapter is configured for admin setup')}`,
+      status: i18n.tr('Administratoroppsett', 'Admin setup'),
       action: 'admin',
       provider,
     }
@@ -1725,8 +1810,8 @@ function buildIntegrationRow(
 
   return {
     name: provider.label,
-    detail: `${provider.category} source · ${provider.capabilities.length} capabilities`,
-    status: 'Ready',
+    detail: `${provider.category} ${i18n.tr('kilde', 'source')} · ${provider.capabilities.length} ${i18n.tr('kapabiliteter', 'capabilities')}`,
+    status: i18n.tr('Klar', 'Ready'),
     action: 'connect',
     provider,
   }
@@ -1736,7 +1821,7 @@ function isSocialIntegrationRow(row: IntegrationSettingsRow): boolean {
   return row.provider.category === 'social'
 }
 
-function connectBundlesFor(provider: IntegrationSettingsProvider): string[] {
+function connectBundlesFor(): string[] {
   // Request the provider's FULL capability set so a connection made from the
   // workspace integrations page is inbox- AND publishing-ready in one grant:
   // Instagram DM / Messenger / WhatsApp (Meta social.inbox/messenger/whatsapp),
@@ -1765,71 +1850,65 @@ function buildSocialIntegrationStats(summary: IntegrationSettingsSummary | null)
 
   return {
     providers: socialProviders.length,
-    connected: socialConnections.length,
+    connected: socialConnections.filter((connection) => isConnectedIntegrationStatus(connection.status)).length,
     publishingReady: socialConnections.filter((connection) => connection.capabilities.includes('social.post.write')).length,
     inboxReady: socialConnections.filter((connection) => connection.capabilities.includes('social.inbox.read')).length,
   }
 }
 
-function socialProviderRole(provider: IntegrationSettingsProvider): string {
+function socialProviderRole(provider: IntegrationSettingsProvider, i18n: ReturnType<typeof useI18n>): string {
   switch (provider.key) {
     case 'meta':
-      return 'Facebook Pages, Instagram, WhatsApp, and Meta Ads in one connection'
+      return i18n.tr('Facebook-sider, Instagram, WhatsApp og Meta Ads i én tilkobling', 'Facebook Pages, Instagram, WhatsApp, and Meta Ads in one connection')
     case 'facebook':
-      return 'Page publishing, comments, inbox, and analytics'
+      return i18n.tr('Sidepublisering, kommentarer, innboks og analyse', 'Page publishing, comments, inbox, and analytics')
     case 'instagram':
-      return 'Media publishing, messaging, and analytics'
+      return i18n.tr('Mediepublisering, meldinger og analyse', 'Media publishing, messaging, and analytics')
     case 'whatsapp':
-      return 'WhatsApp Business messaging and customer conversations'
+      return i18n.tr('WhatsApp Business-meldinger og kundesamtaler', 'WhatsApp Business messaging and customer conversations')
     case 'meta-ads':
-      return 'Meta Ads account, campaign, and reporting workflows'
+      return i18n.tr('Meta Ads-konto, kampanje- og rapporteringsarbeidsflyt', 'Meta Ads account, campaign, and reporting workflows')
     case 'linkedin':
-      return 'Organization posts, comments, and reporting'
+      return i18n.tr('Organisasjonsinnlegg, kommentarer og rapportering', 'Organization posts, comments, and reporting')
     case 'x':
-      return 'Posts, replies, direct messages, and metrics'
+      return i18n.tr('Innlegg, svar, direktemeldinger og målinger', 'Posts, replies, direct messages, and metrics')
     case 'tiktok':
-      return 'Content Posting API uploads and status tracking'
+      return i18n.tr('Content Posting API-opplastinger og statussporing', 'Content Posting API uploads and status tracking')
     case 'snapchat':
-      return 'Ads, creative, campaign, and reporting workflows'
+      return i18n.tr('Annonser, kreativt innhold, kampanje- og rapporteringsarbeidsflyt', 'Ads, creative, campaign, and reporting workflows')
     default:
-      return 'Social workflow adapter'
+      return i18n.tr('Sosial arbeidsflytadapter', 'Social workflow adapter')
   }
 }
 
-async function prepareMetaSdkLogin(provider: IntegrationSettingsProvider): Promise<void> {
-  if (!isMetaIntegrationProvider(provider.key) || !isMetaFacebookSdkEnabled(provider.metaSdk)) return
-  await ensureMetaLogin(provider.metaSdk)
-}
-
-function isMetaIntegrationProvider(providerKey: string): boolean {
-  return ['meta', 'facebook', 'instagram', 'whatsapp', 'meta-ads'].includes(providerKey.trim().toLowerCase())
-}
-
-function socialCapabilityLabels(row: IntegrationSettingsRow): string[] {
+function socialCapabilityLabels(row: IntegrationSettingsRow, i18n: ReturnType<typeof useI18n>): string[] {
   const connectionCapabilities = row.connection?.capabilities ?? []
   const providerCapabilities = row.provider.capabilities.map((capability) => capability.key)
-  const source = connectionCapabilities.length > 0 ? connectionCapabilities : providerCapabilities
+  // Once a connection exists, render only provider-verified grants. Falling
+  // back to the provider catalog made incomplete Meta grants appear inbox- and
+  // publishing-ready even when Graph reported only public_profile.
+  const source = row.connection ? connectionCapabilities : providerCapabilities
   const socialCapabilities = source
     .filter((capability) => capability.startsWith('social.'))
-    .map(formatSocialCapability)
+    .map((capability) => formatSocialCapability(capability, i18n))
 
-  return socialCapabilities.length > 0 ? socialCapabilities.slice(0, 4) : ['review required']
+  return socialCapabilities.length > 0 ? socialCapabilities.slice(0, 4) : [i18n.tr('gjennomgang kreves', 'review required')]
 }
 
-function formatSocialCapability(capability: string): string {
+function formatSocialCapability(capability: string, i18n: ReturnType<typeof useI18n>): string {
   switch (capability) {
     case 'social.profile.read':
-      return 'profile'
+      return i18n.tr('profil', 'profile')
     case 'social.post.write':
-      return 'publishing'
+      return i18n.tr('publisering', 'publishing')
     case 'social.media.upload':
-      return 'media'
+      return i18n.tr('media', 'media')
     case 'social.inbox.read':
-      return 'inbox'
+      return i18n.tr('innboks', 'inbox')
     case 'social.analytics.read':
-      return 'analytics'
+      return i18n.tr('analyse', 'analytics')
     case 'social.ads.manage':
-      return 'ads'
+      return i18n.tr('annonser', 'ads')
     default:
       return capability.replace(/^social\./, '').replace(/\./g, ' ')
   }
@@ -1857,10 +1936,15 @@ function formatCapabilityLabel(capability: IntegrationCapability): string {
 
 // Consistent read/write grouping for EVERY provider (not just social). Returns
 // deduped, capped label lists so the UI can show "Reads … / Writes …" uniformly.
-function capabilityGroups(provider: IntegrationSettingsProvider): { reads: string[]; writes: string[] } {
+function capabilityGroups(
+  provider: IntegrationSettingsProvider,
+  grantedCapabilities?: string[],
+): { reads: string[]; writes: string[] } {
   const reads: string[] = []
   const writes: string[] = []
+  const granted = grantedCapabilities ? new Set(grantedCapabilities) : null
   for (const cap of provider.capabilities) {
+    if (granted && !granted.has(cap.key)) continue
     const dir = cap.direction ?? capabilityDirectionFromKey(cap.key)
     const label = formatCapabilityLabel(cap)
     const bucket = dir === 'write' ? writes : reads
@@ -1874,23 +1958,24 @@ function IntegrationRowActions(props: {
   onAction: (row: IntegrationSettingsRow, action: 'connect' | 'disconnect' | 'reconnect' | 'sync') => void
   row: IntegrationSettingsRow
 }) {
+  const i18n = useI18n()
   const busy = () => props.busyKey?.startsWith(`${props.row.provider.key}:`) ?? false
   return (
     <Switch>
       <Match when={props.row.action === 'connect'}>
         <SettingsButton settingsSize="sm" disabled={busy()} onClick={() => void props.onAction(props.row, 'connect')}>
-          {busy() ? 'Opening' : 'Connect'}
+          {busy() ? i18n.tr('Åpner', 'Opening') : i18n.tr('Koble til', 'Connect')}
         </SettingsButton>
       </Match>
       <Match when={props.row.action === 'connected'}>
         <SettingsButton settingsSize="sm" disabled={busy()} onClick={() => void props.onAction(props.row, 'sync')}>
-          Sync
+          {i18n.tr('Synkroniser', 'Sync')}
         </SettingsButton>
         <SettingsButton settingsSize="sm" disabled={busy()} onClick={() => void props.onAction(props.row, 'reconnect')}>
-          Reconnect
+          {i18n.tr('Koble til på nytt', 'Reconnect')}
         </SettingsButton>
         <SettingsButton settingsSize="sm" danger disabled={busy()} onClick={() => void props.onAction(props.row, 'disconnect')}>
-          Disconnect
+          {i18n.tr('Koble fra', 'Disconnect')}
         </SettingsButton>
       </Match>
     </Switch>

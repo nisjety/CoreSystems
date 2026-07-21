@@ -372,6 +372,132 @@ describe('workspace settings page', () => {
     expect(screen.getByRole('link', { name: /open calendar/i }).getAttribute('href')).toBe('/social/calendar')
   })
 
+  it('does not present soft-deleted provider connections as connected', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/integrations/providers')) {
+        return new Response(JSON.stringify({
+          providers: [{
+            key: 'slack',
+            label: 'Slack',
+            category: 'communications',
+            configured: true,
+            status: 'ready',
+            missingConfig: [],
+            directOAuthReady: true,
+            capabilities: [{ key: 'channels.history' }, { key: 'message.send' }],
+          }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (url.endsWith('/api/v1/integrations/connections')) {
+        return new Response(JSON.stringify({
+          connections: [{
+            id: 'conn_slack_deleted',
+            providerKey: 'slack',
+            displayName: 'Former Slack workspace',
+            status: 'active',
+            capabilities: ['channels.history', 'message.send'],
+            deletedAt: '2026-07-18T09:00:00Z',
+          }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      return new Response(JSON.stringify({}), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }))
+
+    render(() => <VelionWorkspaceSettingsPage section="integrations" />)
+
+    expect(await screen.findByText('Slack')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
+  })
+
+  it('shows provider-verified incomplete Meta authorization as needing reconnect', async () => {
+	vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+	  const url = String(input)
+	  if (url.endsWith('/api/v1/integrations/providers')) {
+		return new Response(JSON.stringify({ providers: [{
+		  key: 'meta', label: 'Meta', category: 'social', configured: true,
+		  status: 'ready', missingConfig: [], directOAuthReady: true,
+		  capabilities: [{ key: 'social.inbox.read' }],
+		}] }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+	  }
+	  if (url.endsWith('/api/v1/integrations/connections')) {
+		return new Response(JSON.stringify({ connections: [{
+		  id: 'conn_meta', providerKey: 'meta', displayName: 'Ima DaCosta',
+		  status: 'needs_refresh', capabilities: [], scopes: ['public_profile'],
+		  lastSyncStatus: 'authorization_incomplete',
+		}] }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+	  }
+	  return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+	}))
+
+	render(() => <VelionWorkspaceSettingsPage section="integrations" />)
+
+	const attentionMetric = (await screen.findByText('Attention')).parentElement
+	expect(attentionMetric).toBeTruthy()
+	expect(within(attentionMetric as HTMLElement).getByText('1')).toBeTruthy()
+	expect(screen.getAllByText('Needs reconnect')).toHaveLength(2)
+	expect(screen.getAllByRole('button', { name: 'Reconnect' })).toHaveLength(2)
+  })
+
+  it('clears connection state and reloads integrations when the active organization changes', async () => {
+    setSessionUser({
+      id: 'owner_1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_one', name: 'One', role: 'owner' })
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/integrations/providers')) {
+        return new Response(JSON.stringify({
+          providers: [{
+            key: 'slack',
+            label: 'Slack',
+            category: 'communications',
+            configured: true,
+            status: 'ready',
+            missingConfig: [],
+            directOAuthReady: true,
+            capabilities: [{ key: 'channels.history' }, { key: 'message.send' }],
+          }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (url.endsWith('/api/v1/integrations/connections')) {
+        const activeOrg = new Headers(init?.headers).get('x-velion-org-id')
+        return new Response(JSON.stringify({
+          connections: activeOrg === 'org_one'
+            ? [{
+              id: 'conn_slack_one',
+              providerKey: 'slack',
+              displayName: 'Workspace One Slack',
+              status: 'active',
+              capabilities: ['channels.history', 'message.send'],
+            }]
+            : [],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      return new Response(JSON.stringify({}), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }))
+
+    render(() => <VelionWorkspaceSettingsPage section="integrations" />)
+
+    expect(await screen.findByRole('button', { name: 'Disconnect' })).toBeTruthy()
+
+    markSessionOnboardingComplete({ id: 'org_two', name: 'Two', role: 'owner' })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Connect' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
+  })
+
   it('renders billing with live account data and prefers embedded Nexi checkout over its hosted URL', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
