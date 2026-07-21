@@ -15,6 +15,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -110,6 +111,76 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Fatalf("list count = %d, want 2", len(entries))
+	}
+}
+
+// TestPostgresLedger_PurgeOrgIsolatesOtherOrg is the mandatory GDPR safety
+// test for the org-erasure consumer: purging one org's cost_entries rows must
+// never touch another org's rows, and must be safe to run twice (NATS
+// redelivery) on the same org.
+func TestPostgresLedger_PurgeOrgIsolatesOtherOrg(t *testing.T) {
+	dsn := os.Getenv("COST_CORE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("COST_CORE_TEST_DATABASE_URL not set; skipping Postgres integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	applyMigration(ctx, t, pool)
+
+	orgA := "itest-purge-a-" + time.Now().Format("150405.000")
+	orgB := orgA + "-b"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cost_entries WHERE org_id IN ($1, $2)`, orgA, orgB)
+	})
+
+	store, err := New(pool)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	must := func(e ledger.Entry) {
+		t.Helper()
+		if err := store.RecordEntry(ctx, e); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+	must(ledger.Entry{OrgID: orgA, UserID: "u1", InputTokens: 100, CostUSD: 1, IdempotencyKey: "purge-a-1"})
+	must(ledger.Entry{OrgID: orgB, UserID: "u2", InputTokens: 200, CostUSD: 2, IdempotencyKey: "purge-b-1"})
+
+	if err := store.PurgeOrg(ctx, orgA); err != nil {
+		t.Fatalf("PurgeOrg(orgA): %v", err)
+	}
+
+	if _, err := store.GetUsage(ctx, orgA, "u1"); !errors.Is(err, ledger.ErrUsageNotFound) {
+		t.Fatalf("orgA usage = %v, want ErrUsageNotFound after purge", err)
+	}
+	entriesA, err := store.ListEntries(ctx, ledger.AggregateFilter{OrgID: orgA}, 10)
+	if err != nil || len(entriesA) != 0 {
+		t.Fatalf("orgA entries = %v (err=%v), want none after purge", entriesA, err)
+	}
+
+	usageB, err := store.GetUsage(ctx, orgB, "u2")
+	if err != nil {
+		t.Fatalf("orgB usage should survive purge of orgA: %v", err)
+	}
+	if usageB.TotalInputTokens != 200 || usageB.EntryCount != 1 {
+		t.Fatalf("orgB usage corrupted by orgA purge: %+v", usageB)
+	}
+
+	// Idempotent: a redelivered purge event must not error and must not touch orgB.
+	if err := store.PurgeOrg(ctx, orgA); err != nil {
+		t.Fatalf("second PurgeOrg(orgA) should be a no-op, got: %v", err)
+	}
+	if _, err := store.GetUsage(ctx, orgB, "u2"); err != nil {
+		t.Fatalf("orgB usage should still be intact after redelivered purge: %v", err)
 	}
 }
 

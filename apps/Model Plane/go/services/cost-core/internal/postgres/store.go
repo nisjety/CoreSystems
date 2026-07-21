@@ -237,6 +237,21 @@ func (s *Store) CheckBudget(ctx context.Context, orgID, userID string, maxCostUS
 	return nil
 }
 
+// PurgeOrg permanently deletes every cost_entries row for orgID. Called by the
+// GDPR org-erasure consumer (internal/consumers/org_erasure_consumer.go) only
+// for subject_type=="organization" events. A plain DELETE scoped by org_id is
+// naturally idempotent (a redelivered event just deletes zero rows) and never
+// touches another org's rows.
+func (s *Store) PurgeOrg(ctx context.Context, orgID string) error {
+	if strings.TrimSpace(orgID) == "" {
+		return fmt.Errorf("postgres ledger: org_id is required")
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM cost_entries WHERE org_id = $1`, orgID); err != nil {
+		return fmt.Errorf("postgres ledger: purge org: %w", err)
+	}
+	return nil
+}
+
 // aggregateRow runs a fixed 4-column aggregate query and reports whether any
 // row matched (EntryCount > 0).
 func (s *Store) aggregateRow(ctx context.Context, q string, args ...any) (*ledger.Usage, bool, error) {

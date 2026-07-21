@@ -188,6 +188,14 @@ type Ledger interface {
 	// CheckBudget returns nil when the org+user is within both caps, or an
 	// ErrBudgetExceeded* error otherwise. A cap <= 0 disables that check.
 	CheckBudget(ctx context.Context, orgID, userID string, maxCostUSD float64, maxTokens int64) error
+
+	// PurgeOrg permanently deletes every cost/usage row scoped to orgID. Used
+	// by the GDPR org-erasure consumer (internal/consumers/org_erasure_consumer.go)
+	// when org-core publishes velion.gdpr.erasure.requested for
+	// subject_type=="organization". Idempotent: calling it twice for the same
+	// orgID is safe (the second call deletes zero rows). Must never affect any
+	// other org's rows.
+	PurgeOrg(ctx context.Context, orgID string) error
 }
 
 const defaultListLimit = 100
@@ -378,6 +386,34 @@ func (s *Store) CheckBudget(_ context.Context, orgID, userID string, maxCostUSD 
 	totalTokens := u.TotalInputTokens + u.TotalOutputTokens
 	if maxTokens > 0 && totalTokens >= maxTokens {
 		return fmt.Errorf("%w: current %d >= limit %d", ErrBudgetExceededTokens, totalTokens, maxTokens)
+	}
+	return nil
+}
+
+// PurgeOrg deletes every in-memory usage rollup, raw entry, and idempotency
+// record for orgID. Scoped strictly by orgID so other orgs are never touched.
+func (s *Store) PurgeOrg(_ context.Context, orgID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for k := range s.usage {
+		if k.OrgID == orgID {
+			delete(s.usage, k)
+		}
+	}
+
+	kept := s.entries[:0:0]
+	for _, e := range s.entries {
+		if e.OrgID != orgID {
+			kept = append(kept, e)
+		}
+	}
+	s.entries = kept
+
+	for k := range s.seen {
+		if k.OrgID == orgID {
+			delete(s.seen, k)
+		}
 	}
 	return nil
 }

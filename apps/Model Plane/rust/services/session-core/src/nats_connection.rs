@@ -5,6 +5,12 @@
 
 const NATS_INBOX_PREFIX: &str = "_INBOX.SESSION_CORE_RUNTIME";
 
+/// Inbox prefix for the dedicated shared-broker connection used by the GDPR
+/// erasure consumer (see [`connect_shared`]). Kept distinct from
+/// [`NATS_INBOX_PREFIX`] because the two connections are separate NATS
+/// sessions, under separate credentials, against separate brokers.
+const NATS_SHARED_INBOX_PREFIX: &str = "_INBOX.SESSION_CORE_GDPR";
+
 fn configured_token() -> Option<String> {
     normalize_token(std::env::var("NATS_AUTH_TOKEN").ok())
 }
@@ -69,6 +75,26 @@ pub async fn connect(url: &str) -> Result<async_nats::Client, async_nats::Connec
                 .await
         }
     }
+}
+
+/// Connect to the shared cross-plane broker (`control-shared-nats`) under the
+/// narrowly-scoped `session-core-gdpr` identity used only by the GDPR
+/// erasure consumer.
+///
+/// Unlike [`connect`], which serves session-core's own Model-Plane-local
+/// broker and tolerates a migration-only bearer-token fallback, this path is
+/// username/password only: `NATS_SHARED_USER` and `NATS_SHARED_PASSWORD` are
+/// read directly with no token fallback, so a missing/misconfigured shared
+/// identity fails the connection attempt (and is retried by the caller's
+/// supervised background loop) rather than silently degrading to an
+/// unauthenticated session on a broker this crate does not own.
+pub async fn connect_shared(url: &str) -> Result<async_nats::Client, async_nats::ConnectError> {
+    let user = std::env::var("NATS_SHARED_USER").unwrap_or_default();
+    let password = std::env::var("NATS_SHARED_PASSWORD").unwrap_or_default();
+    async_nats::ConnectOptions::with_user_and_password(user, password)
+        .custom_inbox_prefix(NATS_SHARED_INBOX_PREFIX)
+        .connect(url)
+        .await
 }
 
 #[cfg(test)]

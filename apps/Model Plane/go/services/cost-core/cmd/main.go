@@ -25,6 +25,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/cost-core/internal/consumers"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 	"github.com/triodelab/model-plane/services/cost-core/internal/postgres"
 	"github.com/triodelab/model-plane/services/cost-core/internal/pricing"
@@ -39,6 +40,13 @@ import (
 const usageSubjectWildcard = "mp.v1.usage.*"
 
 const natsInboxPrefix = "_INBOX.COST_CORE_RUNTIME"
+
+// gdprInboxPrefix is the inbox prefix for the SECOND, narrowly-scoped NATS
+// connection used only by the GDPR org-erasure consumer (see
+// runOrgErasureConsumer). Deliberately distinct from natsInboxPrefix so the
+// cross-plane GDPR credential/connection never shares an inbox namespace with
+// the Model-Plane-local USAGE_ENVELOPE connection above.
+const gdprInboxPrefix = "_INBOX.COST_CORE_GDPR"
 
 const (
 	usageEnvelopeProducer = "model-gateway"
@@ -137,6 +145,17 @@ func main() {
 
 	// USAGE_ENVELOPE subscriber: record costs as runs execute.
 	go subscribeUsageEnvelopes(ctx, srv)
+
+	// Cross-plane GDPR erasure fan-out: org-core publishes
+	// velion.gdpr.erasure.requested (explicit hard-delete AND its 30-day
+	// auto-purge cron) on the shared Control-Plane bus; this permanently
+	// deletes every cost_entries row cost-core holds for that org. Runs on its
+	// own dedicated shared-broker connection (identity "cost-core-gdpr",
+	// configured via COST_CORE_GDPR_NATS_URL/_USER/_PASSWORD below) —
+	// independent of the Model-Plane-local NATS_URL connection used by the
+	// USAGE_ENVELOPE subscriber above, since this consumer never touches that
+	// plane-local broker.
+	go runOrgErasureConsumer(ctx, store)
 
 	<-ctx.Done()
 	slog.Info("shutting down")
@@ -250,6 +269,60 @@ func natsAuthOptions() []nats.Option {
 	}
 	if token := strings.TrimSpace(os.Getenv("NATS_AUTH_TOKEN")); token != "" && os.Getenv("NATS_ALLOW_TOKEN_FALLBACK") == "1" {
 		return append(options, nats.Token(token))
+	}
+	return options
+}
+
+// runOrgErasureConsumer connects to the shared cross-plane control-shared-nats
+// broker over a SECOND, narrowly-scoped connection (identity "cost-core-gdpr",
+// configured by COST_CORE_GDPR_NATS_URL/_USER/_PASSWORD — deliberately
+// distinct env var names from NATS_URL/NATS_USER/NATS_PASSWORD above, which
+// configure the Model-Plane-local broker the USAGE_ENVELOPE subscriber uses)
+// and binds the pre-provisioned GDPR org-erasure consumer. An unset
+// COST_CORE_GDPR_NATS_URL disables only this consumer — every other cost-core
+// function (recording, budget checks, USAGE_ENVELOPE ingestion) is unaffected.
+func runOrgErasureConsumer(ctx context.Context, store ledger.Ledger) {
+	natsURL := strings.TrimSpace(os.Getenv("COST_CORE_GDPR_NATS_URL"))
+	if natsURL == "" {
+		slog.Info("COST_CORE_GDPR_NATS_URL not set; GDPR org-erasure consumer disabled")
+		return
+	}
+
+	nc, err := nats.Connect(natsURL, gdprNatsAuthOptions()...)
+	if err != nil {
+		slog.Error("shared-broker NATS connect failed; GDPR org-erasure consumer disabled", "error", err)
+		return
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("shared-broker JetStream context failed; GDPR org-erasure consumer disabled", "error", err)
+		return
+	}
+
+	orgErasureConsumer := consumers.NewOrgErasureConsumer(js, store)
+	if err := orgErasureConsumer.Start(ctx); err != nil {
+		slog.Error("GDPR org-erasure consumer bind failed (is it pre-provisioned on control-shared-nats?)", "error", err)
+		return
+	}
+	defer orgErasureConsumer.Stop()
+
+	slog.Info("GDPR org-erasure consumer active")
+	<-ctx.Done()
+}
+
+func gdprNatsAuthOptions() []nats.Option {
+	options := []nats.Option{
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+		nats.CustomInboxPrefix(gdprInboxPrefix),
+	}
+	user := strings.TrimSpace(os.Getenv("COST_CORE_GDPR_NATS_USER"))
+	password := strings.TrimSpace(os.Getenv("COST_CORE_GDPR_NATS_PASSWORD"))
+	if user != "" || password != "" {
+		return append(options, nats.UserInfo(user, password))
 	}
 	return options
 }

@@ -343,6 +343,13 @@ services:
       NATS_URL: nats://nats:4222
       NATS_USER: session-core-runtime
       NATS_PASSWORD: ${MODEL_SESSION_CORE_NATS_PASSWORD:?MODEL_SESSION_CORE_NATS_PASSWORD is required}
+      # Dedicated shared-broker identity for the cross-plane GDPR erasure
+      # consumer only (see gdpr_nats.rs). This is NOT the plane-local NATS_URL
+      # above and must never be repointed at the Model Plane's own broker —
+      # AQENCIA_CONTROLPLANE only exists on control-shared-nats.
+      NATS_SHARED_URL: nats://control-shared-nats:4222
+      NATS_SHARED_USER: session-core-gdpr
+      NATS_SHARED_PASSWORD: ${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: session-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
@@ -365,6 +372,9 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+    networks:
+      default: {}
+      inter-plane-bus: {}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/healthz"]
       interval: 10s
@@ -844,6 +854,20 @@ services:
       NATS_URL: nats://model-nats:4222
       NATS_USER: cost-core-runtime
       NATS_PASSWORD: ${MODEL_COST_CORE_NATS_PASSWORD:?MODEL_COST_CORE_NATS_PASSWORD is required}
+      # SECOND, narrowly-scoped connection (identity "cost-core-gdpr") to the
+      # shared cross-plane control-shared-nats broker, used only by the GDPR
+      # org-erasure consumer. Deliberately distinct from NATS_URL/NATS_USER/
+      # NATS_PASSWORD above (the Model-Plane-local `model-nats` broker the
+      # USAGE_ENVELOPE subscriber uses) so this credential never shares a
+      # connection/permission surface with plane-local traffic. cost-core is
+      # already attached to `inter-plane-bus` below, where control-shared-nats
+      # is reachable by that alias. The consumer durable
+      # (cost-core-org-erasure) and this identity's publish/subscribe
+      # permissions must be provisioned in control-shared-nats.conf and
+      # audit-core's provisioner before this becomes live.
+      COST_CORE_GDPR_NATS_URL: nats://control-shared-nats:4222
+      COST_CORE_GDPR_NATS_USER: cost-core-gdpr
+      COST_CORE_GDPR_NATS_PASSWORD: ${COST_CORE_GDPR_NATS_PASSWORD:?COST_CORE_GDPR_NATS_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: cost-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}

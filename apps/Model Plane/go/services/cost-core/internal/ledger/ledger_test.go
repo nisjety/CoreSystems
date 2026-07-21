@@ -78,6 +78,46 @@ func TestStore_IdempotencyIsTenantScoped(t *testing.T) {
 	}
 }
 
+// TestStore_PurgeOrgIsolatesOtherOrg is the mandatory GDPR safety test: purging
+// one org's data must never affect another org's rows.
+func TestStore_PurgeOrgIsolatesOtherOrg(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	mustRecord(t, s, Entry{OrgID: "org-a", UserID: "u1", RunID: "run1", InputTokens: 10, IdempotencyKey: "a-key"})
+	mustRecord(t, s, Entry{OrgID: "org-b", UserID: "u2", RunID: "run1", InputTokens: 20, IdempotencyKey: "b-key"})
+
+	if err := s.PurgeOrg(ctx, "org-a"); err != nil {
+		t.Fatalf("PurgeOrg(org-a): %v", err)
+	}
+
+	if _, err := s.GetUsage(ctx, "org-a", "u1"); !errors.Is(err, ErrUsageNotFound) {
+		t.Fatalf("org-a usage = %v, want ErrUsageNotFound after purge", err)
+	}
+	if entries, err := s.ListEntries(ctx, AggregateFilter{OrgID: "org-a"}, 10); err != nil || len(entries) != 0 {
+		t.Fatalf("org-a entries = %v (err=%v), want none after purge", entries, err)
+	}
+
+	otherUsage, err := s.GetUsage(ctx, "org-b", "u2")
+	if err != nil {
+		t.Fatalf("org-b usage should survive purge of org-a: %v", err)
+	}
+	if otherUsage.TotalInputTokens != 20 || otherUsage.EntryCount != 1 {
+		t.Fatalf("org-b usage corrupted by org-a purge: %+v", otherUsage)
+	}
+	otherEntries, err := s.ListEntries(ctx, AggregateFilter{OrgID: "org-b"}, 10)
+	if err != nil || len(otherEntries) != 1 {
+		t.Fatalf("org-b entries = %v (err=%v), want exactly 1 after org-a purge", otherEntries, err)
+	}
+
+	// Idempotent: purging again (redelivery) must not error or affect org-b.
+	if err := s.PurgeOrg(ctx, "org-a"); err != nil {
+		t.Fatalf("second PurgeOrg(org-a) should be a no-op, got: %v", err)
+	}
+	if _, err := s.GetUsage(ctx, "org-b", "u2"); err != nil {
+		t.Fatalf("org-b usage should still be intact after redelivered purge: %v", err)
+	}
+}
+
 func TestStoreRejectsMalformedAccountingEntries(t *testing.T) {
 	for _, test := range []struct {
 		name  string

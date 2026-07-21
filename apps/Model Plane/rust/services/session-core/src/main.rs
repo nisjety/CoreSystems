@@ -14,6 +14,8 @@ mod auth;
 mod compaction;
 mod dreaming;
 mod finetune_grpc;
+mod gdpr;
+mod gdpr_nats;
 mod grpc;
 mod http_health;
 mod letta_adapter;
@@ -70,6 +72,16 @@ async fn main() -> Result<()> {
             async move { nats::run(pool, nats_url).await }
         },
     ));
+    let gdpr_pool = pool.clone();
+    // The GDPR erasure consumer binds to AQENCIA_CONTROLPLANE on the shared
+    // cross-plane broker (control-shared-nats), not session-core's own
+    // Model-Plane-local NATS_URL — that broker never carries this subject.
+    // NATS_SHARED_URL/NATS_SHARED_USER/NATS_SHARED_PASSWORD are the dedicated
+    // session-core-gdpr identity provisioned for this purpose alone. Left
+    // unset, the consumer is intentionally disabled below rather than
+    // hot-looping doomed connection attempts against session-core's local
+    // broker (which was the previous, incorrect behavior).
+    let gdpr_nats_url = std::env::var("NATS_SHARED_URL").unwrap_or_default();
     let orchestration_events_tx = events_tx.clone();
     let orchestration_nats_handle = tokio::spawn(supervise_background(
         "session-core orchestration NATS bridge",
@@ -79,6 +91,20 @@ async fn main() -> Result<()> {
             async move { orchestration_nats::run(nats_url, events_tx).await }
         },
     ));
+    let gdpr_erasure_handle = tokio::spawn(async move {
+        if gdpr_nats_url.is_empty() {
+            warn!("NATS_SHARED_URL not set; session-core GDPR erasure consumer disabled");
+            // Park forever instead of hot-looping a connection that can
+            // never succeed without shared-broker credentials configured.
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core GDPR erasure consumer", move || {
+            let pool = gdpr_pool.clone();
+            let nats_url = gdpr_nats_url.clone();
+            async move { gdpr_nats::run(pool, nats_url).await }
+        })
+        .await
+    });
     let compaction_handle = tokio::spawn(compaction::run(pool.clone()));
     let dreaming_pool = pool.clone();
     let dreaming_handle = tokio::spawn(supervise_background(
@@ -111,6 +137,7 @@ async fn main() -> Result<()> {
         result = http_handle => result??,
         result = nats_handle => result??,
         result = orchestration_nats_handle => result??,
+        result = gdpr_erasure_handle => result??,
         result = compaction_handle => result??,
         result = dreaming_handle => result??,
         result = terminalization_handle => result??,
