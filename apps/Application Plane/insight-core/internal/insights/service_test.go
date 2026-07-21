@@ -91,6 +91,53 @@ func TestOverviewCitesRealEventSourcesNeverFabricates(t *testing.T) {
 	}
 }
 
+// TestOverviewRelabelsPilotHeadlineScorecards locks the "Conversations
+// handled" / "AI drafts approved" / "AI drafts rejected" presentation labels
+// to their exact real metric ids — relabeling never changes the recorded
+// value or fabricates a new one.
+func TestOverviewRelabelsPilotHeadlineScorecards(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	events := []IngestMetricEventInput{
+		{OrgID: "org-1", Surface: SurfaceInbox, Metric: "tickets_resolved", Value: 5, Source: "conversation-core"},
+		{OrgID: "org-1", Surface: SurfaceInbox, Metric: "ai_actions_approved", Value: 3, Source: "conversation-core"},
+		{OrgID: "org-1", Surface: SurfaceInbox, Metric: "ai_actions_rejected", Value: 1, Source: "conversation-core"},
+		// Unlisted metric must keep the generic transform, not a fabricated label.
+		{OrgID: "org-1", Surface: SurfaceInbox, Metric: "tickets_created", Value: 2, Source: "conversation-core"},
+	}
+	for _, event := range events {
+		if _, err := service.RecordMetricEvent(context.Background(), event); err != nil {
+			t.Fatalf("RecordMetricEvent error: %v", err)
+		}
+	}
+
+	overview, err := service.Overview(context.Background(), OverviewQuery{OrgID: "org-1", Surfaces: []string{SurfaceInbox}})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+
+	labels := map[string]string{}
+	values := map[string]float64{}
+	for _, card := range overview.Scorecards {
+		labels[card.ID] = card.Label
+		values[card.ID] = card.Value
+	}
+
+	wantLabels := map[string]string{
+		"inbox.tickets_resolved":    "Conversations handled",
+		"inbox.ai_actions_approved": "AI drafts approved",
+		"inbox.ai_actions_rejected": "AI drafts rejected",
+		"inbox.tickets_created":     "inbox tickets created",
+	}
+	for id, wantLabel := range wantLabels {
+		if got := labels[id]; got != wantLabel {
+			t.Errorf("label[%s] = %q, want %q", id, got, wantLabel)
+		}
+	}
+	if values["inbox.tickets_resolved"] != 5 {
+		t.Errorf("relabeling changed the value: got %v, want 5", values["inbox.tickets_resolved"])
+	}
+}
+
 func TestOverviewJoinsMultipleDistinctSourcesSorted(t *testing.T) {
 	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
 	for _, source := range []string{"social-core", "conversation-core"} {

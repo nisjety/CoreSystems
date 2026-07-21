@@ -99,6 +99,100 @@ func TestProcess_StableIDForDuplicateDelivery(t *testing.T) {
 	}
 }
 
+func TestProcess_AIActionReviewed_ApprovedSplitsToApprovedMetric(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &MetricSubscriber{recorder: rec}
+	ev := evt("evt-approve", aiActionReviewedType, "org-1")
+	ev.Data = map[string]any{"ai_action_id": "aia-1", "decision": "approved"}
+
+	if got := sub.process(context.Background(), conversationSubjectPrefix+aiActionReviewedType, ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("recorded %d, want 1", rec.count())
+	}
+	in := rec.inputs[0]
+	if in.Surface != insights.SurfaceInbox || in.Metric != "ai_actions_approved" || in.Value != 1 {
+		t.Errorf("unexpected metric input: %+v", in)
+	}
+	if in.Source != metricSourceConversation {
+		t.Errorf("source = %q, want %q", in.Source, metricSourceConversation)
+	}
+}
+
+func TestProcess_AIActionReviewed_RejectedSplitsToRejectedMetric(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &MetricSubscriber{recorder: rec}
+	ev := evt("evt-reject", aiActionReviewedType, "org-1")
+	ev.Data = map[string]any{"ai_action_id": "aia-2", "decision": "rejected"}
+
+	if got := sub.process(context.Background(), conversationSubjectPrefix+aiActionReviewedType, ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("recorded %d, want 1", rec.count())
+	}
+	in := rec.inputs[0]
+	if in.Surface != insights.SurfaceInbox || in.Metric != "ai_actions_rejected" || in.Value != 1 {
+		t.Errorf("unexpected metric input: %+v", in)
+	}
+}
+
+// TestProcess_AIActionReviewed_UnknownDecisionSkipped locks the honesty
+// invariant: a decision outside conversation-core's allowed set ("approved",
+// "rejected") must never be guessed into either bucket.
+func TestProcess_AIActionReviewed_UnknownDecisionSkipped(t *testing.T) {
+	cases := []struct {
+		name     string
+		decision any
+	}{
+		{"missing decision key", nil},
+		{"empty string", ""},
+		{"unrecognized value", "pending"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{}
+			sub := &MetricSubscriber{recorder: rec}
+			ev := evt("evt-x", aiActionReviewedType, "org-1")
+			if tc.decision != nil {
+				ev.Data = map[string]any{"decision": tc.decision}
+			}
+			if got := sub.process(context.Background(), conversationSubjectPrefix+aiActionReviewedType, ev); got != outcomeAck {
+				t.Fatalf("outcome = %v, want ack (skip)", got)
+			}
+			if rec.count() != 0 {
+				t.Errorf("unknown decision %v produced a metric (%d)", tc.decision, rec.count())
+			}
+		})
+	}
+}
+
+func TestProcess_AIActionReviewed_MissingOrgSkipped(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &MetricSubscriber{recorder: rec}
+	ev := evt("evt-x", aiActionReviewedType, "")
+	ev.Data = map[string]any{"decision": "approved"}
+
+	if got := sub.process(context.Background(), conversationSubjectPrefix+aiActionReviewedType, ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 0 {
+		t.Errorf("event without org produced a metric (%d)", rec.count())
+	}
+}
+
+func TestProcess_AIActionReviewed_RecorderErrorRetries(t *testing.T) {
+	rec := &fakeRecorder{err: errors.New("db down")}
+	sub := &MetricSubscriber{recorder: rec}
+	ev := evt("evt-x", aiActionReviewedType, "org-1")
+	ev.Data = map[string]any{"decision": "approved"}
+
+	if got := sub.process(context.Background(), conversationSubjectPrefix+aiActionReviewedType, ev); got != outcomeRetry {
+		t.Fatalf("outcome = %v, want retry", got)
+	}
+}
+
 func TestProcess_UnknownTypeSkipped(t *testing.T) {
 	rec := &fakeRecorder{}
 	sub := &MetricSubscriber{recorder: rec}

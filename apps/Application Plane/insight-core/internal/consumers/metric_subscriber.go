@@ -74,15 +74,37 @@ type metricTarget struct {
 // the `velion.application.conversation.` prefix) to an insight (surface,
 // metric, source). Each mapped event contributes a count of 1. Types not in
 // this map are skipped — never mapped to a fabricated metric.
+//
+// `ai_action.reviewed` is deliberately NOT in this flat map: the reviewer's
+// real decision (approved vs rejected) must split into two distinct metrics,
+// so it is handled separately by processAIActionReviewed below.
 var conversationMapping = map[string]metricTarget{
 	"ai_action.executed":   {insights.SurfaceInbox, "ai_actions_executed", metricSourceConversation},
-	"ai_action.reviewed":   {insights.SurfaceInbox, "ai_actions_reviewed", metricSourceConversation},
 	"ticket.created":       {insights.SurfaceInbox, "tickets_created", metricSourceConversation},
 	"ticket.suggested":     {insights.SurfaceInbox, "tickets_suggested", metricSourceConversation},
 	"ticket.resolved":      {insights.SurfaceInbox, "tickets_resolved", metricSourceConversation},
 	"conversation.created": {insights.SurfaceInbox, "conversations_created", metricSourceConversation},
 	"message.received":     {insights.SurfaceInbox, "messages_received", metricSourceConversation},
 	"message.sent":         {insights.SurfaceInbox, "messages_sent", metricSourceConversation},
+}
+
+// aiActionReviewedType is conversation-core's event type (subject minus the
+// `velion.application.conversation.` prefix) for SubjectAIActionReviewed.
+// Handled separately from conversationMapping because the same event type
+// must resolve to one of TWO distinct metrics depending on the reviewer's
+// real decision — never a single undifferentiated "reviewed" count that
+// would hide the approve/reject split the AI-draft-acceptance measurement
+// needs.
+const aiActionReviewedType = "ai_action.reviewed"
+
+// aiActionDecisionMetrics maps conversation-core's real `decision` field
+// (the ai_action.reviewed event's Data.decision, set by Service.ReviewAIAction
+// in conversation-core-go) to the metric it contributes. Only "approved" and
+// "rejected" are conversation-core's allowed decisions; any other or missing
+// value is skipped — never guessed or defaulted to either bucket.
+var aiActionDecisionMetrics = map[string]string{
+	"approved": "ai_actions_approved",
+	"rejected": "ai_actions_rejected",
 }
 
 // socialMapping maps a social-core lifecycle event Type (the subject minus the
@@ -194,6 +216,9 @@ func (s *MetricSubscriber) process(ctx context.Context, subject string, ev appli
 	if strings.HasPrefix(subject, socialSubjectPrefix) && ev.Type == metricsSnapshottedType {
 		return s.processProviderMetricsSnapshotted(ctx, ev)
 	}
+	if strings.HasPrefix(subject, conversationSubjectPrefix) && ev.Type == aiActionReviewedType {
+		return s.processAIActionReviewed(ctx, ev)
+	}
 
 	target, ok := resolveTarget(subject, ev.Type)
 	if !ok {
@@ -213,6 +238,37 @@ func (s *MetricSubscriber) process(ctx context.Context, subject string, ev appli
 		OccurredAt: ev.OccurredAt,
 	}); err != nil {
 		log.Printf("[insight-core/metric-subscriber] record %s for org %s: %v", target.metric, ev.OrgID, err)
+		return outcomeRetry
+	}
+	return outcomeAck
+}
+
+// processAIActionReviewed records the reviewer's real decision on an
+// ai_action.reviewed event as one of two distinct metrics
+// (ai_actions_approved / ai_actions_rejected) so the measurement layer can
+// compute an honest AI-draft-acceptance rate (approved / (approved+rejected)).
+// A missing org, or a decision outside conversation-core's allowed set, is
+// skipped — never counted toward either bucket, never guessed.
+func (s *MetricSubscriber) processAIActionReviewed(ctx context.Context, ev applicationEvent) outcome {
+	if ev.OrgID == "" {
+		return outcomeAck // cannot attribute without an org — skip
+	}
+	decision := stringFromEventData(ev.Data, "decision")
+	metric, ok := aiActionDecisionMetrics[decision]
+	if !ok {
+		return outcomeAck // unknown/missing decision — skip, never guessed
+	}
+	if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
+		ID:         metricEventID(ev.ID, metric),
+		OrgID:      ev.OrgID,
+		Surface:    insights.SurfaceInbox,
+		Metric:     metric,
+		Value:      1,
+		Unit:       "count",
+		Source:     metricSourceConversation,
+		OccurredAt: ev.OccurredAt,
+	}); err != nil {
+		log.Printf("[insight-core/metric-subscriber] record %s for org %s: %v", metric, ev.OrgID, err)
 		return outcomeRetry
 	}
 	return outcomeAck

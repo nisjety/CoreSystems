@@ -272,6 +272,27 @@ func connectorGaps(connectors []ConnectorSlot) []ConnectorGap {
 	return gaps
 }
 
+// scorecardLabelOverrides gives a small set of scorecards a human-facing
+// label distinct from the generic "surface metric" transform below. Keyed by
+// "surface.metric" — the same key buildScorecards uses for Scorecard.ID — so
+// an override only ever applies to the exact real metric it names. Metrics
+// not listed here fall back to the generic transform; nothing here changes
+// the underlying value, source, or unit — it is presentation only.
+var scorecardLabelOverrides = map[string]string{
+	// "Conversations handled" is the pilot's first headline number (see
+	// velion-feature-map.md's Insights "done-enough gate"): the real count of
+	// conversation-core tickets marked resolved.
+	"inbox.tickets_resolved": "Conversations handled",
+	// Feeds the "AI draft acceptance %" headline number as
+	// approved / (approved + rejected); see metric_subscriber.go's
+	// processAIActionReviewed for how these two metrics are recorded.
+	"inbox.ai_actions_approved": "AI drafts approved",
+	"inbox.ai_actions_rejected": "AI drafts rejected",
+}
+
 func scorecardLabel(surface, metric string) string {
+	if label, ok := scorecardLabelOverrides[surface+"."+metric]; ok {
+		return label
+	}
 	return strings.ReplaceAll(surface+" "+metric, "_", " ")
 }
