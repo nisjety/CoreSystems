@@ -45,6 +45,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/integrations/connections/:id/sync",
             post(connections::trigger_sync),
         )
+        .route(
+            "/api/v1/integrations/connections/:id/inbox-history",
+            post(connections::extend_inbox_history),
+        )
         // Sync jobs — static before param
         .route(
             "/api/v1/integrations/sync-jobs",

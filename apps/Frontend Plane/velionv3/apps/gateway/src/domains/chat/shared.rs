@@ -32,9 +32,18 @@ pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
 }
 
 pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Value {
-    if zdr_flag(headers) {
-        if let Some(object) = body.as_object_mut() {
-            object.insert("zdr".to_owned(), Value::Bool(true));
+    if let Some(object) = body.as_object_mut() {
+        match object.get("zdr") {
+            None => {
+                object.insert("zdr".to_owned(), Value::Bool(zdr_flag(headers)));
+            }
+            Some(Value::Bool(body_zdr)) => {
+                object.insert("zdr".to_owned(), Value::Bool(zdr_flag(headers) || *body_zdr));
+            }
+            Some(_) => {
+                // Preserve malformed values so Model Gateway's typed request
+                // boundary rejects them instead of silently downgrading ZDR.
+            }
         }
     }
     body
@@ -619,6 +628,21 @@ mod tests {
             normalized_model_body(json!({"content": "q", "zdr": true}), &HeaderMap::new())["zdr"],
             true
         );
+    }
+
+    #[test]
+    fn missing_zdr_posture_defaults_explicitly_off() {
+        let normalized = normalized_model_body(json!({"content": "q"}), &HeaderMap::new());
+
+        assert_eq!(normalized["zdr"], false);
+    }
+
+    #[test]
+    fn malformed_zdr_posture_is_not_coerced_off() {
+        let normalized =
+            normalized_model_body(json!({"content": "q", "zdr": "true"}), &HeaderMap::new());
+
+        assert_eq!(normalized["zdr"], "true");
     }
 
     #[test]

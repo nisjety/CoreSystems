@@ -370,7 +370,10 @@ pub(crate) async fn rate_limit_middleware(request: Request, next: Next) -> Respo
 }
 
 fn is_rate_limit_exempt_path(path: &str) -> bool {
-    matches!(path, "/health" | "/metrics" | "/api/v1/auth/session")
+    matches!(
+        path,
+        "/health" | "/version" | "/metrics" | "/api/v1/auth/session"
+    )
 }
 
 #[cfg(test)]
@@ -446,6 +449,7 @@ mod tests {
     #[test]
     fn operational_endpoints_never_depend_on_the_rate_limit_backend() {
         assert!(is_rate_limit_exempt_path("/health"));
+        assert!(is_rate_limit_exempt_path("/version"));
         assert!(is_rate_limit_exempt_path("/metrics"));
         assert!(is_rate_limit_exempt_path("/api/v1/auth/session"));
         assert!(!is_rate_limit_exempt_path("/api/v1/sessions/bootstrap"));

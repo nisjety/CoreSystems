@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
 fn build_router(state: config::AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/version", get(version))
         .merge(domains::actions::router(state.clone()))
         .merge(domains::agent_actions::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
@@ -176,6 +177,20 @@ fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok", "service": "velion-gateway-rs" }))
+}
+
+/// Reports what is actually running in this container: the git revision and
+/// build timestamp baked into the image (see `Dockerfile`'s `SOURCE_REVISION`
+/// / `BUILD_DATE` build args, re-exposed as runtime `ENV` so no Docker/registry
+/// access is needed to answer "what SHA is deployed here"). Falls back to the
+/// same `unverified`/`unknown` defaults the image LABELs use when unset.
+async fn version() -> Json<Value> {
+    Json(json!({
+        "service": "velion-gateway-rs",
+        "revision": env::var("SOURCE_REVISION").unwrap_or_else(|_| "unverified".to_string()),
+        "build_date": env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_string()),
+        "cargo_version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 #[cfg(test)]

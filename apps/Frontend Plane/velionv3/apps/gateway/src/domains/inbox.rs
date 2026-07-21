@@ -46,6 +46,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/inbox/conversations/:id/tags/:tag",
             delete(remove_tag),
         )
+        .route("/api/v1/inbox/feedback", post(submit_feedback))
         .route("/api/v1/inbox/ai-actions", get(list_ai_actions))
         .route(
             "/api/v1/inbox/ai-actions/:id/approve",
@@ -125,6 +126,22 @@ async fn add_note(
     Json(body): Json<Value>,
 ) -> Response {
     forward_conversation_write(&state, &user, Method::POST, &id, "notes", Some(body)).await
+}
+
+/// A signed-in org member's one-line friction report from the shell's
+/// persistent "Send feedback" control. Proxies straight to
+/// conversation-core-go's `/api/v1/feedback`, which lands it as a new,
+/// `demo-feedback`-tagged conversation in the org's own Inbox — the SPA never
+/// picks the conversation id or org scope itself.
+async fn submit_feedback(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(body): Json<Value>,
+) -> Response {
+    let url = format!("{}/api/v1/feedback", state.conversation_core_url);
+    proxy_conversation_json(&state, Method::POST, &url, Some(body), &user, None)
+        .await
+        .into_response()
 }
 
 async fn patch_status(

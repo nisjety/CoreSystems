@@ -58,3 +58,17 @@ pub(super) async fn trigger_sync(
     );
     proxy_for_user(&state, &user, &headers, Method::POST, &url, None).await
 }
+
+pub(super) async fn extend_inbox_history(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let url = format!(
+        "{}/api/v1/connections/{}/inbox-history",
+        state.integration_core_url,
+        urlencoding::encode(&id)
+    );
+    proxy_for_user(&state, &user, &headers, Method::POST, &url, None).await
+}
