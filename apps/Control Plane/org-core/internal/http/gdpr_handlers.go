@@ -1,9 +1,9 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
 	"github.com/gin-gonic/gin"
@@ -35,14 +35,20 @@ const (
 	erasureAuditSubject = orgcore.GDPRErasureAuditSubject
 
 	// gdprErasureFanoutSubject is the cross-plane erasure fan-out. Subscribers
-	// (Model Plane run-history/conversations, Data Plane documents) are a
-	// documented follow-up — org-core only emits the contract today.
-	gdprErasureFanoutSubject = "velion.gdpr.erasure.requested"
+	// (Model Plane run-history/conversations, Data Plane documents) consume
+	// it from both the explicit immediate hard-delete path below AND the
+	// 30-day retention cron (org.PurgeDeletedOrganizations).
+	gdprErasureFanoutSubject = orgcore.GDPRErasureFanoutSubject
 )
 
 // errErasureNotConfirmed is returned when an irreversible erasure request is
 // missing the explicit confirm flag.
 const errErasureNotConfirmed = "erasure is irreversible; set \"confirm\": true to proceed"
+
+// errOrgNameConfirmationMismatch is returned when the soft-delete request's
+// org_name does not exactly match the organization's real, server-fetched
+// name (the "type the org name to confirm" destructive-action pattern).
+const errOrgNameConfirmationMismatch = "organization name confirmation does not match; type the exact organization name to confirm"
 
 // confirmedErasure reports whether an irreversible erasure may proceed. Erasure
 // is irreversible, so the caller MUST pass confirm:true. Extracted as a pure
@@ -97,17 +103,12 @@ func (s *Server) authorizeOrgErasure(c *gin.Context, orgID string) (string, stri
 
 // publishErasureFanout emits the independent cross-plane erasure contract.
 // The local audit event is already committed atomically with the erasure and
-// is delivered by the durable outbox worker.
+// is delivered by the durable outbox worker. Delegates to the Service so the
+// exact same publish logic also runs from the cron-triggered
+// PurgeDeletedOrganizations path (internal/org/service_enhanced.go) — both
+// paths must emit this fan-out identically.
 func (s *Server) publishErasureFanout(orgID, actorID string) {
-	if sp := s.orgService.SharedPub(); sp != nil {
-		sp.PublishPlain(gdprErasureFanoutSubject, map[string]any{
-			"subject_type": "organization",
-			"subject_id":   orgID,
-			"org_id":       orgID,
-			"requested_by": actorID,
-			"ts":           time.Now().UTC().Format(time.RFC3339Nano),
-		})
-	}
+	s.orgService.PublishGDPRErasureFanout(orgID, actorID)
 }
 
 // hardDeleteOrganization erases an organization and all its data via
@@ -149,9 +150,60 @@ func (s *Server) hardDeleteOrganization(c *gin.Context) {
 }
 
 // softDeleteOrganization marks an organization deleted (reversible until the
-// retention cron purges it) via soft_delete_organization.
-// DELETE /orgs/:id/gdpr/soft-delete
+// retention cron purges it) via soft_delete_organization. Opens the 30-day
+// Flow C grace window: creates one org_deletion_members ledger row per
+// active member and publishes velion.org.deletion.pending.
+// DELETE /orgs/:id/gdpr/soft-delete   Body: { "confirm": true, "org_name": "<exact org name>" }
 func (s *Server) softDeleteOrganization(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("id"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization id is required"})
+		return
+	}
+
+	var req struct {
+		Confirm bool   `json:"confirm"`
+		OrgName string `json:"org_name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	actorID, actorRole, ok := s.authorizeOrgErasure(c, orgID)
+	if !ok {
+		return
+	}
+
+	if !confirmedErasure(req.Confirm) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errErasureNotConfirmed})
+		return
+	}
+
+	receipt, err := s.orgService.SoftDelete(c.Request.Context(), orgID, req.OrgName, actorID, actorRole)
+	if err != nil {
+		var nameMismatch *orgcore.ErrOrgNameMismatch
+		if errors.As(err, &nameMismatch) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errOrgNameConfirmationMismatch})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to soft-delete organization"})
+		return
+	}
+
+	// Soft delete is reversible, so it does not emit the irreversible
+	// cross-plane erasure fan-out. Its audit intent was committed atomically
+	// by the service; the deletion ledger + pending notice were handled by
+	// Service.SoftDelete itself.
+	c.Data(http.StatusOK, "application/json", receipt)
+}
+
+// restoreOrganization reverses a pending soft-delete: clears deleted_at back
+// to active, wipes the organization's deletion ledger, and publishes
+// velion.org.deletion.cancelled. Owner-gated, same as the two erasure routes
+// above. 409 if the organization is not currently pending deletion.
+// POST /orgs/:id/gdpr/restore
+func (s *Server) restoreOrganization(c *gin.Context) {
 	orgID := strings.TrimSpace(c.Param("id"))
 	if orgID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "organization id is required"})
@@ -163,15 +215,128 @@ func (s *Server) softDeleteOrganization(c *gin.Context) {
 		return
 	}
 
-	receipt, err := s.orgService.SoftDelete(c.Request.Context(), orgID, actorID, actorRole)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to soft-delete organization"})
+	if err := s.orgService.RestoreOrganization(c.Request.Context(), orgID, actorID, actorRole); err != nil {
+		if errors.Is(err, orgcore.ErrOrganizationNotPendingDeletion) {
+			c.JSON(http.StatusConflict, gin.H{"error": "organization is not pending deletion"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to restore organization"})
 		return
 	}
 
-	// Soft delete is reversible, so it does not emit the cross-plane purge
-	// fan-out. Its audit intent was committed atomically by the service.
-	c.Data(http.StatusOK, "application/json", receipt)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// authorizeDeletionSelfService resolves the caller for the lower-stakes Flow
+// C self-service surface (mark-exported / acknowledge / status). Unlike
+// authorizeOrgErasure (owner-only), ANY ACTIVE MEMBER may act on their own
+// ledger row, and a platform admin may act regardless of membership —
+// mirroring user-core's resolveErasureActor self-or-platform-admin pattern,
+// adapted to org-core's caller-role model since org-core has no equivalent
+// shared helper. isPrivileged reports whether the caller is a platform admin
+// OR an org-level owner/admin — the status handler uses it to decide whether
+// to include every member's ledger row.
+func (s *Server) authorizeDeletionSelfService(c *gin.Context, orgID string) (callerID string, isPrivileged bool, ok bool) {
+	callerID = strings.TrimSpace(c.GetHeader("x-user-id"))
+	if callerID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return "", false, false
+	}
+
+	platformRole := strings.TrimSpace(c.GetHeader("X-User-Role"))
+	if platformRole == "" {
+		platformRole = strings.TrimSpace(c.GetHeader("X-User-Roles"))
+	}
+	if platformRoleIsAdmin(platformRole) {
+		return callerID, true, true
+	}
+
+	orgRole, err := s.orgService.CallerRole(c.Request.Context(), orgID, callerID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resolve caller role"})
+		return "", false, false
+	}
+	orgRole = strings.ToLower(strings.TrimSpace(orgRole))
+	if orgRole == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "organization membership required"})
+		return "", false, false
+	}
+	return callerID, orgRole == "owner" || orgRole == "admin", true
+}
+
+// markExported records that the calling member has received their
+// personal-data export ahead of the organization's scheduled purge.
+// POST /orgs/:id/gdpr/deletion/mark-exported   Body: none.
+func (s *Server) markExported(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("id"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization id is required"})
+		return
+	}
+	callerID, _, ok := s.authorizeDeletionSelfService(c, orgID)
+	if !ok {
+		return
+	}
+	if err := s.orgService.MarkDeletionExported(c.Request.Context(), orgID, callerID); err != nil {
+		if errors.Is(err, orgcore.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no pending-deletion record for this member"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record export acknowledgement"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// acknowledgeDeletion records that the calling member has acknowledged the
+// organization's pending deletion notice.
+// POST /orgs/:id/gdpr/deletion/acknowledge   Body: none.
+func (s *Server) acknowledgeDeletion(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("id"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization id is required"})
+		return
+	}
+	callerID, _, ok := s.authorizeDeletionSelfService(c, orgID)
+	if !ok {
+		return
+	}
+	if err := s.orgService.MarkDeletionAcknowledged(c.Request.Context(), orgID, callerID); err != nil {
+		if errors.Is(err, orgcore.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no pending-deletion record for this member"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record deletion acknowledgement"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// getDeletionStatus reports the organization's pending-deletion window (if
+// any) and the calling member's own export/acknowledge checkpoints. An
+// owner/admin caller (org-level or platform) additionally receives every
+// member's ledger row.
+// GET /orgs/:id/gdpr/deletion/status
+func (s *Server) getDeletionStatus(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("id"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization id is required"})
+		return
+	}
+	callerID, isPrivileged, ok := s.authorizeDeletionSelfService(c, orgID)
+	if !ok {
+		return
+	}
+	status, err := s.orgService.GetDeletionStatus(c.Request.Context(), orgID, callerID, isPrivileged)
+	if err != nil {
+		if errors.Is(err, orgcore.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read deletion status"})
+		return
+	}
+	c.JSON(http.StatusOK, status)
 }
 
 // erasureFanoutSubjects exposes the fan-out + audit subjects for documentation

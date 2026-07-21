@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -652,9 +653,32 @@ func (s *Service) HardDelete(ctx context.Context, orgID, actorID, actorRole stri
 	return receipt, nil
 }
 
-// SoftDelete atomically marks an organization deleted and records its durable
-// audit intent. Reversible soft deletion does not emit cross-plane erasure.
-func (s *Service) SoftDelete(ctx context.Context, orgID, actorID, actorRole string) (json.RawMessage, error) {
+// SoftDelete atomically marks an organization deleted and records its
+// durable audit intent, then opens the 30-day Flow C grace window: it
+// records one org_deletion_members ledger row per currently-active member
+// and publishes velion.org.deletion.pending so notification-core can tell
+// them. orgName is the caller-supplied "type the org name to confirm" value
+// — it is validated here against the organization's real, server-fetched
+// name (case-sensitive, exact match) BEFORE anything is deleted; a mismatch
+// returns *ErrOrgNameMismatch and no state changes. The name is deliberately
+// never trusted from the client for anything other than this confirmation
+// check. Reversible soft deletion does not emit the irreversible cross-plane
+// erasure fan-out (see HardDelete / PurgeDeletedOrganizations for that).
+func (s *Service) SoftDelete(ctx context.Context, orgID, orgName, actorID, actorRole string) (json.RawMessage, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+
+	// Fetch the real name server-side and compare. If the org can't be found
+	// at all (already gone, or already past this grace window), skip the
+	// comparison and let the existing not-found/already-deleted failure from
+	// the proc below surface exactly as it did before this check existed.
+	existing, lookupErr := s.repo.GetOrganization(ctx, orgID)
+	if lookupErr == nil && existing != nil && existing.Name != orgName {
+		return nil, &ErrOrgNameMismatch{OrgID: orgID}
+	}
+
 	occurredAt := time.Now().UTC()
 	auditEvent, err := newGDPRAuditEvent(
 		orgID, "organization_soft", orgID, actorID, actorRole, "ok", occurredAt,
@@ -671,7 +695,55 @@ func (s *Service) SoftDelete(ctx context.Context, orgID, actorID, actorRole stri
 	if s.cache != nil {
 		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
 	}
+
+	// The soft delete and its audit intent are already durably committed
+	// above. Everything below (ledger + pending notice) is best-effort: a
+	// failure here is logged, not rolled back, and does not change the
+	// response — the org is deleted either way, and CreateDeletionLedger's
+	// ON CONFLICT DO NOTHING makes a later retry of this same request safe.
+	orgNameForEvent := orgName
+	if existing != nil {
+		orgNameForEvent = existing.Name
+	}
+
+	var memberIDs []string
+	if members, mErr := s.repo.ListOrganizationMembers(ctx, orgID); mErr != nil {
+		log.Printf("org-core: soft-delete %s: list members for deletion ledger failed: %v", orgID, mErr)
+	} else {
+		memberIDs = make([]string, 0, len(members))
+		for _, m := range members {
+			if strings.EqualFold(m.Status, "active") {
+				memberIDs = append(memberIDs, m.UserID)
+			}
+		}
+	}
+
+	if len(memberIDs) > 0 {
+		if lErr := s.repo.CreateDeletionLedger(ctx, orgID, memberIDs); lErr != nil {
+			log.Printf("org-core: soft-delete %s: create deletion ledger failed: %v", orgID, lErr)
+		}
+	}
+
+	deadline := occurredAt.AddDate(0, 0, deletionGracePeriodDays)
+	s.publishDeletionPending(orgID, orgNameForEvent, actorID, deadline, memberIDs)
+
 	return receipt, nil
+}
+
+// publishDeletionPending emits velion.org.deletion.pending. A nil shared
+// publisher (velion-nats disabled) makes this a no-op.
+func (s *Service) publishDeletionPending(orgID, orgName, requestedBy string, deadline time.Time, memberUserIDs []string) {
+	sp := s.SharedPub()
+	if sp == nil {
+		return
+	}
+	sp.PublishPlain("velion.org.deletion.pending", map[string]any{
+		"org_id":          orgID,
+		"org_name":        orgName,
+		"requested_by":    requestedBy,
+		"deadline":        deadline.UTC().Format(time.RFC3339),
+		"member_user_ids": memberUserIDs,
+	})
 }
 
 func (s *Service) enqueueGDPRErrorAudit(
@@ -691,14 +763,45 @@ func (s *Service) enqueueGDPRErrorAudit(
 	return nil
 }
 
+// gdprPurgeReceipt mirrors the purge_old_deleted_organizations($1) stored
+// proc's JSONB shape (migrations/003_gdpr_hard_delete.up.sql) closely enough
+// to recover the purged org ids for the cross-plane erasure fan-out below.
+type gdprPurgeReceipt struct {
+	OrgIDs []string `json:"org_ids"`
+}
+
 // PurgeDeletedOrganizations hard-deletes organizations soft-deleted more than
 // daysThreshold days ago by invoking purge_old_deleted_organizations (param).
-// Used by the retention cron. Returns the proc's JSONB receipt.
+// Used by the retention cron. For every organization the sweep actually
+// purged, it also publishes GDPRErasureFanoutSubject
+// ("velion.gdpr.erasure.requested") — the same cross-plane contract the
+// explicit HTTP hard-delete path emits — so Model Plane / Data Plane purge
+// their side regardless of which path triggered the erasure. Returns the
+// proc's JSONB receipt verbatim (unchanged from before this fan-out existed).
 func (s *Service) PurgeDeletedOrganizations(ctx context.Context, daysThreshold int) (json.RawMessage, error) {
 	if daysThreshold < 1 {
 		daysThreshold = 1
 	}
-	return s.repo.PurgeOldDeletedOrganizations(ctx, daysThreshold)
+	receipt, err := s.repo.PurgeOldDeletedOrganizations(ctx, daysThreshold)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed gdprPurgeReceipt
+	if jsonErr := json.Unmarshal(receipt, &parsed); jsonErr != nil {
+		log.Printf("org-core: purge sweep: could not parse purge receipt for erasure fan-out: %v", jsonErr)
+		return receipt, nil
+	}
+	for _, orgID := range parsed.OrgIDs {
+		if orgID == "" {
+			continue
+		}
+		s.PublishGDPRErasureFanout(orgID, gdprPurgeCronActorID)
+		if s.cache != nil {
+			_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+		}
+	}
+	return receipt, nil
 }
 
 // CallerRole returns the caller's role within an org (e.g. "owner", "admin"),

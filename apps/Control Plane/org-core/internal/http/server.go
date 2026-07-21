@@ -118,11 +118,26 @@ func (s *Server) setupRoutes() {
 
 	// GDPR erasure (owner/admin-gated; calls the gdpr_hard_delete_organization
 	// / soft_delete_organization stored procedures). Hard erasure is
-	// irreversible and requires { "confirm": true } in the request body. The
-	// membership guard runs first (must be a member at all) before the
-	// handler's own owner/admin role check.
+	// irreversible and requires { "confirm": true } in the request body.
+	// Soft-delete additionally requires the exact org_name as a "type the
+	// name to confirm" step. The membership guard runs first (must be a
+	// member at all) before the handler's own owner/admin role check.
 	s.router.DELETE("/orgs/:id/gdpr/erase", guard, s.hardDeleteOrganization)
 	s.router.DELETE("/orgs/:id/gdpr/soft-delete", guard, s.softDeleteOrganization)
+	// restore reverses a pending soft-delete; same owner/admin gate as the
+	// two erasure routes above (authorizeOrgErasure), so it is wired with the
+	// same membership-guard-then-handler-check pattern.
+	s.router.POST("/orgs/:id/gdpr/restore", guard, s.restoreOrganization)
+
+	// Flow C self-service surface: any active member may act on their own
+	// deletion-ledger row, and a platform admin may act regardless of
+	// membership (authorizeDeletionSelfService enforces this itself), so
+	// these are deliberately NOT wired behind the membership-only `guard` —
+	// that would incorrectly reject a platform admin who isn't a member of
+	// this particular org.
+	s.router.POST("/orgs/:id/gdpr/deletion/mark-exported", s.markExported)
+	s.router.POST("/orgs/:id/gdpr/deletion/acknowledge", s.acknowledgeDeletion)
+	s.router.GET("/orgs/:id/gdpr/deletion/status", s.getDeletionStatus)
 
 	// Internal orchestration routes for zero-input enterprise onboarding.
 	// These are machine-to-machine (provisioning / onboarding orchestration)
@@ -137,4 +152,8 @@ func (s *Server) setupRoutes() {
 	internal.POST("/orgs/:orgId/reconcile", s.reconcileOrganizationProjection)
 	internal.POST("/orgs/:orgId/members/reconcile", s.reconcileOrganizationMember)
 	internal.POST("/orgs/:orgId/reconcile-delete", s.reconcileOrganizationDeletion)
+	// Admin-succession handoff: called by user-core's self-erasure pre-flight
+	// (EnsureSuccession) before a sole owner/admin's erasure saga starts. See
+	// succession_handlers.go.
+	internal.POST("/orgs/:orgId/members/:userId/succession", s.promoteMemberSuccession)
 }

@@ -28,19 +28,21 @@ const (
 )
 
 var orgServiceScopeAllowlist = map[string]struct{}{
-	"org:auth:proxy":            {},
-	"org:read:self":             {},
-	"org:read:any":              {},
-	"org:provision:self":        {},
-	"org:settings:write:self":   {},
-	"org:brreg:read":            {},
-	"org:erase:self":            {},
-	"org:tenant:read:any":       {},
-	"org:tenant:write:any":      {},
-	"org:onboarding:write:self": {},
-	"org:onboarding:write:any":  {},
-	"org:projection:write:any":  {},
-	"org:projection:delete:any": {},
+	"org:auth:proxy":                {},
+	"org:read:self":                 {},
+	"org:read:any":                  {},
+	"org:provision:self":            {},
+	"org:settings:write:self":       {},
+	"org:brreg:read":                {},
+	"org:erase:self":                {},
+	"org:deletion:self":             {},
+	"org:tenant:read:any":           {},
+	"org:tenant:write:any":          {},
+	"org:onboarding:write:self":     {},
+	"org:onboarding:write:any":      {},
+	"org:projection:write:any":      {},
+	"org:projection:delete:any":     {},
+	"org:membership:succession:any": {},
 }
 
 type serviceCredential struct {
@@ -313,6 +315,18 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodDelete && rest[1] == "gdpr" && (rest[2] == "erase" || rest[2] == "soft-delete"):
 		return []string{"org:erase:self"}
+	// restore reverses a pending soft-delete — same owner-gated erasure
+	// lifecycle trust tier as erase/soft-delete above, so it reuses their
+	// scope rather than minting a near-duplicate one.
+	case len(rest) == 3 && method == http.MethodPost && rest[1] == "gdpr" && rest[2] == "restore":
+		return []string{"org:erase:self"}
+	// The Flow C self-service surface (mark-exported / acknowledge / status)
+	// is a distinct, lower-stakes trust tier: any active member may act on
+	// their own ledger row (not owner-only), so it gets its own scope.
+	case len(rest) == 4 && rest[1] == "gdpr" && rest[2] == "deletion" &&
+		((method == http.MethodPost && (rest[3] == "mark-exported" || rest[3] == "acknowledge")) ||
+			(method == http.MethodGet && rest[3] == "status")):
+		return []string{"org:deletion:self"}
 	default:
 		return nil
 	}
@@ -332,6 +346,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:projection:write:any"}
 	case len(rest) == 2 && rest[1] == "reconcile-delete" && method == http.MethodPost:
 		return []string{"org:projection:delete:any"}
+	case len(rest) == 4 && rest[1] == "members" && rest[3] == "succession" && method == http.MethodPost:
+		return []string{"org:membership:succession:any"}
 	default:
 		return nil
 	}

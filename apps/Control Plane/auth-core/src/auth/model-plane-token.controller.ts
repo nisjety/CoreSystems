@@ -46,7 +46,7 @@ import { DirectNatsService } from '../nats/direct-nats.service';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import { ConvexTokenService } from './convex-token.service';
-import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
+import { resolveInteractiveRetentionPosture } from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
   type AuthorizedPlaneServicePrincipal,
@@ -163,25 +163,20 @@ export class ModelPlaneTokenController {
     // array — the gateway rejects admin actions with 403.
     const scopes = modelGatewayScopesForRole(sessionContext.role);
 
-    let bundle;
-    try {
-      bundle = this.convexTokenService.issueModelPlaneToken({
-        userId: session.user.id,
-        orgId: sessionContext.orgId,
-        email: session.user.email ?? undefined,
-        scopes: scopes.length > 0 ? scopes : undefined,
-      });
-    } catch (error) {
-      if (error instanceof InteractiveRetentionPolicyConfigurationError) {
-        this.logger.error(
-          'Interactive retention policy unavailable; refusing Model token issuance',
-        );
-        throw new ServiceUnavailableException(
-          'Interactive retention policy is unavailable',
-        );
-      }
-      throw error;
-    }
+    // Resolved asynchronously against org-core (stored intent + plan
+    // entitlement); fails closed to zdr:false on any org-core outage rather
+    // than blocking token issuance — see interactive-retention-policy.ts.
+    const retentionPosture = await resolveInteractiveRetentionPosture(
+      sessionContext.orgId,
+    );
+
+    const bundle = this.convexTokenService.issueModelPlaneToken({
+      userId: session.user.id,
+      orgId: sessionContext.orgId,
+      email: session.user.email ?? undefined,
+      scopes: scopes.length > 0 ? scopes : undefined,
+      retentionPosture,
+    });
 
     return {
       ...bundle,

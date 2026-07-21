@@ -218,7 +218,7 @@ describe('ConvexTokenService production key and principal posture', () => {
     'sandbox-manager',
     'bridge-core',
   ] as const)(
-    'issues an exact %s audience with mandatory issuer ZDR that caller input cannot downgrade',
+    'issues an exact %s audience with mandatory issuer-computed ZDR (defaults false; caller input cannot influence it)',
     (audience) => {
       process.env.NODE_ENV = 'test';
       for (const name of keyEnvNames) delete process.env[name];
@@ -226,16 +226,51 @@ describe('ConvexTokenService production key and principal posture', () => {
       const bundle = service.issuePlaneToken(audience, {
         userId: 'user-a',
         orgId: 'org-a',
-        zdr: false,
+        // Not part of the claims type — a caller-shaped attempt to set `zdr`
+        // directly must have zero effect either way.
+        zdr: true,
       } as never);
       const payload = JSON.parse(
         Buffer.from(bundle.token.split('.')[1], 'base64url').toString('utf8'),
       ) as Record<string, unknown>;
 
       expect(bundle.audience).toBe(audience);
-      expect(payload).toMatchObject({ aud: audience, zdr: true });
+      expect(payload).toMatchObject({ aud: audience, zdr: false });
     },
   );
+
+  it('trusts only a retentionPosture claim stamped with the interactive-org-retention-policy authority for user tokens', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+
+    const trusted = service.issuePlaneToken('session-core', {
+      userId: 'user-a',
+      orgId: 'org-a',
+      retentionPosture: {
+        zdr: true,
+        authority: 'interactive-org-retention-policy',
+      },
+    });
+    const untrustedAuthority = service.issuePlaneToken('session-core', {
+      userId: 'user-a',
+      orgId: 'org-a',
+      // A service-authority marker on a user-principal token must never be
+      // honored — only the exact interactive authority is trusted.
+      retentionPosture: {
+        zdr: true,
+        authority: 'service-principal-policy',
+      } as never,
+    });
+
+    const decode = (token: string) =>
+      JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+
+    expect(decode(trusted.token).zdr).toBe(true);
+    expect(decode(untrustedAuthority.token).zdr).toBe(false);
+  });
 
   it('caps policy-caller credentials at a five-minute lifetime', () => {
     process.env.NODE_ENV = 'test';
@@ -405,7 +440,7 @@ describe('ConvexTokenService production key and principal posture', () => {
     expect(payload).not.toHaveProperty('user_id');
   });
 
-  it('keeps Model users ZDR and accepts non-ZDR Model services only through the policy marker', () => {
+  it('defaults Model users to zdr:false and accepts non-ZDR Model services only through the policy marker', () => {
     process.env.NODE_ENV = 'test';
     for (const name of keyEnvNames) delete process.env[name];
     const service = new ConvexTokenService();
@@ -415,6 +450,17 @@ describe('ConvexTokenService production key and principal posture', () => {
       orgId: 'org-a',
     } as unknown as Parameters<ConvexTokenService['issueModelPlaneToken']>[0];
     const userBundle = service.issueModelPlaneToken(userClaimsWithoutPosture);
+    const userClaimsWithInteractivePosture = {
+      userId: 'user-b',
+      orgId: 'org-b',
+      retentionPosture: {
+        zdr: true,
+        authority: 'interactive-org-retention-policy',
+      },
+    } as unknown as Parameters<ConvexTokenService['issueModelPlaneToken']>[0];
+    const userZdrBundle = service.issueModelPlaneToken(
+      userClaimsWithInteractivePosture,
+    );
     const serviceClaims = {
       userId: 'service:model-worker',
       orgId: 'org-a',
@@ -428,21 +474,23 @@ describe('ConvexTokenService production key and principal posture', () => {
     } as unknown as Parameters<ConvexTokenService['issueModelPlaneToken']>[0];
     const serviceBundle = service.issueModelPlaneToken(serviceClaims);
 
-    const userPayload = JSON.parse(
-      Buffer.from(userBundle.token.split('.')[1], 'base64url').toString('utf8'),
-    ) as Record<string, unknown>;
-    const servicePayload = JSON.parse(
-      Buffer.from(serviceBundle.token.split('.')[1], 'base64url').toString(
-        'utf8',
-      ),
-    ) as Record<string, unknown>;
-    expect(userPayload.zdr).toBe(true);
-    expect(servicePayload.zdr).toBe(false);
+    const decode = (token: string) =>
+      JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+    expect(decode(userBundle.token).zdr).toBe(false);
+    expect(decode(userZdrBundle.token).zdr).toBe(true);
+    expect(decode(serviceBundle.token).zdr).toBe(false);
   });
 
-  it('uses an exact Control-Plane organization policy for interactive persistence', () => {
+  it('no longer reads the removed AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON env var — the mechanism is deleted, not just unused', () => {
     process.env.NODE_ENV = 'test';
     for (const name of keyEnvNames) delete process.env[name];
+    // Presence of the old env var — even naming this exact org — must have
+    // zero effect. Interactive posture now only ever comes from an explicit
+    // `interactive-org-retention-policy` claim the controller resolves
+    // asynchronously against org-core; the service layer never reads env
+    // vars for this.
     process.env.AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON = JSON.stringify({
       version: 1,
       organizations: {
@@ -468,6 +516,6 @@ describe('ConvexTokenService production key and principal posture', () => {
         Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
       ) as Record<string, unknown>;
     expect(decodePayload(approved.token).zdr).toBe(false);
-    expect(decodePayload(unlisted.token).zdr).toBe(true);
+    expect(decodePayload(unlisted.token).zdr).toBe(false);
   });
 });

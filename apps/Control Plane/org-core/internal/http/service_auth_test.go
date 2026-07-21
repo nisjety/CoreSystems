@@ -184,6 +184,7 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/orgs/org-1/reconcile", want: []string{"org:projection:write:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/org-1/members/reconcile", want: []string{"org:projection:write:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/org-1/reconcile-delete", want: []string{"org:projection:delete:any"}},
+		{method: http.MethodPost, path: "/internal/orgs/org-1/members/user-1/succession", want: []string{"org:membership:succession:any"}},
 		{method: http.MethodGet, path: "/orgs//org-1", want: nil},
 		{method: http.MethodPost, path: "/orgs/org-1/members/invite", want: nil},
 	}

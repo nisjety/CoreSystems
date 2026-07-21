@@ -250,6 +250,7 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		"aqencia.reasoning.session.>", "velion.agent.>",
 		"aqencia.reasoning.run.>", "app.session.>", ConvexControlDLQSubject,
 		GDPRErasureRequestedSubject, GDPRErasureDLQSubject, GDPROwnershipTransferredSubject,
+		DocumentsOrgPurgeDLQSubject, OrgDeletionSubjectWildcard,
 	}) {
 		t.Fatalf("shared subjects = %v", info.Config.Subjects)
 	}
@@ -285,6 +286,127 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		gdprConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
 		gdprConsumer.Config.MaxDeliver != 20 {
 		t.Fatalf("unexpected documents GDPR consumer: %+v", gdprConsumer.Config)
+	}
+	wantedConversationGDPR := conversationOrgErasureConsumerConfig()
+	if wantedConversationGDPR.Durable != ConversationOrgErasureConsumerName {
+		t.Fatalf("conversation org-erasure durable = %q, want %q (must match conversation-core-go's orgErasureDurable)",
+			wantedConversationGDPR.Durable, ConversationOrgErasureConsumerName)
+	}
+	conversationGDPRConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedConversationGDPR.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversationGDPRConsumer.Config.DeliverSubject != wantedConversationGDPR.DeliverSubject ||
+		conversationGDPRConsumer.Config.DeliverGroup != wantedConversationGDPR.DeliverGroup ||
+		conversationGDPRConsumer.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		conversationGDPRConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		conversationGDPRConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected conversation-core org-erasure consumer: %+v", conversationGDPRConsumer.Config)
+	}
+
+	wantedDocumentsOrgErasure := documentsOrgErasureConsumerConfig()
+	documentsOrgErasureConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedDocumentsOrgErasure.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if documentsOrgErasureConsumer.Config.DeliverSubject != wantedDocumentsOrgErasure.DeliverSubject ||
+		documentsOrgErasureConsumer.Config.DeliverGroup != wantedDocumentsOrgErasure.DeliverGroup ||
+		documentsOrgErasureConsumer.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		documentsOrgErasureConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		documentsOrgErasureConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected documents-api org-erasure consumer: %+v", documentsOrgErasureConsumer.Config)
+	}
+
+	// sessionGDPRErasureConsumerConfig is a PULL consumer (Model Plane's Rust
+	// session-core uses async-nats PullConsumer, no DeliverSubject): confirm it
+	// was provisioned with empty DeliverSubject/DeliverGroup, not silently
+	// dropped or coerced into a push shape.
+	wantedSessionGDPR := sessionGDPRErasureConsumerConfig()
+	if wantedSessionGDPR.DeliverSubject != "" || wantedSessionGDPR.DeliverGroup != "" {
+		t.Fatalf("session-core GDPR consumer config unexpectedly has push delivery: %+v", wantedSessionGDPR)
+	}
+	sessionGDPRConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedSessionGDPR.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionGDPRConsumer.Config.DeliverSubject != "" || sessionGDPRConsumer.Config.DeliverGroup != "" ||
+		sessionGDPRConsumer.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		sessionGDPRConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		sessionGDPRConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected session-core GDPR pull consumer: %+v", sessionGDPRConsumer.Config)
+	}
+
+	wantedQuarry := quarryControlOrgErasureConsumerConfig()
+	quarryConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedQuarry.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quarryConsumer.Config.DeliverSubject != wantedQuarry.DeliverSubject ||
+		quarryConsumer.Config.DeliverGroup != wantedQuarry.DeliverGroup ||
+		quarryConsumer.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		quarryConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		quarryConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected quarry-control org-erasure consumer: %+v", quarryConsumer.Config)
+	}
+
+	for _, wanted := range notificationOrgDeletionConsumerConfigs() {
+		got, err := js.ConsumerInfo(ControlSharedStreamName, wanted.Durable)
+		if err != nil {
+			t.Fatalf("notification-core consumer %s missing: %v", wanted.Durable, err)
+		}
+		if got.Config.DeliverSubject != wanted.DeliverSubject ||
+			got.Config.DeliverGroup != wanted.DeliverGroup ||
+			got.Config.FilterSubject != wanted.FilterSubject ||
+			got.Config.AckPolicy != nats.AckExplicitPolicy ||
+			got.Config.MaxDeliver != 20 {
+			t.Fatalf("unexpected notification-core org-deletion consumer %s: %+v", wanted.Durable, got.Config)
+		}
+	}
+
+	// The eight Data Plane v2 / Model Plane GDPR org-erasure consumers added
+	// alongside documents-api-gdpr/session-core-gdpr/conversation-core-gdpr/
+	// quarry-control-gdpr/notification-core-gdpr above. Four are PULL
+	// consumers (no DeliverSubject/DeliverGroup): index-engine-rs,
+	// graph-index-rs, retrieval-engine-rs, quickwit-adapter-rs. Four are
+	// push/queue consumers (nats.Bind + QueueSubscribe): wiki-store-go,
+	// data-quality-go, data-orchestrator-go, cost-core.
+	for _, wanted := range []*nats.ConsumerConfig{
+		indexEngineOrgErasureConsumerConfig(),
+		graphIndexOrgErasureConsumerConfig(),
+		retrievalEngineOrgErasureConsumerConfig(),
+		quickwitAdapterOrgErasureConsumerConfig(),
+	} {
+		if wanted.DeliverSubject != "" || wanted.DeliverGroup != "" {
+			t.Fatalf("consumer %s config unexpectedly has push delivery: %+v", wanted.Durable, wanted)
+		}
+		got, err := js.ConsumerInfo(ControlSharedStreamName, wanted.Durable)
+		if err != nil {
+			t.Fatalf("pull consumer %s missing: %v", wanted.Durable, err)
+		}
+		if got.Config.DeliverSubject != "" || got.Config.DeliverGroup != "" ||
+			got.Config.FilterSubject != GDPRErasureRequestedSubject ||
+			got.Config.AckPolicy != nats.AckExplicitPolicy ||
+			got.Config.MaxDeliver != 20 {
+			t.Fatalf("unexpected pull consumer %s: %+v", wanted.Durable, got.Config)
+		}
+	}
+	for _, wanted := range []*nats.ConsumerConfig{
+		wikiStoreOrgErasureConsumerConfig(),
+		dataQualityOrgErasureConsumerConfig(),
+		dataOrchestratorOrgErasureConsumerConfig(),
+		costCoreOrgErasureConsumerConfig(),
+	} {
+		got, err := js.ConsumerInfo(ControlSharedStreamName, wanted.Durable)
+		if err != nil {
+			t.Fatalf("push consumer %s missing: %v", wanted.Durable, err)
+		}
+		if got.Config.DeliverSubject != wanted.DeliverSubject ||
+			got.Config.DeliverGroup != wanted.DeliverGroup ||
+			got.Config.FilterSubject != GDPRErasureRequestedSubject ||
+			got.Config.AckPolicy != nats.AckExplicitPolicy ||
+			got.Config.MaxDeliver != 20 {
+			t.Fatalf("unexpected push consumer %s: %+v", wanted.Durable, got.Config)
+		}
 	}
 }
 

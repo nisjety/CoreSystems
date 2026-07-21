@@ -53,7 +53,7 @@ import { DirectNatsService } from '../nats/direct-nats.service';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import { ConvexTokenService } from './convex-token.service';
-import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
+import { resolveInteractiveRetentionPosture } from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
   loadPlaneServicePrincipalRegistry,
@@ -199,25 +199,20 @@ export class PlaneTokenController {
     // rebuild is intentionally absent from every interactive-user token.
     const scopes = planeScopesForRole(sessionContext.role, audience);
 
-    let bundle;
-    try {
-      bundle = this.convexTokenService.issuePlaneToken(audience, {
-        userId: session.user.id,
-        orgId: sessionContext.orgId,
-        email: session.user.email ?? undefined,
-        scopes,
-      });
-    } catch (error) {
-      if (error instanceof InteractiveRetentionPolicyConfigurationError) {
-        this.logger.error(
-          'Interactive retention policy unavailable; refusing plane token issuance',
-        );
-        throw new ServiceUnavailableException(
-          'Interactive retention policy is unavailable',
-        );
-      }
-      throw error;
-    }
+    // Resolved asynchronously against org-core (stored intent + plan
+    // entitlement); fails closed to zdr:false on any org-core outage rather
+    // than blocking token issuance — see interactive-retention-policy.ts.
+    const retentionPosture = await resolveInteractiveRetentionPosture(
+      sessionContext.orgId,
+    );
+
+    const bundle = this.convexTokenService.issuePlaneToken(audience, {
+      userId: session.user.id,
+      orgId: sessionContext.orgId,
+      email: session.user.email ?? undefined,
+      scopes,
+      retentionPosture,
+    });
 
     return {
       ...bundle,

@@ -68,7 +68,9 @@ func main() {
 
 	repo := orgcore.NewRepository(db)
 	// U6-3 (ui-ux-velion-gap.md §10): role/permission editor backend.
-	rbacRepo := rbac.NewRepository(db.Pool)
+	// NewRepository takes *database.DB (not db.Pool) so every rbac query
+	// runs through WithOrgScope — see internal/rbac/repository.go.
+	rbacRepo := rbac.NewRepository(db)
 
 	// Initialize Redis cache (optional — gracefully degraded when disabled)
 	var redisClient *rediscache.Client
@@ -143,6 +145,12 @@ func main() {
 	// then daily, and exits when ctx is cancelled. Mirrors audit-core's
 	// retention cron shape.
 	go runOrgPurge(ctx, orgService, orgPurgeDays())
+
+	// Flow C reminder sweep: 7-day and 1-day-out reminders for organizations
+	// pending deletion. Runs once at startup, then every
+	// orgDeletionReminderInterval, and exits when ctx is cancelled. Mirrors
+	// runOrgPurge/runGDPRAuditOutbox's ticker shape.
+	go runOrgDeletionReminderSweep(ctx, orgService, orgDeletionReminderInterval)
 
 	server := httpserver.NewServer(cfg.HTTPPort, orgService, rbacRepo, cfg.AuthServiceURL, cfg.UserServiceURL)
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
@@ -290,6 +298,62 @@ func runOrgPurge(ctx context.Context, svc *orgcore.Service, days int) {
 			return
 		case <-ticker.C:
 			purge()
+		}
+	}
+}
+
+// orgDeletionReminderInterval is how often the Flow C deletion-reminder sweep
+// runs. A few hours is frequent enough that a 7-day/1-day-out reminder never
+// slips by more than a few hours, without hammering the DB like a hot-path
+// query would.
+const orgDeletionReminderInterval = 6 * time.Hour
+
+// runOrgDeletionReminderSweep finds organizations pending deletion whose
+// 30-day grace window is 7 (or 1) days from expiring and have not yet had
+// that reminder sent, publishes velion.org.deletion.reminder for each, and
+// marks the reminder sent so the next sweep does not re-fire it — the
+// idempotency guard for this at-least-once ticker. Runs once immediately,
+// then on orgDeletionReminderInterval, and returns when ctx is cancelled.
+func runOrgDeletionReminderSweep(ctx context.Context, svc *orgcore.Service, interval time.Duration) {
+	sweepKind := func(which string, daysRemaining int, list func(context.Context) ([]orgcore.OrgPendingDeletionReminder, error)) {
+		sweepCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+
+		reminders, err := list(sweepCtx)
+		if err != nil {
+			log.Printf("org-core deletion reminder sweep (%s) failed to list candidates: %v", which, err)
+			return
+		}
+
+		sent := 0
+		for _, reminder := range reminders {
+			svc.PublishDeletionReminder(sweepCtx, reminder.OrgID, reminder.OrgName, daysRemaining)
+			if err := svc.MarkReminderSent(sweepCtx, reminder.OrgID, which); err != nil {
+				log.Printf("org-core deletion reminder sweep (%s): mark sent failed for org=%s: %v", which, reminder.OrgID, err)
+				continue
+			}
+			sent++
+		}
+		if sent > 0 {
+			log.Printf("org-core sent %d %s deletion reminder(s)", sent, which)
+		}
+	}
+
+	sweep := func() {
+		sweepKind("7d", 7, svc.ListOrgsNeeding7DayReminder)
+		sweepKind("1d", 1, svc.ListOrgsNeeding1DayReminder)
+	}
+
+	sweep() // immediate sweep at startup
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("org-core deletion reminder sweep loop stopping")
+			return
+		case <-ticker.C:
+			sweep()
 		}
 	}
 }

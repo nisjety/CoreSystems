@@ -753,6 +753,54 @@ func (r *Repository) GetUserOrgMembership(ctx context.Context, userID, orgID str
 	return out, nil
 }
 
+// SoleAdminOrg identifies an organization where the subject is the ONLY
+// active owner/admin. OrgName is not resolved here: user-core does not own
+// org display names (org-core does); callers needing one must resolve it
+// separately.
+type SoleAdminOrg struct {
+	OrgID string `json:"org_id"`
+}
+
+// SoleAdminOrgs returns every organization where userID is the ONLY active
+// owner/admin — i.e. organizations that would be left leaderless if userID
+// self-erased without naming a successor. Used by the erasure pre-flight
+// (gdpr_succession.go) before the erasure saga is touched.
+func (r *Repository) SoleAdminOrgs(ctx context.Context, userID string) ([]SoleAdminOrg, error) {
+	const q = `
+SELECT m1.org_id
+FROM user_org_memberships m1
+WHERE m1.user_id = $1
+  AND m1.status = 'active'
+  AND m1.role IN ('owner', 'admin')
+  AND NOT EXISTS (
+    SELECT 1 FROM user_org_memberships m2
+    WHERE m2.org_id = m1.org_id
+      AND m2.status = 'active'
+      AND m2.role IN ('owner', 'admin')
+      AND m2.user_id <> m1.user_id
+  )
+ORDER BY m1.org_id
+`
+	rows, err := r.db.Pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query sole-admin organizations: %w", err)
+	}
+	defer rows.Close()
+
+	var out []SoleAdminOrg
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, fmt.Errorf("scan sole-admin organization: %w", err)
+		}
+		out = append(out, SoleAdminOrg{OrgID: orgID})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sole-admin organization rows error: %w", err)
+	}
+	return out, nil
+}
+
 // ListUserOrgMembershipsForSubject returns ALL of a user's org memberships
 // (any status), for the GDPR DSAR (Art. 15) data-subject export. Unlike
 // GetPrimaryUserOrgMembership this is not limited to active rows — a data

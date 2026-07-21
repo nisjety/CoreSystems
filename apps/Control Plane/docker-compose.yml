@@ -159,6 +159,19 @@ services:
       DOCUMENTS_GDPR_NATS_PASSWORD: "\"${DOCUMENTS_GDPR_NATS_PASSWORD:?DOCUMENTS_GDPR_NATS_PASSWORD is required}\""
       CONTROL_SHARED_BRIDGE_PASSWORD: "\"${CONTROL_SHARED_BRIDGE_PASSWORD:?CONTROL_SHARED_BRIDGE_PASSWORD is required}\""
       CONTROL_SHARED_NATS_PROVISIONER_PASSWORD: "\"${CONTROL_SHARED_NATS_PROVISIONER_PASSWORD:?CONTROL_SHARED_NATS_PROVISIONER_PASSWORD is required}\""
+      SESSION_CORE_GDPR_NATS_PASSWORD: "\"${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}\""
+      CONVERSATION_CORE_GDPR_NATS_PASSWORD: "\"${CONVERSATION_CORE_GDPR_NATS_PASSWORD:?CONVERSATION_CORE_GDPR_NATS_PASSWORD is required}\""
+      QUARRY_CONTROL_GDPR_NATS_PASSWORD: "\"${QUARRY_CONTROL_GDPR_NATS_PASSWORD:?QUARRY_CONTROL_GDPR_NATS_PASSWORD is required}\""
+      NOTIFICATION_CORE_GDPR_NATS_PASSWORD: "\"${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}\""
+      INDEX_ENGINE_GDPR_NATS_PASSWORD: "\"${INDEX_ENGINE_GDPR_NATS_PASSWORD:?INDEX_ENGINE_GDPR_NATS_PASSWORD is required}\""
+      GRAPH_INDEX_GDPR_NATS_PASSWORD: "\"${GRAPH_INDEX_GDPR_NATS_PASSWORD:?GRAPH_INDEX_GDPR_NATS_PASSWORD is required}\""
+      WIKI_STORE_GDPR_NATS_PASSWORD: "\"${WIKI_STORE_GDPR_NATS_PASSWORD:?WIKI_STORE_GDPR_NATS_PASSWORD is required}\""
+      RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD: "\"${RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD:?RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD is required}\""
+      DATA_QUALITY_GDPR_NATS_PASSWORD: "\"${DATA_QUALITY_GDPR_NATS_PASSWORD:?DATA_QUALITY_GDPR_NATS_PASSWORD is required}\""
+      DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD: "\"${DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD:?DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD is required}\""
+      QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD: "\"${QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD:?QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD is required}\""
+      COST_CORE_GDPR_NATS_PASSWORD: "\"${COST_CORE_GDPR_NATS_PASSWORD:?COST_CORE_GDPR_NATS_PASSWORD is required}\""
+      EMBEDDING_ENGINE_GDPR_NATS_PASSWORD: "\"${EMBEDDING_ENGINE_GDPR_NATS_PASSWORD:?EMBEDDING_ENGINE_GDPR_NATS_PASSWORD is required}\""
     ports:
       - "127.0.0.1:${CONTROL_SHARED_NATS_HOST_PORT:-4224}:4222"
       - "127.0.0.1:${CONTROL_SHARED_NATS_MONITOR_HOST_PORT:-8224}:8222"
@@ -422,7 +435,7 @@ services:
       DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
       ORG_CORE_SERVICE_CREDENTIALS: >-
-        [{"principal":"velion-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]}]
+        [{"principal":"velion-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]}]
     ports:
       - "127.0.0.1:${ORG_CORE_HTTP_HOST_PORT:-18080}:8080"
       - "127.0.0.1:${ORG_CORE_GRPC_HOST_PORT:-19090}:9090"

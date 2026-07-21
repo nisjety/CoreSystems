@@ -82,6 +82,7 @@ type Service struct {
 	authEraser       authErasureExecutor
 	erasureFanout    ErasureFanoutPublisher
 	erasureWorker    *erasureWorker
+	orgCoreClient    OrgCoreSuccessionClient
 }
 
 // NewService creates a new user service

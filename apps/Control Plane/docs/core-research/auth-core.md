@@ -5,6 +5,42 @@ Updated (source + isolated + local integration verification): 2026-07-16
 
 Scope: `apps/Control Plane/auth-core` (NestJS/TypeScript, container `auth-service`, port 3011 / gRPC 50011)
 
+## 2026-07-21 interactive retention default flipped to opt-in ZDR (current — supersedes the 07-16/07-17 addenda below)
+
+The env-var-driven interactive retention policy described in the two
+addenda below is REMOVED. Stated business intent: ZDR is an opt-in, paid,
+plan-gated add-on — never the standard. The default for every org
+(including brand-new orgs and any org whose retention intent cannot be
+resolved) is now normal retention (`zdr: false`), not all-ZDR.
+
+`interactive-retention-policy.ts` now resolves the effective posture live,
+per org, at token-mint time via a real HTTP call to org-core (same
+`ORG_SERVICE_URL`/base-URL pattern already used by
+`organizations.controller.ts`). `zdr: true` only when BOTH hold, verified
+independently:
+
+1. Stored intent — `GET /api/v1/organizations/:id`'s existing
+   `metadata.interactiveRetention.zdr === true` (set by org-core's already
+   real, plan-gated self-serve `PATCH /api/v1/organizations/:id/settings`
+   toggle; no org-core change was needed — the data was already returned).
+2. Plan entitlement — org-core's own server-computed
+   `feature.zero_data_retention` entry from
+   `GET /api/v1/organizations/:id/entitlements`, reused rather than
+   reimplementing the plan allowlist client-side (avoids the two lists
+   drifting apart).
+
+Any org-core call failure, timeout, non-2xx response, or missing metadata
+fails closed to `zdr: false` and never blocks token issuance — an org-core
+outage degrades to normal retention, not to a login outage. A 45s
+process-local TTL cache (single-instance-per-container; no distributed
+cache) keyed by org id bounds the added per-mint latency and load on
+org-core. `AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON` and its two
+hardcoded org-ID exceptions (`G240yBgMDU0OjWKnJpdienKD9I7KY4kr`,
+`KWt1sU9IZbeS628OMeTfbm5RmOzHa3uQ` — undocumented, zero decision record per
+prior audit) are deleted entirely, from source, `.env.docker`, and
+`.env.example`; those orgs now use the same real self-serve toggle as any
+other org, gated by org-core's existing plan-entitlement check.
+
 ## 2026-07-16 Model/Data cross-plane issuer addendum
 
 Control Compose now sets both `MODEL_PLANE_AUTH_ISSUER` and
@@ -68,7 +104,7 @@ attestation exists. The unconfigured runtime therefore remains all-ZDR, and exte
 remain unavailable until an approved persistence policy or independently
 verified ZDR provider path is live-proven.
 
-## 2026-07-17 retention policy APPLIED live + frontend toggle plan (current)
+## 2026-07-17 retention policy APPLIED live + frontend toggle plan (historical — superseded by 2026-07-21 addendum above)
 
 The "no live persistent-policy entry" statement above is now superseded for one
 organization. Two things changed on 2026-07-17:

@@ -175,6 +175,39 @@ type MemberSuggestion struct {
 	Status      string `json:"status"` // "active" | "invited"
 }
 
+// DeletionLedgerEntry is one member's GDPR export/acknowledge checkpoint
+// row from org_deletion_members (migrations/018_org_deletion_ledger.up.sql),
+// captured for the 30-day soft-delete grace window opened by
+// DELETE /orgs/:id/gdpr/soft-delete.
+type DeletionLedgerEntry struct {
+	UserID         string     `json:"user_id"`
+	NotifiedAt     *time.Time `json:"notified_at,omitempty"`
+	ExportedAt     *time.Time `json:"exported_at,omitempty"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+}
+
+// OrgPendingDeletionReminder is the minimal shape ListOrgsNeeding7DayReminder
+// and ListOrgsNeeding1DayReminder return: enough for the caller to publish
+// velion.org.deletion.reminder without a second lookup.
+type OrgPendingDeletionReminder struct {
+	OrgID    string    `json:"org_id"`
+	OrgName  string    `json:"org_name"`
+	Deadline time.Time `json:"deadline"`
+}
+
+// DeletionStatus is the shape GET /orgs/:id/gdpr/deletion/status returns:
+// whether orgID is currently inside its 30-day soft-delete grace window, the
+// calling member's own export/acknowledge checkpoint, and — only populated
+// by the HTTP layer for an owner/admin caller (org-level or platform) —
+// every member's ledger row.
+type DeletionStatus struct {
+	Pending      bool                  `json:"pending"`
+	Deadline     *time.Time            `json:"deadline,omitempty"`
+	OrgName      string                `json:"org_name"`
+	MemberStatus *DeletionLedgerEntry  `json:"member_status,omitempty"`
+	Members      []DeletionLedgerEntry `json:"members,omitempty"`
+}
+
 // OrgTenantLink maps an external identity provider tenant to an organization.
 // Used for deterministic enterprise org resolution.
 type OrgTenantLink struct {

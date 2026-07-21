@@ -1,10 +1,42 @@
 /**
  * Control-Plane-owned retention posture for interactive user tokens.
  *
- * The absence of this policy is deliberately restrictive: every interactive
- * token remains ZDR. A persistent posture can be selected only by an exact
- * organization entry in managed Auth Core configuration; request bodies,
- * headers, frontend state, and service principals cannot influence it.
+ * Zero Data Retention (ZDR) is an OPT-IN, PAID, plan-gated add-on — never the
+ * standard. The default for every organization, including brand-new orgs and
+ * any org whose retention intent cannot be resolved, is normal retention
+ * (`zdr: false`). An org gets `zdr: true` only when BOTH of the following are
+ * independently verified against org-core, the sole authority for
+ * organization state:
+ *
+ *   1. Stored intent — the org explicitly toggled ZDR on via the self-serve
+ *      settings endpoint. Persisted at
+ *      `organizations.metadata.interactiveRetention.zdr` by org-core's
+ *      `SetInteractiveRetention` (`org-core/internal/org/repository.go`) and
+ *      already returned by the existing `GET /api/v1/organizations/:id`
+ *      response (`Organization.Metadata`).
+ *   2. Plan entitlement — the org's current plan is entitled to ZDR. Rather
+ *      than reimplementing org-core's plan allowlist here (which would drift
+ *      out of sync with `org-core/internal/org/types.go`'s
+ *      `zeroDataRetentionPlans`), this reuses org-core's own server-computed
+ *      `feature.zero_data_retention` entitlement from
+ *      `GET /api/v1/organizations/:id/entitlements`
+ *      (`org-core/internal/org/service_enhanced.go#PlanAllowsZeroDataRetention`).
+ *
+ * This is defense-in-depth: org-core already refuses to persist a `zdr: true`
+ * intent for a non-qualifying plan (`SetInteractiveRetention` returns
+ * `ErrPlanUpgradeRequired`), but a single layer is never trusted alone for a
+ * security-sensitive default in this project, so Auth Core independently
+ * re-verifies the plan entitlement rather than trusting the stored intent.
+ *
+ * Fail-closed contract: any missing/absent metadata, invalid organization id,
+ * org-core call failure, timeout, or non-2xx response resolves to
+ * `zdr: false` (normal retention). This resolver never throws — an org-core
+ * outage must never block interactive token issuance (login), and it must
+ * never fail OPEN to `zdr: true` either.
+ *
+ * A short-TTL process-local cache avoids hammering org-core on every
+ * token-mint (which happens on every login/refresh for every interactive
+ * request path).
  */
 
 export type InteractiveRetentionPosture = Readonly<{
@@ -12,128 +44,136 @@ export type InteractiveRetentionPosture = Readonly<{
   authority: 'interactive-org-retention-policy';
 }>;
 
-type OrganizationPolicy = Readonly<{
-  posture: 'zdr' | 'persistent';
-  policyEvidenceSha256?: string;
-}>;
-
-type InteractiveRetentionPolicy = Readonly<{
-  version: 1;
-  organizations: Readonly<Record<string, OrganizationPolicy>>;
-}>;
-
-const ORGANIZATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
 const DEFAULT_POSTURE: InteractiveRetentionPosture = Object.freeze({
-  zdr: true,
-  authority: 'interactive-org-retention-policy',
-});
-const PERSISTENT_POSTURE: InteractiveRetentionPosture = Object.freeze({
   zdr: false,
   authority: 'interactive-org-retention-policy',
 });
 
-export class InteractiveRetentionPolicyConfigurationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'InteractiveRetentionPolicyConfigurationError';
-  }
+const ZDR_POSTURE: InteractiveRetentionPosture = Object.freeze({
+  zdr: true,
+  authority: 'interactive-org-retention-policy',
+});
+
+const ORGANIZATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+/** Simple process-local TTL cache — single-instance-per-container service, no distributed cache needed. */
+const CACHE_TTL_MS = 45_000;
+/** Bounds a single org-core round trip so a stalled dependency can't stall token issuance. */
+const LOOKUP_TIMEOUT_MS = 2_000;
+
+type CacheEntry = Readonly<{
+  posture: InteractiveRetentionPosture;
+  expiresAt: number;
+}>;
+
+const postureCache = new Map<string, CacheEntry>();
+
+function orgServiceBaseUrl(): string {
+  // Same env var + default as the existing synchronous org-core client
+  // pattern in `organizations.controller.ts`.
+  return (process.env.ORG_SERVICE_URL ?? 'http://org-core:8080').replace(
+    /\/$/,
+    '',
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function invalidPolicy(): never {
-  throw new InteractiveRetentionPolicyConfigurationError(
-    'AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON is invalid',
-  );
+/**
+ * `Array.isArray` narrows to `any[]` in TS's lib types, which would make a
+ * downstream `.find()` return `any` and trip `no-unsafe-assignment`. Route
+ * through an explicit `unknown[]` assertion so callers get a clean,
+ * still-unchecked-per-element array type.
+ */
+function asUnknownArray(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? (value as unknown[]) : undefined;
 }
 
-function parseOrganizationPolicy(value: unknown): OrganizationPolicy {
-  if (!isRecord(value)) {
-    return invalidPolicy();
+async function fetchOrgCoreJson(path: string): Promise<unknown> {
+  const response = await fetch(`${orgServiceBaseUrl()}${path}`, {
+    signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`org-core responded ${response.status} for ${path}`);
   }
-  const keys = Object.keys(value);
-  if (
-    keys.some((key) => key !== 'posture' && key !== 'policyEvidenceSha256') ||
-    (value.posture !== 'zdr' && value.posture !== 'persistent')
-  ) {
-    return invalidPolicy();
-  }
-  if (value.posture === 'persistent') {
-    if (
-      typeof value.policyEvidenceSha256 !== 'string' ||
-      !SHA256.test(value.policyEvidenceSha256)
-    ) {
-      return invalidPolicy();
-    }
-    return {
-      posture: 'persistent',
-      policyEvidenceSha256: value.policyEvidenceSha256,
-    };
-  }
-  if (value.policyEvidenceSha256 !== undefined) {
-    return invalidPolicy();
-  }
-  return { posture: 'zdr' };
-}
-
-function parsePolicy(raw: string): InteractiveRetentionPolicy {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    return invalidPolicy();
-  }
-  if (
-    !isRecord(value) ||
-    value.version !== 1 ||
-    !isRecord(value.organizations) ||
-    Object.keys(value).some(
-      (key) => key !== 'version' && key !== 'organizations',
-    )
-  ) {
-    return invalidPolicy();
-  }
-
-  const organizations: Record<string, OrganizationPolicy> = {};
-  for (const [organizationId, entry] of Object.entries(value.organizations)) {
-    if (!ORGANIZATION_ID.test(organizationId)) {
-      return invalidPolicy();
-    }
-    organizations[organizationId] = parseOrganizationPolicy(entry);
-  }
-  return { version: 1, organizations };
+  return response.json();
 }
 
 /**
- * Resolve the effective interactive token posture from managed Auth Core
- * configuration. Empty configuration is a deliberate all-ZDR default; a
- * non-empty malformed policy is an availability error rather than a fallback.
+ * Read the org's stored interactive-retention intent straight from the
+ * existing organization record — no new org-core endpoint required.
  */
-export function resolveInteractiveRetentionPosture(
-  rawPolicy: string | undefined,
-  organizationId: string,
-): InteractiveRetentionPosture {
-  if (!ORGANIZATION_ID.test(organizationId)) {
-    return invalidPolicy();
+async function storedZdrIntent(organizationId: string): Promise<boolean> {
+  const body = await fetchOrgCoreJson(
+    `/api/v1/organizations/${encodeURIComponent(organizationId)}`,
+  );
+  if (!isRecord(body) || !isRecord(body.metadata)) {
+    return false;
   }
-  if (!rawPolicy?.trim()) {
-    return DEFAULT_POSTURE;
-  }
-  const policy = parsePolicy(rawPolicy);
-  return policy.organizations[organizationId]?.posture === 'persistent'
-    ? PERSISTENT_POSTURE
-    : DEFAULT_POSTURE;
+  const interactiveRetention = body.metadata.interactiveRetention;
+  return isRecord(interactiveRetention) && interactiveRetention.zdr === true;
 }
 
-/** Resolve the process-owned interactive posture without accepting user input. */
-export function currentInteractiveRetentionPosture(
-  organizationId: string,
-): InteractiveRetentionPosture {
-  return resolveInteractiveRetentionPosture(
-    process.env.AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON,
-    organizationId,
+/**
+ * Independently re-verify the plan entitlement via org-core's own
+ * server-computed boolean instead of reimplementing the plan allowlist here.
+ */
+async function planEntitlesZdr(organizationId: string): Promise<boolean> {
+  const body = await fetchOrgCoreJson(
+    `/api/v1/organizations/${encodeURIComponent(organizationId)}/entitlements`,
   );
+  const entitlements = isRecord(body)
+    ? asUnknownArray(body.entitlements)
+    : undefined;
+  if (!entitlements) {
+    return false;
+  }
+  const entry = entitlements.find(
+    (candidate) =>
+      isRecord(candidate) && candidate.key === 'feature.zero_data_retention',
+  );
+  return isRecord(entry) && entry.enabled === true;
+}
+
+/**
+ * Resolve the effective interactive-token retention posture for an
+ * organization. `zdr: true` only when the stored intent AND the
+ * independently-verified plan entitlement both hold; every other case
+ * (missing data, invalid id, org-core error/timeout/non-2xx) fails closed to
+ * `zdr: false`. Never throws.
+ */
+export async function resolveInteractiveRetentionPosture(
+  organizationId: string,
+): Promise<InteractiveRetentionPosture> {
+  if (!ORGANIZATION_ID.test(organizationId)) {
+    return DEFAULT_POSTURE;
+  }
+
+  const now = Date.now();
+  const cached = postureCache.get(organizationId);
+  if (cached && cached.expiresAt > now) {
+    return cached.posture;
+  }
+
+  let posture = DEFAULT_POSTURE;
+  try {
+    const [intent, entitled] = await Promise.all([
+      storedZdrIntent(organizationId),
+      planEntitlesZdr(organizationId),
+    ]);
+    posture = intent && entitled ? ZDR_POSTURE : DEFAULT_POSTURE;
+  } catch {
+    // org-core unreachable/timeout/non-2xx/malformed body — fail closed.
+    posture = DEFAULT_POSTURE;
+  }
+
+  postureCache.set(organizationId, { posture, expiresAt: now + CACHE_TTL_MS });
+  return posture;
+}
+
+/** Test-only: clear the process-local posture cache between test cases. */
+export function resetInteractiveRetentionCacheForTests(): void {
+  postureCache.clear();
 }

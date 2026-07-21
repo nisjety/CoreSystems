@@ -80,7 +80,7 @@ INSERT INTO gdpr_audit_rejection_fixture (org_id) VALUES ($1)
 ON CONFLICT (org_id) DO NOTHING`, atomicOrgID); err != nil {
 		t.Fatalf("seed atomicity failure fixture: %v", err)
 	}
-	if _, err := service.SoftDelete(ctx, atomicOrgID, "owner-atomic", "owner"); err == nil || !strings.Contains(err.Error(), "success audit") {
+	if _, err := service.SoftDelete(ctx, atomicOrgID, "GDPR audit atomic", "owner-atomic", "owner"); err == nil || !strings.Contains(err.Error(), "success audit") {
 		t.Fatalf("soft delete with rejected audit error=%v", err)
 	}
 	var status string
@@ -113,7 +113,7 @@ DROP TABLE gdpr_audit_rejection_fixture`); err != nil {
 	// A transient PubAck failure increments attempts but leaves the row pending.
 	// The exact stored event identity must be reused by the successful retry.
 	retryOrgID := seed("retry")
-	if _, err := service.SoftDelete(ctx, retryOrgID, "owner-retry", "owner"); err != nil {
+	if _, err := service.SoftDelete(ctx, retryOrgID, "GDPR audit retry", "owner-retry", "owner"); err != nil {
 		t.Fatalf("soft delete retry fixture: %v", err)
 	}
 	var retryEventID string
@@ -159,7 +159,7 @@ FROM organization_gdpr_audit_outbox WHERE event_id = $1`, retryEventID).Scan(
 	// Repeated failures stop at the bounded retry ceiling and remain visible in
 	// the local dead-letter state; terminal rows are never reclaimed.
 	deadOrgID := seed("dead")
-	if _, err := service.SoftDelete(ctx, deadOrgID, "owner-dead", "owner"); err != nil {
+	if _, err := service.SoftDelete(ctx, deadOrgID, "GDPR audit dead", "owner-dead", "owner"); err != nil {
 		t.Fatalf("soft delete dead-letter fixture: %v", err)
 	}
 	var deadEventID string
@@ -230,7 +230,7 @@ WHERE payload->>'org_id' = $1 AND payload->>'outcome' = 'ok'`, hardOrgID).Scan(&
 		t.Fatal("nonmatching audit failure was accepted")
 	}
 	missingOrgID := "org-gdpr-audit-missing-" + suffix
-	if _, err := service.SoftDelete(ctx, missingOrgID, "owner-missing", "owner"); err == nil || !strings.Contains(err.Error(), "organization erasure failed") {
+	if _, err := service.SoftDelete(ctx, missingOrgID, "", "owner-missing", "owner"); err == nil || !strings.Contains(err.Error(), "organization erasure failed") {
 		t.Fatalf("missing organization semantic failure=%v", err)
 	}
 	if result, err := service.FlushGDPRAuditOutbox(ctx, 10); err != nil || result.Published != 2 {

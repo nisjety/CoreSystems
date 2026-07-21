@@ -846,6 +846,12 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 		"SESSION_SHARED_NATS_PASSWORD", "APPLICATION_CONVEX_CONTROL_NATS_PASSWORD",
 		"DOCUMENTS_GDPR_NATS_PASSWORD",
 		"CONTROL_SHARED_BRIDGE_PASSWORD", "CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
+		"SESSION_CORE_GDPR_NATS_PASSWORD", "CONVERSATION_CORE_GDPR_NATS_PASSWORD",
+		"QUARRY_CONTROL_GDPR_NATS_PASSWORD", "NOTIFICATION_CORE_GDPR_NATS_PASSWORD",
+		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
+		"WIKI_STORE_GDPR_NATS_PASSWORD", "RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD",
+		"DATA_QUALITY_GDPR_NATS_PASSWORD", "DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD",
+		"QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD", "COST_CORE_GDPR_NATS_PASSWORD",
 	} {
 		t.Setenv(envName, strconv.Quote(password))
 	}
@@ -1027,6 +1033,55 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 	assertMainPermissionDenied(t, documents, documentsPermissionErrors, "documents JetStream administration", func() error {
 		return documents.Publish("$JS.API.STREAM.CREATE.FORGED", []byte(`{"name":"FORGED"}`))
 	})
+
+	conversationPermissionErrors := make(chan error, 4)
+	conversationGDPR, err := nats.Connect(instance.ClientURL(),
+		nats.UserInfo("conversation-core-gdpr", password),
+		nats.CustomInboxPrefix("_INBOX.CONVERSATION_CORE_GDPR"),
+		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, permissionErr error) {
+			conversationPermissionErrors <- permissionErr
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(conversationGDPR.Close)
+	conversationJS, err := conversationGDPR.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationGDPRReceived := make(chan struct{}, 1)
+	conversationGDPRSubscription, err := conversationJS.QueueSubscribe(
+		provisioner.GDPRErasureRequestedSubject,
+		provisioner.ConversationOrgErasureConsumerName,
+		func(message *nats.Msg) {
+			_ = message.Ack()
+			conversationGDPRReceived <- struct{}{}
+		},
+		nats.Bind(provisioner.ControlSharedStreamName, provisioner.ConversationOrgErasureConsumerName),
+		nats.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("bind scoped conversation-core org-erasure consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = conversationGDPRSubscription.Unsubscribe() })
+	if err := userProducer.Publish(provisioner.GDPRErasureRequestedSubject, []byte(`{"event_id":"gdpr:org-fanout:test","subject_type":"organization","subject_id":"org-1","org_id":"org-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := userProducer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversationGDPRReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scoped conversation-core org-erasure consumer did not receive the durable erasure event")
+	}
+	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation GDPR request forgery", func() error {
+		return conversationGDPR.Publish(provisioner.GDPRErasureRequestedSubject, []byte(`{"forged":true}`))
+	})
+	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation JetStream administration", func() error {
+		return conversationGDPR.Publish("$JS.API.STREAM.CREATE.FORGED", []byte(`{"name":"FORGED"}`))
+	})
 }
 
 func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
@@ -1201,6 +1256,12 @@ func TestScopedBrokerMonitoringBindsLoopback(t *testing.T) {
 		"SESSION_SHARED_NATS_PASSWORD", "APPLICATION_CONVEX_CONTROL_NATS_PASSWORD", "CONTROL_SHARED_BRIDGE_PASSWORD",
 		"DOCUMENTS_GDPR_NATS_PASSWORD",
 		"CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
+		"SESSION_CORE_GDPR_NATS_PASSWORD", "CONVERSATION_CORE_GDPR_NATS_PASSWORD",
+		"QUARRY_CONTROL_GDPR_NATS_PASSWORD", "NOTIFICATION_CORE_GDPR_NATS_PASSWORD",
+		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
+		"WIKI_STORE_GDPR_NATS_PASSWORD", "RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD",
+		"DATA_QUALITY_GDPR_NATS_PASSWORD", "DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD",
+		"QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD", "COST_CORE_GDPR_NATS_PASSWORD",
 		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
 		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",

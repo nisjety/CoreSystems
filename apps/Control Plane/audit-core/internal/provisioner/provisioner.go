@@ -14,42 +14,73 @@ import (
 )
 
 const (
-	StreamName                          = "VELION_CONTROL_OBSERVABILITY"
-	DLQSubject                          = "velion.dlq.audit-core.>"
-	AuthEventsStreamName                = "AUTH_EVENTS"
-	ControlEventsStreamName             = "CONTROL_PLANE_EVENTS"
-	BillingPlanConsumerName             = "billing-core-organization-plan-changed"
-	BillingPlanSubject                  = "organization.plan.changed"
-	BillingPlanDeliverySubject          = "_VELION.CONTROL.DELIVER.billing.organization-plan-changed"
-	ControlSharedStreamName             = "AQENCIA_CONTROLPLANE"
-	LegacyBridgeConsumerName            = "control-shared-legacy-bridge"
-	LegacyBridgeDelivery                = "_VELION.CONTROL.SHARED.DELIVER.legacy"
-	ConvexControlDLQSubject             = "velion.application.dlq.convex.controlplane"
-	GDPRErasureRequestedSubject         = "velion.gdpr.erasure.requested"
-	GDPRErasureDLQSubject               = "velion.gdpr.erasure.dlq.documents-api"
-	GDPROwnershipTransferredSubject     = "velion.gdpr.ownership.transferred"
-	DocumentsGDPRConsumerName           = "documents-api-gdpr-erasure-v1"
-	DocumentsGDPRDeliverySubject        = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
-	ModelToolsStreamName                = "TOOLS_COMPLETIONS"
-	ModelOrchestrationStreamName        = "MP_ORCHESTRATION_EVENTS"
-	ModelRunEventsStreamName            = "MODEL_PLANE_RUN_EVENTS"
-	SessionToolsConsumerName            = "session-core-tools"
-	SessionOrchestrationConsumerName    = "session-core-orchestration"
-	InsightRunConsumerName              = "insight-core-agent-run-subscriber"
-	InsightApprovalConsumerName         = "insight-core-agent-approval-subscriber"
-	InsightRunDeliverySubject           = "_VELION.MODEL.DELIVER.application.insight.run"
-	InsightApprovalDeliverySubject      = "_VELION.MODEL.DELIVER.application.insight.approval"
-	ApplicationEventsStreamName         = "VELION_APPLICATION"
-	ApplicationModelStreamName          = "VELION_MODEL"
-	ApplicationIngestionStreamName      = "VELION_INGESTION"
-	ConversationAIActionConsumerName    = "conversation-core-ai-action-executor"
-	ConversationModelActionConsumerName = "conversation-core-model-action-proposed"
-	ConversationWebhookConsumerName     = "conversation-core-webhook-received"
-	InsightMetricConsumerName           = "insight-core-metric-subscriber"
-	ConversationAIActionDelivery        = "_VELION.APPLICATION.DELIVER.conversation.ai-action-reviewed"
-	ConversationModelActionDelivery     = "_VELION.APPLICATION.DELIVER.conversation.model-action-proposed"
-	ConversationWebhookDelivery         = "_VELION.APPLICATION.DELIVER.conversation.webhook-received"
-	InsightMetricDelivery               = "_VELION.APPLICATION.DELIVER.insight.metrics"
+	StreamName                                   = "VELION_CONTROL_OBSERVABILITY"
+	DLQSubject                                   = "velion.dlq.audit-core.>"
+	AuthEventsStreamName                         = "AUTH_EVENTS"
+	ControlEventsStreamName                      = "CONTROL_PLANE_EVENTS"
+	BillingPlanConsumerName                      = "billing-core-organization-plan-changed"
+	BillingPlanSubject                           = "organization.plan.changed"
+	BillingPlanDeliverySubject                   = "_VELION.CONTROL.DELIVER.billing.organization-plan-changed"
+	ControlSharedStreamName                      = "AQENCIA_CONTROLPLANE"
+	LegacyBridgeConsumerName                     = "control-shared-legacy-bridge"
+	LegacyBridgeDelivery                         = "_VELION.CONTROL.SHARED.DELIVER.legacy"
+	ConvexControlDLQSubject                      = "velion.application.dlq.convex.controlplane"
+	GDPRErasureRequestedSubject                  = "velion.gdpr.erasure.requested"
+	GDPRErasureDLQSubject                        = "velion.gdpr.erasure.dlq.documents-api"
+	GDPROwnershipTransferredSubject              = "velion.gdpr.ownership.transferred"
+	DocumentsGDPRConsumerName                    = "documents-api-gdpr-erasure-v1"
+	DocumentsGDPRDeliverySubject                 = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
+	DocumentsOrgErasureConsumerName              = "documents-api-org-erasure"
+	DocumentsOrgErasureDelivery                  = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
+	DocumentsOrgPurgeDLQSubject                  = "velion.gdpr.erasure.dlq.documents-api-org-purge"
+	ConversationOrgErasureConsumerName           = "conversation-core-org-erasure"
+	ConversationOrgErasureDelivery               = "_VELION.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
+	SessionGDPRErasureConsumerName               = "session-core-gdpr-erasure-v1"
+	QuarryControlOrgErasureConsumerName          = "quarry-control-org-erasure"
+	QuarryControlOrgErasureDelivery              = "_VELION.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
+	OrgDeletionSubjectWildcard                   = "velion.org.deletion.>"
+	OrgDeletionPendingSubject                    = "velion.org.deletion.pending"
+	OrgDeletionReminderSubject                   = "velion.org.deletion.reminder"
+	OrgDeletionCancelledSubject                  = "velion.org.deletion.cancelled"
+	NotificationOrgDeletionPendingConsumerName   = "notification-core-org-deletion-pending"
+	NotificationOrgDeletionReminderConsumerName  = "notification-core-org-deletion-reminder"
+	NotificationOrgDeletionCancelledConsumerName = "notification-core-org-deletion-cancelled"
+	NotificationOrgDeletionPendingDelivery       = "_VELION.CONTROL.SHARED.DELIVER.application.notification.org-deletion-pending"
+	NotificationOrgDeletionReminderDelivery      = "_VELION.CONTROL.SHARED.DELIVER.application.notification.org-deletion-reminder"
+	NotificationOrgDeletionCancelledDelivery     = "_VELION.CONTROL.SHARED.DELIVER.application.notification.org-deletion-cancelled"
+	ModelToolsStreamName                         = "TOOLS_COMPLETIONS"
+	ModelOrchestrationStreamName                 = "MP_ORCHESTRATION_EVENTS"
+	ModelRunEventsStreamName                     = "MODEL_PLANE_RUN_EVENTS"
+	SessionToolsConsumerName                     = "session-core-tools"
+	SessionOrchestrationConsumerName             = "session-core-orchestration"
+	InsightRunConsumerName                       = "insight-core-agent-run-subscriber"
+	InsightApprovalConsumerName                  = "insight-core-agent-approval-subscriber"
+	InsightRunDeliverySubject                    = "_VELION.MODEL.DELIVER.application.insight.run"
+	InsightApprovalDeliverySubject               = "_VELION.MODEL.DELIVER.application.insight.approval"
+	ApplicationEventsStreamName                  = "VELION_APPLICATION"
+	ApplicationModelStreamName                   = "VELION_MODEL"
+	ApplicationIngestionStreamName               = "VELION_INGESTION"
+	ConversationAIActionConsumerName             = "conversation-core-ai-action-executor"
+	ConversationModelActionConsumerName          = "conversation-core-model-action-proposed"
+	ConversationWebhookConsumerName              = "conversation-core-webhook-received"
+	InsightMetricConsumerName                    = "insight-core-metric-subscriber"
+	ConversationAIActionDelivery                 = "_VELION.APPLICATION.DELIVER.conversation.ai-action-reviewed"
+	ConversationModelActionDelivery              = "_VELION.APPLICATION.DELIVER.conversation.model-action-proposed"
+	ConversationWebhookDelivery                  = "_VELION.APPLICATION.DELIVER.conversation.webhook-received"
+	InsightMetricDelivery                        = "_VELION.APPLICATION.DELIVER.insight.metrics"
+	IndexEngineOrgErasureConsumerName            = "index-engine-org-erasure"
+	GraphIndexOrgErasureConsumerName             = "graph-index-gdpr-erasure-v1"
+	WikiStoreOrgErasureConsumerName              = "wiki-store-org-erasure"
+	WikiStoreOrgErasureDelivery                  = "_VELION.CONTROL.SHARED.DELIVER.data.wiki-store.org-erasure"
+	RetrievalEngineOrgErasureConsumerName        = "retrieval-engine-gdpr-erasure-v1"
+	DataQualityOrgErasureConsumerName            = "data-quality-org-erasure"
+	DataQualityOrgErasureDelivery                = "_VELION.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
+	DataOrchestratorOrgErasureConsumerName       = "data-orchestrator-org-erasure"
+	DataOrchestratorOrgErasureDelivery           = "_VELION.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
+	QuickwitAdapterOrgErasureConsumerName        = "quickwit-adapter-gdpr-erasure-v1"
+	CostCoreOrgErasureConsumerName               = "cost-core-org-erasure"
+	CostCoreOrgErasureDelivery                   = "_VELION.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
+	EmbeddingEngineOrgErasureConsumerName        = "embedding-engine-org-erasure"
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -369,6 +400,8 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 		GDPRErasureRequestedSubject,
 		GDPRErasureDLQSubject,
 		GDPROwnershipTransferredSubject,
+		DocumentsOrgPurgeDLQSubject,
+		OrgDeletionSubjectWildcard,
 	}
 	if err := ensureControlStream(js, ControlSharedStreamName, subjects); err != nil {
 		return err
@@ -404,6 +437,50 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, gdprDocumentsConsumerConfig()); err != nil {
 		return err
 	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, documentsOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, conversationOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, sessionGDPRErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, quarryControlOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	for _, consumer := range notificationOrgDeletionConsumerConfigs() {
+		if err := ensureFixedConsumer(js, ControlSharedStreamName, consumer); err != nil {
+			return err
+		}
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, indexEngineOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, graphIndexOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, wikiStoreOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, retrievalEngineOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, dataQualityOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, dataOrchestratorOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, quickwitAdapterOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, costCoreOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, embeddingEngineOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -411,6 +488,210 @@ func gdprDocumentsConsumerConfig() *nats.ConsumerConfig {
 	return &nats.ConsumerConfig{
 		Durable: DocumentsGDPRConsumerName, DeliverSubject: DocumentsGDPRDeliverySubject,
 		DeliverGroup: DocumentsGDPRConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// documentsOrgErasureConsumerConfig is documents-api-go's second, org-scoped
+// GDPR consumer (org_purge_consumer.go's orgPurgeDurableConsumerName). It
+// mirrors gdprDocumentsConsumerConfig's shape exactly; both consumers run
+// over the same shared connection/credentials in documents-api-go.
+func documentsOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: DocumentsOrgErasureConsumerName, DeliverSubject: DocumentsOrgErasureDelivery,
+		DeliverGroup: DocumentsOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// sessionGDPRErasureConsumerConfig is Model Plane's session-core (Rust) pull
+// consumer for the shared GDPR erasure fan-out. Unlike the push/queue
+// consumers above, a pull consumer has no DeliverSubject/DeliverGroup: the
+// client fetches with CONSUMER.MSG.NEXT instead of receiving an async
+// delivery. ensureFixedConsumer's compatibility check tolerates the resulting
+// empty DeliverSubject/DeliverGroup on both sides without modification.
+func sessionGDPRErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: SessionGDPRErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// quarryControlOrgErasureConsumerConfig is Ingestion Plane's quarry-control
+// push/queue consumer for the shared GDPR erasure fan-out. The durable name
+// must match subscriber.go's DurableConsumerName const, which switches from
+// self-provisioning (nats.Durable) to nats.Bind once this entry exists.
+func quarryControlOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: QuarryControlOrgErasureConsumerName, DeliverSubject: QuarryControlOrgErasureDelivery,
+		DeliverGroup: QuarryControlOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// notificationOrgDeletionConsumerConfigs returns notification-core's three
+// fixed push/queue consumers, one per org-deletion lifecycle subject. Durable
+// names must match org_deletion_consumer.go's orgDeletionDurablePrefix +
+// "-pending"/"-reminder"/"-cancelled" suffixes exactly, since that consumer
+// binds via nats.Bind once switched off self-provisioning.
+func notificationOrgDeletionConsumerConfigs() []*nats.ConsumerConfig {
+	definitions := []struct {
+		durable  string
+		delivery string
+		filter   string
+	}{
+		{NotificationOrgDeletionPendingConsumerName, NotificationOrgDeletionPendingDelivery, OrgDeletionPendingSubject},
+		{NotificationOrgDeletionReminderConsumerName, NotificationOrgDeletionReminderDelivery, OrgDeletionReminderSubject},
+		{NotificationOrgDeletionCancelledConsumerName, NotificationOrgDeletionCancelledDelivery, OrgDeletionCancelledSubject},
+	}
+	configs := make([]*nats.ConsumerConfig, 0, len(definitions))
+	for _, definition := range definitions {
+		configs = append(configs, &nats.ConsumerConfig{
+			Durable: definition.durable, DeliverSubject: definition.delivery,
+			DeliverGroup: definition.durable, FilterSubject: definition.filter,
+			DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+			AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+		})
+	}
+	return configs
+}
+
+// indexEngineOrgErasureConsumerConfig is Data Plane v2's index-engine-rs GDPR
+// org-erasure PULL consumer. Like sessionGDPRErasureConsumerConfig, a pull
+// consumer has no DeliverSubject/DeliverGroup — index-engine-rs binds via
+// get_consumer_from_stream (never get_stream first), so its identity also
+// does not need $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE.
+func indexEngineOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: IndexEngineOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// graphIndexOrgErasureConsumerConfig is Data Plane v2's graph-index-rs GDPR
+// org-erasure PULL consumer. Same shape and STREAM.INFO-free reasoning as
+// indexEngineOrgErasureConsumerConfig above.
+func graphIndexOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: GraphIndexOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// wikiStoreOrgErasureConsumerConfig is Data Plane v2's wiki-store-go GDPR
+// org-erasure push/queue consumer (nats.Bind + QueueSubscribe, ManualAck),
+// mirroring documentsOrgErasureConsumerConfig's shape. The Durable value
+// must exactly match wiki-store-go's internal/gdpr/subscriber.go
+// DurableConsumerName, which also doubles as the queue-group name there.
+func wikiStoreOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: WikiStoreOrgErasureConsumerName, DeliverSubject: WikiStoreOrgErasureDelivery,
+		DeliverGroup: WikiStoreOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// retrievalEngineOrgErasureConsumerConfig is Data Plane v2's
+// retrieval-engine-rs GDPR org-erasure PULL consumer, matching
+// sessionGDPRErasureConsumerConfig's shape (no DeliverSubject/DeliverGroup,
+// no STREAM.INFO permission needed).
+func retrievalEngineOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: RetrievalEngineOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// dataQualityOrgErasureConsumerConfig is Data Plane v2's data-quality-go GDPR
+// org-erasure push/queue consumer, mirroring documentsOrgErasureConsumerConfig's
+// shape. The Durable value must exactly match data-quality-go's
+// internal/gdpr/consumer.go OrgErasureDurableName.
+func dataQualityOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: DataQualityOrgErasureConsumerName, DeliverSubject: DataQualityOrgErasureDelivery,
+		DeliverGroup: DataQualityOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// dataOrchestratorOrgErasureConsumerConfig is Data Plane v2's
+// data-orchestrator-go GDPR org-erasure push/queue consumer, mirroring
+// documentsOrgErasureConsumerConfig's shape. The Durable value must exactly
+// match data-orchestrator-go's internal/gdpr/consumer.go durableConsumerName.
+func dataOrchestratorOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: DataOrchestratorOrgErasureConsumerName, DeliverSubject: DataOrchestratorOrgErasureDelivery,
+		DeliverGroup: DataOrchestratorOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// quickwitAdapterOrgErasureConsumerConfig is Data Plane v2's
+// quickwit-adapter-rs GDPR org-erasure PULL consumer. Unlike the other pull
+// consumers above, quickwit-adapter-rs's client resolves the consumer via
+// js.get_stream(..) before get_consumer(..), so this identity also needs
+// $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE granted in control-shared-nats.conf
+// (see the session-core-gdpr identity for the same requirement).
+func quickwitAdapterOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: QuickwitAdapterOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// costCoreOrgErasureConsumerConfig is Model Plane's cost-core GDPR
+// org-erasure push/queue consumer (nats.Bind + QueueSubscribe via
+// DurableConsumer.BindProvisioned), mirroring documentsOrgErasureConsumerConfig's
+// shape. The Durable value must exactly match cost-core's
+// internal/consumers/org_erasure_consumer.go orgErasureDurable.
+func costCoreOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: CostCoreOrgErasureConsumerName, DeliverSubject: CostCoreOrgErasureDelivery,
+		DeliverGroup: CostCoreOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// embeddingEngineOrgErasureConsumerConfig is Data Plane v2's
+// embedding-engine-rs GDPR org-erasure PULL consumer, purging org-scoped
+// Qdrant vector points (dataplane_knowledge / wiki_block_embeddings / the
+// visual page-image collection). Same shape and STREAM.INFO-free reasoning
+// as indexEngineOrgErasureConsumerConfig/graphIndexOrgErasureConsumerConfig
+// above — embedding-engine-rs binds via get_consumer_from_stream (never
+// get_stream first), so its identity also does not need
+// $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE.
+func embeddingEngineOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: EmbeddingEngineOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// conversationOrgErasureConsumerConfig is conversation-core-go's fixed
+// consumer for the same shared GDPR erasure fan-out (see
+// gdprDocumentsConsumerConfig for documents-api-go's sibling registration).
+// The Durable value must exactly match orgErasureDurable in
+// conversation-core-go/internal/consumers/org_erasure_consumer.go — that
+// consumer binds via nats.Bind, which requires this durable to already exist
+// server-side, so a name mismatch here silently breaks the org-scoped
+// hard-purge.
+func conversationOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: ConversationOrgErasureConsumerName, DeliverSubject: ConversationOrgErasureDelivery,
+		DeliverGroup: ConversationOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
 		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
 		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
 	}

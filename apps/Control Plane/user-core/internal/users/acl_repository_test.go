@@ -206,6 +206,62 @@ func TestGrantRejectsTeamSharedType(t *testing.T) {
 	}
 }
 
+// TestCrossOrgGrantIsolation proves org_id is a hard boundary on
+// resource_grants: two orgs granting the identical
+// resource_type/resource_id/subject pairing must not see, list, or revoke
+// each other's rows. The other tests in this file (TestGrantCheckRevoke,
+// TestListVisibleAndBatchCheckScopePerUser, ...) only ever exercise a single
+// org, so per-user scoping was proven but cross-org scoping was not.
+func TestCrossOrgGrantIsolation(t *testing.T) {
+	repo, orgA, cleanup := newTestAclRepo(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	orgB := "owntest-" + uuid.NewString()
+	defer func() {
+		_ = repo.Revoke(context.Background(), orgB, "document", "doc-1", "user", "user-a")
+	}()
+
+	// Same resource_type/resource_id/subject pairing granted independently in
+	// each org. The unique index is (org_id, resource_type, resource_id,
+	// subject_type, subject_id), so if org_id scoping were dropped anywhere
+	// along the read path these two rows would be indistinguishable.
+	mustGrant(t, repo, orgA, "doc-1", "user-a")
+	mustGrant(t, repo, orgB, "doc-1", "user-a")
+
+	// Check must key off org_id, not just resource+subject.
+	if okA, roleA, err := repo.Check(ctx, orgA, "document", "doc-1", "user", "user-a"); err != nil || !okA || roleA != "view" {
+		t.Fatalf("Check(orgA) = (%v,%q,err=%v); want (true,view,nil)", okA, roleA, err)
+	}
+
+	// ListVisible for org A must not include org B's identically-keyed grant.
+	visA, err := repo.ListVisible(ctx, orgA, "document", "user", "user-a")
+	if err != nil {
+		t.Fatalf("ListVisible(orgA): %v", err)
+	}
+	if got := toSet(visA.IDs); len(got) != 1 || !got["doc-1"] {
+		t.Fatalf("ListVisible(orgA) = %v; want exactly {doc-1} (must not include org B's rows)", visA.IDs)
+	}
+
+	// ListByResource for org A must not surface org B's grant on the same
+	// resource_id.
+	grantsA, err := repo.ListByResource(ctx, orgA, "document", "doc-1")
+	if err != nil {
+		t.Fatalf("ListByResource(orgA): %v", err)
+	}
+	if len(grantsA) != 1 || grantsA[0].OrgID != orgA {
+		t.Fatalf("ListByResource(orgA) leaked cross-org grants: %+v", grantsA)
+	}
+
+	// Revoking org A's grant must not touch org B's identically-keyed grant.
+	if err := repo.Revoke(ctx, orgA, "document", "doc-1", "user", "user-a"); err != nil {
+		t.Fatalf("Revoke(orgA): %v", err)
+	}
+	if okB, roleB, err := repo.Check(ctx, orgB, "document", "doc-1", "user", "user-a"); err != nil || !okB || roleB != "view" {
+		t.Fatalf("Check(orgB) after orgA revoke = (%v,%q,err=%v); want (true,view,nil) — cross-org revoke leak", okB, roleB, err)
+	}
+}
+
 func mustGrant(t *testing.T, repo *users.AclRepository, org, doc, user string) {
 	t.Helper()
 	if _, err := repo.Grant(context.Background(), &users.ResourceGrant{

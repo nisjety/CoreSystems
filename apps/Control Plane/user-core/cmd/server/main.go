@@ -338,6 +338,29 @@ func main() {
 	} else {
 		log.Println("⚠️  GDPR: AUTH_DATABASE_URL not set — hard-erase/anonymize routes will return 503 erasure_unavailable (never an opaque 500); DSAR export still works")
 	}
+
+	// Wire the org-core succession client used by the admin-succession
+	// pre-flight (EnsureSuccession, internal/users/gdpr_succession.go): before
+	// a sole owner/admin's erasure saga starts, user-core must hand their seat
+	// off to a validated successor in org-core. When any of
+	// ORG_CORE_BASE_URL / ORG_CORE_SERVICE_PRINCIPAL / ORG_CORE_SERVICE_TOKEN
+	// is unset, NewOrgCoreClient returns nil and EnsureSuccession fails closed
+	// (503) ONLY for the users who actually need a successor — everyone else's
+	// erasure is unaffected.
+	orgCoreServicePrincipal := strings.TrimSpace(os.Getenv("ORG_CORE_SERVICE_PRINCIPAL"))
+	if orgCoreServicePrincipal == "" {
+		orgCoreServicePrincipal = "user-core"
+	}
+	if orgCoreClient := clients.NewOrgCoreClient(
+		os.Getenv("ORG_CORE_BASE_URL"),
+		orgCoreServicePrincipal,
+		os.Getenv("ORG_CORE_SERVICE_TOKEN"),
+	); orgCoreClient != nil {
+		userService.SetOrgCoreClient(orgCoreClient)
+		log.Println("✅ GDPR: org-core succession client wired (admin-succession pre-flight active)")
+	} else {
+		log.Println("⚠️  GDPR: ORG_CORE_BASE_URL/ORG_CORE_SERVICE_TOKEN not set — sole-owner/admin self-erasure will return 503 succession_unavailable until a successor client is configured")
+	}
 	userService.StartErasureSaga()
 
 	// Create gRPC server with NATS publisher and Better Auth client

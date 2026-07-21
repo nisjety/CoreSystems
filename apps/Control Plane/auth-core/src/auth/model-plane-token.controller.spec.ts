@@ -17,9 +17,12 @@ const mockResolveCanonicalTokenContext = jest.fn();
 jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
 }));
+const mockResolveInteractiveRetentionPosture = jest.fn();
+jest.mock('./interactive-retention-policy', () => ({
+  resolveInteractiveRetentionPosture: mockResolveInteractiveRetentionPosture,
+}));
 
 import { ModelPlaneTokenController } from './model-plane-token.controller';
-import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
 
 describe('ModelPlaneTokenController secure ZDR issuance', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
@@ -40,6 +43,13 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Default: normal retention, as if org-core resolved a brand-new/
+    // non-ZDR org. Individual tests override when they need to exercise the
+    // zdr:true or org-core-outage paths.
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
+    });
   });
 
   afterEach(() => {
@@ -55,7 +65,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     }
   });
 
-  it('requires mandatory ZDR for an authenticated user token', async () => {
+  it('resolves the org interactive retention posture via org-core and stamps it into the minted user token', async () => {
     mockGetSession.mockResolvedValue({
       user: { id: 'user-a', email: 'user-a@example.test' },
       session: { activeOrganizationId: 'org-a' },
@@ -63,6 +73,10 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     mockResolveCanonicalTokenContext.mockResolvedValue({
       orgId: 'org-a',
       role: 'member',
+    });
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
     });
     const tokenService = {
       issueModelPlaneToken: jest
@@ -81,12 +95,91 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       userId: 'user-a',
       orgId: 'org-a',
     });
+    expect(mockResolveInteractiveRetentionPosture).toHaveBeenCalledWith(
+      'org-a',
+    );
     expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith({
       userId: 'user-a',
       orgId: 'org-a',
       email: 'user-a@example.test',
       scopes: undefined,
+      retentionPosture: {
+        zdr: false,
+        authority: 'interactive-org-retention-policy',
+      },
     });
+  });
+
+  it('stamps zdr:true into the minted user token when org-core resolves a qualifying org', async () => {
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a', email: 'user-a@example.test' },
+      session: { activeOrganizationId: 'org-zdr' },
+    });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-zdr',
+      role: 'member',
+    });
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: true,
+      authority: 'interactive-org-retention-policy',
+    });
+    const tokenService = {
+      issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'zdr-user' }),
+    };
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      availableAudit() as never,
+    );
+
+    await expect(
+      controller.getToken({ headers: {} } as never),
+    ).resolves.toMatchObject({ token: 'zdr-user' });
+    expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionPosture: {
+          zdr: true,
+          authority: 'interactive-org-retention-policy',
+        },
+      }),
+    );
+  });
+
+  it('still succeeds and mints a normal-retention token when the org-core retention lookup is unavailable (fails closed, never blocks login)', async () => {
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a' },
+      session: { activeOrganizationId: 'org-a' },
+    });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
+    // resolveInteractiveRetentionPosture never throws — an org-core outage
+    // or timeout resolves to the fail-closed posture, not a rejection.
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
+    });
+    const tokenService = {
+      issueModelPlaneToken: jest
+        .fn()
+        .mockReturnValue({ token: 'degraded-user' }),
+    };
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      availableAudit() as never,
+    );
+
+    await expect(
+      controller.getToken({ headers: {} } as never),
+    ).resolves.toMatchObject({ token: 'degraded-user' });
+    expect(tokenService.issueModelPlaneToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        retentionPosture: {
+          zdr: false,
+          authority: 'interactive-org-retention-policy',
+        },
+      }),
+    );
   });
 
   it('keeps an authenticated user unprivileged when canonical role is absent', async () => {
@@ -146,32 +239,6 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     expect(tokenService.issueModelPlaneToken).not.toHaveBeenCalled();
   });
 
-  it('fails closed when the issuer-owned interactive retention policy is invalid', async () => {
-    mockGetSession.mockResolvedValue({
-      user: { id: 'user-a' },
-      session: { activeOrganizationId: 'org-a' },
-    });
-    mockResolveCanonicalTokenContext.mockResolvedValue({
-      orgId: 'org-a',
-      role: 'member',
-    });
-    const tokenService = {
-      issueModelPlaneToken: jest.fn().mockImplementation(() => {
-        throw new InteractiveRetentionPolicyConfigurationError(
-          'invalid policy',
-        );
-      }),
-    };
-    const controller = new ModelPlaneTokenController(
-      tokenService as never,
-      availableAudit() as never,
-    );
-
-    await expect(
-      controller.getToken({ headers: {} } as never),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
-  });
-
   it('rejects a session without a verified active organization', async () => {
     mockGetSession.mockResolvedValue({
       user: { id: 'user-a' },
@@ -221,6 +288,10 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
         orgId: 'org-a',
         email: undefined,
         scopes: ['admin'],
+        retentionPosture: {
+          zdr: false,
+          authority: 'interactive-org-retention-policy',
+        },
       });
     },
   );

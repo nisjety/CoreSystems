@@ -13,9 +13,12 @@ jest.mock('./auth', () => ({
 jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
 }));
+const mockResolveInteractiveRetentionPosture = jest.fn();
+jest.mock('./interactive-retention-policy', () => ({
+  resolveInteractiveRetentionPosture: mockResolveInteractiveRetentionPosture,
+}));
 
 import { PlaneTokenController } from './plane-token.controller';
-import { InteractiveRetentionPolicyConfigurationError } from './interactive-retention-policy';
 
 describe('PlaneTokenController service issuance audit', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
@@ -270,9 +273,16 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
   beforeEach(() => {
     mockGetSession.mockReset();
     mockResolveCanonicalTokenContext.mockReset();
+    mockResolveInteractiveRetentionPosture.mockReset();
     mockGetSession.mockResolvedValue({
       user: { id: 'user-a', email: 'user@example.test' },
       session: { activeOrganizationId: 'org-a' },
+    });
+    // Default: normal retention. Individual tests override to exercise the
+    // zdr:true or org-core-outage paths.
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
     });
   });
 
@@ -310,29 +320,74 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
         orgId: 'org-a',
         email: 'user@example.test',
         scopes: expectedScopes,
+        retentionPosture: {
+          zdr: false,
+          authority: 'interactive-org-retention-policy',
+        },
       });
+      expect(mockResolveInteractiveRetentionPosture).toHaveBeenCalledWith(
+        'org-a',
+      );
     },
   );
 
-  it('fails closed when the issuer-owned interactive retention policy is invalid', async () => {
+  it('stamps zdr:true into the minted token when org-core resolves a qualifying org', async () => {
     mockResolveCanonicalTokenContext.mockResolvedValue({
       orgId: 'org-a',
       role: 'member',
     });
-    const controller = new PlaneTokenController(
-      {
-        isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
-        issuePlaneToken: jest.fn().mockImplementation(() => {
-          throw new InteractiveRetentionPolicyConfigurationError(
-            'invalid policy',
-          );
-        }),
-      } as never,
-      {} as never,
-    );
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: true,
+      authority: 'interactive-org-retention-policy',
+    });
+    const tokens = {
+      isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: 'zdr-interactive' }),
+    };
+    const controller = new PlaneTokenController(tokens as never, {} as never);
 
     await expect(
       controller.getToken('inference-core', { headers: {} } as never),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    ).resolves.toMatchObject({ token: 'zdr-interactive' });
+    expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
+      'inference-core',
+      expect.objectContaining({
+        retentionPosture: {
+          zdr: true,
+          authority: 'interactive-org-retention-policy',
+        },
+      }),
+    );
+  });
+
+  it('still succeeds and mints a normal-retention token when the org-core retention lookup is unavailable (fails closed, never blocks login)', async () => {
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
+    // resolveInteractiveRetentionPosture never throws — an org-core outage
+    // or timeout resolves to the fail-closed posture, not a rejection.
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
+    });
+    const tokens = {
+      isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: 'degraded' }),
+    };
+    const controller = new PlaneTokenController(tokens as never, {} as never);
+
+    await expect(
+      controller.getToken('inference-core', { headers: {} } as never),
+    ).resolves.toMatchObject({ token: 'degraded' });
+    expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
+      'inference-core',
+      expect.objectContaining({
+        retentionPosture: {
+          zdr: false,
+          authority: 'interactive-org-retention-policy',
+        },
+      }),
+    );
   });
 });

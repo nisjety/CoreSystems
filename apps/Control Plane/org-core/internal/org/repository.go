@@ -1001,6 +1001,41 @@ WHERE org_id = $1 AND user_id = $2`
 	})
 }
 
+// PromoteMember assigns role (owner|admin) to an EXISTING active member as
+// part of an admin-succession handoff: a departing sole owner/admin nominates
+// a successor before self-erasing (see internal/http/succession_handlers.go
+// and user-core's Service.EnsureSuccession, which calls this via org-core's
+// internal succession endpoint before the erasure saga starts).
+//
+// This is deliberately narrower than rbac.Repository.AssignMemberRole: it
+// never invites, never removes, and never touches anyone other than the named
+// user. It runs inside WithOrgScope like every other membership mutation, so
+// the DB-level owner-invariant constraint trigger
+// (migrations/010_owner_invariant.up.sql) still applies at commit — promoting
+// a successor can only ever add an owner/admin, so that trigger can never
+// reject this specific call, but the transaction boundary is kept consistent
+// with every other membership write in this file.
+func (r *Repository) PromoteMember(ctx context.Context, orgID, userID, role string) error {
+	if role != "owner" && role != "admin" {
+		return fmt.Errorf("role must be owner or admin")
+	}
+	const q = `
+UPDATE organization_members
+SET role = $3, updated_at = NOW()
+WHERE org_id = $1 AND user_id = $2 AND status = 'active'`
+
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, q, orgID, userID, role)
+		if err != nil {
+			return fmt.Errorf("promote member: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			return fmt.Errorf("no active membership found for user %s in organization %s", userID, orgID)
+		}
+		return nil
+	})
+}
+
 // ReconcileOrganizationMember applies a canonical Auth Core membership intent
 // only when its per-member revision is newer than the last applied revision.
 // Version check and membership mutation share one transaction, preventing a

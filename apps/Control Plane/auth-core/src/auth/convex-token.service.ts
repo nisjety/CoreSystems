@@ -8,7 +8,7 @@ import {
   type KeyObject,
 } from 'crypto';
 import { readFileSync } from 'fs';
-import { currentInteractiveRetentionPosture } from './interactive-retention-policy';
+import type { InteractiveRetentionPosture } from './interactive-retention-policy';
 
 type ConvexJwtClaims = {
   externalAuthId: string;
@@ -48,7 +48,7 @@ type ModelPlaneJwtClaims = {
   principalType?: 'user' | 'service';
   serviceId?: string;
   reason?: string;
-  retentionPosture?: ServiceRetentionPosture;
+  retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
 };
 
 type ModelPlaneTokenBundle = {
@@ -114,21 +114,35 @@ type ServiceRetentionPosture = {
 
 type RetentionAwareClaims = {
   orgId: string;
-  retentionPosture?: ServiceRetentionPosture;
+  retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
 };
 
 /**
- * Retention posture is issuer-owned. Interactive users resolve through the
- * exact Control-Plane organization policy; service tokens retain their
- * separately bounded per-audience registry policy. No caller field can select
- * a non-ZDR posture.
+ * Retention posture is issuer-owned computed state. It is resolved once by
+ * the caller — asynchronously, via `resolveInteractiveRetentionPosture`
+ * (interactive users) or the bounded service-principal registry (service
+ * principals) — and handed in as a claim; this function never performs I/O
+ * itself so token minting stays synchronous.
+ *
+ * Interactive (`user`) tokens trust ONLY a claim stamped with the
+ * `interactive-org-retention-policy` authority. Anything else — including no
+ * claim at all — fails closed to `zdr: false` (normal retention is Auth
+ * Core's default for every org; ZDR is an opt-in, paid, plan-gated add-on).
+ *
+ * Service tokens are unrelated to this task and keep their prior behavior:
+ * they trust only a claim stamped `service-principal-policy`, defaulting to
+ * `zdr: true` otherwise. No caller-selected field (request body, header) can
+ * ever downgrade either posture.
  */
 function issuedTokenZdr(
   principalType: 'user' | 'service',
   claims: RetentionAwareClaims,
 ): boolean {
   if (principalType === 'user') {
-    return currentInteractiveRetentionPosture(claims.orgId).zdr;
+    return claims.retentionPosture?.authority ===
+      'interactive-org-retention-policy'
+      ? claims.retentionPosture.zdr
+      : false;
   }
   return claims.retentionPosture?.authority === 'service-principal-policy'
     ? claims.retentionPosture.zdr
@@ -143,7 +157,7 @@ type PlaneJwtClaims = {
   principalType?: 'user' | 'service';
   serviceId?: string;
   reason?: string;
-  retentionPosture?: ServiceRetentionPosture;
+  retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
 };
 
 type PlaneTokenBundle = {
