@@ -149,6 +149,31 @@ impl Grounding {
     }
 }
 
+/// HONESTY_CONTRACT: system notice injected when grounding was genuinely
+/// attempted (a retrieval call completed) and came back with nothing
+/// relevant, so the model says that plainly instead of answering an
+/// org-specific question from unguarded parametric memory.
+pub const NO_GROUNDING_SYSTEM_NOTICE: &str =
+    "You checked the organization's own knowledge base for this question and it returned nothing \
+relevant. Answer from your general knowledge if you can, but say plainly that you found nothing \
+in the organization's connected knowledge base for this — never present a guess as an \
+organization-specific fact.";
+
+/// HONESTY_CONTRACT: appended to the retrieved context block when the matches
+/// are weak, so the model treats them as tentative rather than authoritative.
+pub const LOW_CONFIDENCE_GROUNDING_NOTICE: &str =
+    "\n\nNote: the matches above are low-confidence. Treat them as tentative, not certain, and say \
+so if your answer relies on them.";
+
+/// Resolve the honesty-contract system notice for a resolved grounding
+/// attempt. `None` when grounding was never attempted (nothing dishonest to
+/// flag) or it found real matches; `Some(NO_GROUNDING_SYSTEM_NOTICE)` only
+/// when an attempt genuinely completed and came back empty.
+#[must_use]
+pub fn no_grounding_notice(grounding: Option<&Grounding>) -> Option<&'static str> {
+    grounding.and_then(|g| g.is_empty().then_some(NO_GROUNDING_SYSTEM_NOTICE))
+}
+
 fn truncate_chars(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max {
@@ -724,12 +749,15 @@ pub async fn retrieve(
 
     match retrieval_result {
         Ok(resp) => {
-            let grounding = with_graph(build_grounding(query, &resp.into_inner()), graph);
-            if grounding.is_empty() {
-                None
-            } else {
-                Some(grounding)
-            }
+            // HONESTY_CONTRACT: report a completed attempt even when empty
+            // (`Grounding::is_empty`), so callers can tell "checked and found
+            // nothing" apart from "never checked" and instruct the model
+            // accordingly via `no_grounding_notice`. This used to collapse an
+            // empty result to `None`, indistinguishable from not asking at
+            // all. The `grounded` bool fed into confidence scoring
+            // (`grounding.is_some_and(|g| !g.citations.is_empty())`) is
+            // unaffected since it already requires non-empty citations.
+            Some(with_graph(build_grounding(query, &resp.into_inner()), graph))
         }
         Err(error) => {
             tracing::warn!(

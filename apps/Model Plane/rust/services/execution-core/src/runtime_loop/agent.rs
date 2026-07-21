@@ -81,8 +81,10 @@ listed tool covers; call the tool and let its result (or the approval step for a
 decide the outcome. A knowledge_search result is JSON: when status is no_results or \
 low_confidence, reformulate with materially different terms and retry within the round budget; \
 never repeat the exact same retrieval, and never invent graph, SQL, structured, vector-only, or \
-MCP retrieval when the tool says that route is not configured. Only use the tools you have been \
-given. When you have enough information or \
+MCP retrieval when the tool says that route is not configured. If knowledge_search still finds \
+nothing relevant after reformulating, say plainly that the organization's knowledge base has \
+nothing on this — never present a guess as an organization-specific fact. Only use the tools you \
+have been given. When you have enough information or \
 have taken the requested action, answer the user's request directly and clearly.";
 
 /// Temperature for each inference round.
@@ -308,6 +310,10 @@ async fn run_agent_with_tools(
     let mut rounds_executed: u32 = 0;
     let mut step_seq: u32 = 0;
     let mut attempted_retrievals = BTreeSet::new();
+    // HONESTY_CONTRACT: true once any knowledge_search call in this run
+    // actually returned org knowledge (JSON status "ok"), so the final
+    // RunAgentResponse can report real grounding instead of a guess.
+    let mut grounded = false;
 
     for _round in 0..max_rounds {
         heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
@@ -349,6 +355,7 @@ async fn run_agent_with_tools(
                     GRACEFUL_FAILURE_REPLY,
                     false,
                     rounds_executed,
+                    grounded,
                     session_bearer.as_deref(),
                     terminal_tokens,
                 )
@@ -458,6 +465,13 @@ async fn run_agent_with_tools(
             )
             .await;
 
+            if call.name == "knowledge_search"
+                && outcome.error.is_empty()
+                && knowledge_search_found_grounding(&outcome.output)
+            {
+                grounded = true;
+            }
+
             outcomes.push(ToolStepResult {
                 name: call.name.clone(),
                 output: outcome.output,
@@ -504,6 +518,7 @@ async fn run_agent_with_tools(
         &final_answer,
         success,
         rounds_executed,
+        grounded,
         session_bearer.as_deref(),
         terminal_tokens,
     )
@@ -554,6 +569,18 @@ fn tool_step_id(run_id: &str, seq: u32, call: &pb::ToolCall) -> String {
     };
     let _ = run_id;
     format!("tool_{seq}_{suffix}")
+}
+
+/// HONESTY_CONTRACT: true when a `knowledge_search` tool outcome's JSON
+/// envelope (see `execute_knowledge_search`/`knowledge_tools::format_candidates`)
+/// reports `status: "ok"` — i.e. the org's knowledge base actually returned
+/// relevant results, not `no_results`/`low_confidence`/`degraded`. Malformed
+/// output (never expected from the real tool) is treated as ungrounded.
+fn knowledge_search_found_grounding(output: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(output)
+        .ok()
+        .and_then(|value| value.get("status").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .is_some_and(|status| status == "ok")
 }
 
 /// Canonical signature used only to suppress exact retrieval loops. Invalid or
@@ -826,6 +853,7 @@ async fn pause_for_approval(
         status: "awaiting_approval".to_owned(),
         final_output: String::new(),
         rounds_executed,
+        grounded: false,
     })
 }
 
@@ -915,6 +943,7 @@ async fn finalize(
     answer: &str,
     success: bool,
     rounds_executed: u32,
+    grounded: bool,
     bearer: Option<&str>,
     terminal_tokens: &dyn ManagedRunTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
@@ -1003,6 +1032,7 @@ async fn finalize(
         status: status.to_owned(),
         final_output: final_answer,
         rounds_executed,
+        grounded,
     })
 }
 
@@ -1126,6 +1156,23 @@ mod tests {
         assert!(
             retrieval_signature("knowledge_search", r#"{"query":"q","route":"graph"}"#).is_none()
         );
+    }
+
+    #[test]
+    fn knowledge_search_found_grounding_requires_status_ok() {
+        assert!(knowledge_search_found_grounding(
+            r#"{"status":"ok","result_count":2}"#
+        ));
+        assert!(!knowledge_search_found_grounding(
+            r#"{"status":"no_results","result_count":0}"#
+        ));
+        assert!(!knowledge_search_found_grounding(
+            r#"{"status":"low_confidence","result_count":1}"#
+        ));
+        assert!(!knowledge_search_found_grounding(
+            r#"{"status":"degraded","result_count":0}"#
+        ));
+        assert!(!knowledge_search_found_grounding("not-json"));
     }
 
     type InferStream = Pin<Box<dyn futures::Stream<Item = Result<pb::InferChunk, Status>> + Send>>;

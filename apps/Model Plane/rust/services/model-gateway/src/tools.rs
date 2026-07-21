@@ -307,7 +307,17 @@ fn quarry_err_to_status(err: QuarryError) -> Status {
         QuarryError::Transport(e) => Status::unavailable(format!("quarry transport: {e}")),
         QuarryError::EmptyEnvelope => Status::internal("quarry: empty envelope"),
         QuarryError::Decode(e) => Status::internal(format!("quarry decode: {e}")),
-        QuarryError::Authentication(_) => {
+        // The detailed cause (e.g. missing MODEL_GATEWAY_SERVICE_API_KEY /
+        // AUTH_CORE_URL misconfiguration, or Auth Core refusing the
+        // service-principal credential) is deliberately not echoed to the
+        // caller/model, but must not be silently swallowed either — log it
+        // so this is diagnosable from server logs instead of only ever
+        // surfacing as an opaque "quarry authentication is unavailable".
+        QuarryError::Authentication(detail) => {
+            warn!(
+                error = %detail,
+                "quarry authentication failed; check MODEL_GATEWAY_SERVICE_API_KEY and the Auth Core service-principal credential"
+            );
             Status::unavailable("quarry authentication is unavailable")
         }
         QuarryError::Typed { code, message, .. } => match code.as_str() {

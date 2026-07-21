@@ -176,11 +176,16 @@ impl RetrievalService for RetrievalSvc {
         };
         apply_verified_context(&ctx, &mut pipeline_req);
 
-        let resp = self
-            .pipeline
-            .retrieve(pipeline_req)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let resp = self.pipeline.retrieve(pipeline_req).await.map_err(|e| {
+            // The anyhow chain (e.g. "model-plane embedding failed: status:
+            // Unauthenticated ...") is deliberately not echoed to the caller,
+            // but must not be silently truncated to just the top-level
+            // context either — `{:?}` prints the full "Caused by:" chain so
+            // this is diagnosable from server logs, not just an opaque
+            // "model-plane embedding failed".
+            tracing::warn!(error = ?e, "retrieval pipeline failed");
+            Status::internal(e.to_string())
+        })?;
 
         let candidates: Vec<Candidate> = resp
             .candidates

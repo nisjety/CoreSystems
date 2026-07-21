@@ -89,6 +89,13 @@ message RunAgentResponse {
 
   // Number of agent rounds actually executed.
   uint32 rounds_executed = 3;
+
+  // HONESTY_CONTRACT: true when at least one knowledge_search call in this
+  // run actually returned org knowledge (status "ok"), so the gateway can
+  // score confidence honestly instead of assuming ungrounded. False for
+  // "awaiting_approval" (run not finished) and when no knowledge_search
+  // call succeeded with real results.
+  bool grounded = 4;
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.

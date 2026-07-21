@@ -250,16 +250,27 @@ pub async fn invoke_stream_sse(
         } else {
             req.content.clone()
         };
-        let provider_content = grounding
-            .as_ref()
-            .map(|value| value.context_block.trim())
-            .filter(|value| !value.is_empty())
-            .map_or_else(
-                || user_content.clone(),
-                |context| {
-                    format!("Relevant organization context:\n{context}\n\nUser: {user_content}")
-                },
-            );
+        let provider_content = match grounding.as_ref() {
+            Some(payload) if payload.is_empty() => {
+                format!(
+                    "{}\n\nUser: {user_content}",
+                    crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE
+                )
+            }
+            Some(payload) if !payload.context_block.trim().is_empty() => {
+                let block = if payload.low_confidence {
+                    format!(
+                        "{}{}",
+                        payload.context_block.trim(),
+                        crate::retrieval::LOW_CONFIDENCE_GROUNDING_NOTICE
+                    )
+                } else {
+                    payload.context_block.trim().to_owned()
+                };
+                format!("Relevant organization context:\n{block}\n\nUser: {user_content}")
+            }
+            _ => user_content.clone(),
+        };
         return zdr_direct_stream(
             state,
             request_id,
@@ -603,10 +614,17 @@ pub async fn invoke_stream_sse(
     } else {
         None
     };
-    let context_block = grounding
-        .as_ref()
-        .map(|payload| payload.context_block.clone())
-        .unwrap_or_default();
+    let context_block = grounding.as_ref().map_or_else(String::new, |payload| {
+        if payload.low_confidence && !payload.context_block.is_empty() {
+            format!(
+                "{}{}",
+                payload.context_block,
+                crate::retrieval::LOW_CONFIDENCE_GROUNDING_NOTICE
+            )
+        } else {
+            payload.context_block.clone()
+        }
+    });
 
     // chat-parity safety (pii_filter): opt-in redaction of PII from the user
     // message before it reaches an external provider. Retrieval above used the
@@ -660,6 +678,23 @@ pub async fn invoke_stream_sse(
             ChatMessage {
                 role: "system".to_owned(),
                 content: context_block,
+                name: String::new(),
+            },
+        );
+    }
+    // HONESTY_CONTRACT: grounding was explicitly requested (features contains
+    // rag/knowledge) and genuinely came back empty — tell the model plainly
+    // instead of letting it guess at an org-specific answer.
+    if let Some(notice) = crate::retrieval::no_grounding_notice(grounding.as_ref()) {
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(
+            insert_at,
+            ChatMessage {
+                role: "system".to_owned(),
+                content: notice.to_owned(),
                 name: String::new(),
             },
         );
@@ -926,7 +961,7 @@ pub async fn invoke_stream_sse(
             return;
         }
 
-        if let Some(payload) = grounding.clone() {
+        if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
             if event.should_emit(&features) {
                 let _ = tx.send(Ok(event.to_sse(&req_id))).await;
@@ -2082,7 +2117,7 @@ fn infer_fallback_stream(
         // lifetime; released on task end (Drop), mirroring the streaming path.
         let _idem_guard = idem_guard;
 
-        if let Some(payload) = grounding.clone() {
+        if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
             if event.should_emit(&features) {
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -2706,7 +2741,7 @@ async fn zdr_direct_stream(
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
-        if let Some(payload) = grounding {
+        if let Some(payload) = grounding.filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding {
                 grounding: payload.clone(),
             };
@@ -3319,12 +3354,16 @@ fn agentic_run_stream(
         // the cost-core ledger / cost dashboard), so cost_usd stays null rather
         // than a fabricated 0. Confidence is scored over the run's final answer.
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // HONESTY_CONTRACT: `grounded` reflects whether a knowledge_search call
+        // in this run actually returned org knowledge (execution-core's
+        // `run_agent` sets it from a real "status": "ok" tool outcome, not a
+        // guess) — see agent.rs::knowledge_search_found_grounding.
         let usage_event = crate::sse_events::ChatEvent::Usage {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
             latency_ms,
-            confidence: crate::confidence::score(&final_text, 0, 1024, false),
+            confidence: crate::confidence::score(&final_text, 0, 1024, response.grounded),
         };
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
