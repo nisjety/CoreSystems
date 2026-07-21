@@ -1,9 +1,9 @@
 //! HTTP routes for model-gateway on :8080.
 //!
-//! Public routes: /healthz, /readyz, /metrics
+//! Public routes: /healthz, /readyz, /version, /metrics
 //! Auth-gated routes: invoke endpoints, orchestration read endpoints, run-event SSE
 
-use std::fmt::Write as _;
+use std::{env, fmt::Write as _};
 
 use axum::{
     body::{Body, Bytes},
@@ -87,6 +87,7 @@ pub fn build_router_with_readiness(
         Router::new()
             .route("/healthz", get(healthz))
             .route("/readyz", get(readyz))
+            .route("/version", get(version))
             .route(
                 "/metrics",
                 get(gateway_metrics::metrics_handler).with_state(handle),
@@ -95,6 +96,7 @@ pub fn build_router_with_readiness(
         Router::new()
             .route("/healthz", get(healthz))
             .route("/readyz", get(readyz))
+            .route("/version", get(version))
             .route("/metrics", get(metrics_placeholder))
     };
 
@@ -426,6 +428,20 @@ async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response
 
 async fn metrics_placeholder() -> impl IntoResponse {
     (StatusCode::OK, "# HELP model_gateway_requests_total\n")
+}
+
+/// Reports what is actually running in this container: the git revision and
+/// build timestamp baked into the image (see `Dockerfile`'s `SOURCE_REVISION`
+/// / `BUILD_DATE` build args, re-exposed as runtime `ENV` so no Docker/registry
+/// access is needed to answer "what SHA is deployed here"). Falls back to the
+/// same `unverified`/`unknown` defaults the image LABELs use when unset.
+async fn version() -> Json<Value> {
+    Json(json!({
+        "service": "model-gateway",
+        "revision": env::var("SOURCE_REVISION").unwrap_or_else(|_| "unverified".to_string()),
+        "build_date": env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_string()),
+        "cargo_version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 type HttpJsonError = (StatusCode, Json<Value>);

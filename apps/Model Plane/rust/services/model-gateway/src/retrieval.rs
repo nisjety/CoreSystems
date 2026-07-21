@@ -149,7 +149,75 @@ impl Grounding {
     }
 }
 
+// ── Honesty contract for grounded answering ─────────────────────────────────
+//
+// Incident (2026-07-20): asking Velion "tell me about aquatiq what do they do
+// and sell" returned a confident, fully-formed paragraph guessing the wrong
+// industry, with NO citation and NO caveat in the chat bubble — even though
+// no knowledge-base context was ever retrieved for the turn. Root cause: when
+// grounding is absent, the gateway builds the prompt with no system message
+// at all (session-core's context assembly had nothing AND the direct RAG
+// fallback below was never attempted), so the model falls back to answering
+// an organization-specific question from general training data as if it were
+// verified fact. This violates CoreSystem's own honesty-contract principle —
+// "no fabricated success/answers, honest empty state preferred" — applied to
+// chat specifically.
+//
+// The two notices below are the fix: whichever caller assembles the final
+// prompt messages must inject `NO_GROUNDING_SYSTEM_NOTICE` when this turn has
+// no knowledge-base context at all, or append `LOW_CONFIDENCE_GROUNDING_NOTICE`
+// to the context block when a match was found but Data Plane flagged it (or
+// this module derived it) as low-confidence.
+
+/// Injected as a system message when NEITHER session-core's context assembly
+/// NOR a direct Data Plane retrieval produced anything for this turn. Named
+/// and centralized here (rather than an inline string at each call site) so
+/// every chat-answer path can share the same wording and it stays easy to
+/// find and audit.
+pub const NO_GROUNDING_SYSTEM_NOTICE: &str = "You have NO knowledge-base context for this \
+    organization on this turn — no internal documents, pages, or connected \
+    sources were retrieved. If the user is asking about this specific \
+    organization (what it does, sells, its people, policies, data, or any \
+    other org-specific fact), you MUST say plainly that you do not have this \
+    information in the knowledge base yet, instead of guessing from general \
+    or training-data knowledge and presenting the guess as fact. You may \
+    still answer general-knowledge questions unrelated to this organization \
+    normally.";
+
+/// Appended to the context block when grounding WAS found but is weak (Data
+/// Plane's `low_confidence` flag, or a fact count too small to be a real
+/// answer). Distinguishes "nothing found" from "found something, but it's a
+/// weak match" — the model must not present a weak match as a settled answer.
+pub const LOW_CONFIDENCE_GROUNDING_NOTICE: &str = "\n\nThe knowledge-base matches above are \
+    weak / low-confidence retrieval results, not a confirmed answer. If they \
+    do not clearly and directly answer the user's question, say so \
+    explicitly (e.g. \"I don't have a clear answer to this in the knowledge \
+    base yet\") rather than presenting them as a complete or certain answer.";
+
+/// True when `grounding` carries no usable knowledge-base evidence at all —
+/// covers both "retrieval was never attempted" (`None`) and "retrieval ran
+/// but returned nothing" (present, zero facts and zero sources).
+#[must_use]
+pub fn is_effectively_empty(grounding: &Option<Grounding>) -> bool {
+    grounding
+        .as_ref()
+        .is_none_or(|g| g.fact_count == 0 && g.source_count == 0)
+}
+
+/// True when `grounding` is flagged `low_confidence` — by Data Plane's own
+/// relevance signal, or by `build_grounding`'s rule that a fact-less result is
+/// low-confidence too. Because of that rule this is also true for an
+/// effectively-empty grounding; check [`is_effectively_empty`] first to tell
+/// "nothing was found" apart from "something was found, but it's weak".
+#[must_use]
+pub fn is_weak_match(grounding: &Option<Grounding>) -> bool {
+    grounding.as_ref().is_some_and(|g| g.low_confidence)
+}
+
 fn truncate_chars(text: &str, max: usize) -> String {
+    // EDIT_PROBE_MARKER_3
+    // EDIT_PROBE_MARKER_2
+    // EDIT_PROBE_MARKER
     let trimmed = text.trim();
     if trimmed.chars().count() <= max {
         return trimmed.to_owned();
@@ -960,5 +1028,69 @@ mod tests {
         // truncated body keeps MAX_SNIPPET_CHARS chars + an ellipsis
         assert!(g.citations[0].snippet.chars().count() <= MAX_SNIPPET_CHARS + 1);
         assert!(g.citations[0].snippet.ends_with('…'));
+    }
+
+    #[test]
+    fn no_grounding_is_effectively_empty() {
+        assert!(is_effectively_empty(&None));
+    }
+
+    #[test]
+    fn empty_candidates_grounding_is_effectively_empty() {
+        let resp = RetrieveResponse::default();
+        let g = build_grounding("status", &resp);
+        assert_eq!(g.fact_count, 0);
+        assert_eq!(g.source_count, 0);
+        assert!(is_effectively_empty(&Some(g)));
+    }
+
+    #[test]
+    fn grounding_with_facts_is_not_effectively_empty() {
+        let resp = RetrieveResponse {
+            candidates: vec![candidate("doc-1", "Refunds within 30 days.", 0.9)],
+            sources: vec![source("doc-1", "Refund policy", "Notion")],
+            ..Default::default()
+        };
+        let g = build_grounding("refund policy", &resp);
+        assert!(!is_effectively_empty(&Some(g)));
+    }
+
+    #[test]
+    fn low_confidence_flag_carries_through_when_facts_were_found() {
+        let resp = RetrieveResponse {
+            candidates: vec![candidate("doc-1", "Refunds within 30 days.", 0.4)],
+            sources: vec![source("doc-1", "Refund policy", "Notion")],
+            low_confidence: true,
+            ..Default::default()
+        };
+        let g = Some(build_grounding("refund policy", &resp));
+        assert!(!is_effectively_empty(&g), "facts were found");
+        assert!(is_weak_match(&g), "low_confidence carried through");
+    }
+
+    #[test]
+    fn empty_grounding_is_effectively_empty_and_also_reads_as_low_confidence() {
+        // `build_grounding` marks a fact-less result `low_confidence` too, so
+        // "empty" and "weak" overlap here — callers must check
+        // `is_effectively_empty` FIRST to pick the right notice (an empty
+        // result gets the "no context at all" notice, not the "weak match"
+        // one, even though `is_weak_match` alone would also say true).
+        let empty = Some(build_grounding("status", &RetrieveResponse::default()));
+        assert!(is_effectively_empty(&empty));
+        assert!(is_weak_match(&empty));
+    }
+
+    #[test]
+    fn no_grounding_is_not_flagged_as_a_weak_match() {
+        // Absence and weakness are different failure modes; callers must be
+        // able to tell "never checked" apart from "checked, weak match".
+        assert!(!is_weak_match(&None));
+    }
+
+    #[test]
+    fn honesty_notices_are_non_empty_and_on_topic() {
+        assert!(NO_GROUNDING_SYSTEM_NOTICE.contains("knowledge base"));
+        assert!(NO_GROUNDING_SYSTEM_NOTICE.to_lowercase().contains("do not have this"));
+        assert!(LOW_CONFIDENCE_GROUNDING_NOTICE.contains("low-confidence"));
     }
 }

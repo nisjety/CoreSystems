@@ -50,6 +50,7 @@ pub async fn serve(state: PolicyState, grpc_readiness: GrpcReadiness) -> anyhow:
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/version", get(version))
         .route("/metrics", get(metrics_handler))
         .merge(policy_routes)
         .layer(Extension(grpc_readiness));
@@ -74,6 +75,20 @@ async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response
 
 async fn metrics_handler() -> impl IntoResponse {
     (StatusCode::OK, "# HELP inference_core_requests_total\n")
+}
+
+/// Reports what is actually running in this container: the git revision and
+/// build timestamp baked into the image (see `Dockerfile`'s `SOURCE_REVISION`
+/// / `BUILD_DATE` build args, re-exposed as runtime `ENV` so no Docker/registry
+/// access is needed to answer "what SHA is deployed here"). Falls back to the
+/// same `unverified`/`unknown` defaults the image LABELs use when unset.
+async fn version() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "inference-core",
+        "revision": std::env::var("SOURCE_REVISION").unwrap_or_else(|_| "unverified".to_string()),
+        "build_date": std::env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_string()),
+        "cargo_version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// Return the currently-loaded effective routing policy.

@@ -19,6 +19,46 @@ pub(crate) const MANAGED_RUN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(
 /// alive indefinitely. The next interval may retry only while the caller is
 /// still otherwise active; initial liveness always fails closed.
 const MANAGED_RUN_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MANAGED_GOAL_BYTES: usize = 60 * 1024;
+
+/// Session Core stores a run goal as single-line metadata and rejects control
+/// characters. Preserve the full prompt in the user message/inference request,
+/// while sending a bounded, contract-safe projection to the managed lifecycle.
+fn managed_goal(goal: &str) -> String {
+    if goal.len() <= MAX_MANAGED_GOAL_BYTES && !goal.chars().any(char::is_control) {
+        return goal.to_owned();
+    }
+
+    let digest = blake3::hash(goal.as_bytes()).to_hex();
+    let digest_suffix = format!(" [full-goal-blake3:{digest}]");
+    let content_limit = MAX_MANAGED_GOAL_BYTES - digest_suffix.len();
+    let mut normalized = String::with_capacity(goal.len().min(content_limit));
+    let mut pending_space = false;
+
+    for character in goal.chars() {
+        if character.is_control() || character.is_whitespace() {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+
+        let required = character.len_utf8() + usize::from(pending_space);
+        if normalized.len() + required > content_limit {
+            break;
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        normalized.push(character);
+    }
+
+    if normalized.is_empty() {
+        digest_suffix.trim_start().to_owned()
+    } else {
+        normalized.push_str(&digest_suffix);
+        normalized
+    }
+}
 
 fn authenticated_request<T>(value: T, bearer: Option<&str>) -> Result<tonic::Request<T>> {
     let bearer = bearer.context("verified session credential required")?;
@@ -351,7 +391,7 @@ async fn prepare_managed_run_with_bearer(
     let (managed_agent_id, managed_goal, managed_mode) = if zdr {
         (String::new(), String::new(), String::new())
     } else {
-        (agent_id.to_owned(), goal.to_owned(), mode.to_owned())
+        (agent_id.to_owned(), managed_goal(goal), mode.to_owned())
     };
 
     let mut lifecycle = state.managed_run_client.clone();
@@ -919,7 +959,7 @@ impl StringExt for String {
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_managed_run_with_token, terminalize_direct_inference_run_with_token,
+        managed_goal, prepare_managed_run_with_token, terminalize_direct_inference_run_with_token,
         DirectInferenceTerminal, SessionRun,
     };
     use crate::state::AppState;
@@ -1066,5 +1106,34 @@ mod tests {
             starts[0].terminal_source,
             ManagedRunSource::GatewayDirect as i32
         );
+    }
+
+    #[test]
+    fn managed_goal_removes_control_characters_and_stays_within_session_contract() {
+        let prompt = format!("Route this request.\n\nCustomer:\t{}", "æ".repeat(40_000));
+        let normalized = managed_goal(&prompt);
+
+        assert!(normalized.starts_with("Route this request. Customer:"));
+        assert!(!normalized.chars().any(char::is_control));
+        assert!(normalized.len() <= 60 * 1024);
+        assert!(normalized.is_char_boundary(normalized.len()));
+    }
+
+    #[test]
+    fn managed_goal_preserves_already_valid_prompts_for_retry_compatibility() {
+        let prompt = "Route this customer message exactly as provided.";
+
+        assert_eq!(managed_goal(prompt), prompt);
+    }
+
+    #[test]
+    fn managed_goal_digest_preserves_retry_conflict_identity_after_truncation() {
+        let shared_prefix = "x".repeat(70 * 1024);
+        let first = managed_goal(&format!("{shared_prefix}-first"));
+        let second = managed_goal(&format!("{shared_prefix}-second"));
+
+        assert_ne!(first, second);
+        assert!(first.contains("full-goal-blake3:"));
+        assert!(second.contains("full-goal-blake3:"));
     }
 }

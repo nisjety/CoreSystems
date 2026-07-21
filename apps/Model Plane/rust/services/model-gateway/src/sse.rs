@@ -250,16 +250,37 @@ pub async fn invoke_stream_sse(
         } else {
             req.content.clone()
         };
-        let provider_content = grounding
+        // HONESTY_CONTRACT (see retrieval::NO_GROUNDING_SYSTEM_NOTICE): when the
+        // caller explicitly asked for knowledge-base grounding and it came back
+        // empty or low-confidence, tell the model plainly instead of letting it
+        // answer an org-specific question from general training data as fact.
+        let grounding_requested = crate::retrieval::wants_grounding(&features);
+        let grounding_context = grounding
             .as_ref()
-            .map(|value| value.context_block.trim())
-            .filter(|value| !value.is_empty())
-            .map_or_else(
-                || user_content.clone(),
-                |context| {
-                    format!("Relevant organization context:\n{context}\n\nUser: {user_content}")
-                },
-            );
+            .map(|value| {
+                if value.low_confidence {
+                    format!(
+                        "{}{}",
+                        value.context_block.trim(),
+                        crate::retrieval::LOW_CONFIDENCE_GROUNDING_NOTICE
+                    )
+                } else {
+                    value.context_block.trim().to_owned()
+                }
+            })
+            .filter(|value| !value.is_empty());
+        let provider_content = match grounding_context {
+            Some(context) => {
+                format!("Relevant organization context:\n{context}\n\nUser: {user_content}")
+            }
+            None if grounding_requested && crate::retrieval::is_effectively_empty(&grounding) => {
+                format!(
+                    "{}\n\nUser: {user_content}",
+                    crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE
+                )
+            }
+            None => user_content.clone(),
+        };
         return zdr_direct_stream(
             state,
             request_id,
@@ -582,36 +603,32 @@ pub async fn invoke_stream_sse(
     }
 
     // chat-parity §8: RAG grounding via Data Plane v2 retrieval (reused — no
-    // new RAG store). When the request opts in, retrieve sources for
-    // grounding/citation events. Prompt context normally comes from
-    // session-core context assembly; this direct block is prepended only when
-    // assembly is unavailable.
-    let grounding = if crate::retrieval::wants_grounding(&features) {
-        let Some(bearer) = data_plane_bearer.as_ref() else {
-            return prepared_direct_failure_stream(
-                &state,
-                &session_run,
-                &model_bearer,
-                &request_id,
-                "data_plane_auth_required",
-                "Grounding requires a cryptographically verified user credential",
-                false,
-            )
-            .await;
-        };
-        crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr).await
-    } else {
-        None
-    };
-    let context_block = grounding
-        .as_ref()
-        .map(|payload| payload.context_block.clone())
-        .unwrap_or_default();
+    // new RAG store). An explicit `rag`/`knowledge` feature always retrieves
+    // (used for the Kunnskap/Søk citation UI and requires a verified Data
+    // Plane bearer up front). Prompt context normally comes from session-core
+    // context assembly; this direct block is prepended only when assembly is
+    // unavailable — but it is now ALSO attempted as a best-effort fallback
+    // even when the caller didn't opt in (see below), so a plain chat turn
+    // still checks the org's knowledge base before falling back to an
+    // ungrounded answer.
+    let explicit_grounding_requested = crate::retrieval::wants_grounding(&features);
+    if explicit_grounding_requested && data_plane_bearer.is_none() {
+        return prepared_direct_failure_stream(
+            &state,
+            &session_run,
+            &model_bearer,
+            &request_id,
+            "data_plane_auth_required",
+            "Grounding requires a cryptographically verified user credential",
+            false,
+        )
+        .await;
+    }
 
     // chat-parity safety (pii_filter): opt-in redaction of PII from the user
-    // message before it reaches an external provider. Retrieval above used the
-    // RAW query (Data Plane is internal); only the provider-bound prompt is
-    // redacted. Off by default → plain chat is unchanged.
+    // message before it reaches an external provider. Retrieval below uses
+    // the RAW query (Data Plane is internal); only the provider-bound prompt
+    // is redacted. Off by default → plain chat is unchanged.
     let user_content = if crate::moderation::wants_moderation(&features) {
         crate::moderation::redact_pii(&req.content).0
     } else {
@@ -654,12 +671,68 @@ pub async fn invoke_stream_sse(
         }
         None => (recent_thread_messages, false),
     };
-    if !context_block.is_empty() && !used_context_assembly {
+
+    // HONESTY_CONTRACT (see retrieval::NO_GROUNDING_SYSTEM_NOTICE): resolve
+    // grounding AFTER context assembly so the fallback below only fires when
+    // assembly genuinely had nothing — never a duplicate, always a real
+    // best-effort check of the org's knowledge base.
+    let grounding = if explicit_grounding_requested {
+        // Bearer presence already verified above.
+        match data_plane_bearer.as_ref() {
+            Some(bearer) => {
+                crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr)
+                    .await
+            }
+            None => None,
+        }
+    } else if !used_context_assembly {
+        // Best-effort fallback: session-core found nothing durable for this
+        // thread, so directly check Data Plane before concluding there is no
+        // grounding at all. Degrades silently (no bearer, no error) — a
+        // missing credential here must never break plain chat.
+        match data_plane_bearer.as_ref() {
+            Some(bearer) => {
+                crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr)
+                    .await
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let context_block = grounding.as_ref().map(|payload| {
+        if payload.low_confidence {
+            format!(
+                "{}{}",
+                payload.context_block,
+                crate::retrieval::LOW_CONFIDENCE_GROUNDING_NOTICE
+            )
+        } else {
+            payload.context_block.clone()
+        }
+    });
+
+    if let Some(context_block) = context_block.filter(|block| !block.is_empty()) {
+        if !used_context_assembly {
+            messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: context_block,
+                    name: String::new(),
+                },
+            );
+        }
+    } else if !used_context_assembly && crate::retrieval::is_effectively_empty(&grounding) {
+        // Neither session-core context assembly nor a direct Data Plane
+        // retrieval found anything for this turn — tell the model to be
+        // honest about that instead of silently guessing from general
+        // training-data knowledge (the exact failure mode this fixes).
         messages.insert(
             0,
             ChatMessage {
                 role: "system".to_owned(),
-                content: context_block,
+                content: crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
                 name: String::new(),
             },
         );

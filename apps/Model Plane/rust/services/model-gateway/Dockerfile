@@ -52,6 +52,11 @@ ARG SOURCE_REVISION=unverified
 ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
       org.opencontainers.image.created=$BUILD_DATE
+# Re-expose the build args as runtime ENV so the running process can answer
+# GET /version (src/http_routes.rs) without needing Docker/registry access to
+# read the image label above.
+ENV SOURCE_REVISION=${SOURCE_REVISION} \
+    BUILD_DATE=${BUILD_DATE}
 # Builder and runtime intentionally share Debian Bookworm's glibc ABI. curl
 # ships the binary the compose healthcheck calls (curl -f /healthz).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
