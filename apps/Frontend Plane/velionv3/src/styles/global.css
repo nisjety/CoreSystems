@@ -609,16 +609,20 @@ textarea:focus-visible {
   overflow: hidden;
   border: 1px solid rgb(0 0 0 / 5%);
   border-radius: 10px;
-  background: var(--panel);
-  color: var(--velion-dark-surface);
-  font-size: 11px;
-  font-weight: 700;
+  background-color: var(--panel);
   box-shadow: 0 1px 2px rgb(0 0 0 / 7%);
   transition: background-color 160ms ease;
 }
 
+.core-navbar__home-logo {
+  display: block;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
 .core-navbar__home-mark:hover {
-  background: rgb(0 0 0 / 5%);
+  background-color: rgb(0 0 0 / 5%);
 }
 
 .core-history-nav {
