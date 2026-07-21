@@ -13,6 +13,7 @@ import (
 
 	"coresystem/apps/application-plane/information-core/internal/cache"
 	"coresystem/apps/application-plane/information-core/internal/config"
+	"coresystem/apps/application-plane/information-core/internal/provenance"
 )
 
 const atlasURL = "https://trafikkdata-api.atlas.vegvesen.no"
@@ -71,9 +72,10 @@ type Observation struct {
 }
 
 type Response struct {
-	Success   bool      `json:"success"`
-	Data      []Station `json:"data"`
-	Timestamp string    `json:"timestamp"`
+	Success   bool              `json:"success"`
+	Source    provenance.Source `json:"source"`
+	Data      []Station         `json:"data"`
+	Timestamp string            `json:"timestamp"`
 }
 
 type atlasResponse struct {
@@ -187,7 +189,12 @@ func (s *Service) Latest(ctx context.Context, lat, lon, radius float64, search s
 	}
 
 	result := Response{
-		Success:   true,
+		Success: true,
+		Source: provenance.Source{
+			Provider: "statens_vegvesen", Dataset: "traffic-registration-points",
+			SourceURL: atlasURL, RetrievedAt: fetchedAt, Quality: "provider_metadata_only",
+			Coverage: "registration-point-metadata", Status: "partial", APIVersion: "atlas-graphql",
+		},
 		Data:      stations,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}

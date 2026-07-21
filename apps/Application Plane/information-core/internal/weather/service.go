@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"coresystem/apps/application-plane/information-core/internal/cache"
 	"coresystem/apps/application-plane/information-core/internal/config"
+	"coresystem/apps/application-plane/information-core/internal/provenance"
 )
 
 const (
@@ -24,8 +26,9 @@ type Service struct {
 }
 
 type Forecast struct {
-	Current  Current         `json:"current"`
-	Forecast []DailyForecast `json:"forecast"`
+	Source   provenance.Source `json:"source"`
+	Current  Current           `json:"current"`
+	Forecast []DailyForecast   `json:"forecast"`
 }
 
 type Current struct {
@@ -141,6 +144,11 @@ func (s *Service) Forecast(ctx context.Context, userAgent string, lat, lon float
 	}
 
 	result := Forecast{
+		Source: provenance.Source{
+			Provider: "met.no", Dataset: "locationforecast-2.0-compact",
+			SourceURL: forecastURL, License: "NLOD-2.0", RetrievedAt: time.Now().UTC().Format(time.RFC3339),
+			Quality: "authoritative_provider", Coverage: "point_forecast", Status: "forecast", APIVersion: "2.0",
+		},
 		Current: Current{
 			Temperature:   int(math.Round(currentEntry.Data.Instant.Details.AirTemperature)),
 			Humidity:      int(math.Round(currentEntry.Data.Instant.Details.RelativeHumidity)),

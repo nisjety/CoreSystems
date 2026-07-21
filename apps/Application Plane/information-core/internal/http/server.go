@@ -47,14 +47,28 @@ func newRouter(handler *Handler, internalAPIKey string) *gin.Engine {
 	router.Use(gin.Recovery())
 
 	router.GET("/health", handler.Health)
-	router.GET("/ready", handler.Health)
+	router.GET("/ready", handler.Ready)
 
 	api := router.Group("/api/v1", requireInternalKey(internalAPIKey))
 	api.GET("/weather", handler.Weather)
 	api.GET("/weather/oslo", handler.WeatherOslo)
+	api.GET("/address", handler.Address)
+	api.POST("/statistics/query", handler.StatisticsQuery)
+	api.GET("/statistics/metadata", handler.StatisticsMetadata)
+	api.POST("/journey/plan", handler.Journey)
+	api.GET("/parliament/representatives", handler.Representatives)
+	api.GET("/legal/search", handler.LegalSearch)
+	api.GET("/exchange", handler.Exchange)
+	api.GET("/property/lookup", handler.PropertyLookup)
+	api.GET("/air-quality", handler.AirQuality)
+	api.GET("/roads", handler.RoadObjects)
+	api.GET("/datex/situation", handler.DatexSituation)
+	api.GET("/frost/observations", handler.FrostObservations)
+	api.GET("/nve/avalanche-warnings", handler.AvalancheWarnings)
+	api.GET("/heritage/features", handler.HeritageFeatures)
+	api.GET("/air-quality/aggregate", handler.AggregateAirQuality)
 	api.GET("/traffic", handler.Traffic)
 	api.GET("/news", handler.News)
-	api.GET("/shipping/track", handler.Shipping)
 
 	return router
 }

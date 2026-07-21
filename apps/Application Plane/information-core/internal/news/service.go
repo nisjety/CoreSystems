@@ -16,6 +16,7 @@ import (
 
 	"coresystem/apps/application-plane/information-core/internal/cache"
 	"coresystem/apps/application-plane/information-core/internal/config"
+	"coresystem/apps/application-plane/information-core/internal/provenance"
 )
 
 type Service struct {
@@ -35,10 +36,11 @@ type Article struct {
 }
 
 type Response struct {
-	Articles    []Article `json:"articles"`
-	LastUpdated string    `json:"lastUpdated"`
-	TotalCount  int       `json:"totalCount"`
-	HasMore     bool      `json:"hasMore"`
+	Source      provenance.Source `json:"source"`
+	Articles    []Article         `json:"articles"`
+	LastUpdated string            `json:"lastUpdated"`
+	TotalCount  int               `json:"totalCount"`
+	HasMore     bool              `json:"hasMore"`
 }
 
 type rssFeed struct {
@@ -151,6 +153,11 @@ func (s *Service) Latest(ctx context.Context, userAgent, category string, limit,
 	}
 	end := min(totalCount, offset+limit)
 	result := Response{
+		Source: provenance.Source{
+			Provider: "norwegian-rss-feeds", Dataset: "configured-news-rss",
+			SourceURL: "multiple_configured_rss_feeds", RetrievedAt: time.Now().UTC().Format(time.RFC3339),
+			Quality: "publisher_feed", Coverage: "configured_feeds", Status: "measured",
+		},
 		Articles:    articles[offset:end],
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 		TotalCount:  totalCount,

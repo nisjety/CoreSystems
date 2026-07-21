@@ -8,22 +8,32 @@ import (
 )
 
 type Config struct {
-	Port           int
-	ServiceName    string
-	InternalAPIKey string
-	UserAgent      string
-	BringAPIUID    string
-	BringAPIKey    string
+	Port            int
+	ServiceName     string
+	InternalAPIKey  string
+	UserAgent       string
+	LovdataAPIKey   string
+	EnturClientName string
+	DatexURL        string
+	DatexUsername   string
+	DatexPassword   string
+	FrostURL        string
+	FrostClientID   string
 }
 
 func Load() Config {
 	return Config{
-		Port:           getInt("PORT", 3190),
-		ServiceName:    getString("SERVICE_NAME", "information-core"),
-		InternalAPIKey: strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		UserAgent:      getString("INFORMATION_CORE_USER_AGENT", "VelionInformationCore/1.0 (ops@velion.local)"),
-		BringAPIUID:    strings.TrimSpace(os.Getenv("BRING_API_UID")),
-		BringAPIKey:    strings.TrimSpace(os.Getenv("BRING_API_KEY")),
+		Port:            getInt("PORT", 3190),
+		ServiceName:     getString("SERVICE_NAME", "information-core"),
+		InternalAPIKey:  strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
+		UserAgent:       getString("INFORMATION_CORE_USER_AGENT", "VelionInformationCore/1.0 (ops@velion.local)"),
+		LovdataAPIKey:   strings.TrimSpace(os.Getenv("LOVDATA_API_KEY")),
+		EnturClientName: getString("ENTUR_CLIENT_NAME", "coresystem-information-core"),
+		DatexURL:        strings.TrimSpace(os.Getenv("DATEX_URL")),
+		DatexUsername:   strings.TrimSpace(os.Getenv("DATEX_USERNAME")),
+		DatexPassword:   os.Getenv("DATEX_PASSWORD"),
+		FrostURL:        strings.TrimSpace(os.Getenv("FROST_URL")),
+		FrostClientID:   strings.TrimSpace(os.Getenv("FROST_CLIENT_ID")),
 	}
 }
 
