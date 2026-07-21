@@ -8,16 +8,21 @@ import (
 )
 
 type Config struct {
-	DatabaseURL                string
-	NatsURL                    string
-	NatsToken                  string
-	HTTPPort                   int
-	GRPCPort                   int
-	SharedNatsURL              string
-	SharedNatsUser             string
-	SharedNatsPassword         string
-	GDPRConsumerRequired       bool
-	UserCoreServiceToken       string
+	DatabaseURL          string
+	NatsURL              string
+	NatsToken            string
+	HTTPPort             int
+	GRPCPort             int
+	SharedNatsURL        string
+	SharedNatsUser       string
+	SharedNatsPassword   string
+	GDPRConsumerRequired bool
+	// OrgPurgeConsumerRequired gates the "documents-api-org-erasure" durable
+	// (internal/gdpr/org_purge_consumer.go) the same way GDPRConsumerRequired
+	// gates the per-user ownership-transfer durable: when true, the service
+	// fails to boot if the pre-provisioned consumer can't be bound.
+	OrgPurgeConsumerRequired bool
+	UserCoreServiceToken     string
 	// UserCoreGrantsRequired keeps production fail-closed while allowing an
 	// explicit standalone boot posture. When false, grant-only documents remain
 	// hidden until User Core is connected; owner/org-visible policy is unchanged.
@@ -39,6 +44,7 @@ func Load() (*Config, error) {
 		SharedNatsUser:             strings.TrimSpace(os.Getenv("NATS_SHARED_USER")),
 		SharedNatsPassword:         strings.TrimSpace(os.Getenv("NATS_SHARED_PASSWORD")),
 		GDPRConsumerRequired:       os.Getenv("GDPR_DURABLE_CONSUMER_REQUIRED") == "1",
+		OrgPurgeConsumerRequired:   os.Getenv("ORG_PURGE_DURABLE_CONSUMER_REQUIRED") == "1",
 		UserCoreServiceToken:       envOr("USER_CORE_SERVICE_TOKEN", ""),
 		UserCoreGrantsRequired:     envOr("USER_CORE_GRANTS_REQUIRED", "1") != "0",
 		EventSigningPrivateKeyPath: envOr("EVENT_SIGNING_PRIVATE_KEY_PATH", ""),
@@ -59,6 +65,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.GDPRConsumerRequired && !sharedConfigured {
 		return nil, fmt.Errorf("scoped shared NATS credentials are required for the durable GDPR consumer")
+	}
+	if cfg.OrgPurgeConsumerRequired && !sharedConfigured {
+		return nil, fmt.Errorf("scoped shared NATS credentials are required for the durable org-purge consumer")
 	}
 	return cfg, nil
 }

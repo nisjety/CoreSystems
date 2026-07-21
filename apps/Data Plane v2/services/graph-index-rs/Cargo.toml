@@ -25,6 +25,7 @@ reqwest = { version = "0.12", features = ["json"] }
 jsonwebtoken.workspace = true
 uuid = { version = "1", features = ["v4"] }
 chrono.workspace = true
+thiserror.workspace = true
 event-envelope-rs = { path = "../event-envelope-rs" }
 # Neo4j Bolt driver for the rebuildable, org-scoped graph read-model
 # (native multi-hop Cypher traversal). Postgres stays canonical.

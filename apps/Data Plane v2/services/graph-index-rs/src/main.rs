@@ -3,6 +3,8 @@ mod auth;
 mod community;
 mod config;
 mod extractor;
+mod gdpr;
+mod gdpr_nats;
 mod grpc;
 mod inference_auth;
 mod model;
@@ -178,6 +180,36 @@ async fn main() -> anyhow::Result<()> {
         auth::JwtInterceptor::new(jwt_verifier),
     );
     tracing::info!("graph-index gRPC on {grpc_addr}");
+
+    // Cross-plane GDPR organization-erasure consumer. Deliberately
+    // independent of `event_runtime` above (signed/legacy graph-extraction
+    // triggers) and spawned as its own supervised task (not raced inside the
+    // `tokio::select!` below) so a shared-broker outage never takes down
+    // HTTP/gRPC/graph-extraction: it binds a pre-provisioned pull consumer on
+    // the SHARED cross-plane broker (control-shared-nats, stream
+    // AQENCIA_CONTROLPLANE) under its own dedicated `graph-index-gdpr`
+    // identity (GRAPH_INDEX_GDPR_NATS_URL/_USER/_PASSWORD) — never this
+    // service's own Data-Plane-local `cfg.nats_url` connection, which does
+    // not host that stream. Left unset, the consumer is intentionally
+    // disabled rather than hot-looping doomed connection attempts. See
+    // `gdpr_nats` for the full provisioning contract this depends on.
+    let gdpr_nats_url = std::env::var("GRAPH_INDEX_GDPR_NATS_URL").unwrap_or_default();
+    if gdpr_nats_url.is_empty() {
+        tracing::warn!(
+            "GRAPH_INDEX_GDPR_NATS_URL not set; graph-index GDPR erasure consumer disabled"
+        );
+    } else {
+        let gdpr_nats_user = std::env::var("GRAPH_INDEX_GDPR_NATS_USER").unwrap_or_default();
+        let gdpr_nats_password =
+            std::env::var("GRAPH_INDEX_GDPR_NATS_PASSWORD").unwrap_or_default();
+        let gdpr_store = store.clone();
+        tokio::spawn(gdpr_nats::run_supervised(
+            gdpr_store,
+            gdpr_nats_url,
+            gdpr_nats_user,
+            gdpr_nats_password,
+        ));
+    }
 
     let consumer_neo4j = neo4j.clone();
     let community_min_size = cfg.community_min_size;

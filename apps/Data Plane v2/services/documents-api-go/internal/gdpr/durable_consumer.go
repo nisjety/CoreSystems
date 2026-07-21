@@ -159,6 +159,15 @@ type Consumer struct {
 	js     nats.JetStreamContext
 	sub    *nats.Subscription
 	health *consumerHealth
+	// name is this instance's own durable consumer name, used by Health() to
+	// look up ITS ConsumerInfo. Generalized (rather than reading the
+	// package-level durableConsumerName constant directly) because Consumer
+	// is shared by every durable this package starts — StartSubscriber's
+	// "documents-api-gdpr-erasure-v1" AND StartOrgPurgeSubscriber's
+	// (org_purge_consumer.go) "documents-api-org-erasure" both return a
+	// *Consumer, and each must report health for its own durable, not
+	// whichever one happened to be started first.
+	name string
 }
 
 func StartSubscriber(nc *nats.Conn, repo OwnershipTransferrer) (*Consumer, error) {
@@ -190,7 +199,7 @@ func StartSubscriber(nc *nats.Conn, repo OwnershipTransferrer) (*Consumer, error
 		return nil, fmt.Errorf("subscribe durable GDPR consumer: %w", err)
 	}
 	log.Info().Str("consumer", durableConsumerName).Str("subject", ErasureRequestedSubject).Msg("durable GDPR consumer started")
-	return &Consumer{js: js, sub: subscription, health: health}, nil
+	return &Consumer{js: js, sub: subscription, health: health, name: durableConsumerName}, nil
 }
 
 func (consumer *Consumer) Close() error {
@@ -215,7 +224,7 @@ func (consumer *Consumer) Health(ctx context.Context) ConsumerHealthSnapshot {
 		snapshot.LastSuccessAt = lastSuccess.Format(time.RFC3339Nano)
 		snapshot.LastActivityLag = time.Since(lastSuccess).Milliseconds()
 	}
-	info, err := consumer.js.ConsumerInfo(controlSharedStream, durableConsumerName, nats.Context(ctx))
+	info, err := consumer.js.ConsumerInfo(controlSharedStream, consumer.name, nats.Context(ctx))
 	if err != nil {
 		snapshot.Status = "degraded"
 		snapshot.LastError = truncateError(err.Error(), 1000)

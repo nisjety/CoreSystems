@@ -429,6 +429,19 @@ services:
       # Log target is the bin/crate name `retrieval_engine` (package is
       # `retrieval-engine-rs`); the old `retrieval_engine_rs=info` matched nothing.
       RUST_LOG: ${RUST_LOG:-warn,retrieval_engine=info,tower_http=info}
+      # Cross-plane GDPR organization-erasure purge consumer — a SECOND,
+      # narrowly-scoped connection to control-shared-nats (identity
+      # "retrieval-engine-gdpr"), kept entirely separate from NATS_URL/
+      # DATAPLANE_NATS_TOKEN above (the Data-Plane-local broker this
+      # service's cache invalidator + cost-ledger publisher use — that
+      # broker does not host AQENCIA_CONTROLPLANE). Deliberately distinct env
+      # var names from NATS_SHARED_URL/SHARED_NATS_URL already in play for
+      # other services/fallbacks — see src/gdpr/consumer.rs's module doc.
+      # Empty URL leaves the consumer disabled (logged, non-fatal) rather
+      # than hot-looping doomed connection attempts.
+      RETRIEVAL_ENGINE_GDPR_NATS_URL: ${RETRIEVAL_ENGINE_GDPR_NATS_URL:-}
+      RETRIEVAL_ENGINE_GDPR_NATS_USER: ${RETRIEVAL_ENGINE_GDPR_NATS_USER:-retrieval-engine-gdpr}
+      RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD: ${RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD:-}
     volumes:
       # auth-core's PUBLIC JWT key (read-only) for verified-JWT viewer binding.
       - "${AUTH_CORE_PUBLIC_KEY_PATH:-../Control Plane/auth-core/keys/convex-auth.pub}:/app/keys/convex-auth.pub:ro"
@@ -483,6 +496,15 @@ services:
       DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       INDEX_EVENT_PRIVATE_KEY_PATH: /run/event-keys/index-events.pem
       EVENT_AUTH_AUDIENCE: dataplane-events
+      # Cross-plane GDPR organization-erasure consumer (knowledge_units +
+      # index_deletion_outbox). Dedicated shared-broker identity, distinct
+      # from this service's own NATS_URL/DATAPLANE_NATS_TOKEN connection to
+      # data-nats above. Left empty, the consumer disables itself instead of
+      # looping doomed connection attempts against data-nats (see
+      # src/gdpr_nats.rs).
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
+      NATS_SHARED_USER: ${INDEX_ENGINE_GDPR_NATS_USER:-index-engine-gdpr}
+      NATS_SHARED_PASSWORD: ${INDEX_ENGINE_GDPR_NATS_PASSWORD:-}
     volumes:
       - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/documents-events.pub}:/run/event-keys/documents-events.pub:ro
       - ${INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/index-events.pem}:/run/event-keys/index-events.pem:ro
@@ -567,6 +589,19 @@ services:
       WIKI_EVENT_PUBLIC_KEY_PATH: /run/event-keys/wiki-events.pub
       EMBEDDING_EVENT_PRIVATE_KEY_PATH: /run/event-keys/embedding-events.pem
       EVENT_AUTH_AUDIENCE: dataplane-events
+      # Cross-plane GDPR organization-erasure purge consumer — a SECOND,
+      # narrowly-scoped connection to control-shared-nats (identity
+      # "embedding-engine-gdpr"), kept entirely separate from NATS_URL/
+      # DATAPLANE_NATS_TOKEN above (the Data-Plane-local broker this
+      # service's embedding/wiki/page-image consumers use — that broker does
+      # not host AQENCIA_CONTROLPLANE). Deliberately distinct env var names
+      # from NATS_SHARED_URL/SHARED_NATS_URL already in play for other
+      # services/fallbacks — see src/gdpr_nats.rs's module doc. Empty URL
+      # leaves the consumer disabled (logged, non-fatal) rather than
+      # hot-looping doomed connection attempts.
+      EMBEDDING_ENGINE_GDPR_NATS_URL: ${EMBEDDING_ENGINE_GDPR_NATS_URL:-}
+      EMBEDDING_ENGINE_GDPR_NATS_USER: ${EMBEDDING_ENGINE_GDPR_NATS_USER:-embedding-engine-gdpr}
+      EMBEDDING_ENGINE_GDPR_NATS_PASSWORD: ${EMBEDDING_ENGINE_GDPR_NATS_PASSWORD:-}
     volumes:
       - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
       - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/wiki-events.pub}:/run/event-keys/wiki-events.pub:ro
@@ -652,6 +687,19 @@ services:
       NEO4J_BOOT_ATTEMPTS: ${NEO4J_BOOT_ATTEMPTS:-30}
       GRAPH_MAX_HOPS: ${GRAPH_MAX_HOPS:-3}
       GRAPH_TRAVERSE_MAX_ENTITIES: ${GRAPH_TRAVERSE_MAX_ENTITIES:-100}
+      # Cross-plane GDPR organization-erasure purge consumer — a SECOND,
+      # narrowly-scoped connection to control-shared-nats (identity
+      # "graph-index-gdpr"), kept entirely separate from NATS_URL/
+      # DATAPLANE_NATS_TOKEN above (the Data-Plane-local broker this
+      # service's graph-extraction/cleanup consumers use — that broker does
+      # not host AQENCIA_CONTROLPLANE). Deliberately distinct env var names
+      # from NATS_SHARED_URL/SHARED_NATS_URL already in play for other
+      # services/fallbacks — see src/gdpr_nats.rs's module doc. Empty URL
+      # leaves the consumer disabled (logged, non-fatal) rather than
+      # hot-looping doomed connection attempts.
+      GRAPH_INDEX_GDPR_NATS_URL: ${GRAPH_INDEX_GDPR_NATS_URL:-}
+      GRAPH_INDEX_GDPR_NATS_USER: ${GRAPH_INDEX_GDPR_NATS_USER:-graph-index-gdpr}
+      GRAPH_INDEX_GDPR_NATS_PASSWORD: ${GRAPH_INDEX_GDPR_NATS_PASSWORD:-}
     volumes:
       # A public verification key is local configuration, not a live Auth Core
       # dependency. This lets graph-index bind while Auth Core is offline; each
@@ -691,6 +739,16 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
       NATS_URL: nats://data-nats:4222
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
+      # Dedicated shared-broker identity for the cross-plane GDPR
+      # organization-erasure consumer only (see src/gdpr_nats.rs). This is
+      # NOT the plane-local NATS_URL/DATAPLANE_NATS_TOKEN pair above and must
+      # never be repointed at data-nats — AQENCIA_CONTROLPLANE only exists on
+      # control-shared-nats. Left empty (e.g. standalone/isolated posture),
+      # the consumer logs a warning and stays disabled rather than
+      # hot-looping doomed connection attempts.
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
+      NATS_SHARED_USER: ${QUICKWIT_ADAPTER_GDPR_NATS_USER:-quickwit-adapter-gdpr}
+      NATS_SHARED_PASSWORD: ${QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD:-}
       QUICKWIT_URL: ${QUICKWIT_URL:-http://quickwit:7280}
       QUICKWIT_INDEX_ID: ${QUICKWIT_INDEX_ID:-dataplane-corpus}
       QUICKWIT_INDEX_CONFIG_PATH: /app/infra/quickwit/dataplane-corpus-index.yaml
@@ -822,6 +880,14 @@ services:
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
+      # GDPR cross-plane org-erasure purge consumer — a SECOND, narrowly-scoped
+      # connection to control-shared-nats (identity "wiki-store-gdpr"), kept
+      # entirely separate from NATS_URL/DATAPLANE_NATS_TOKEN above (the
+      # Data-Plane-local broker the wiki-event publisher uses). Deliberately
+      # distinct env var names — see config.go's field doc.
+      WIKISTORE_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
+      WIKISTORE_GDPR_SHARED_NATS_USER: wiki-store-gdpr
+      WIKISTORE_GDPR_SHARED_NATS_PASSWORD: ${WIKI_STORE_GDPR_NATS_PASSWORD:?WIKI_STORE_GDPR_NATS_PASSWORD is required}
     volumes:
       - ${WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/wiki-events.pem}:/run/event-keys/wiki-events.pem:ro
     networks:
@@ -864,6 +930,16 @@ services:
       SIGNED_COST_EVENTS_ENABLED: ${SIGNED_COST_EVENTS_ENABLED:-1}
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       RETRIEVAL_EVENT_PUBLIC_KEY_PATH: /run/event-keys/retrieval-events.pub
+      # GDPR org-erasure durable delivery crosses into Control Plane's shared
+      # broker. Empty values are allowed only so an explicit standalone
+      # overlay can boot; production keeps GDPR_ORG_PURGE_CONSUMER_REQUIRED=1
+      # and the service config rejects missing scoped broker credentials.
+      # Deliberately a SEPARATE identity from NATS_URL/DATAPLANE_NATS_TOKEN
+      # above (the plane-local broker) — see internal/gdpr's package doc.
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
+      NATS_SHARED_USER: ${DATA_ORCHESTRATOR_GDPR_NATS_USER:-data-orchestrator-gdpr}
+      NATS_SHARED_PASSWORD: ${DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD:-}
+      GDPR_ORG_PURGE_CONSUMER_REQUIRED: ${GDPR_ORG_PURGE_CONSUMER_REQUIRED:-1}
     volumes:
       - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
       - ${RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/retrieval-events.pub}:/run/event-keys/retrieval-events.pub:ro
@@ -900,6 +976,17 @@ services:
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
+      # GDPR org-erasure durable delivery crosses into Control Plane on the
+      # shared cross-plane broker. Empty values are allowed only so the
+      # explicit standalone overlay can boot; production keeps
+      # GDPR_DURABLE_CONSUMER_REQUIRED=1 and the service config rejects
+      # missing scoped broker credentials. Identity is dedicated to this
+      # service (data-quality-gdpr), distinct from every other service's own
+      # shared-broker identity.
+      NATS_SHARED_URL: ${NATS_SHARED_URL:-}
+      NATS_SHARED_USER: ${DATA_QUALITY_GDPR_NATS_USER:-data-quality-gdpr}
+      NATS_SHARED_PASSWORD: ${DATA_QUALITY_GDPR_NATS_PASSWORD:-}
+      GDPR_DURABLE_CONSUMER_REQUIRED: ${GDPR_DURABLE_CONSUMER_REQUIRED:-1}
     networks:
       - dpv2-net
       - inter-plane-bus

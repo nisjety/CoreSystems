@@ -64,3 +64,41 @@ func TestLoadReadsDedicatedDataPlaneNATSToken(t *testing.T) {
 		t.Fatalf("NatsToken was not loaded from the dedicated environment variable")
 	}
 }
+
+func TestLoadReadsDedicatedGDPRSharedNATSCredentialsAndLeavesThemUnsetByDefault(t *testing.T) {
+	cfg := Load()
+	if cfg.GDPRSharedNatsURL != "" || cfg.GDPRSharedNatsUser != "" || cfg.GDPRSharedNatsPassword != "" {
+		t.Fatalf("GDPR shared NATS credentials must be unset by default: %+v", cfg)
+	}
+
+	t.Setenv("WIKISTORE_GDPR_SHARED_NATS_URL", "nats://control-shared-nats:4222")
+	t.Setenv("WIKISTORE_GDPR_SHARED_NATS_USER", "wiki-store-gdpr")
+	t.Setenv("WIKISTORE_GDPR_SHARED_NATS_PASSWORD", "s3cret")
+
+	cfg = Load()
+	if cfg.GDPRSharedNatsURL != "nats://control-shared-nats:4222" {
+		t.Fatalf("GDPRSharedNatsURL = %q", cfg.GDPRSharedNatsURL)
+	}
+	if cfg.GDPRSharedNatsUser != "wiki-store-gdpr" {
+		t.Fatalf("GDPRSharedNatsUser = %q", cfg.GDPRSharedNatsUser)
+	}
+	if cfg.GDPRSharedNatsPassword != "s3cret" {
+		t.Fatalf("GDPRSharedNatsPassword = %q", cfg.GDPRSharedNatsPassword)
+	}
+
+	// This consumer's dedicated env var names must never be satisfied by the
+	// generic "NATS_SHARED_URL" name other services in this monorepo use —
+	// that name is already claimed inside wiki-store-go's own NatsURL
+	// fallback chain (as the confusingly-similar literal "SHARED_NATS_URL")
+	// for a completely different, plane-local connection.
+	t.Setenv("WIKISTORE_GDPR_SHARED_NATS_URL", "")
+	t.Setenv("WIKISTORE_GDPR_SHARED_NATS_USER", "")
+	t.Setenv("WIKISTORE_GDPR_SHARED_NATS_PASSWORD", "")
+	t.Setenv("NATS_SHARED_URL", "nats://unrelated:4222")
+	t.Setenv("SHARED_NATS_URL", "nats://plane-local:4222")
+
+	cfg = Load()
+	if cfg.GDPRSharedNatsURL != "" {
+		t.Fatalf("GDPRSharedNatsURL must not fall back to a generic shared-NATS env var, got %q", cfg.GDPRSharedNatsURL)
+	}
+}

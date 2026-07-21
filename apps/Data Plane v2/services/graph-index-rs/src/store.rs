@@ -2,7 +2,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::model::{
-    Claim, Community, Entity, ExtractionResult, MirrorEntity, MirrorRelationship,
+    Claim, Community, Entity, ExtractionResult, GdprPurgeSummary, MirrorEntity, MirrorRelationship,
     PersistedExtraction, Relationship,
 };
 
@@ -254,6 +254,69 @@ impl GraphStore {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    /// GDPR organization-erasure hard-purge (see `crate::gdpr_nats`, which
+    /// gates this to `subject_type == "organization"` events only). Deletes
+    /// every org-scoped row THIS service owns for `org_id`, in one
+    /// transaction, in FK-safe child-before-parent order. Does NOT touch
+    /// `documents` or `knowledge_units` — those tables belong to
+    /// documents-api-go / embedding-engine-rs / index-engine-rs and are
+    /// read-only here (see `load_org_visible_chunks` above). There is no
+    /// `graph_exports` table write path in this crate (the `/v1/graph/
+    /// exports` endpoint in `api.rs` streams a snapshot back to the caller
+    /// without persisting it), so it is intentionally excluded.
+    ///
+    /// Idempotent: every statement is `DELETE ... WHERE org_id = $1`, so a
+    /// redelivered event (NATS at-least-once) matches zero rows the second
+    /// time — not an error. Every statement binds `org_id` as a parameter;
+    /// none is ever string-interpolated, so a purge for one org can never
+    /// touch another org's rows.
+    pub async fn purge_organization_data(&self, org_id: &str) -> anyhow::Result<GdprPurgeSummary> {
+        let mut tx = self.pool.begin().await?;
+        let mut summary = GdprPurgeSummary::default();
+
+        // graph_text_units references graph_entities/graph_relationships/
+        // graph_claims via FK (ON DELETE CASCADE) — purging it first keeps
+        // this scoped purge independent of that cascade rather than
+        // relying on it, and matches the org-isolation safety requirement
+        // that every statement scope strictly by the event's own org_id.
+        summary.graph_text_units = sqlx::query("DELETE FROM graph_text_units WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        summary.graph_relationships =
+            sqlx::query("DELETE FROM graph_relationships WHERE org_id = $1")
+                .bind(org_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+
+        summary.graph_claims = sqlx::query("DELETE FROM graph_claims WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        summary.graph_communities = sqlx::query("DELETE FROM graph_communities WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        // graph_entities last: graph_relationships.entity_a_id/entity_b_id
+        // and graph_text_units.entity_id both reference it with ON DELETE
+        // CASCADE, so it must be purged after both of its dependents above.
+        summary.graph_entities = sqlx::query("DELETE FROM graph_entities WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        tx.commit().await?;
+        Ok(summary)
     }
 
     pub async fn get_entity(
@@ -1042,6 +1105,178 @@ mod visibility_tests {
                 .unwrap()
                 .is_empty());
         }
+
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("drop isolated graph schema");
+        pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod gdpr_purge_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::Row;
+
+    // Every table graph-index-rs owns and purges, seeded for TWO
+    // organizations so the isolation assertion below is meaningful.
+    // `documents`/`knowledge_units` are intentionally NOT seeded here: this
+    // service reads but never writes them, and `purge_organization_data`
+    // must not (and does not) reference either table.
+    const FIXTURE_SQL: &str = r#"
+        CREATE TABLE graph_entities (
+            entity_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+            entity_text TEXT NOT NULL, confidence DOUBLE PRECISION, provenance TEXT,
+            source_refs JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE graph_relationships (
+            rel_id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+            entity_a_id TEXT NOT NULL REFERENCES graph_entities(entity_id) ON DELETE CASCADE,
+            entity_b_id TEXT NOT NULL REFERENCES graph_entities(entity_id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL, confidence DOUBLE PRECISION, provenance TEXT,
+            source_refs JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE graph_claims (
+            claim_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, claim_text TEXT NOT NULL,
+            entity_ids JSONB, confidence DOUBLE PRECISION, provenance TEXT,
+            source_refs JSONB, contradicted_by_claim_ids JSONB, claim_status TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE TABLE graph_text_units (
+            id BIGSERIAL PRIMARY KEY, org_id TEXT NOT NULL, knowledge_id TEXT NOT NULL,
+            entity_id TEXT REFERENCES graph_entities(entity_id) ON DELETE CASCADE,
+            rel_id TEXT REFERENCES graph_relationships(rel_id) ON DELETE CASCADE,
+            claim_id TEXT REFERENCES graph_claims(claim_id) ON DELETE CASCADE
+        );
+        CREATE TABLE graph_communities (
+            community_id TEXT PRIMARY KEY, org_id TEXT NOT NULL,
+            entity_ids JSONB NOT NULL, summary TEXT, level INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        INSERT INTO graph_entities VALUES
+            ('e-a1', 'org-a', 'Person', 'A One', 1, 'test', '[]', NOW()),
+            ('e-a2', 'org-a', 'Person', 'A Two', 1, 'test', '[]', NOW()),
+            ('e-b1', 'org-b', 'Person', 'B One', 1, 'test', '[]', NOW()),
+            ('e-b2', 'org-b', 'Person', 'B Two', 1, 'test', '[]', NOW());
+        INSERT INTO graph_relationships VALUES
+            ('r-a', 'org-a', 'e-a1', 'e-a2', 'knows', 1, 'test', '[]', NOW()),
+            ('r-b', 'org-b', 'e-b1', 'e-b2', 'knows', 1, 'test', '[]', NOW());
+        INSERT INTO graph_claims VALUES
+            ('c-a', 'org-a', 'a claim', '["e-a1"]', 1, 'test', '[]', '[]', 'active', NOW()),
+            ('c-b', 'org-b', 'b claim', '["e-b1"]', 1, 'test', '[]', '[]', 'active', NOW());
+        INSERT INTO graph_text_units (org_id, knowledge_id, entity_id) VALUES
+            ('org-a', 'k-a', 'e-a1'), ('org-b', 'k-b', 'e-b1');
+        INSERT INTO graph_text_units (org_id, knowledge_id, rel_id) VALUES
+            ('org-a', 'k-a', 'r-a'), ('org-b', 'k-b', 'r-b');
+        INSERT INTO graph_text_units (org_id, knowledge_id, claim_id) VALUES
+            ('org-a', 'k-a', 'c-a'), ('org-b', 'k-b', 'c-b');
+        INSERT INTO graph_communities VALUES
+            ('comm-a', 'org-a', '["e-a1","e-a2"]', 'org a community', 0, NOW()),
+            ('comm-b', 'org-b', '["e-b1","e-b2"]', 'org b community', 0, NOW());
+    "#;
+
+    async fn fixture() -> (GraphStore, PgPool, String) {
+        let database_url = std::env::var("GRAPH_TEST_DATABASE_URL")
+            .expect("GRAPH_TEST_DATABASE_URL must point to disposable PostgreSQL");
+        assert!(
+            (database_url.contains("localhost") || database_url.contains("127.0.0.1"))
+                && database_url.contains("/graph_test"),
+            "refusing non-local or non-graph_test database"
+        );
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect disposable admin database");
+        let schema = format!("graph_gdpr_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .expect("create isolated graph schema");
+        admin.close().await;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect isolated graph pool");
+        sqlx::query(&format!("SET search_path TO {schema}"))
+            .execute(&pool)
+            .await
+            .expect("select isolated graph schema");
+        sqlx::raw_sql(FIXTURE_SQL)
+            .execute(&pool)
+            .await
+            .expect("create graph gdpr-purge fixture");
+        (GraphStore::new(pool.clone()), pool, schema)
+    }
+
+    async fn org_row_counts(pool: &PgPool, org_id: &str) -> [i64; 5] {
+        let mut counts = [0i64; 5];
+        for (idx, table) in [
+            "graph_text_units",
+            "graph_relationships",
+            "graph_claims",
+            "graph_communities",
+            "graph_entities",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let row = sqlx::query(&format!(
+                "SELECT COUNT(*) AS n FROM {table} WHERE org_id = $1"
+            ))
+            .bind(org_id)
+            .fetch_one(pool)
+            .await
+            .expect("count query");
+            counts[idx] = row.get::<i64, _>("n");
+        }
+        counts
+    }
+
+    /// Safety-critical isolation test (per the GDPR purge safety contract):
+    /// purging org-a must remove every graph-index-owned row for org-a and
+    /// must NOT touch a single row belonging to org-b.
+    #[tokio::test]
+    #[ignore = "requires GRAPH_TEST_DATABASE_URL pointing to disposable PostgreSQL"]
+    async fn purge_is_scoped_strictly_by_org_id_and_leaves_other_orgs_untouched() {
+        let (store, pool, schema) = fixture().await;
+
+        // graph_text_units carries THREE rows per org: one mapping row each
+        // for the entity_id-only, rel_id-only, and claim_id-only inserts
+        // above — not one row per source table.
+        assert_eq!(org_row_counts(&pool, "org-a").await, [3, 1, 1, 1, 2]);
+        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2]);
+
+        let summary = store
+            .purge_organization_data("org-a")
+            .await
+            .expect("purge org-a");
+        assert_eq!(summary.graph_text_units, 3);
+        assert_eq!(summary.graph_relationships, 1);
+        assert_eq!(summary.graph_claims, 1);
+        assert_eq!(summary.graph_communities, 1);
+        assert_eq!(summary.graph_entities, 2);
+        assert_eq!(summary.total(), 8);
+
+        // org-a is now fully purged across every owned table...
+        assert_eq!(org_row_counts(&pool, "org-a").await, [0, 0, 0, 0, 0]);
+        // ...and org-b's rows are byte-for-byte untouched.
+        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2]);
+
+        // Idempotency: NATS is at-least-once delivery, so a redelivered
+        // erasure event must be safe to run twice — the second purge must
+        // match zero rows everywhere and must not error.
+        let replay = store
+            .purge_organization_data("org-a")
+            .await
+            .expect("replayed purge of already-purged org-a must not error");
+        assert_eq!(replay.total(), 0);
+        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2]);
 
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&pool)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/config"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/cost"
+	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/gdpr"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/handler"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/jobs"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/metrics"
@@ -33,6 +35,9 @@ func main() {
 	cfg := config.Load()
 	if err := cfg.ValidateSignedCostEvents(); err != nil {
 		log.Fatal().Err(err).Msg("signed cost event verification configuration invalid")
+	}
+	if err := cfg.ValidateGDPRConsumer(); err != nil {
+		log.Fatal().Err(err).Msg("GDPR org-purge consumer configuration invalid")
 	}
 	verifier, err := authctx.NewVerifier(authctx.Config{
 		Audience:      cfg.JWTAudience,
@@ -86,6 +91,43 @@ func main() {
 	staleDetector := jobs.NewStaleDetector(pool)
 	orchHandler := handler.NewOrchestratorHandler(executor, staleDetector)
 
+	// GDPR org-erasure durable consumer. Deliberately a SEPARATE NATS
+	// connection from nc above: nc is this service's plane-local Data Plane
+	// v2 broker connection (cost ledger, reindex jobs); this is a dedicated
+	// identity ("data-orchestrator-gdpr") on the cross-plane SHARED broker
+	// (control-shared-nats), scoped to exactly one pre-provisioned durable.
+	// It has no stream or consumer administration rights and no legacy
+	// token fallback — see internal/gdpr's package doc.
+	var orgPurgeConsumer *gdpr.Consumer
+	if cfg.SharedNatsURL != "" {
+		sharedNc, sharedErr := nats.Connect(
+			cfg.SharedNatsURL,
+			nats.Name("data-orchestrator-gdpr-durable"),
+			nats.UserInfo(cfg.SharedNatsUser, cfg.SharedNatsPassword),
+			nats.CustomInboxPrefix("_INBOX.DATA_ORCHESTRATOR_GDPR"),
+		)
+		if sharedErr != nil {
+			if cfg.GDPROrgPurgeConsumerRequired {
+				log.Fatal().Err(sharedErr).Msg("required scoped GDPR org-purge NATS connection failed")
+			}
+			log.Warn().Err(sharedErr).Msg("optional scoped GDPR org-purge NATS connection failed")
+		} else {
+			defer sharedNc.Close()
+			purgeRepo := gdpr.NewPurgeRepo(pool)
+			orgPurgeConsumer, sharedErr = gdpr.StartOrgPurgeSubscriber(sharedNc, purgeRepo)
+			if sharedErr != nil {
+				if cfg.GDPROrgPurgeConsumerRequired {
+					log.Fatal().Err(sharedErr).Msg("required durable GDPR org-purge consumer failed to bind")
+				}
+				log.Warn().Err(sharedErr).Msg("optional durable GDPR org-purge consumer failed to bind")
+			} else {
+				defer orgPurgeConsumer.Close() //nolint:errcheck
+			}
+		}
+	} else if cfg.GDPROrgPurgeConsumerRequired {
+		log.Fatal().Msg("required durable GDPR org-purge consumer is not configured")
+	}
+
 	if cfg.SignedCostEventsEnabled {
 		registry, err := cost.LoadVerifierRegistryFromFiles(
 			cfg.EmbeddingEventPublicKeyPath,
@@ -122,7 +164,23 @@ func main() {
 	r.Use(metrics.Middleware)
 
 	r.Get("/health", handler.Health)
-	r.Get("/readyz", handler.Readyz)
+	r.Get("/readyz", func(w http.ResponseWriter, request *http.Request) {
+		if cfg.GDPROrgPurgeConsumerRequired && orgPurgeConsumer == nil {
+			http.Error(w, "required GDPR org-purge consumer unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		handler.Readyz(w, request)
+	})
+	r.Get("/internal/gdpr/org-purge/health", func(w http.ResponseWriter, request *http.Request) {
+		snapshot := gdpr.ConsumerHealthSnapshot{Status: "disabled"}
+		if orgPurgeConsumer != nil {
+			healthContext, healthCancel := context.WithTimeout(request.Context(), 2*time.Second)
+			defer healthCancel()
+			snapshot = orgPurgeConsumer.Health(healthContext)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": snapshot})
+	})
 	r.Method("GET", "/metrics", metrics.Handler())
 
 	handler.MountProtectedRoutes(r, authMiddleware, orchHandler)

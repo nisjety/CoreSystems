@@ -1,5 +1,14 @@
 # Data Plane v2 Deep Dive
 
+> **2026-07-20 correction:** the claims below and at lines ~148, 377, 400, 445
+> that `documents-api-go` "defaults to observe mode (`AUTHCTX_ENFORCE=0`)" are
+> stale. `docker-compose.yml` now sets `AUTHCTX_ENFORCE: "1"` for this service,
+> and the live container was re-verified this pass with real `curl` calls:
+> requests with no bearer token or a bogus bearer token both return `401`
+> (genuine enforcement, not a pass-through). This is confirmed for
+> `documents-api-go` only — the other Go services' enforce-mode status was not
+> re-checked in this pass.
+
 Generated: 2026-06-07
 
 **Verified 2026-07-10**: Live `docker ps` against the running `dpv2-*` compose stack reconfirms every port/container in the topology table below (all 15 containers healthy, ports unchanged). The HTTP route lists for `documents-api-go` and `wiki-store-go` were re-checked against current source and remain accurate. Two "not implemented" claims in the original 2026-06-07 draft are now stale — see the updated `documents-api-go` and `retrieval-engine-rs` Maturity notes below. This document still does not cover the security/compliance findings uncovered in the later plane audit — org-scoped no-credential access on `graph-index-rs`/`data-quality-go`/`data-orchestrator-go`, the `wiki-store-go` `deleted_at` HTTP 500, and ZDR persistence gaps. For those, `docs/core-research/plane-audit-2026-07-02.md` (with its 2026-07-10 addendum) is the current, more authoritative source of truth; this deep dive remains useful as the structural/topology map.

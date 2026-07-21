@@ -19,6 +19,20 @@ type Config struct {
 	JWTPublicKeyFile            string
 	EventSigningPrivateKeyPath  string
 	AllowDisabledEventPublisher bool
+	// GDPRSharedNats{URL,User,Password} configure a SECOND, narrowly-scoped
+	// connection to the cross-plane control-shared-nats broker (identity
+	// "wiki-store-gdpr"), used only by the GDPR org-erasure purge consumer
+	// (internal/gdpr). Deliberately DISTINCT env var names from NatsURL's own
+	// fallback chain above, which already treats the literal name
+	// "SHARED_NATS_URL" as an alternate Data-Plane-LOCAL broker URL for the
+	// wiki-event publisher — reusing any name that close (including the
+	// commonly-used "NATS_SHARED_URL") here would invite exactly the kind of
+	// operator mix-up this consumer must not repeat. Empty GDPRSharedNatsURL
+	// disables the org-erasure consumer without affecting the plane-local
+	// NATS client or the wiki-event publisher.
+	GDPRSharedNatsURL      string
+	GDPRSharedNatsUser     string
+	GDPRSharedNatsPassword string
 }
 
 func Load() *Config {
@@ -40,6 +54,9 @@ func Load() *Config {
 		EventSigningPrivateKeyPath: envOr("WIKI_EVENT_PRIVATE_KEY_PATH", ""),
 		AllowDisabledEventPublisher: os.Getenv("ALLOW_UNVERIFIED_LEGACY_EVENTS") == "1" &&
 			os.Getenv("ALLOW_INSECURE_DEV_DEFAULTS") == "1" && os.Getenv("ISOLATED_E2E") == "1",
+		GDPRSharedNatsURL:      strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_URL")),
+		GDPRSharedNatsUser:     strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_USER")),
+		GDPRSharedNatsPassword: strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_PASSWORD")),
 	}
 }
 

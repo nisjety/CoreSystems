@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLoadUsesFailClosedControlTokenDefaults(t *testing.T) {
 	t.Setenv("DATA_PLANE_AUTH_AUDIENCE", "")
@@ -71,5 +74,63 @@ func TestSignedCostConsumerConfigurationRequiresBothProducerKeys(t *testing.T) {
 	cfg = Load()
 	if err := cfg.ValidateSignedCostEvents(); err != nil {
 		t.Fatalf("complete signed consumer configuration failed: %v", err)
+	}
+}
+
+func TestGDPRConsumerConfigurationDefaultsOff(t *testing.T) {
+	t.Setenv("NATS_SHARED_URL", "")
+	t.Setenv("NATS_SHARED_USER", "")
+	t.Setenv("NATS_SHARED_PASSWORD", "")
+	t.Setenv("GDPR_ORG_PURGE_CONSUMER_REQUIRED", "")
+
+	cfg := Load()
+	if err := cfg.ValidateGDPRConsumer(); err != nil {
+		t.Fatalf("unconfigured GDPR consumer must not fail closed by default: %v", err)
+	}
+}
+
+func TestGDPRConsumerConfigurationRequiresAllSharedCredentialsTogether(t *testing.T) {
+	t.Setenv("NATS_SHARED_URL", "nats://control-shared-nats:4222")
+	t.Setenv("NATS_SHARED_USER", "data-orchestrator-gdpr")
+	t.Setenv("NATS_SHARED_PASSWORD", "")
+
+	cfg := Load()
+	if err := cfg.ValidateGDPRConsumer(); err == nil {
+		t.Fatal("partial shared NATS credentials were accepted")
+	}
+}
+
+func TestGDPRConsumerConfigurationRejectsWeakSharedPassword(t *testing.T) {
+	t.Setenv("NATS_SHARED_URL", "nats://control-shared-nats:4222")
+	t.Setenv("NATS_SHARED_USER", "data-orchestrator-gdpr")
+	t.Setenv("NATS_SHARED_PASSWORD", "too-short")
+
+	cfg := Load()
+	if err := cfg.ValidateGDPRConsumer(); err == nil {
+		t.Fatal("weak NATS_SHARED_PASSWORD was accepted")
+	}
+}
+
+func TestGDPRConsumerConfigurationFailsClosedWhenRequiredButUnconfigured(t *testing.T) {
+	t.Setenv("NATS_SHARED_URL", "")
+	t.Setenv("NATS_SHARED_USER", "")
+	t.Setenv("NATS_SHARED_PASSWORD", "")
+	t.Setenv("GDPR_ORG_PURGE_CONSUMER_REQUIRED", "1")
+
+	cfg := Load()
+	if err := cfg.ValidateGDPRConsumer(); err == nil {
+		t.Fatal("required GDPR org-purge consumer accepted missing shared NATS credentials")
+	}
+}
+
+func TestGDPRConsumerConfigurationAcceptsCompleteSharedCredentials(t *testing.T) {
+	t.Setenv("NATS_SHARED_URL", "nats://control-shared-nats:4222")
+	t.Setenv("NATS_SHARED_USER", "data-orchestrator-gdpr")
+	t.Setenv("NATS_SHARED_PASSWORD", strings.Repeat("a", 32))
+	t.Setenv("GDPR_ORG_PURGE_CONSUMER_REQUIRED", "1")
+
+	cfg := Load()
+	if err := cfg.ValidateGDPRConsumer(); err != nil {
+		t.Fatalf("complete shared NATS configuration failed: %v", err)
 	}
 }

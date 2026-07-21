@@ -1,5 +1,17 @@
 # documents-api-go Research Dive
 
+> **2026-07-20 correction:** the "observe mode by default (`AUTHCTX_ENFORCE=0`)"
+> finding throughout this document is stale. `docker-compose.yml` now sets
+> `AUTHCTX_ENFORCE: "1"` for `documents-api-go`, and the live
+> `data-plane-v2-documents-api-1` container (healthy, `ALLOW_INSECURE_DEV_DEFAULTS`
+> unset) was re-verified this pass: `curl /v1/documents` with no bearer returns 401
+> `"missing bearer token"`, and with a bogus bearer returns 401 `"invalid token"` —
+> genuine blocking, not pass-through. The org/JWT mismatch → 403 re-stamp behavior
+> documented below is therefore live, not just source-tested. This does **not**
+> extend to the other Data Plane v2 services (`data-orchestrator-go`,
+> `data-quality-go`, `wiki-store-go`, `graph-index-rs`) — those remain unverified
+> for enforce-mode status as of this pass.
+
 Generated: 2026-07-10 (supersedes 2026-06-07 pass; re-verified live against the running `dpv2-documents-api` container, its Postgres, and a real Control Plane auth-core session)
 
 Scope: `apps/Data Plane v2/services/documents-api-go`

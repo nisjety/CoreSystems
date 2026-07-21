@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/cost"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/eval"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/gates"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/gdpr"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/handler"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/lint"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/metrics"
@@ -31,7 +33,10 @@ func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Str("service", "data-quality-go").Logger()
 
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal().Err(err).Msg("config invalid")
+	}
 	verifier, err := authctx.NewVerifier(authctx.Config{
 		Audience:      cfg.JWTAudience,
 		Issuer:        cfg.JWTIssuer,
@@ -84,6 +89,48 @@ func main() {
 	costQuery := cost.NewQuery(pool)
 	goldenStore := eval.NewPostgresGoldenStore(pool)
 	qualityHandler := handler.NewQualityHandler(runner, goldenStore, scorer, checker, linter, costQuery)
+
+	// Cross-plane GDPR erasure fan-out: org-core publishes
+	// velion.gdpr.erasure.requested (explicit hard-delete AND its 30-day
+	// auto-purge cron) on the shared Control-Plane bus; this hard-purges
+	// quality_eval_runs and eval_golden_judgments for that org. Runs on a
+	// SECOND, dedicated connection to the shared broker (control-shared-nats,
+	// identity "data-quality-gdpr") — independent of this service's database
+	// connection and never sharing plane-local broker traffic, since
+	// data-quality-go has no plane-local NATS client of its own. Optional —
+	// an unset NATS_SHARED_URL disables only this consumer, matching
+	// GDPRConsumerRequired's fail-open default for local/dev.
+	orgPurger := gdpr.NewPostgresOrgPurger(pool)
+	var gdprConsumer *gdpr.Consumer
+	if cfg.SharedNatsURL != "" {
+		sharedNc, sharedErr := nats.Connect(
+			cfg.SharedNatsURL,
+			nats.Name("data-quality-gdpr"),
+			nats.UserInfo(cfg.SharedNatsUser, cfg.SharedNatsPassword),
+			nats.CustomInboxPrefix("_INBOX.DATA_QUALITY_GDPR"),
+		)
+		if sharedErr != nil {
+			if cfg.GDPRConsumerRequired {
+				log.Fatal().Err(sharedErr).Msg("required scoped GDPR NATS connection failed")
+			}
+			log.Warn().Err(sharedErr).Msg("optional scoped GDPR NATS connection failed; org-erasure consumer disabled")
+		} else {
+			defer sharedNc.Close()
+			gdprConsumer, sharedErr = gdpr.Start(sharedNc, orgPurger)
+			if sharedErr != nil {
+				if cfg.GDPRConsumerRequired {
+					log.Fatal().Err(sharedErr).Msg("required durable GDPR org-erasure consumer failed to bind")
+				}
+				log.Warn().Err(sharedErr).Msg("optional durable GDPR org-erasure consumer failed to bind")
+			} else {
+				defer gdprConsumer.Close() //nolint:errcheck
+			}
+		}
+	} else if cfg.GDPRConsumerRequired {
+		log.Fatal().Msg("required durable GDPR org-erasure consumer is not configured")
+	} else {
+		log.Warn().Msg("NATS_SHARED_URL unset — GDPR org-erasure consumer disabled")
+	}
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)

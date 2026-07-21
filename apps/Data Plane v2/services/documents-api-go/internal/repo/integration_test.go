@@ -11,10 +11,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	tc "github.com/testcontainers/testcontainers-go"
 	pgmod "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -260,21 +262,45 @@ func TestIdempotency(t *testing.T) {
 		t.Errorf("first create should not be reused")
 	}
 
-	// Same key again — must return existing doc, not create new one
+	// Same key, BYTE-IDENTICAL content — a true no-op replay (e.g. a client
+	// retrying after a dropped response). Must return the existing row
+	// verbatim: Reused=true, same doc_id, unchanged title.
+	replay, err := r.Create(ctx, input)
+	if err != nil {
+		t.Fatalf("replay create: %v", err)
+	}
+	if !replay.Reused {
+		t.Errorf("byte-identical re-submission should be reused (Reused=%v Updated=%v)", replay.Reused, replay.Updated)
+	}
+	if replay.Document.DocumentID != first.Document.DocumentID {
+		t.Errorf("idempotent replay returned different doc_id")
+	}
+	if replay.Document.Title != "First" {
+		t.Errorf("expected original title on true replay, got %q", replay.Document.Title)
+	}
+
+	// Same key, DIFFERENT content — a re-ingest. documents-api's documented
+	// contract (see events.DocumentUpdatedEvent and CreateWithOutbox, verified
+	// by TestCreateUpdateDeleteLifecycleOutboxIsAtomic) is to refresh the row
+	// in place and report Updated=true — never silently discard the new
+	// content, and never insert a duplicate row for the same key.
 	input.Title = "Second"
 	input.Content = "C2"
 	second, err := r.Create(ctx, input)
 	if err != nil {
 		t.Fatalf("second create: %v", err)
 	}
-	if !second.Reused {
-		t.Errorf("second create should be reused")
+	if second.Reused {
+		t.Errorf("content-changed re-ingest must not report Reused")
+	}
+	if !second.Updated {
+		t.Errorf("content-changed re-ingest should report Updated")
 	}
 	if second.Document.DocumentID != first.Document.DocumentID {
 		t.Errorf("idempotent create returned different doc_id")
 	}
-	if second.Document.Title != "First" {
-		t.Errorf("expected original title, got %q", second.Document.Title)
+	if second.Document.Title != "Second" {
+		t.Errorf("expected refreshed title on content-changed re-ingest, got %q", second.Document.Title)
 	}
 
 	// Different org, same key — must create separately
@@ -318,6 +344,43 @@ func TestSoftDeleteOrgScope(t *testing.T) {
 	}
 	if got.DocumentID == "" {
 		t.Errorf("doc unexpectedly deleted")
+	}
+}
+
+// Classic IDOR probe: an org-B caller who has obtained (guessed, leaked,
+// enumerated) org-A's real document_id must not be able to fetch it by
+// supplying their own org_id — Get's WHERE clause must reject on org_id
+// mismatch, not just on a missing/garbage document_id. This is the read-path
+// counterpart to TestSoftDeleteOrgScope (write-path) and TestListOrgScoped
+// (collection-path); direct by-ID GET was previously untested.
+func TestGetCrossOrgReturnsNotFound(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	doc, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID: "org-A", Source: "s", Type: "t", Title: "A-secret", Content: "confidential", Visibility: "org",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Org B supplies org A's real document_id as their own — must not resolve,
+	// not even to prove existence. No viewer/grant filtering is in play here
+	// (empty viewerID = legacy org-scoped path), isolating org_id as the only
+	// variable under test.
+	if _, err := r.Get(ctx, "org-B", doc.Document.DocumentID, "", nil); err == nil {
+		t.Fatal("cross-org Get by known document_id succeeded — IDOR leak")
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("cross-org Get error = %v, want pgx.ErrNoRows", err)
+	}
+
+	// Sanity: the same call from the owning org still resolves, so the
+	// rejection above is attributable to org_id and not a broken fixture.
+	if got, err := r.Get(ctx, "org-A", doc.Document.DocumentID, "", nil); err != nil || got.DocumentID == "" {
+		t.Fatalf("same-org Get failed: got=%v err=%v", got, err)
 	}
 }
 

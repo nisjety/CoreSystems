@@ -1,6 +1,8 @@
 mod api;
 mod batch;
 mod config;
+mod gdpr;
+mod gdpr_nats;
 mod image_consumer;
 mod provider;
 mod qdrant_writer;
@@ -178,6 +180,44 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("embedding, wiki, and page-image consumers disabled until signed producer-scoped envelopes are available");
         None
     };
+
+    // Cross-plane GDPR organization-erasure consumer. Deliberately
+    // independent of the embedding/wiki/page-image event_runtime above and
+    // spawned as its own supervised task (not raced inside the
+    // `tokio::select!` below) so a shared-broker outage never takes down the
+    // admin HTTP server or the embedding consumers: it binds a
+    // pre-provisioned pull consumer on the SHARED cross-plane broker
+    // (control-shared-nats, stream AQENCIA_CONTROLPLANE) under its own
+    // dedicated `embedding-engine-gdpr` identity
+    // (EMBEDDING_ENGINE_GDPR_NATS_URL/_USER/_PASSWORD) — never this
+    // service's own Data-Plane-local `cfg.nats_url` connection, which does
+    // not host that stream. Left unset, the consumer is intentionally
+    // disabled (fail open with a warning) rather than hot-looping doomed
+    // connection attempts, matching this rollout's established posture for
+    // this optional consumer. See `gdpr_nats` for the full provisioning
+    // contract this depends on.
+    let gdpr_nats_url = std::env::var("EMBEDDING_ENGINE_GDPR_NATS_URL").unwrap_or_default();
+    if gdpr_nats_url.is_empty() {
+        tracing::warn!(
+            "EMBEDDING_ENGINE_GDPR_NATS_URL not set; embedding-engine GDPR erasure consumer disabled"
+        );
+    } else {
+        let gdpr_nats_user = std::env::var("EMBEDDING_ENGINE_GDPR_NATS_USER").unwrap_or_default();
+        let gdpr_nats_password =
+            std::env::var("EMBEDDING_ENGINE_GDPR_NATS_PASSWORD").unwrap_or_default();
+        let gdpr_collections = Arc::new(gdpr::PurgeCollections {
+            knowledge: cfg.qdrant_collection.clone(),
+            wiki: wiki_consumer::WIKI_COLLECTION.to_string(),
+            visual: cfg.qdrant_visual_collection.clone(),
+        });
+        tokio::spawn(gdpr_nats::run_supervised(
+            qdrant.clone(),
+            gdpr_collections,
+            gdpr_nats_url,
+            gdpr_nats_user,
+            gdpr_nats_password,
+        ));
+    }
 
     let admin_app = api::router();
     let admin_addr = format!("0.0.0.0:{}", cfg.admin_port);

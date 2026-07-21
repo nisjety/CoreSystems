@@ -88,6 +88,32 @@ pub struct PersistedExtraction {
     pub mirror_relationships: Vec<MirrorRelationship>,
 }
 
+/// Per-table row counts from one GDPR org-erasure purge run (see
+/// `crate::gdpr_nats` and `crate::store::GraphStore::
+/// purge_organization_data`). Every table here is one graph-index-rs itself
+/// writes to — it never touches `documents` or `knowledge_units`, which are
+/// owned by sibling Data Plane v2 services and are read-only in this crate.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GdprPurgeSummary {
+    pub graph_text_units: u64,
+    pub graph_relationships: u64,
+    pub graph_claims: u64,
+    pub graph_communities: u64,
+    pub graph_entities: u64,
+}
+
+impl GdprPurgeSummary {
+    /// Total rows deleted across every table in one purge run.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.graph_text_units
+            + self.graph_relationships
+            + self.graph_claims
+            + self.graph_communities
+            + self.graph_entities
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedEntity {
     pub entity_type: String,

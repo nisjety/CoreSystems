@@ -4,6 +4,8 @@ mod chunker;
 mod config;
 mod extract;
 mod fingerprint;
+mod gdpr;
+mod gdpr_nats;
 mod normalizer;
 mod outbox;
 mod stream;
@@ -99,6 +101,33 @@ async fn main() -> anyhow::Result<()> {
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!("admin server on {admin_addr}");
 
+    // Cross-plane GDPR organization-erasure consumer. Binds to
+    // AQENCIA_CONTROLPLANE on the shared cross-plane broker
+    // (control-shared-nats) under the dedicated index-engine-gdpr identity —
+    // never this service's own Data-Plane-local NATS_URL/DATAPLANE_NATS_TOKEN
+    // connection to data-nats, which does not host that stream. Left unset,
+    // the consumer is intentionally disabled rather than hot-looping doomed
+    // connection attempts. See gdpr_nats.rs for the full rationale.
+    let gdpr_pool = pool.clone();
+    let gdpr_nats_url = std::env::var("NATS_SHARED_URL").unwrap_or_default();
+    let gdpr_task = async move {
+        if gdpr_nats_url.is_empty() {
+            tracing::warn!("NATS_SHARED_URL not set; index-engine GDPR erasure consumer disabled");
+            std::future::pending::<()>().await;
+        }
+        loop {
+            let pool = gdpr_pool.clone();
+            let nats_url = gdpr_nats_url.clone();
+            match gdpr_nats::run(pool, nats_url).await {
+                Ok(()) => tracing::warn!("GDPR erasure consumer ended; restarting"),
+                Err(error) => {
+                    tracing::warn!(%error, "GDPR erasure consumer failed; restarting")
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    };
+
     let consumer_task = async move {
         match event_runtime {
             Some((consumer, nats_client, verifier, signer)) => {
@@ -136,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         res = consumer_task => {
             if let Err(e) = res { tracing::error!(err = %e, "consumer error"); }
         }
+        () = gdpr_task => {}
     }
 
     Ok(())

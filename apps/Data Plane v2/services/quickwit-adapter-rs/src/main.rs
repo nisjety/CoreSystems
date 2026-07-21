@@ -5,6 +5,7 @@ use quickwit_adapter_rs::{
     api,
     auth::AdminVerifier,
     config::Config,
+    gdpr_nats,
     jobs::{execute_claimed_job, AdminJobStore, PgAdminJobStore},
     quickwit::QuickwitClient,
     rebuild::RebuildContext,
@@ -60,6 +61,27 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         run_admin_job_worker(runner_store, runner_executor).await;
     });
+
+    // The GDPR erasure consumer binds to AQENCIA_CONTROLPLANE on the shared
+    // cross-plane broker (control-shared-nats), not this crate's own
+    // Data-Plane-local `cfg.nats_url` (used below by `stream::spawn`/
+    // `spawn_unverified_legacy`) — that broker never carries this subject.
+    // NATS_SHARED_URL/NATS_SHARED_USER/NATS_SHARED_PASSWORD are the dedicated
+    // `quickwit-adapter-gdpr` identity provisioned for this purpose alone.
+    // Left unset, the consumer is intentionally disabled below rather than
+    // hot-looping doomed connection attempts against this crate's own local
+    // broker.
+    let gdpr_nats_url = std::env::var("NATS_SHARED_URL").unwrap_or_default();
+    if gdpr_nats_url.is_empty() {
+        tracing::warn!(
+            "NATS_SHARED_URL not set; quickwit-adapter GDPR erasure consumer disabled"
+        );
+    } else {
+        let gdpr_pool = pool.clone();
+        tokio::spawn(async move {
+            run_gdpr_erasure_worker(gdpr_pool, gdpr_nats_url).await;
+        });
+    }
 
     if signed_event_consumers_enabled(
         std::env::var("ENABLE_SIGNED_EVENT_CONSUMERS")
@@ -159,6 +181,20 @@ fn event_verifier(
 
 fn signed_event_consumers_enabled(value: &str) -> bool {
     value == "1"
+}
+
+/// Runs the GDPR organization-erasure consumer forever, restarting on any
+/// connection failure (missing pre-provisioned consumer, dropped broker
+/// connection, etc.) rather than letting the task exit silently.
+async fn run_gdpr_erasure_worker(pool: sqlx::PgPool, nats_url: String) {
+    loop {
+        if let Err(error) = gdpr_nats::run(pool.clone(), nats_url.clone()).await {
+            tracing::error!(?error, "quickwit-adapter GDPR erasure consumer failed");
+        } else {
+            tracing::warn!("quickwit-adapter GDPR erasure consumer ended unexpectedly");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
 async fn run_admin_job_worker(store: Arc<PgAdminJobStore>, executor: Arc<RebuildContext>) {

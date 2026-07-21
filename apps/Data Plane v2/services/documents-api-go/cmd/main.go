@@ -99,6 +99,7 @@ func main() {
 	// its ACK subject, ownership receipts, and a single DLQ. It has no stream or
 	// consumer administration rights and no legacy token fallback.
 	var gdprConsumer *gdpr.Consumer
+	var orgPurgeConsumer *gdpr.Consumer
 	if cfg.SharedNatsURL != "" {
 		sharedNc, sharedErr := nats.Connect(
 			cfg.SharedNatsURL,
@@ -111,6 +112,10 @@ func main() {
 				log.Fatal().Err(sharedErr).Msg("required scoped GDPR NATS connection failed")
 			}
 			log.Warn().Err(sharedErr).Msg("optional scoped GDPR NATS connection failed")
+			if cfg.OrgPurgeConsumerRequired {
+				log.Fatal().Err(sharedErr).Msg("required scoped org-purge NATS connection failed")
+			}
+			log.Warn().Err(sharedErr).Msg("optional scoped org-purge NATS connection failed")
 		} else {
 			defer sharedNc.Close()
 			gdprConsumer, sharedErr = gdpr.StartSubscriber(sharedNc, docRepo)
@@ -122,9 +127,26 @@ func main() {
 			} else {
 				defer gdprConsumer.Close() //nolint:errcheck
 			}
+
+			// Same shared connection, second independent durable: the
+			// per-user ownership-transfer consumer above and this
+			// organization hard-purge consumer both filter on
+			// velion.gdpr.erasure.requested but own disjoint subject_type
+			// values, so one binding failing never blocks the other.
+			orgPurgeConsumer, sharedErr = gdpr.StartOrgPurgeSubscriber(sharedNc, docRepo)
+			if sharedErr != nil {
+				if cfg.OrgPurgeConsumerRequired {
+					log.Fatal().Err(sharedErr).Msg("required durable org-purge consumer failed to bind")
+				}
+				log.Warn().Err(sharedErr).Msg("optional durable org-purge consumer failed to bind")
+			} else {
+				defer orgPurgeConsumer.Close() //nolint:errcheck
+			}
 		}
 	} else if cfg.GDPRConsumerRequired {
 		log.Fatal().Msg("required durable GDPR consumer is not configured")
+	} else if cfg.OrgPurgeConsumerRequired {
+		log.Fatal().Msg("required durable org-purge consumer is not configured")
 	}
 	// Phase A · A1.5 — usage + audit publisher. Logs-only on connect
 	// failure (the existing nc above is already required, so failure
@@ -172,6 +194,10 @@ func main() {
 			http.Error(w, "required GDPR consumer unavailable", http.StatusServiceUnavailable)
 			return
 		}
+		if cfg.OrgPurgeConsumerRequired && orgPurgeConsumer == nil {
+			http.Error(w, "required org-purge consumer unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		handler.Readyz(w, request)
 	})
 	r.Get("/internal/gdpr/health", func(w http.ResponseWriter, request *http.Request) {
@@ -180,6 +206,16 @@ func main() {
 			healthContext, healthCancel := context.WithTimeout(request.Context(), 2*time.Second)
 			defer healthCancel()
 			snapshot = gdprConsumer.Health(healthContext)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": snapshot})
+	})
+	r.Get("/internal/gdpr/org-purge/health", func(w http.ResponseWriter, request *http.Request) {
+		snapshot := gdpr.ConsumerHealthSnapshot{Status: "disabled"}
+		if orgPurgeConsumer != nil {
+			healthContext, healthCancel := context.WithTimeout(request.Context(), 2*time.Second)
+			defer healthCancel()
+			snapshot = orgPurgeConsumer.Health(healthContext)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": snapshot})

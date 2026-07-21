@@ -11,6 +11,7 @@ mod context_pack;
 mod context_pins;
 mod db;
 mod embed;
+mod gdpr;
 mod grpc;
 mod metrics;
 mod pipeline;
@@ -108,6 +109,34 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let pool = db::create_pool(&cfg.database_url).await?;
+
+    // Cross-plane GDPR organization-erasure consumer. Binds to
+    // AQENCIA_CONTROLPLANE on the shared cross-plane broker
+    // (control-shared-nats) under the dedicated `retrieval-engine-gdpr`
+    // identity — NEVER this service's own Data-Plane-local NATS connection
+    // wired further below (that broker does not host this stream). Left
+    // unset, the consumer is intentionally disabled rather than hot-looping
+    // doomed connection attempts. See `gdpr::consumer` module docs for the
+    // full rationale (including why these env var names are distinct from
+    // `SHARED_NATS_URL`/`NATS_SHARED_URL` already in play elsewhere in this
+    // service and its siblings).
+    let gdpr_nats_url = std::env::var("RETRIEVAL_ENGINE_GDPR_NATS_URL").unwrap_or_default();
+    if gdpr_nats_url.is_empty() {
+        tracing::warn!(
+            "RETRIEVAL_ENGINE_GDPR_NATS_URL not set; GDPR organization-erasure consumer disabled"
+        );
+    } else {
+        let gdpr_nats_user = std::env::var("RETRIEVAL_ENGINE_GDPR_NATS_USER").unwrap_or_default();
+        let gdpr_nats_password =
+            std::env::var("RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD").unwrap_or_default();
+        let gdpr_pool = pool.clone();
+        tokio::spawn(gdpr::consumer::run_supervised(
+            gdpr_pool,
+            gdpr_nats_url,
+            gdpr_nats_user,
+            gdpr_nats_password,
+        ));
+    }
 
     let qdrant = qdrant_client::Qdrant::from_url(&cfg.qdrant_url)
         .build()

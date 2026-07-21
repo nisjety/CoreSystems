@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/config"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/eventauth"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/events"
+	"github.com/triodelab/dataplane/services/wiki-store-go/internal/gdpr"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/grpcserver"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/handler"
 	"github.com/triodelab/dataplane/services/wiki-store-go/internal/metrics"
@@ -103,6 +105,43 @@ func main() {
 		outbox.Start(ctx)
 		log.Info().Msg("signed acknowledged wiki outbox publisher attached")
 	}
+
+	// GDPR cross-plane org-erasure purge consumer — subscribes to
+	// velion.gdpr.erasure.requested (org-core, fanned out over the shared
+	// control-shared-nats broker) and hard-purges this org's wiki +
+	// Operating Map data. Uses a SECOND, narrowly-scoped "wiki-store-gdpr"
+	// shared-broker connection (WIKISTORE_GDPR_SHARED_NATS_URL/_USER/
+	// _PASSWORD) kept entirely separate from cfg.NatsURL above (the
+	// Data-Plane-local broker the wiki-event publisher uses) — see
+	// config.go's field doc for why this consumer's env var names are
+	// deliberately distinct from any name already claimed in this service's
+	// own NatsURL fallback chain. Safe by default: absent
+	// WIKISTORE_GDPR_SHARED_NATS_URL, the consumer is simply not started;
+	// org deletions will not auto-purge this service's wiki data until it is
+	// configured.
+	var gdprNC *nats.Conn
+	if strings.TrimSpace(cfg.GDPRSharedNatsURL) != "" {
+		nc, err := nats.Connect(cfg.GDPRSharedNatsURL,
+			nats.Name("wiki-store-gdpr"),
+			nats.UserInfo(cfg.GDPRSharedNatsUser, cfg.GDPRSharedNatsPassword),
+			nats.CustomInboxPrefix("_INBOX.WIKI_STORE_GDPR"),
+		)
+		if err != nil {
+			log.Warn().Err(err).Msg("control-shared NATS connect failed — GDPR org-erasure purge consumer disabled")
+		} else if _, err := gdpr.StartSubscriber(nc, wikiRepo); err != nil {
+			log.Warn().Err(err).Msg("GDPR org-erasure subscriber failed to start")
+			nc.Close()
+		} else {
+			gdprNC = nc
+		}
+	} else {
+		log.Warn().Msg("WIKISTORE_GDPR_SHARED_NATS_URL unset — GDPR org-erasure purge consumer disabled (org deletions will not auto-purge this service's wiki data for that org)")
+	}
+	defer func() {
+		if gdprNC != nil {
+			gdprNC.Close()
+		}
+	}()
 
 	wikiHandler := handler.NewWikiHandler(wikiRepo)
 

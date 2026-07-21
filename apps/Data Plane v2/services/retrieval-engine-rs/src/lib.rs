@@ -12,6 +12,7 @@ pub mod context_pack;
 pub mod context_pins;
 pub mod db;
 pub mod embed;
+pub mod gdpr;
 pub mod grpc;
 pub mod metrics;
 pub mod pipeline;
