@@ -492,6 +492,52 @@ describe('InboxPage', () => {
     })
   })
 
+  it('shows unassigned incoming conversations in the default "Your inbox" view and hides other agents\' conversations', async () => {
+    const unassigned = {
+      ...conversationSummary,
+      id: 'conv_unassigned_incoming',
+      title: 'New Outlook email awaiting triage',
+      assignee_user_id: '',
+      assignee_name: '',
+    }
+    const otherAgent = {
+      ...conversationSummary,
+      id: 'conv_other_agent',
+      title: 'Assigned to a teammate',
+      assignee_user_id: 'user-other',
+      assignee_name: 'Someone Else',
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/session')) {
+        return jsonResponse({
+          user: { id: 'user-demo', email: 'velion@example.com', name: 'Velion Demo', emailVerified: true },
+        })
+      }
+      if (url.endsWith('/api/v1/me/session-context')) {
+        return jsonResponse({ userId: 'user-demo', orgs: [{ id: 'org-demo', name: 'Velion', role: 'owner' }] })
+      }
+      if (url.startsWith('/api/v1/inbox/conversations?')) {
+        return jsonResponse([unassigned, otherAgent])
+      }
+      if (url.endsWith('/api/v1/inbox/inboxes')) {
+        return jsonResponse([{ id: 'inbox-support', name: 'Commerce context' }])
+      }
+      return jsonResponse({})
+    }))
+
+    renderInbox()
+
+    const ticketList = await screen.findByRole('list', { name: /tickets/i })
+    // Unassigned incoming mail must be visible in the default queue — this is the
+    // conversation that a fresh, unassigned provider ingest produces.
+    await waitFor(() =>
+      expect(within(ticketList).getByRole('button', { name: /new outlook email awaiting triage/i })).toBeTruthy(),
+    )
+    // A conversation owned by a different agent stays out of "Your inbox".
+    expect(within(ticketList).queryByRole('button', { name: /assigned to a teammate/i })).toBeNull()
+  })
+
   it('reuses the same idempotency key when an ambiguous reply is retried unchanged', async () => {
     failFirstReply = true
     const randomUUID = vi.fn(() => 'manual-reply-1234567890')

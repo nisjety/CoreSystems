@@ -262,9 +262,14 @@ export default function InboxPage() {
     const filter = routeFilter()
     const query = searchQuery().trim().toLowerCase()
 
+    const currentUserId = ctx()?.userId ?? ''
     return tickets().filter((ticket) => {
       if (activeTab() !== 'all' && !ticketMatchesTab(ticket, activeTab())) return false
-      if (filter.assigned === 'mine' && !ticket.owner) return false
+      // "Your inbox" is the actionable queue: conversations assigned to you PLUS
+      // unassigned incoming ones you can pick up. Only conversations owned by a
+      // *different* agent are hidden. Without this, a fresh support inbox whose
+      // provider messages (email/Teams/etc.) all arrive unassigned looks empty.
+      if (filter.assigned === 'mine' && ticket.owner && ticket.assigneeUserId !== currentUserId) return false
       if (filter.assigned === 'unassigned' && ticket.owner) return false
       if (filter.channel && filter.channel !== 'all' && ticket.channel !== filter.channel) return false
       if (filter.queue === 'mentions' && !ticketMatchesMentions(ticket)) return false

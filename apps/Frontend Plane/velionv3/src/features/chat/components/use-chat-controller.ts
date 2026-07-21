@@ -49,6 +49,9 @@ import {
   VELION_BALANCE_MODE_ID,
 } from '@/shared/api/chat-client'
 import {
+  ApiError,
+} from '@/shared/api/http'
+import {
   collectArtifactItems,
   collectEvidenceSources,
   collectLatestGrounding,
@@ -249,7 +252,25 @@ export function useChatController() {
       if (turns.length > 0) {
         writeThreadSnapshot(threadId, turns, {}, cachedTaskSteps, { persistServer: false })
       }
-    } catch {
+    } catch (error) {
+      // A 404 (thread_not_found) means session-core no longer has this thread
+      // — it was deleted, or the id is stale (e.g. carried over from another
+      // device). model-gateway now returns 404 for that case rather than a 502
+      // outage, so evict the ghost thread from the sidebar list + local caches
+      // and deselect it, instead of leaving it selected with stale content and
+      // refetching it on every mount. Any other failure (502/timeout/offline)
+      // is treated as transient: keep rendering the cached transcript.
+      if (error instanceof ApiError && error.status === 404) {
+        removeChatThreadHistoryItem(threadId)
+        if (readActiveChatThreadId() === threadId) {
+          // Clears the stored active id and resets the chat view via the
+          // CHAT_ACTIVE_THREAD_CHANGED_EVENT listener registered in onMount.
+          clearActiveChatThreadId()
+        } else if (state.threadId === threadId) {
+          resetChatState()
+        }
+        return
+      }
       const fallbackTurns = cachedTurns
       setState({ turns: fallbackTurns, taskSteps: cachedTaskSteps })
       if (fallbackTurns.length > 0) {

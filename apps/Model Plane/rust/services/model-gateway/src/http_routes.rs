@@ -4234,6 +4234,49 @@ fn not_found(message: &str) -> HttpJsonError {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
 }
 
+/// Map a session-core gRPC error from the chat thread read surfaces
+/// (`list_threads`, `list_thread_messages`) to an HTTP error.
+///
+/// A stale or deleted `thread_id` surfaces as `tonic::Code::NotFound` from
+/// session-core (`authorize_thread_owner` returns `not_found` when the row is
+/// gone). Blanket-mapping every gRPC error to `502 Bad Gateway` made that
+/// ordinary "the thread no longer exists" state look like an upstream outage,
+/// so velionv3 chat could not tell a gone thread apart from a broken
+/// model-gateway and could not self-heal by dropping the thread. Map `NotFound`
+/// to `404` with a stable `thread_not_found` code so the SPA can evict the
+/// thread from its list, and `PermissionDenied` (cross-org / cross-user read)
+/// to `403`. Every other code — including transport failures (`Unavailable`,
+/// `Internal`, …) — stays `502`, preserving the prior "upstream is unhappy"
+/// default for these routes.
+fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "thread_not_found",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        tonic::Code::PermissionDenied => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": {
+                    "code": "forbidden",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("{context}: {}", error.message()),
+            })),
+        ),
+    }
+}
+
 /// Serialize a `RunDetail` for the runs-history UI. `Snake_case` wire keys match
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
@@ -4773,14 +4816,7 @@ async fn list_threads(
             &bearer,
         )?)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("session-core list_threads failed: {}", e.message()),
-                })),
-            )
-        })?
+        .map_err(|e| session_thread_error("session-core list_threads failed", &e))?
         .into_inner();
 
     let threads = response
@@ -4840,14 +4876,7 @@ async fn list_thread_messages(
             &bearer,
         )?)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "error": format!("session-core list_conversation failed: {}", e.message()),
-                })),
-            )
-        })?
+        .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
         .into_inner();
 
     let messages = response
@@ -5944,5 +5973,64 @@ mod run_owner_publish_tests {
         assert!(events.iter().all(|(subject, _)| {
             subject == mp_events::subjects::SUBJECT_RUN || subject == "mp.v1.feedback.rated"
         }));
+    }
+}
+
+#[cfg(test)]
+mod session_thread_error_tests {
+    use super::*;
+
+    #[test]
+    fn not_found_maps_to_404_thread_not_found() {
+        let (status, Json(body)) = session_thread_error(
+            "session-core list_conversation failed",
+            &tonic::Status::not_found("thread 01KX3CTBFND3888N31344E5YV4 not found"),
+        );
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "thread_not_found");
+        assert_eq!(
+            body["error"]["message"],
+            "thread 01KX3CTBFND3888N31344E5YV4 not found"
+        );
+    }
+
+    #[test]
+    fn permission_denied_maps_to_403_forbidden() {
+        let (status, Json(body)) = session_thread_error(
+            "session-core list_conversation failed",
+            &tonic::Status::permission_denied("tenant access denied"),
+        );
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+        assert_eq!(body["error"]["message"], "tenant access denied");
+    }
+
+    #[test]
+    fn transport_and_unknown_errors_stay_502() {
+        // Every non-NotFound/PermissionDenied code — including transport
+        // failures and server-side faults — must keep the 502 default so a
+        // genuine upstream problem is never misreported as a client error.
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::Internal,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Unknown,
+            tonic::Code::InvalidArgument,
+            tonic::Code::Unauthenticated,
+        ] {
+            let (status, Json(body)) = session_thread_error(
+                "session-core list_threads failed",
+                &tonic::Status::new(code, "boom"),
+            );
+
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "code {code:?} -> 502");
+            assert_eq!(
+                body["error"],
+                "session-core list_threads failed: boom",
+                "code {code:?} keeps the contextual string body",
+            );
+        }
     }
 }

@@ -42,8 +42,11 @@ export interface ConversationDetail extends ConversationSummary {
 
 /** The UI model keys tickets by a numeric id, but conversation-core uses string
  * ids. We carry the real `conversationId` for API calls and derive a stable
- * numeric surrogate for UI identity/selection. */
-export type LiveTicket = ZammadTicket & { conversationId: string }
+ * numeric surrogate for UI identity/selection. `assigneeUserId` is the raw
+ * conversation-core assignee (empty when unassigned) so the queue filters can
+ * tell "assigned to me" apart from "assigned to another agent" without relying
+ * on the derived numeric owner id. */
+export type LiveTicket = ZammadTicket & { conversationId: string; assigneeUserId?: string }
 
 export interface InboxConversationsResult {
   tickets: LiveTicket[]
@@ -119,6 +122,7 @@ export function toLiveTicket(conversation: ConversationSummary | ConversationDet
   return {
     id: hashToInt(conversation.id),
     conversationId: conversation.id,
+    assigneeUserId: conversation.assignee_user_id || undefined,
     number: conversation.id.replace(/^conv_/, '').slice(0, 12),
     title: conversation.title,
     state: stateFromStatus(conversation.status),
