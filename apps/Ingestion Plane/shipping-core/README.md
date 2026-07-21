@@ -123,6 +123,7 @@ Do not include credentials, account numbers or sensitive endpoint parameters in 
 | GET | `/api/bookings/{id}/customs-document` | Customs PDF/JSON envelope | Not live-probed. |
 | POST | `/api/bookings/{id}/pickup` | Schedule pickup | Never use as a smoke probe. |
 | GET | `/api/bookings/{id}/tracking` | Refresh/read tracking | Not live-probed; may call carrier API. |
+| GET | `/api/tracking/{trackingNo}` | Tenant-scoped tracking lookup by tracking number | Added for Model Plane `track_shipment`; deployment verification pending. |
 | GET | `/api/bookings/{id}/audit` | Booking audit trail | Not live-probed. |
 | POST | `/api/manifests` | Build end-of-day manifest | Never use as a smoke probe. |
 | GET | `/api/manifests/{id}/document` | Manifest PDF | Not live-probed. |

@@ -205,6 +205,24 @@ func (s *Store) GetBooking(ctx context.Context, orgID, id string) (Record, error
 	return rec, nil
 }
 
+// FindBookingByTrackingNo resolves a tracking number only inside the verified
+// organization's booking set. Tracking numbers are not ambient public keys.
+func (s *Store) FindBookingByTrackingNo(ctx context.Context, orgID, trackingNo string) (string, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, `
+		SELECT id FROM bookings
+		WHERE org_id = $1 AND tracking_no = $2
+		ORDER BY created_at DESC
+		LIMIT 1`, orgID, trackingNo).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("find booking by tracking number: %w", err)
+	}
+	return id, nil
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""

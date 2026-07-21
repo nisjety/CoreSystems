@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"shipping-core/internal/carrier"
@@ -333,6 +334,20 @@ func (s *Service) Tracking(ctx context.Context, orgID, id string) (Tracking, err
 		current = events[len(events)-1].Status
 	}
 	return Tracking{BookingID: id, TrackingNo: rec.TrackingNo, CurrentStatus: current, Events: events}, nil
+}
+
+// TrackingByNumber resolves and tracks a shipment within the caller's
+// organization. It exists for governed agent lookups; callers cannot use a
+// tracking number to cross tenant boundaries.
+func (s *Service) TrackingByNumber(ctx context.Context, orgID, trackingNo string) (Tracking, error) {
+	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(trackingNo) == "" {
+		return Tracking{}, fmt.Errorf("%w: organization and tracking number are required", ErrValidation)
+	}
+	id, err := s.store.FindBookingByTrackingNo(ctx, orgID, strings.TrimSpace(trackingNo))
+	if err != nil {
+		return Tracking{}, err
+	}
+	return s.Tracking(ctx, orgID, id)
 }
 
 // RefreshOpenTracking polls every open (booked, undelivered) shipment

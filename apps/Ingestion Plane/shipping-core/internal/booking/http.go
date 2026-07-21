@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -105,6 +106,7 @@ func Routes(r chi.Router, svc *Service, store *Store) {
 	r.Get("/api/bookings/{id}/customs-document", customsDocHandler(store))
 	r.Post("/api/bookings/{id}/pickup", pickupHandler(svc))
 	r.Get("/api/bookings/{id}/tracking", trackingHandler(svc))
+	r.Get("/api/tracking/{trackingNo}", trackingNumberHandler(svc))
 	r.Get("/api/bookings/{id}/audit", auditHandler(store))
 	r.Post("/api/manifests", manifestHandler(svc))
 	r.Get("/api/manifests/{id}/document", manifestDocHandler(store))
@@ -344,6 +346,26 @@ func trackingHandler(svc *Service) http.HandlerFunc {
 			return
 		}
 		tracking, err := svc.Tracking(r.Context(), principal.OrganizationID, chi.URLParam(r, "id"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, tracking)
+	}
+}
+
+func trackingNumberHandler(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := verifiedPrincipal(w, r)
+		if !ok {
+			return
+		}
+		trackingNo := strings.TrimSpace(chi.URLParam(r, "trackingNo"))
+		if trackingNo == "" || len(trackingNo) > 120 || strings.ContainsAny(trackingNo, "/\r\n") {
+			writeErr(w, fmt.Errorf("%w: tracking number is invalid", ErrValidation))
+			return
+		}
+		tracking, err := svc.TrackingByNumber(r.Context(), principal.OrganizationID, trackingNo)
 		if err != nil {
 			writeErr(w, err)
 			return
