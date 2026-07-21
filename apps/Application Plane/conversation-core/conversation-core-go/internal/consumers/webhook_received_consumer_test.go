@@ -216,6 +216,31 @@ func TestWebhookReceived_MessengerMessage_StoresInboundEvent(t *testing.T) {
 	}
 }
 
+func TestWebhookReceived_UnifiedMetaMessenger_StoresWithEventConnection(t *testing.T) {
+	fetcher := &fakeWebhookFetcher{
+		payloads: map[string]map[string]any{"meta-1": decodePayload(t, messengerMessagePayload)},
+	}
+	ingester := &fakeIngester{}
+	c := &WebhookReceivedConsumer{fetcher: fetcher, ingester: ingester}
+
+	ev := ingestionEvent{
+		OrganizationID: "org-meta",
+		ConnectionID:   "conn-meta",
+		ProviderKey:    "meta",
+		Data:           map[string]any{"webhookEventId": "meta-1"},
+	}
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if ingester.count() != 1 {
+		t.Fatalf("IngestEvent called %d times, want 1", ingester.count())
+	}
+	event := ingester.events[0]
+	if event.Provider != "messenger" || event.ConnectionID != "conn-meta" {
+		t.Fatalf("stored unified Meta event = %+v", event)
+	}
+}
+
 func TestWebhookReceived_StatusOnlyPayload_AcksWithoutStoring(t *testing.T) {
 	fetcher := &fakeWebhookFetcher{payloads: map[string]map[string]any{"wh-3": decodePayload(t, whatsAppStatusPayload)}}
 	ingester := &fakeIngester{}
@@ -377,6 +402,24 @@ func TestNormalize_PageObject_StaysMessenger(t *testing.T) {
 	}
 }
 
+func TestNormalizeMetaSkipsMessengerAndInstagramEchoes(t *testing.T) {
+	for _, object := range []string{"page", "instagram"} {
+		t.Run(object, func(t *testing.T) {
+			payload := metaMessagingPayload(object, "account-1", "sender-1", "our reply")
+			entry := payload["entry"].([]any)[0].(map[string]any)
+			item := entry["messaging"].([]any)[0].(map[string]any)
+			item["message"].(map[string]any)["is_echo"] = true
+			events, err := normalizeMetaWebhookPayload(payload)
+			if err != nil {
+				t.Fatalf("normalizeMetaWebhookPayload: %v", err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("events = %+v, want outbound echo skipped", events)
+			}
+		})
+	}
+}
+
 func TestNormalize_UnknownObject_FallsBackToShapeSniffing(t *testing.T) {
 	payload := metaMessagingPayload("", "page-1", "psid-1", "hello")
 	delete(payload, "object")
@@ -499,8 +542,8 @@ func TestNormalizeSlack_ThreadedMessageCompositeRef(t *testing.T) {
 
 func TestNormalizeSlack_SkipsBotEchoesAndSubtypes(t *testing.T) {
 	for name, payload := range map[string]string{
-		"bot echo": slackBotEchoPayload,
-		"edited":   slackEditedPayload,
+		"bot echo":  slackBotEchoPayload,
+		"edited":    slackEditedPayload,
 		"handshake": `{"type": "url_verification", "challenge": "abc"}`,
 	} {
 		events, err := normalizeSlackWebhookPayload(decodePayload(t, payload))

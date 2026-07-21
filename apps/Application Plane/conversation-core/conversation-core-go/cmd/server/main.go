@@ -53,6 +53,29 @@ func main() {
 		publisher = eventPublisher
 	}
 
+	// Shared Control-Plane broker client: a SECOND, narrowly-scoped
+	// connection (identity "conversation-core-gdpr") to control-shared-nats,
+	// kept separate from natsClient (the Application-Plane-local broker
+	// above) so the cross-plane GDPR org-erasure consumer never shares a
+	// credential/permission surface with plane-local traffic. Optional — an
+	// unset CONVERSATION_GDPR_SHARED_NATS_URL disables only the org-erasure
+	// consumer, mirroring the tolerant natsClient construction above.
+	var sharedNatsClient *appnats.Client
+	if cfg.SharedNATSURL != "" {
+		sharedNatsClient, err = appnats.NewClient(appnats.Config{
+			URL: cfg.SharedNATSURL, User: cfg.SharedNATSUser, Password: cfg.SharedNATSPassword,
+			InboxPrefix: "_INBOX.CONVERSATION_CORE_GDPR", Name: cfg.ServiceName + "-gdpr",
+		})
+		if err != nil {
+			log.Printf("conversation-core-go: shared-broker NATS disabled (org-erasure consumer will not run): %v", err)
+			sharedNatsClient = nil
+		} else {
+			defer sharedNatsClient.Close()
+		}
+	} else {
+		log.Printf("conversation-core-go: CONVERSATION_GDPR_SHARED_NATS_URL unset — org-erasure consumer disabled")
+	}
+
 	repository := conversation.NewRepository(db.Pool)
 
 	// Outbound client to integration-corev2, shared by the draft.reply act-leg
@@ -93,11 +116,32 @@ func main() {
 	// sent" in the Inbox reflects a real delivery. When unconfigured, replies are
 	// stored without a false send claim. Only wire the sender when a real client
 	// exists — passing a typed-nil would make the Service attempt (and fail) sends.
-	serviceOpts := []conversation.Option{}
+	// Mirrors every feedback submission into the team's own monitored org so
+	// external-pilot-org feedback stays visible (see
+	// conversation.Service.mirrorFeedback). Always registered -- an empty
+	// FeedbackMirrorOrgID disables mirroring inside the Service itself.
+	serviceOpts := []conversation.Option{
+		conversation.WithFeedbackMirrorOrgID(cfg.FeedbackMirrorOrgID),
+	}
+	if cfg.FeedbackMirrorOrgID != "" {
+		log.Printf("conversation-core-go: feedback mirroring enabled into org %s", cfg.FeedbackMirrorOrgID)
+	} else {
+		log.Printf("conversation-core-go: FEEDBACK_MIRROR_ORG_ID unset -- feedback mirroring disabled")
+	}
 	if integrationClient != nil {
 		serviceOpts = append(serviceOpts, conversation.WithSender(integrationClient))
 	}
 	service := conversation.NewService(repository, publisher, serviceOpts...)
+
+	// Stuck-send sweep for the review-approve-send path: periodically flips any
+	// outbound intent that has sat in `sending` past cfg.OutboundReconcileStaleAfter
+	// to `unknown` for operator reconciliation (see
+	// conversation.Service.ReconcileStaleOutboundIntents). Runs unconditionally —
+	// it only ever touches conversation-core's own ledger, never a provider — so
+	// it is not gated on NATS or the integration client being configured.
+	reconciler := consumers.NewOutboundIntentReconciler(service, cfg.OutboundReconcileInterval, cfg.OutboundReconcileStaleAfter)
+	reconciler.Start(ctx)
+	defer reconciler.Stop()
 
 	// W4 HITL executor: when a human approves an action, promote the ticket
 	// (ticket.classification) or send the reply (draft.reply). Only runs when
@@ -132,6 +176,22 @@ func main() {
 			}
 		} else {
 			log.Printf("conversation-core-go: webhook-received consumer disabled (no integration client)")
+		}
+	}
+
+	// Cross-plane GDPR erasure fan-out: org-core publishes
+	// velion.gdpr.erasure.requested (explicit hard-delete AND its 30-day
+	// auto-purge cron) on the shared Control-Plane bus; this hard-purges
+	// every conversation_* row conversation-core holds for that org. Runs on
+	// the dedicated shared-broker client (conversation-core-gdpr identity)
+	// constructed above — independent of natsClient/publisher, since this
+	// consumer never touches the Application-Plane-local broker.
+	if sharedNatsClient != nil {
+		orgErasureConsumer := consumers.NewOrgErasureConsumer(sharedNatsClient.JS, service)
+		if err := orgErasureConsumer.Start(ctx); err != nil {
+			log.Printf("conversation-core-go: org-erasure consumer: %v", err)
+		} else {
+			defer orgErasureConsumer.Stop()
 		}
 	}
 

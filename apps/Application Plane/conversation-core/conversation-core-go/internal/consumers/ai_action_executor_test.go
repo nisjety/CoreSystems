@@ -380,6 +380,43 @@ func TestProcess_ApprovedTicketClassification_PromotesRoutesAndEmits(t *testing.
 	}
 }
 
+// TestProcess_ApprovedTicketClassification_PromotesReviewerEditedFields proves
+// the read side of the edited-fields fix: repository.ReviewAIAction merges a
+// reviewer's overrides into payload.suggested_fields atomically with the
+// approve UPDATE (verified separately at the repository layer). This test
+// simulates exactly that post-merge payload -- reviewer changed category
+// (billing -> sales) and priority (high -> urgent), left team_id untouched --
+// and confirms the executor's fresh GetAIAction read surfaces it to promote()
+// with zero changes to ai_action_executor.go: promote() has no notion of
+// "edited" vs "AI original", it just applies whatever suggested_fields holds.
+func TestProcess_ApprovedTicketClassification_PromotesReviewerEditedFields(t *testing.T) {
+	exec, store, tickets, _ := fixture()
+	store.action.Payload = map[string]any{
+		"suggested_fields": map[string]any{
+			"category": "sales",
+			"priority": "urgent",
+			"team_id":  "team-fin",
+		},
+	}
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if tickets.count() != 1 {
+		t.Fatalf("UpdateTicket called %d times, want 1", tickets.count())
+	}
+	upd := tickets.updates[0]
+	if upd.Category == nil || *upd.Category != "sales" {
+		t.Errorf("reviewer-edited category not applied: %+v", upd.Category)
+	}
+	if upd.Priority == nil || *upd.Priority != "urgent" {
+		t.Errorf("reviewer-edited priority not applied: %+v", upd.Priority)
+	}
+	if upd.TeamID == nil || *upd.TeamID != "team-fin" {
+		t.Errorf("untouched routing field changed unexpectedly: %+v", upd.TeamID)
+	}
+}
+
 func TestProcess_DuplicateDelivery_AppliesOnce(t *testing.T) {
 	exec, _, tickets, pub := fixture()
 	ev := reviewedEvent("org-1", "act-1", "approved")

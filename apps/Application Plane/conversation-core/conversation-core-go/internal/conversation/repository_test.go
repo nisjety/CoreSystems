@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,18 +22,28 @@ type fakeTx struct {
 	execResults []pgconn.CommandTag
 	execErrors  []error
 	execSQL     []string
+	execArgs    [][]any
 	execCalls   int
 	queryRows   []pgx.Row
 	querySQL    []string
 	queryCalls  int
 	committed   bool
 	rolledBack  bool
+	// multiQueryRows/multiQueryErr back Query (plural), used by statements
+	// that RETURNING multiple rows (e.g. ReconcileStaleOutboundIntents' bulk
+	// UPDATE); QueryRow (singular, above) is unaffected.
+	multiQueryRows  pgx.Rows
+	multiQueryErr   error
+	multiQuerySQL   []string
+	multiQueryArgs  [][]any
+	multiQueryCalls int
 }
 
-func (t *fakeTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+func (t *fakeTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	i := t.execCalls
 	t.execCalls++
 	t.execSQL = append(t.execSQL, sql)
+	t.execArgs = append(t.execArgs, args)
 	var tag pgconn.CommandTag
 	if i < len(t.execResults) {
 		tag = t.execResults[i]
@@ -43,8 +54,84 @@ func (t *fakeTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTa
 	return tag, nil
 }
 
+func TestReconcileTeamsConversationMetadataUsesCounterpart(t *testing.T) {
+	tx := &fakeTx{}
+	event := InboundEvent{
+		OrgID:     "org_1",
+		Provider:  "teams",
+		Direction: DirectionOutbound,
+		Subject:   "Robert Røsten",
+		From:      ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@aquatiq.com"},
+		To:        []ParticipantInput{{Name: "Robert Røsten", Email: "robert@example.com"}},
+	}
+
+	if err := reconcileTeamsConversationMetadata(t.Context(), tx, event, "conv_1"); err != nil {
+		t.Fatalf("reconcileTeamsConversationMetadata: %v", err)
+	}
+	if len(tx.execSQL) != 2 {
+		t.Fatalf("Exec calls = %d, want contact upsert and conversation repair", len(tx.execSQL))
+	}
+	if !strings.Contains(tx.execSQL[1], "title IN ('', '(chat)', 'Re: (chat)')") {
+		t.Fatalf("conversation repair does not replace placeholder titles:\n%s", tx.execSQL[1])
+	}
+	if got := tx.execArgs[0][2]; got != "Robert Røsten" {
+		t.Fatalf("contact name = %v, want Teams counterpart", got)
+	}
+	if got := tx.execArgs[0][3]; got != "robert@example.com" {
+		t.Fatalf("contact email = %v, want Teams counterpart", got)
+	}
+}
+
+func TestReconcileTeamsMessageMetadataMarksSelfAsAgent(t *testing.T) {
+	tx := &fakeTx{}
+	event := InboundEvent{
+		OrgID:     "org_1",
+		Provider:  "teams",
+		Direction: DirectionOutbound,
+		From:      ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@aquatiq.com"},
+	}
+
+	if err := reconcileTeamsMessageMetadata(t.Context(), tx, event, "msg_1"); err != nil {
+		t.Fatalf("reconcileTeamsMessageMetadata: %v", err)
+	}
+	if len(tx.execSQL) != 1 || !strings.Contains(tx.execSQL[0], "sender_type = $4") {
+		t.Fatalf("message repair SQL = %q, want sender ownership update", tx.execSQL)
+	}
+	if got := tx.execArgs[0][2]; got != DirectionOutbound {
+		t.Fatalf("direction = %v, want outbound", got)
+	}
+	if got := tx.execArgs[0][3]; got != "agent" {
+		t.Fatalf("sender type = %v, want agent", got)
+	}
+}
+
+func TestStoredEventAuditTypeUsesMessageSentForOutboundHistory(t *testing.T) {
+	if got := storedEventAuditType(InboundEvent{Direction: DirectionOutbound}, false); got != "message.sent" {
+		t.Fatalf("audit type = %q, want message.sent", got)
+	}
+	if got := storedEventAuditType(InboundEvent{Direction: DirectionInbound}, false); got != "message.received" {
+		t.Fatalf("audit type = %q, want message.received", got)
+	}
+	if got := storedEventAuditType(InboundEvent{Direction: DirectionOutbound}, true); got != "conversation.created" {
+		t.Fatalf("created audit type = %q, want conversation.created", got)
+	}
+}
+
 func (t *fakeTx) Commit(_ context.Context) error   { t.committed = true; return nil }
 func (t *fakeTx) Rollback(_ context.Context) error { t.rolledBack = true; return nil }
+
+func (t *fakeTx) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	t.multiQueryCalls++
+	t.multiQuerySQL = append(t.multiQuerySQL, sql)
+	t.multiQueryArgs = append(t.multiQueryArgs, args)
+	if t.multiQueryErr != nil {
+		return nil, t.multiQueryErr
+	}
+	if t.multiQueryRows != nil {
+		return t.multiQueryRows, nil
+	}
+	return &fakeRows{}, nil
+}
 
 func (t *fakeTx) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
 	i := t.queryCalls
@@ -87,6 +174,33 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
+// fakeRows implements pgx.Rows over a fixed slice of fakeRow values so a
+// multi-row RETURNING statement (e.g. ReconcileStaleOutboundIntents) can be
+// unit-tested without a live database. Only Next/Scan/Err/Close are
+// exercised; the remaining pgx.Rows methods panic to prove they are not
+// reached on this path.
+type fakeRows struct {
+	values []fakeRow
+	index  int
+	err    error
+}
+
+func (r *fakeRows) Close()                                       {}
+func (r *fakeRows) Err() error                                   { return r.err }
+func (r *fakeRows) CommandTag() pgconn.CommandTag                { panic("unused") }
+func (r *fakeRows) FieldDescriptions() []pgconn.FieldDescription { panic("unused") }
+func (r *fakeRows) Next() bool {
+	if r.index >= len(r.values) {
+		return false
+	}
+	r.index++
+	return true
+}
+func (r *fakeRows) Scan(dest ...any) error { return r.values[r.index-1].Scan(dest...) }
+func (r *fakeRows) Values() ([]any, error) { panic("unused") }
+func (r *fakeRows) RawValues() [][]byte    { panic("unused") }
+func (r *fakeRows) Conn() *pgx.Conn        { panic("unused") }
+
 // fakePool implements PgxPool. Only Begin is exercised by ReviewAIAction; the
 // other methods panic to prove they are not reached on this path.
 type fakePool struct {
@@ -113,6 +227,55 @@ func (p *fakePool) QueryRow(context.Context, string, ...any) pgx.Row {
 }
 func (p *fakePool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	panic("unused")
+}
+
+func TestStoreInboundEventOnlyPromotesChronologicallyNewerMessages(t *testing.T) {
+	tx := &fakeTx{
+		queryRows: []pgx.Row{
+			fakeRow{err: pgx.ErrNoRows},
+			fakeRow{value: "conv_existing"},
+		},
+		execErrors: []error{nil, nil, nil, nil, nil, errors.New("stop after latest-message update")},
+	}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+	_, err := repo.StoreInboundEvent(t.Context(), InboundEvent{
+		OrgID: "org_1", ConnectionID: "conn_ms", Provider: "microsoft",
+		ProviderThreadID: "thread_1", ProviderMessageID: "message_old",
+		ProviderEventID: "event_old", IDempotencyKey: "microsoft:event_old",
+		Direction: DirectionInbound, Subject: "Old mail", BodyText: "older body",
+		From:       ParticipantInput{Name: "Customer", Email: "customer@example.com"},
+		OccurredAt: time.Date(2026, time.July, 18, 8, 0, 0, 0, time.UTC),
+	})
+	if err == nil {
+		t.Fatal("StoreInboundEvent error = nil, want sentinel after update")
+	}
+	if len(tx.execSQL) < 5 {
+		t.Fatalf("Exec calls = %d, want latest-message update", len(tx.execSQL))
+	}
+	latestUpdate := tx.execSQL[4]
+	if !strings.Contains(latestUpdate, "last_message_at IS NULL OR last_message_at <= $4") {
+		t.Fatalf("latest-message update can regress on older backfill:\n%s", latestUpdate)
+	}
+	if !strings.Contains(latestUpdate, "updated_at = GREATEST(updated_at, $4)") {
+		t.Fatalf("activity timestamp can regress on delayed backfill:\n%s", latestUpdate)
+	}
+}
+
+func TestPreviewTruncatesWithoutSplittingUTF8(t *testing.T) {
+	// 239 ASCII bytes followed by a three-byte rune crosses the old byte slice
+	// boundary at 240 and used to produce invalid UTF-8 for Postgres.
+	input := strings.Repeat("a", 239) + "€" + strings.Repeat("b", 20)
+	got := preview(input, "")
+
+	if !strings.HasSuffix(got, "€") {
+		t.Fatalf("preview suffix = %q, want complete multi-byte rune", got[len(got)-4:])
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("preview is invalid UTF-8: %q", got)
+	}
+	if runeCount := utf8.RuneCountInString(got); runeCount != 240 {
+		t.Fatalf("preview rune count = %d, want 240", runeCount)
+	}
 }
 
 // A review for an action that does not exist for the org (missing or foreign-org
@@ -205,6 +368,112 @@ func TestReviewAIActionCommitsWhenActionExists(t *testing.T) {
 	}
 	if !tx.committed {
 		t.Fatal("transaction not committed for an existing action")
+	}
+}
+
+// Approving with edited fields must merge only the caller-provided keys into
+// payload.suggested_fields, atomically with the status UPDATE (same Exec, same
+// transaction), so the executor's later fresh GetAIAction read observes the
+// reviewer's overrides.
+func TestReviewAIActionMergesEditedFieldsIntoSuggestedFieldsOnApprove(t *testing.T) {
+	tx := &fakeTx{execResults: []pgconn.CommandTag{
+		pgconn.NewCommandTag("UPDATE 1"),
+		pgconn.NewCommandTag("INSERT 0 1"),
+	}}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+
+	err := repo.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:        "org_1",
+		AIActionID:   "aiact_1",
+		ReviewerID:   "user_1",
+		Decision:     "approved",
+		EditedFields: map[string]string{"category": "sales", "priority": "urgent"},
+		OccurredAt:   time.Date(2026, time.July, 20, 8, 0, 0, 0, time.UTC),
+	})
+
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+	if tx.execCalls != 2 {
+		t.Fatalf("Exec called %d times, want 2 (UPDATE action + INSERT review row -- the merge rides the SAME UPDATE, not a third call)", tx.execCalls)
+	}
+	if !strings.Contains(tx.execSQL[0], "jsonb_set(payload, '{suggested_fields}'") {
+		t.Fatalf("UPDATE does not merge edited fields into suggested_fields:\n%s", tx.execSQL[0])
+	}
+	if !strings.Contains(tx.execSQL[0], "status = 'suggested'") {
+		t.Fatalf("UPDATE is no longer a compare-and-set from suggested state:\n%s", tx.execSQL[0])
+	}
+	editedFieldsArg, ok := tx.execArgs[0][5].(string)
+	if !ok {
+		t.Fatalf("edited-fields arg type = %T, want string", tx.execArgs[0][5])
+	}
+	if !strings.Contains(editedFieldsArg, `"category":"sales"`) || !strings.Contains(editedFieldsArg, `"priority":"urgent"`) {
+		t.Fatalf("edited-fields JSON = %s, want category and priority", editedFieldsArg)
+	}
+	if !tx.committed {
+		t.Fatal("transaction not committed for an approve with edited fields")
+	}
+}
+
+// Approving with no edited fields must leave payload untouched: the JSON arg
+// is the empty object and the SQL's own gate (<> '{}'::jsonb) turns the merge
+// into a no-op, so behavior is byte-for-byte identical to before edited-fields
+// support existed.
+func TestReviewAIActionNoEditedFieldsIsNoOpMerge(t *testing.T) {
+	tx := &fakeTx{execResults: []pgconn.CommandTag{
+		pgconn.NewCommandTag("UPDATE 1"),
+		pgconn.NewCommandTag("INSERT 0 1"),
+	}}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+
+	err := repo.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:      "org_1",
+		AIActionID: "aiact_1",
+		ReviewerID: "user_1",
+		Decision:   "approved",
+		OccurredAt: time.Date(2026, time.July, 20, 8, 0, 0, 0, time.UTC),
+	})
+
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+	editedFieldsArg, ok := tx.execArgs[0][5].(string)
+	if !ok {
+		t.Fatalf("edited-fields arg type = %T, want string", tx.execArgs[0][5])
+	}
+	if editedFieldsArg != "{}" {
+		t.Fatalf("edited-fields JSON = %s, want empty object for a no-edits approve", editedFieldsArg)
+	}
+	if !strings.Contains(tx.execSQL[0], "<> '{}'::jsonb") {
+		t.Fatalf("UPDATE does not gate the merge on non-empty edited fields:\n%s", tx.execSQL[0])
+	}
+}
+
+// Defense-in-depth: even if a reject somehow carried edited fields (the
+// service layer must never let that happen), the repository's merge is gated
+// on decision = 'approved' in the SQL itself, so a reject can never mutate
+// payload.suggested_fields.
+func TestReviewAIActionRejectNeverMergesEditedFieldsEvenIfPresent(t *testing.T) {
+	tx := &fakeTx{execResults: []pgconn.CommandTag{
+		pgconn.NewCommandTag("UPDATE 1"),
+		pgconn.NewCommandTag("INSERT 0 1"),
+	}}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+
+	err := repo.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:        "org_1",
+		AIActionID:   "aiact_1",
+		ReviewerID:   "user_1",
+		Decision:     "rejected",
+		EditedFields: map[string]string{"category": "sales"},
+		OccurredAt:   time.Date(2026, time.July, 20, 8, 0, 0, 0, time.UTC),
+	})
+
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+	if !strings.Contains(tx.execSQL[0], "WHEN $3 = 'approved'") {
+		t.Fatalf("UPDATE does not gate the merge on decision = 'approved':\n%s", tx.execSQL[0])
 	}
 }
 
@@ -664,10 +933,160 @@ func TestMarkOutboundIntentOutcomeValidatesAndResolvesTransitionRaces(t *testing
 	})
 }
 
+// staleOutboundIntentRow builds a fake RETURNING row shaped like a
+// conversation_outbound_intents record already flipped to `unknown` by
+// ReconcileStaleOutboundIntents's UPDATE — id/conversation/ai_action_id vary
+// per test case, everything else mirrors outboundIntentRow's fixture values.
+func staleOutboundIntentRow(id, conversationID, aiActionID string) fakeRow {
+	row := outboundIntentRow(OutboundIntentUnknown, "fp-"+id, "").(fakeRow)
+	row.values[0] = id
+	row.values[3] = conversationID
+	row.values[4] = aiActionID
+	row.values[18] = OutboundIntentErrorStaleSendingTimeout
+	return row
+}
+
+// The sweep must (1) run the bulk UPDATE...RETURNING against the reconciliation
+// index columns, (2) flip the linked AI action out of `approved` for every
+// reconciled row that carries one, (3) leave a plain human-reply row (no
+// ai_action_id) alone, and (4) commit.
+func TestReconcileStaleOutboundIntentsFlipsSendingRowsAndLinkedApprovedActions(t *testing.T) {
+	rows := &fakeRows{values: []fakeRow{
+		staleOutboundIntentRow("oi_ai", "conv_ai", "act_1"),
+		staleOutboundIntentRow("oi_human", "conv_human", ""),
+	}}
+	tx := &fakeTx{
+		multiQueryRows: rows,
+		execResults:    []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 1")},
+	}
+	reconciled, err := (&PGRepository{pool: &fakePool{tx: tx}}).ReconcileStaleOutboundIntents(t.Context(), 15*time.Minute)
+	if err != nil || !tx.committed {
+		t.Fatalf("ReconcileStaleOutboundIntents() = %v committed=%v", err, tx.committed)
+	}
+	if len(reconciled) != 2 {
+		t.Fatalf("reconciled = %#v, want 2", reconciled)
+	}
+	if reconciled[0].Status != OutboundIntentUnknown || reconciled[0].ErrorCode != OutboundIntentErrorStaleSendingTimeout {
+		t.Fatalf("reconciled[0] = %#v, want status/error_code unknown/%s", reconciled[0], OutboundIntentErrorStaleSendingTimeout)
+	}
+	if len(tx.multiQuerySQL) != 1 ||
+		!strings.Contains(tx.multiQuerySQL[0], "status = 'sending'") ||
+		!strings.Contains(tx.multiQuerySQL[0], "make_interval") {
+		t.Fatalf("sweep SQL = %#v, want a status='sending'/make_interval RETURNING sweep", tx.multiQuerySQL)
+	}
+	if tx.execCalls != 1 {
+		t.Fatalf("Exec called %d times, want exactly 1 (only the row with an ai_action_id)", tx.execCalls)
+	}
+	if !strings.Contains(tx.execSQL[0], "conversation_ai_actions") || !strings.Contains(tx.execSQL[0], "status = 'approved'") {
+		t.Fatalf("linked action update SQL = %q", tx.execSQL[0])
+	}
+	if len(tx.execArgs[0]) != 2 || tx.execArgs[0][1] != "act_1" {
+		t.Fatalf("linked action update args = %v, want [org_1 act_1]", tx.execArgs[0])
+	}
+}
+
+// staleAfter must be positive: zero or negative would match every `sending`
+// row unconditionally (updated_at < NOW() is always true), reconciling
+// send attempts still legitimately in flight. This must fail closed before
+// ever touching the pool.
+func TestReconcileStaleOutboundIntentsRejectsNonPositiveStaleAfter(t *testing.T) {
+	for _, staleAfter := range []time.Duration{0, -1 * time.Minute} {
+		_, err := (&PGRepository{pool: &fakePool{}}).ReconcileStaleOutboundIntents(t.Context(), staleAfter)
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("staleAfter=%v error = %v, want ErrInvalidInput", staleAfter, err)
+		}
+	}
+}
+
+func TestReconcileStaleOutboundIntentsRollsBackOnQueryFailure(t *testing.T) {
+	tx := &fakeTx{multiQueryErr: errors.New("update unavailable")}
+	_, err := (&PGRepository{pool: &fakePool{tx: tx}}).ReconcileStaleOutboundIntents(t.Context(), 15*time.Minute)
+	if err == nil || !tx.rolledBack || tx.committed {
+		t.Fatalf("error/rolledBack/committed = %v/%v/%v", err, tx.rolledBack, tx.committed)
+	}
+}
+
+func TestReconcileStaleOutboundIntentsRollsBackWhenLinkedActionUpdateFails(t *testing.T) {
+	rows := &fakeRows{values: []fakeRow{staleOutboundIntentRow("oi_ai", "conv_ai", "act_1")}}
+	tx := &fakeTx{multiQueryRows: rows, execErrors: []error{errors.New("update unavailable")}}
+	_, err := (&PGRepository{pool: &fakePool{tx: tx}}).ReconcileStaleOutboundIntents(t.Context(), 15*time.Minute)
+	if err == nil || !tx.rolledBack || tx.committed {
+		t.Fatalf("error/rolledBack/committed = %v/%v/%v", err, tx.rolledBack, tx.committed)
+	}
+}
+
 func TestGetMessageIsOrganizationScoped(t *testing.T) {
 	message, err := (&PGRepository{pool: &fakePool{queryRows: []pgx.Row{messageRow("msg_1")}}}).GetMessage(t.Context(), "org_1", "msg_1")
 	if err != nil || message.ID != "msg_1" || message.OrgID != "org_1" {
 		t.Fatalf("GetMessage() = %#v/%v", message, err)
+	}
+}
+
+// HardPurgeByOrg must bind every one of its DELETE statements to exactly the
+// target org's id and nothing else — that is the only thing standing between
+// a purge and touching another org's rows, so it is asserted for every
+// statement, not just a sample.
+func TestHardPurgeByOrgDeletesEveryOrgScopedTableBoundToOnlyThatOrg(t *testing.T) {
+	tx := &fakeTx{}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+
+	if err := repo.HardPurgeByOrg(context.Background(), "org_A"); err != nil {
+		t.Fatalf("HardPurgeByOrg() = %v, want nil", err)
+	}
+	if !tx.committed || tx.rolledBack {
+		t.Fatalf("committed=%v rolledBack=%v, want committed only", tx.committed, tx.rolledBack)
+	}
+	if len(tx.execSQL) != len(hardPurgeOrgQueries) {
+		t.Fatalf("Exec called %d times, want %d (one DELETE per org-scoped table)", len(tx.execSQL), len(hardPurgeOrgQueries))
+	}
+	for i, sql := range tx.execSQL {
+		if !strings.Contains(sql, "WHERE org_id = $1") {
+			t.Fatalf("statement %d is not org-scoped: %s", i, sql)
+		}
+		if len(tx.execArgs[i]) != 1 || tx.execArgs[i][0] != "org_A" {
+			t.Fatalf("statement %d args = %v, want exactly [org_A] -- a purge must never bind another org's id", i, tx.execArgs[i])
+		}
+	}
+}
+
+// NATS is at-least-once delivery: a redelivered erasure event re-runs the
+// purge for the same org. Every statement is a plain DELETE with no
+// compensating insert, so a second run must succeed identically to the
+// first (deleting zero rows the second time in a real database).
+func TestHardPurgeByOrgIsSafeToRunTwice(t *testing.T) {
+	for i := 0; i < 2; i++ {
+		tx := &fakeTx{}
+		repo := &PGRepository{pool: &fakePool{tx: tx}}
+		if err := repo.HardPurgeByOrg(context.Background(), "org_A"); err != nil {
+			t.Fatalf("run %d: HardPurgeByOrg() = %v, want nil", i, err)
+		}
+		if !tx.committed || tx.rolledBack {
+			t.Fatalf("run %d: committed=%v rolledBack=%v, want committed only", i, tx.committed, tx.rolledBack)
+		}
+	}
+}
+
+func TestHardPurgeByOrgRejectsBlankOrgID(t *testing.T) {
+	repo := &PGRepository{pool: &fakePool{}}
+	if err := repo.HardPurgeByOrg(context.Background(), "   "); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+}
+
+// A failure partway through the purge must roll back everything already
+// deleted in that transaction -- an org purge is all-or-nothing, never left
+// half-applied.
+func TestHardPurgeByOrgRollsBackAllStatementsOnFailure(t *testing.T) {
+	execErrors := make([]error, len(hardPurgeOrgQueries))
+	execErrors[len(hardPurgeOrgQueries)-1] = errors.New("delete unavailable")
+	tx := &fakeTx{execErrors: execErrors}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+
+	if err := repo.HardPurgeByOrg(context.Background(), "org_A"); err == nil {
+		t.Fatal("error = nil, want failure from the final statement")
+	}
+	if tx.committed || !tx.rolledBack {
+		t.Fatalf("committed=%v rolledBack=%v, want rollback on failure", tx.committed, tx.rolledBack)
 	}
 }
 

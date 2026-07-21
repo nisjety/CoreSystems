@@ -49,6 +49,11 @@ type tagBody struct {
 type reviewBody struct {
 	Decision string `json:"decision"`
 	Comment  string `json:"comment"`
+	// EditedFields is the frontend's exact wire shape (inbox-client.ts
+	// reviewAiAction): a flat object of up to a few optional string keys
+	// (category, intent, priority, ...) that overrides the AI's suggestion for
+	// only the keys present. Only ever sent alongside decision=approve.
+	EditedFields map[string]string `json:"edited_fields"`
 }
 
 type createAIActionBody struct {
@@ -860,6 +865,48 @@ func (h *Handler) PatchTicketChecklistItem(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": checklist})
 }
 
+type submitFeedbackBody struct {
+	BodyText       string `json:"body_text"`
+	FromName       string `json:"from_name"`
+	FromEmail      string `json:"from_email"`
+	IdempotencyKey string `json:"idempotency_key"`
+	// PageURL is the route the submitter was on in the SPA (e.g.
+	// "/inbox?view=mine"), sent on a best-effort basis by FeedbackWidget.tsx.
+	// Optional -- never validated as an authorization boundary.
+	PageURL string `json:"page_url"`
+}
+
+// SubmitFeedback lets any signed-in org member (owner/admin/member -- the
+// same "agents" write tier as AddMessage) drop a one-line friction report
+// from anywhere in the product. It lands as a new conversation in the org's
+// own Inbox, tagged conversation.FeedbackTag, and is mirrored into the
+// team's configured monitored org -- see conversation.Service.SubmitFeedback.
+func (h *Handler) SubmitFeedback(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body submitFeedbackBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	detail, err := h.service.SubmitFeedback(c.Request.Context(), conversation.FeedbackInput{
+		OrgID:          orgID,
+		ActorUserID:    actorUserID(c),
+		FromName:       body.FromName,
+		FromEmail:      body.FromEmail,
+		BodyText:       body.BodyText,
+		IdempotencyKey: body.IdempotencyKey,
+		PageURL:        body.PageURL,
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": detail})
+}
+
 func (h *Handler) IngestEvent(c *gin.Context) {
 	var event conversation.InboundEvent
 	if err := c.ShouldBindJSON(&event); err != nil {
@@ -876,7 +923,18 @@ func (h *Handler) IngestEvent(c *gin.Context) {
 		writeServiceError(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"data": result})
+	if result == nil || result.Detail == nil || result.Message == nil {
+		c.JSON(http.StatusInternalServerError, errorPayload("invalid_ingest_result", "Internal ingest result was incomplete."))
+		return
+	}
+	// Internal callers only need stable identifiers and creation state. Returning
+	// the full conversation transcript makes idempotent retries grow without
+	// bound and can exceed the bridge's acknowledgement limit for long threads.
+	c.JSON(http.StatusAccepted, gin.H{"data": gin.H{
+		"detail":  gin.H{"id": result.Detail.ID},
+		"message": gin.H{"id": result.Message.ID},
+		"created": result.Created,
+	}})
 }
 
 func (h *Handler) AddMessage(c *gin.Context) {
@@ -1091,12 +1149,13 @@ func (h *Handler) reviewAIAction(c *gin.Context, forcedDecision string) {
 		body.Decision = forcedDecision
 	}
 	if err := h.service.ReviewAIAction(c.Request.Context(), conversation.AIActionReview{
-		OrgID:      orgID,
-		AIActionID: c.Param("id"),
-		ReviewerID: actorUserID(c),
-		Decision:   body.Decision,
-		Comment:    body.Comment,
-		OccurredAt: time.Now().UTC(),
+		OrgID:        orgID,
+		AIActionID:   c.Param("id"),
+		ReviewerID:   actorUserID(c),
+		Decision:     body.Decision,
+		Comment:      body.Comment,
+		EditedFields: body.EditedFields,
+		OccurredAt:   time.Now().UTC(),
 	}); err != nil {
 		writeServiceError(c, err)
 		return
@@ -1116,6 +1175,12 @@ func listFilterFromRequest(c *gin.Context, orgID string) conversation.ListFilter
 	}
 	if state := c.Query("state"); filter.Status == "" && state != "" {
 		filter.Status = statusFromTab(state)
+	}
+	cursorID := strings.TrimSpace(c.Query("cursor_id"))
+	if cursorUpdated, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(c.Query("cursor_updated"))); err == nil && cursorID != "" {
+		cursorUpdated = cursorUpdated.UTC()
+		filter.CursorUpdated = &cursorUpdated
+		filter.CursorID = cursorID
 	}
 	return filter
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/channels"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/config"
+	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/delegation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/eventing"
@@ -56,6 +57,34 @@ func main() {
 		}
 		natsClient.Conn.Close()
 	}()
+
+	// Shared Control-Plane broker client: a SECOND, narrowly-scoped
+	// connection (identity "notification-core-gdpr") to control-shared-nats,
+	// kept separate from natsClient (the Application-Plane-local broker
+	// above) so the cross-plane org-deletion subscriber never shares a
+	// credential/permission surface with plane-local traffic. Optional — an
+	// unset NOTIFICATION_GDPR_SHARED_NATS_URL disables only the org-deletion
+	// subscriber.
+	var sharedNatsClient *natsclient.Client
+	if cfg.SharedNATSURL != "" {
+		sharedNatsClient, err = natsclient.NewClient(natsclient.Config{
+			URL: cfg.SharedNATSURL, User: cfg.SharedNATSUser, Password: cfg.SharedNATSPassword,
+			InboxPrefix: "_INBOX.NOTIFICATION_CORE_GDPR", Name: cfg.ServiceName + "-gdpr",
+		})
+		if err != nil {
+			log.Printf("notification-core: shared-broker NATS disabled (org-deletion subscriber will not run): %v", err)
+			sharedNatsClient = nil
+		} else {
+			defer func() {
+				if err := sharedNatsClient.Conn.Drain(); err != nil {
+					log.Printf("notification-core: shared nats drain error: %v", err)
+				}
+				sharedNatsClient.Conn.Close()
+			}()
+		}
+	} else {
+		log.Printf("notification-core: NOTIFICATION_GDPR_SHARED_NATS_URL unset — org-deletion subscriber disabled")
+	}
 
 	// ── Wiring ──────────────────────────────────────────────────────────
 	repository := notification.NewRepository(db.Pool)
@@ -158,9 +187,41 @@ func main() {
 	server := httpserver.NewServer(cfg.HTTPPort, handler, delegationVerifier)
 
 	// ── Shared bus consumers ────────────────────────────────────────────
-	// Shared-bus notification consumers remain off until workload-signed,
-	// revisioned authority events and subject ACLs are deployed.
-	log.Printf("notification-core: unsigned shared-bus consumers intentionally disabled")
+	// Most shared-bus notification consumers (ControlSessionSubscriber,
+	// SocialPublishFailedSubscriber, IdentitySyncSubscriber) remain off
+	// until workload-signed, revisioned authority events and subject ACLs
+	// are deployed — see internal/consumers/control_session.go.
+	//
+	// OrgDeletionSubscriber is started explicitly: the 30-day GDPR
+	// soft-delete/purge flow (org-core's owner-gated hardDeleteOrganization
+	// + PurgeDeletedOrganizations cron) needs member-facing pending/
+	// reminder/cancelled notifications live now. It carries the same
+	// unsigned-shared-bus exposure as the disabled consumers above until
+	// that hardening work lands.
+	log.Printf("notification-core: unsigned shared-bus consumers intentionally disabled (except org-deletion)")
+
+	// consumerCtx (not startupCtx, which is bounded to 15s) lives for the
+	// process lifetime — it's captured by the subscription's message
+	// handlers and used on every Accept call for as long as the service
+	// runs, not just at startup. consumerCancel is deferred AFTER
+	// orgDeletionSubscriber's Stop() below (not here) so that, on shutdown,
+	// defers run in the reverse order: cancel first (signalling the
+	// background retry goroutine to exit before it can call sub.Start again)
+	// and only then Stop — avoiding a Start/Stop race on the subscriber's
+	// subscription slice.
+	consumerCtx, consumerCancel := context.WithCancel(context.Background())
+
+	// Runs on the dedicated shared-broker client (notification-core-gdpr
+	// identity) constructed above — independent of natsClient, since this
+	// subscriber never touches the Application-Plane-local broker. Gated on
+	// sharedNatsClient being non-nil so an intentionally-unconfigured shared
+	// broker never reaches Start() at all.
+	if sharedNatsClient != nil {
+		orgDeletionSubscriber := consumers.NewOrgDeletionSubscriber(sharedNatsClient.JS, notificationService)
+		startOrgDeletionSubscriberWithRetry(consumerCtx, orgDeletionSubscriber)
+		defer orgDeletionSubscriber.Stop()
+	}
+	defer consumerCancel()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -184,4 +245,53 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+// orgDeletionSubscriberRetryInterval is how often
+// startOrgDeletionSubscriberWithRetry re-attempts binding the org-deletion
+// subscriber's three JetStream subscriptions after an initial failure.
+const orgDeletionSubscriberRetryInterval = 30 * time.Second
+
+// startOrgDeletionSubscriberWithRetry attempts sub.Start once synchronously.
+// A wiring gap (the shared-broker consumers not yet provisioned on
+// control-shared-nats, a transient connect failure, etc.) used to be fatal —
+// main() called log.Fatalf, crash-looping the entire notification-core
+// process on every deploy until the gap was closed. Instead this logs a
+// warning and keeps retrying in the background on a fixed interval until it
+// succeeds or ctx is cancelled, so a remaining wiring gap degrades
+// gracefully (org-deletion notifications simply stay unavailable) instead of
+// taking down the HTTP API and every other consumer.
+//
+// Shape mirrors session-core's supervise_background (Model Plane, Rust,
+// src/main.rs): log-warn-and-retry-with-sleep rather than fail startup — the
+// same non-fatal posture quarry-control's GDPR org-erasure consumer already
+// takes for the same class of "not yet provisioned" bind failure
+// (Ingestion Plane, cmd/control/main.go: warn and continue rather than
+// os.Exit). Unlike session-core's ever-restarting supervisor, Start binds a
+// one-time subscription rather than an ever-running loop, so this stops
+// retrying as soon as one attempt succeeds.
+func startOrgDeletionSubscriberWithRetry(ctx context.Context, sub *consumers.OrgDeletionSubscriber) {
+	if err := sub.Start(ctx); err == nil {
+		return
+	} else {
+		log.Printf("notification-core: org-deletion subscriber failed to start, will retry every %s in the background: %v", orgDeletionSubscriberRetryInterval, err)
+	}
+
+	go func() {
+		ticker := time.NewTicker(orgDeletionSubscriberRetryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := sub.Start(ctx); err != nil {
+					log.Printf("notification-core: org-deletion subscriber retry failed: %v", err)
+					continue
+				}
+				log.Printf("notification-core: org-deletion subscriber started successfully after retry")
+				return
+			}
+		}
+	}()
 }

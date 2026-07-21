@@ -29,6 +29,12 @@ const (
 	applicationEventsStream    = "VELION_APPLICATION"
 	applicationModelStream     = "VELION_MODEL"
 	applicationIngestionStream = "VELION_INGESTION"
+	// controlSharedStream carries platform-wide, cross-plane events published
+	// by Control-Plane services (e.g. org-core's GDPR erasure fan-out) that
+	// are not scoped to the application/model/ingestion namespaces. Mirrors
+	// documents-api-go's GDPR subscriber (Data Plane v2) and audit-core's
+	// provisioner (ControlSharedStreamName).
+	controlSharedStream = "AQENCIA_CONTROLPLANE"
 )
 
 func NewDurableConsumer(js nats.JetStreamContext, name string) *DurableConsumer {

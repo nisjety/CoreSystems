@@ -327,6 +327,9 @@ func normalizeMessengerEntry(entry map[string]any) []conversation.InboundEvent {
 			// delivery/read/postback events — not a message to store.
 			continue
 		}
+		if isTrue(message, "is_echo") {
+			continue
+		}
 		sender, _ := item["sender"].(map[string]any)
 		psid := stringFromMap(sender, "id")
 		text := strings.TrimSpace(stringFromMap(message, "text"))
@@ -367,6 +370,9 @@ func normalizeInstagramEntry(entry map[string]any) []conversation.InboundEvent {
 			// delivery/read/reaction events — not a message to store.
 			continue
 		}
+		if isTrue(message, "is_echo") {
+			continue
+		}
 		sender, _ := item["sender"].(map[string]any)
 		igsid := stringFromMap(sender, "id")
 		text := strings.TrimSpace(stringFromMap(message, "text"))
@@ -385,6 +391,11 @@ func normalizeInstagramEntry(entry map[string]any) []conversation.InboundEvent {
 		})
 	}
 	return events
+}
+
+func isTrue(m map[string]any, key string) bool {
+	value, _ := m[key].(bool)
+	return value
 }
 
 func stringFromMap(m map[string]any, key string) string {

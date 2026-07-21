@@ -413,6 +413,15 @@ services:
       # provider mutation. Only the matching public key leaves this service.
       CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
       CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID must match the integration-corev2 verifier key ring}
+      # Cross-plane GDPR org-erasure consumer: a SECOND, narrowly-scoped NATS
+      # identity (conversation-core-gdpr) on the shared Control-Plane broker,
+      # kept distinct from VELION_NATS_URL/NATS_USER/NATS_PASSWORD above
+      # (application-nats, the plane-local broker). Deliberately NOT named
+      # NATS_SHARED_URL — config.go's NATSURL fallback chain already treats
+      # that literal name as an alternate plane-local broker URL.
+      CONVERSATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
+      CONVERSATION_GDPR_SHARED_NATS_USER: conversation-core-gdpr
+      CONVERSATION_GDPR_SHARED_NATS_PASSWORD: ${CONVERSATION_CORE_GDPR_NATS_PASSWORD:?CONVERSATION_CORE_GDPR_NATS_PASSWORD is required}
     depends_on:
       jetstream-provisioner:
         condition: service_completed_successfully
@@ -753,6 +762,15 @@ services:
       NOTIFICATION_DELIVERY_MODE: ${NOTIFICATION_DELIVERY_MODE:-disabled}
       NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
       NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
+      # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
+      # identity (notification-core-gdpr) on the shared Control-Plane broker,
+      # kept distinct from NATS_URL/NATS_SHARED_URL/VELION_NATS_URL above,
+      # which this deployment deliberately points at the plane-local broker
+      # (see "priority 1/2 in Go config chain" comments) — reusing either of
+      # those names here would be neutralized by that existing wiring.
+      NOTIFICATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
+      NOTIFICATION_GDPR_SHARED_NATS_USER: notification-core-gdpr
+      NOTIFICATION_GDPR_SHARED_NATS_PASSWORD: ${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}
     depends_on:
       jetstream-provisioner:
         condition: service_completed_successfully

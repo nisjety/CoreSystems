@@ -72,6 +72,7 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	readers.GET("/sla-policies", handler.ListSLAPolicies)
 	readers.GET("/ai-actions", handler.ListAIActions)
 
+	agents.POST("/feedback", handler.SubmitFeedback)
 	agents.POST("/conversations/:id/ticket-classifications", handler.ClassifyConversationForTicket)
 	agents.POST("/conversations/:id/messages", handler.AddMessage)
 	agents.POST("/conversations/:id/notes", handler.AddNote)

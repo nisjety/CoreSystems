@@ -168,14 +168,76 @@ func channelLabel(channel string) string {
 // contact record. The returned kind is namespaced into the hash input so an
 // email and phone that happen to share literal text can't collide either.
 func contactIdentityKey(event InboundEvent) (key, kind string) {
-	if email := strings.TrimSpace(event.From.Email); email != "" {
+	participant := conversationContact(event)
+	if email := strings.TrimSpace(participant.Email); email != "" {
 		return strings.ToLower(email), "email"
 	}
-	if phone := strings.TrimSpace(event.From.Phone); phone != "" {
+	if phone := strings.TrimSpace(participant.Phone); phone != "" {
 		return phone, "phone"
 	}
-	ref := firstNonEmptyString(event.ProviderThreadID, event.ProviderEventID, event.From.Name)
+	ref := firstNonEmptyString(event.ProviderThreadID, event.ProviderEventID, participant.Name)
 	return event.Provider + ":" + ref, "ref"
+}
+
+func conversationContact(event InboundEvent) ParticipantInput {
+	if event.Direction == DirectionOutbound && len(event.To) > 0 {
+		return event.To[0]
+	}
+	return event.From
+}
+
+func upsertConversationContact(ctx context.Context, tx pgx.Tx, event InboundEvent) (string, error) {
+	contactKey, contactKeyKind := contactIdentityKey(event)
+	contact := conversationContact(event)
+	contactID := stableContactID(event.OrgID, contactKeyKind+":"+contactKey)
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_contacts (id, org_id, name, email, phone, updated_at)
+VALUES ($1, $2, $3, $4, $5, NOW())
+ON CONFLICT (id) DO UPDATE SET
+	name = COALESCE(NULLIF(EXCLUDED.name, ''), conversation_contacts.name),
+	email = COALESCE(NULLIF(EXCLUDED.email, ''), conversation_contacts.email),
+	phone = COALESCE(NULLIF(EXCLUDED.phone, ''), conversation_contacts.phone),
+	updated_at = NOW()`,
+		contactID, event.OrgID, contact.Name, contact.Email, contact.Phone); err != nil {
+		return "", err
+	}
+	return contactID, nil
+}
+
+func repairTeamsConversationMetadata(ctx context.Context, tx pgx.Tx, event InboundEvent, conversationID, contactID string) error {
+	_, err := tx.Exec(ctx, `
+UPDATE conversations
+SET contact_id = $3,
+	title = CASE
+		WHEN title IN ('', '(chat)', 'Re: (chat)') AND $4 NOT IN ('', '(chat)') THEN $4
+		ELSE title
+	END
+WHERE org_id = $1 AND id = $2`, event.OrgID, conversationID, contactID, event.Subject)
+	return err
+}
+
+func reconcileTeamsConversationMetadata(ctx context.Context, tx pgx.Tx, event InboundEvent, conversationID string) error {
+	contactID, err := upsertConversationContact(ctx, tx, event)
+	if err != nil {
+		return err
+	}
+	return repairTeamsConversationMetadata(ctx, tx, event, conversationID, contactID)
+}
+
+func reconcileTeamsMessageMetadata(ctx context.Context, tx pgx.Tx, event InboundEvent, messageID string) error {
+	senderType := "customer"
+	if event.Direction == DirectionOutbound {
+		senderType = "agent"
+	}
+	_, err := tx.Exec(ctx, `
+UPDATE conversation_messages
+SET direction = $3,
+	sender_type = $4,
+	sender_name = $5,
+	sender_email = $6
+WHERE org_id = $1 AND id = $2 AND provider = 'teams'`,
+		event.OrgID, messageID, event.Direction, senderType, event.From.Name, event.From.Email)
+	return err
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -202,7 +264,7 @@ func (r *PGRepository) StoreInboundEvent(ctx context.Context, event InboundEvent
 		}
 	}()
 
-	existing, err := findIdempotentResult(ctx, tx, event.OrgID, event.IDempotencyKey)
+	existing, err := findIdempotentResult(ctx, tx, event)
 	if err == nil {
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
@@ -229,17 +291,8 @@ ON CONFLICT (org_id, channel) DO UPDATE SET updated_at = NOW()`, inboxID, event.
 	// customers on non-email channels never collide on one contact record.
 	// stableContactID's output IS the row's primary key, so ON CONFLICT (id)
 	// upserts correctly regardless of which identity key produced it.
-	contactKey, contactKeyKind := contactIdentityKey(event)
-	contactID := stableContactID(event.OrgID, contactKeyKind+":"+contactKey)
-	if _, err := tx.Exec(ctx, `
-INSERT INTO conversation_contacts (id, org_id, name, email, phone, updated_at)
-VALUES ($1, $2, $3, $4, $5, NOW())
-ON CONFLICT (id) DO UPDATE SET
-	name = COALESCE(NULLIF(EXCLUDED.name, ''), conversation_contacts.name),
-	email = COALESCE(NULLIF(EXCLUDED.email, ''), conversation_contacts.email),
-	phone = COALESCE(NULLIF(EXCLUDED.phone, ''), conversation_contacts.phone),
-	updated_at = NOW()`,
-		contactID, event.OrgID, event.From.Name, event.From.Email, event.From.Phone); err != nil {
+	contactID, err := upsertConversationContact(ctx, tx, event)
+	if err != nil {
 		return nil, err
 	}
 
@@ -264,6 +317,11 @@ INSERT INTO conversations (
 		}
 		createdConversation = true
 	}
+	if event.Provider == "teams" {
+		if err := repairTeamsConversationMetadata(ctx, tx, event, conversationID, contactID); err != nil {
+			return nil, err
+		}
+	}
 
 	if event.ProviderThreadID != "" {
 		if _, err := tx.Exec(ctx, `
@@ -276,13 +334,17 @@ ON CONFLICT (org_id, provider, connection_id, provider_thread_id) DO NOTHING`,
 	}
 
 	messageID := newID("msg")
+	senderType := "customer"
+	if event.Direction == DirectionOutbound {
+		senderType = "agent"
+	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO conversation_messages (
 	id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
 	body_text, body_html, internal, provider, provider_message_id, provider_event_id,
 	occurred_at, created_at
-) VALUES ($1, $2, $3, $4, 'customer', $5, $6, $7, $8, FALSE, $9, $10, $11, $12, $12)`,
-		messageID, event.OrgID, conversationID, event.Direction, event.From.Name, event.From.Email,
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10, $11, $12, $13, $13)`,
+		messageID, event.OrgID, conversationID, event.Direction, senderType, event.From.Name, event.From.Email,
 		event.BodyText, event.BodyHTML, event.Provider, event.ProviderMessageID, event.ProviderEventID, event.OccurredAt); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -301,8 +363,9 @@ INSERT INTO conversation_messages (
 
 	if _, err := tx.Exec(ctx, `
 UPDATE conversations
-SET last_message_preview = $3, last_message_at = $4, updated_at = $4
-WHERE org_id = $1 AND id = $2`, event.OrgID, conversationID, preview(event.BodyText, event.BodyHTML), event.OccurredAt); err != nil {
+SET last_message_preview = $3, last_message_at = $4, updated_at = GREATEST(updated_at, $4)
+WHERE org_id = $1 AND id = $2
+  AND (last_message_at IS NULL OR last_message_at <= $4)`, event.OrgID, conversationID, preview(event.BodyText, event.BodyHTML), event.OccurredAt); err != nil {
 		return nil, err
 	}
 
@@ -313,10 +376,7 @@ ON CONFLICT (org_id, idempotency_key) DO NOTHING`, event.OrgID, event.IDempotenc
 		return nil, err
 	}
 
-	eventType := "message.received"
-	if createdConversation {
-		eventType = "conversation.created"
-	}
+	eventType := storedEventAuditType(event, createdConversation)
 	if err := insertAuditAndEvent(ctx, tx, event.OrgID, conversationID, "", eventType, map[string]any{
 		"message_id":        messageID,
 		"provider":          event.Provider,
@@ -324,18 +384,26 @@ ON CONFLICT (org_id, idempotency_key) DO NOTHING`, event.OrgID, event.IDempotenc
 	}); err != nil {
 		return nil, err
 	}
+	result, err := compactStoredEventResultFromTx(ctx, tx, event.OrgID, conversationID, messageID, true)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	committed = true
+	return result, nil
+}
 
-	detail, err := r.GetConversation(ctx, event.OrgID, conversationID)
-	if err != nil {
-		return nil, err
+func storedEventAuditType(event InboundEvent, createdConversation bool) string {
+	if createdConversation {
+		return "conversation.created"
 	}
-	message := findMessage(detail.Messages, messageID)
-	return &StoredEventResult{Detail: detail, Message: message, Created: true}, nil
+	if event.Direction == DirectionOutbound {
+		return "message.sent"
+	}
+	return "message.received"
 }
 
 func (r *PGRepository) AddMessage(ctx context.Context, input AddMessageInput) (*Message, error) {
@@ -683,6 +751,159 @@ WHERE org_id = $1 AND id = $2 AND status = 'approved'`, input.OrgID, input.AIAct
 	return nil
 }
 
+// ReconcileStaleOutboundIntents is the stuck-send sweep: 004_outbound_intents.sql
+// added conversation_outbound_intents_reconciliation_idx (org_id, status,
+// updated_at) specifically to support this query, but nothing executed it
+// until now. A row can be left `sending` forever if the process that claimed
+// it (ClaimOutboundIntent) crashes, is redeployed, or is OOM-killed before it
+// reaches FinalizeOutboundIntent or MarkOutboundIntentOutcome — that
+// permanently blocks the idempotency key and hides the failure from any
+// operator. This atomically flips every such row older than staleAfter to
+// `unknown` (never `retryable`: a `sending` row does not prove the provider
+// call never happened, so an automatic retry could double-send) and, in the
+// same transaction, flips its linked AI action out of `approved` — mirroring
+// exactly what MarkOutboundIntentOutcome already does for a live send
+// failure, so the HITL review queue never shows a permanently "approved"
+// action for a send that in fact never resolved.
+func (r *PGRepository) ReconcileStaleOutboundIntents(ctx context.Context, staleAfter time.Duration) ([]OutboundIntent, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	if staleAfter <= 0 {
+		return nil, fmt.Errorf("%w: reconciliation stale_after must be positive", ErrInvalidInput)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	rows, err := tx.Query(ctx, `
+UPDATE conversation_outbound_intents
+SET status = 'unknown', error_code = $1, updated_at = NOW()
+WHERE status = 'sending'
+  AND updated_at < NOW() - make_interval(secs => $2)
+RETURNING `+outboundIntentColumns, OutboundIntentErrorStaleSendingTimeout, staleAfter.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	reconciled := []OutboundIntent{}
+	for rows.Next() {
+		intent, scanErr := scanOutboundIntent(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		reconciled = append(reconciled, intent)
+	}
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return nil, rowsErr
+	}
+
+	for _, intent := range reconciled {
+		if intent.AIActionID == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE conversation_ai_actions
+SET status = 'unknown', updated_at = NOW()
+WHERE org_id = $1 AND id = $2 AND status = 'approved'`, intent.OrgID, intent.AIActionID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	committed = true
+	return reconciled, nil
+}
+
+// hardPurgeOrgQueries hard-deletes every conversation_* row scoped by org_id,
+// in dependency order (children before parents) so the purge never trips a
+// foreign-key constraint even without relying on ON DELETE CASCADE — in
+// particular, conversations must be deleted before conversation_inboxes,
+// which RESTRICTs deletion of an inbox still referenced by a conversation.
+// Every statement is a plain `DELETE ... WHERE org_id = $1`, bound to exactly
+// one org: idempotent by construction (a redelivered erasure event — NATS is
+// at-least-once — deletes zero rows the second time) and impossible to widen
+// into touching another org's rows.
+var hardPurgeOrgQueries = []string{
+	"DELETE FROM conversation_ticket_checklist_items WHERE org_id = $1",
+	"DELETE FROM conversation_ticket_checklists WHERE org_id = $1",
+	"DELETE FROM conversation_ticket_macro_runs WHERE org_id = $1",
+	"DELETE FROM conversation_linked_resources WHERE org_id = $1",
+	"DELETE FROM conversation_ai_reviews WHERE org_id = $1",
+	"DELETE FROM conversation_ai_action_sends WHERE org_id = $1",
+	"DELETE FROM conversation_outbound_intents WHERE org_id = $1",
+	"DELETE FROM conversation_ai_actions WHERE org_id = $1",
+	"DELETE FROM conversation_channel_thread_refs WHERE org_id = $1",
+	"DELETE FROM conversation_sla_states WHERE org_id = $1",
+	"DELETE FROM conversation_tag_links WHERE org_id = $1",
+	"DELETE FROM conversation_attachments WHERE org_id = $1",
+	"DELETE FROM conversation_messages WHERE org_id = $1",
+	"DELETE FROM conversation_participants WHERE org_id = $1",
+	"DELETE FROM conversation_tickets WHERE org_id = $1",
+	"DELETE FROM conversation_idempotency_keys WHERE org_id = $1",
+	"DELETE FROM conversation_audit_events WHERE org_id = $1",
+	"DELETE FROM conversation_events WHERE org_id = $1",
+	"DELETE FROM conversations WHERE org_id = $1",
+	"DELETE FROM conversation_tags WHERE org_id = $1",
+	"DELETE FROM conversation_contacts WHERE org_id = $1",
+	"DELETE FROM conversation_inboxes WHERE org_id = $1",
+	"DELETE FROM conversation_ticket_views WHERE org_id = $1",
+	"DELETE FROM conversation_ticket_macros WHERE org_id = $1",
+	"DELETE FROM conversation_ticket_automation_rules WHERE org_id = $1",
+	"DELETE FROM conversation_sla_policies WHERE org_id = $1",
+	"DELETE FROM conversation_ticket_checklist_templates WHERE org_id = $1",
+}
+
+// HardPurgeByOrg permanently deletes every row this service holds for orgID,
+// across every conversation_* table (conversations, messages, tickets,
+// AI actions/reviews, outbound intents, tags, macros, SLA policies, ...). It
+// is the conversation-core half of the cross-plane GDPR erasure fan-out
+// (velion.gdpr.erasure.requested, published by org-core's explicit
+// hard-delete path AND its 30-day auto-purge cron) — see
+// consumers.OrgErasureConsumer. Every statement in hardPurgeOrgQueries binds
+// only orgID, so a purge can never touch another org's rows, and the whole
+// set commits as one transaction so a purge is never left half-applied.
+func (r *PGRepository) HardPurgeByOrg(ctx context.Context, orgID string) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	for _, query := range hardPurgeOrgQueries {
+		if _, err := tx.Exec(ctx, query, orgID); err != nil {
+			return fmt.Errorf("hard purge org %s: %w", orgID, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func boundedOutboundErrorCode(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 64 {
@@ -795,10 +1016,28 @@ func (r *PGRepository) ReviewAIAction(ctx context.Context, input AIActionReview)
 			_ = tx.Rollback(ctx)
 		}
 	}()
+	// The payload merge is expressed as part of THIS same compare-and-set UPDATE
+	// so a reviewer's edited fields land atomically with the decision: either
+	// both the status flip and the suggested_fields merge commit together, or
+	// neither does. The merge itself is double-gated even though the service
+	// layer already whitelist-filters and decision-gates EditedFields: it only
+	// ever applies when decision = 'approved' (a reject can never mutate
+	// payload, even if a caller bypassed the service layer), and only when the
+	// edited-fields JSON is non-empty (an approve with no edits is a pure
+	// no-op merge, leaving payload byte-for-byte identical to today).
 	tag, err := tx.Exec(ctx, `
 UPDATE conversation_ai_actions
-SET status = $3, reviewed_by = $4, reviewed_at = $5, updated_at = $5
-WHERE org_id = $1 AND id = $2 AND status = 'suggested'`, input.OrgID, input.AIActionID, input.Decision, input.ReviewerID, input.OccurredAt)
+SET status = $3,
+    reviewed_by = $4,
+    reviewed_at = $5,
+    updated_at = $5,
+    payload = CASE
+        WHEN $3 = 'approved' AND $6::jsonb <> '{}'::jsonb
+            THEN jsonb_set(payload, '{suggested_fields}', COALESCE(payload->'suggested_fields', '{}'::jsonb) || $6::jsonb, true)
+        ELSE payload
+    END
+WHERE org_id = $1 AND id = $2 AND status = 'suggested'`,
+		input.OrgID, input.AIActionID, input.Decision, input.ReviewerID, input.OccurredAt, mustJSONStringMap(input.EditedFields))
 	if err != nil {
 		return err
 	}
@@ -2322,22 +2561,26 @@ func ticketSLAState(ticket Ticket) string {
 	return "ok"
 }
 
-func findIdempotentResult(ctx context.Context, tx pgx.Tx, orgID, key string) (*StoredEventResult, error) {
+func findIdempotentResult(ctx context.Context, tx pgx.Tx, event InboundEvent) (*StoredEventResult, error) {
 	var conversationID, messageID string
 	if err := tx.QueryRow(ctx, `
 SELECT outcome_conversation_id, outcome_message_id
 FROM conversation_idempotency_keys
-WHERE org_id = $1 AND idempotency_key = $2`, orgID, key).Scan(&conversationID, &messageID); err != nil {
+WHERE org_id = $1 AND idempotency_key = $2`, event.OrgID, event.IDempotencyKey).Scan(&conversationID, &messageID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	detail, err := detailFromTx(ctx, tx, orgID, conversationID)
-	if err != nil {
-		return nil, err
+	if event.Provider == "teams" {
+		if err := reconcileTeamsConversationMetadata(ctx, tx, event, conversationID); err != nil {
+			return nil, err
+		}
+		if err := reconcileTeamsMessageMetadata(ctx, tx, event, messageID); err != nil {
+			return nil, err
+		}
 	}
-	return &StoredEventResult{Detail: detail, Message: findMessage(detail.Messages, messageID), Created: false}, nil
+	return compactStoredEventResultFromTx(ctx, tx, event.OrgID, conversationID, messageID, false)
 }
 
 func findByProviderMessage(ctx context.Context, tx pgx.Tx, event InboundEvent) (*StoredEventResult, error) {
@@ -2348,11 +2591,37 @@ FROM conversation_messages
 WHERE org_id = $1 AND provider = $2 AND provider_message_id = $3`, event.OrgID, event.Provider, event.ProviderMessageID).Scan(&conversationID, &messageID); err != nil {
 		return nil, err
 	}
-	detail, err := detailFromTx(ctx, tx, event.OrgID, conversationID)
+	return compactStoredEventResultFromTx(ctx, tx, event.OrgID, conversationID, messageID, false)
+}
+
+func compactStoredEventResultFromTx(ctx context.Context, tx pgx.Tx, orgID, conversationID, messageID string, created bool) (*StoredEventResult, error) {
+	row := tx.QueryRow(ctx, `
+SELECT
+	c.id, c.org_id, c.inbox_id, c.title, c.status, c.priority, c.channel,
+	c.provider, c.provider_thread_id, c.assignee_user_id, c.assignee_name,
+	c.last_message_preview, c.last_message_at, c.created_at, c.updated_at,
+	COALESCE(ct.id, ''), COALESCE(ct.name, ''), COALESCE(ct.email, ''), COALESCE(ct.phone, '')
+FROM conversations c
+LEFT JOIN conversation_contacts ct ON ct.id = c.contact_id
+WHERE c.org_id = $1 AND c.id = $2`, orgID, conversationID)
+	summary, err := scanConversationSummary(row)
 	if err != nil {
 		return nil, err
 	}
-	return &StoredEventResult{Detail: detail, Message: findMessage(detail.Messages, messageID), Created: false}, nil
+	messageRow := tx.QueryRow(ctx, `
+SELECT id, org_id, conversation_id, direction, sender_type, sender_name, sender_email,
+	body_text, body_html, internal, provider, provider_message_id, provider_event_id, occurred_at, created_at
+FROM conversation_messages
+WHERE org_id = $1 AND conversation_id = $2 AND id = $3`, orgID, conversationID, messageID)
+	message, err := scanMessage(messageRow)
+	if err != nil {
+		return nil, err
+	}
+	return &StoredEventResult{
+		Detail:  &ConversationDetail{ConversationSummary: summary},
+		Message: message,
+		Created: created,
+	}, nil
 }
 
 func detailFromTx(ctx context.Context, tx pgx.Tx, orgID, conversationID string) (*ConversationDetail, error) {
@@ -2443,8 +2712,9 @@ func preview(text, html string) string {
 		value = strings.TrimSpace(html)
 	}
 	value = strings.Join(strings.Fields(value), " ")
-	if len(value) > 240 {
-		return value[:240]
+	runes := []rune(value)
+	if len(runes) > 240 {
+		return string(runes[:240])
 	}
 	return value
 }
@@ -2475,6 +2745,20 @@ func createdBy(actorUserID string) string {
 
 func mustJSON(value map[string]any) string {
 	if value == nil {
+		return "{}"
+	}
+	bytes, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(bytes)
+}
+
+// mustJSONStringMap marshals a reviewer's edited-fields map for the
+// suggested_fields merge in ReviewAIAction. An empty/nil map yields the empty
+// object, which the SQL's <> '{}'::jsonb gate treats as "nothing to merge".
+func mustJSONStringMap(value map[string]string) string {
+	if len(value) == 0 {
 		return "{}"
 	}
 	bytes, err := json.Marshal(value)

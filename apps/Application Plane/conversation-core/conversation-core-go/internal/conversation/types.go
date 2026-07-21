@@ -15,6 +15,22 @@ const (
 	DirectionInbound  = "inbound"
 	DirectionOutbound = "outbound"
 
+	// FeedbackProvider marks the synthetic inbound channel used by
+	// Service.SubmitFeedback -- a signed-in org member reporting friction from
+	// inside the product, not a real external provider. FeedbackTag is applied
+	// to every conversation it creates (in the submitter's own org, and again
+	// in the mirrored copy -- see Service.mirrorFeedback) so the Inbox can
+	// filter pilot feedback into its own queue instead of mixing it with
+	// customer traffic.
+	FeedbackProvider = "pilot-feedback"
+	FeedbackTag      = "pilot-feedback"
+	// FeedbackMirrorTag is applied ONLY to the mirrored copy of a feedback
+	// conversation (Service.mirrorFeedback), never to the submitter's own-org
+	// original. It lets a team member distinguish "feedback filed directly in
+	// our own org" from "feedback mirrored in from an external pilot org" at a
+	// glance, without having to read the body.
+	FeedbackMirrorTag = "cross-org-feedback"
+
 	SubjectConversationCreated = "velion.application.conversation.created"
 	SubjectConversationUpdated = "velion.application.conversation.updated"
 	SubjectMessageReceived     = "velion.application.conversation.message.received"
@@ -76,6 +92,15 @@ const (
 	OutboundIntentUnknown   = "unknown"
 )
 
+// OutboundIntentErrorStaleSendingTimeout is the error_code
+// ReconcileStaleOutboundIntents stamps on a `sending` row it flips to
+// `unknown` because it sat unresolved past the configured timeout (a crash or
+// lost process between ClaimOutboundIntent and
+// FinalizeOutboundIntent/MarkOutboundIntentOutcome). It is intentionally
+// distinct from the send-path error codes so operators can tell "we never
+// heard back" apart from a provider-reported failure.
+const OutboundIntentErrorStaleSendingTimeout = "stale_sending_timeout"
+
 type EventPublisher interface {
 	Publish(ctx context.Context, subject string, payload any) error
 }
@@ -89,6 +114,15 @@ type Repository interface {
 	ClaimOutboundIntent(ctx context.Context, input OutboundIntentClaimInput) (*OutboundIntentClaim, error)
 	FinalizeOutboundIntent(ctx context.Context, input OutboundIntentFinalizeInput) (*Message, error)
 	MarkOutboundIntentOutcome(ctx context.Context, input OutboundIntentOutcomeInput) error
+	// ReconcileStaleOutboundIntents atomically flips every outbound intent
+	// still `sending` after staleAfter to `unknown` and returns the reconciled
+	// rows. It is the stuck-send sweep for a claim that never reached
+	// FinalizeOutboundIntent or MarkOutboundIntentOutcome (process crash,
+	// deploy, OOM): without it such a row stays `sending` forever, silently
+	// blocking its idempotency key from ever being retried or reconciled. It
+	// never marks a row `retryable`, because a `sending` row does not prove
+	// the provider was never called — an automatic retry could double-send.
+	ReconcileStaleOutboundIntents(ctx context.Context, staleAfter time.Duration) ([]OutboundIntent, error)
 	GetMessage(ctx context.Context, orgID, messageID string) (*Message, error)
 	// GetChannelThreadRefByConversation resolves the outbound send target
 	// (provider/connection/thread) for a conversation, or ErrNotFound when the
@@ -125,6 +159,11 @@ type Repository interface {
 	UpdateSLAPolicy(ctx context.Context, input UpdateSLAPolicyInput) (*SLAPolicy, error)
 	CreateTicketChecklist(ctx context.Context, input CreateTicketChecklistInput) (*TicketChecklist, error)
 	UpdateTicketChecklistItem(ctx context.Context, input UpdateTicketChecklistItemInput) (*TicketChecklist, error)
+	// HardPurgeByOrg permanently deletes every conversation_* row for orgID.
+	// It is the conversation-core half of the cross-plane GDPR erasure fan-out
+	// (see consumers.OrgErasureConsumer) and must remain safe to call more
+	// than once for the same orgID (NATS at-least-once delivery).
+	HardPurgeByOrg(ctx context.Context, orgID string) error
 }
 
 type Inbox struct {
@@ -370,6 +409,34 @@ type StoredEventResult struct {
 	Created bool                `json:"created"`
 }
 
+// FeedbackInput is a signed-in org member's one-line friction report,
+// submitted from anywhere in the product via the persistent "Send feedback"
+// control. Service.SubmitFeedback turns it into a normal inbound conversation
+// (through the same path real provider webhooks use) tagged FeedbackTag, so
+// the team reviews it in the org's own Inbox rather than a bespoke store --
+// and mirrors it into the configured FEEDBACK_MIRROR_ORG_ID org so it stays
+// visible to the team even when the submitter's org is an external pilot
+// tenant (see Service.mirrorFeedback).
+type FeedbackInput struct {
+	OrgID       string
+	ActorUserID string
+	// FromName/FromEmail are display-only contact fields for the resulting
+	// conversation's contact card, the same trust level as any other inbound
+	// channel's sender fields (e.g. a webhook payload's From). They are never
+	// used for authorization -- OrgID/ActorUserID come from the verified
+	// gateway delegation, not from this input.
+	FromName       string
+	FromEmail      string
+	BodyText       string
+	IdempotencyKey string
+	// PageURL is the route the submitter was on when they opened the feedback
+	// widget (e.g. "/inbox?view=mine"), supplied by the client on a best-effort
+	// basis. It is appended to the stored conversation body so a terse
+	// one-line report still says where the friction happened; it is never
+	// required and never validated as an authorization boundary.
+	PageURL string
+}
+
 type AddMessageInput struct {
 	OrgID          string
 	ConversationID string
@@ -506,7 +573,15 @@ type AIActionReview struct {
 	ReviewerID string
 	Decision   string
 	Comment    string
-	OccurredAt time.Time
+	// EditedFields carries a reviewer's overrides for an approval, keyed by the
+	// same field names promote() reads from payload.suggested_fields (category,
+	// priority, severity, intent, team_id, team_name). Only present for
+	// decision == "approved"; Service.ReviewAIAction whitelist-filters it before
+	// it reaches the repository, which merges it into suggested_fields inside
+	// the same transaction as the status update. A reject must never carry a
+	// non-empty value here.
+	EditedFields map[string]string
+	OccurredAt   time.Time
 }
 
 // AIAction is a model-proposed action awaiting (or having received) a human

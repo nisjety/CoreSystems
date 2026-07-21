@@ -27,6 +27,10 @@ type Service struct {
 	publisher  EventPublisher
 	sender     OutboundSender
 	now        func() time.Time
+	// feedbackMirrorOrgID is FEEDBACK_MIRROR_ORG_ID (see config.Config), the
+	// Velion-owned monitored org every feedback submission is mirrored into.
+	// Empty disables mirroring -- see Service.mirrorFeedback.
+	feedbackMirrorOrgID string
 }
 
 type Option func(*Service)
@@ -44,6 +48,17 @@ func WithNow(now func() time.Time) Option {
 func WithSender(sender OutboundSender) Option {
 	return func(s *Service) {
 		s.sender = sender
+	}
+}
+
+// WithFeedbackMirrorOrgID configures the Velion-owned monitored org that
+// every Service.SubmitFeedback submission is mirrored into, in addition to
+// the submitter's own org. Pass the empty string (the zero value, so this
+// option can always be registered unconditionally) to disable mirroring --
+// see Service.mirrorFeedback for the resulting behavior.
+func WithFeedbackMirrorOrgID(orgID string) Option {
+	return func(s *Service) {
+		s.feedbackMirrorOrgID = strings.TrimSpace(orgID)
 	}
 }
 
@@ -102,13 +117,182 @@ func (s *Service) IngestEvent(ctx context.Context, event InboundEvent) (*StoredE
 		return nil, fmt.Errorf("store inbound event: %w", err)
 	}
 	if result != nil && result.Created {
-		s.publish(ctx, SubjectMessageReceived, result.Detail, result.Message, "", map[string]any{
+		subject := SubjectMessageReceived
+		if event.Direction == DirectionOutbound {
+			subject = SubjectMessageSent
+		}
+		s.publish(ctx, subject, result.Detail, result.Message, "", map[string]any{
 			"provider":            event.Provider,
 			"provider_event_id":   event.ProviderEventID,
 			"provider_message_id": event.ProviderMessageID,
 		})
 	}
 	return result, nil
+}
+
+// SubmitFeedback stores a signed-in org member's one-line friction report as
+// a new conversation on the same inbound-ingest path real provider webhooks
+// use (IngestEvent), tags it FeedbackTag so the Inbox can surface it in its
+// own queue, and mirrors it into the configured FEEDBACK_MIRROR_ORG_ID org
+// (see mirrorFeedback) so the team can see it even when the submitter's own
+// org is an external pilot tenant. Each call is idempotent on
+// input.IdempotencyKey -- a retried submission (e.g. a double-click) resolves
+// to the conversation created by the first attempt instead of creating a
+// duplicate ticket, and the duplicate is not re-tagged or re-mirrored.
+func (s *Service) SubmitFeedback(ctx context.Context, input FeedbackInput) (*ConversationDetail, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	input.BodyText = strings.TrimSpace(input.BodyText)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.PageURL = strings.TrimSpace(input.PageURL)
+	// A caller-supplied idempotency key is mandatory (unlike IngestEvent's
+	// fallback derivation from provider refs): feedback has no provider
+	// event/message/thread id to fall back to, so every submission from the
+	// same org would otherwise derive the SAME key and silently collapse into
+	// one conversation, dropping every submission after the first.
+	if input.OrgID == "" || input.BodyText == "" || input.IdempotencyKey == "" {
+		return nil, fmt.Errorf("%w: org_id, body_text, and idempotency_key are required", ErrInvalidInput)
+	}
+
+	fromName := strings.TrimSpace(input.FromName)
+	fromEmail := strings.TrimSpace(input.FromEmail)
+	if fromName == "" && fromEmail == "" {
+		fromName = "Feedback submitter"
+	}
+	bodyText := input.BodyText
+	if input.PageURL != "" {
+		bodyText = fmt.Sprintf("%s\n\nReported from: %s", bodyText, input.PageURL)
+	}
+	subject := input.BodyText
+	if len(subject) > 80 {
+		subject = subject[:80] + "…"
+	}
+	result, err := s.IngestEvent(ctx, InboundEvent{
+		IDempotencyKey: input.IdempotencyKey,
+		OrgID:          input.OrgID,
+		Provider:       FeedbackProvider,
+		Direction:      DirectionInbound,
+		Subject:        "Feedback: " + subject,
+		From:           ParticipantInput{Name: fromName, Email: fromEmail},
+		BodyText:       bodyText,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || result.Detail == nil {
+		return nil, fmt.Errorf("%w: feedback conversation was not created", ErrInvalidInput)
+	}
+
+	var detail *ConversationDetail
+	if !result.Created {
+		// Idempotent replay of an earlier submission -- already tagged (and
+		// already mirrored, if mirroring was configured at the time).
+		detail = result.Detail
+	} else {
+		detail, err = s.AddTag(ctx, input.OrgID, result.Detail.ID, FeedbackTag, input.ActorUserID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Best-effort: never let a mirroring problem fail the submitter's own
+	// (already-succeeded) submission above.
+	s.mirrorFeedback(ctx, input, result.Detail.ID)
+
+	return detail, nil
+}
+
+// mirrorFeedback copies a feedback submission into the Velion-owned
+// FEEDBACK_MIRROR_ORG_ID org, in addition to the submitter's own org.
+// Without this, feedback submitted from inside an external pilot org's own
+// isolated tenant would be invisible to the team: conversation-core-go has no
+// cross-org/platform-admin read bypass, so nobody on the team is a member of
+// that org's Inbox. The mirrored conversation's body names the submitting
+// org, the submitter's identity, and the original conversation id, so a team
+// member reading it in their OWN org's Inbox knows exactly where it came
+// from -- the whole point of the mirror is that it now lives outside the
+// customer's own tenant.
+//
+// Best-effort and never returns an error to the caller: a mirroring failure
+// is logged, never propagated, so a mirroring outage can never turn an
+// already-successful feedback submission into a failed one. Mirroring is
+// skipped entirely when FEEDBACK_MIRROR_ORG_ID is unset, and when the
+// submitter's own org already IS the mirror-target org (e.g. a team member
+// testing their own product) -- that case would just duplicate the
+// conversation already created in SubmitFeedback above.
+func (s *Service) mirrorFeedback(ctx context.Context, input FeedbackInput, originalConversationID string) {
+	mirrorOrgID := s.feedbackMirrorOrgID
+	if mirrorOrgID == "" {
+		log.Printf("conversation-core-go: FEEDBACK_MIRROR_ORG_ID is unset -- skipping feedback mirror (org=%s conversation=%s)", input.OrgID, originalConversationID)
+		return
+	}
+	if mirrorOrgID == input.OrgID {
+		// The submitter's own org already IS the monitored org -- mirroring
+		// would just create a redundant duplicate of the conversation above.
+		return
+	}
+
+	fromName := strings.TrimSpace(input.FromName)
+	fromEmail := strings.TrimSpace(input.FromEmail)
+	reporter := fromName
+	switch {
+	case reporter != "" && fromEmail != "":
+		reporter = fmt.Sprintf("%s <%s>", reporter, fromEmail)
+	case reporter == "" && fromEmail != "":
+		reporter = fromEmail
+	case reporter == "":
+		reporter = "unknown submitter"
+	}
+	if input.ActorUserID != "" {
+		reporter = fmt.Sprintf("%s (user %s)", reporter, input.ActorUserID)
+	}
+
+	body := fmt.Sprintf(
+		"%s\n\n---\nMirrored cross-org feedback -- not filed in this org.\nSubmitting org: %s\nSubmitted by: %s\nOriginal conversation: %s (org %s)",
+		input.BodyText, input.OrgID, reporter, originalConversationID, input.OrgID,
+	)
+	if input.PageURL != "" {
+		body += fmt.Sprintf("\nReported from: %s", input.PageURL)
+	}
+
+	subject := input.BodyText
+	if len(subject) > 60 {
+		subject = subject[:60] + "…"
+	}
+	subject = fmt.Sprintf("Feedback [%s]: %s", input.OrgID, subject)
+
+	// Distinct from the original's idempotency key so the two conversations
+	// (own-org and mirror) are independently idempotent -- a replayed
+	// SubmitFeedback call resolves each side to its own first attempt instead
+	// of colliding with, or skipping, the other.
+	mirrorResult, err := s.IngestEvent(ctx, InboundEvent{
+		IDempotencyKey: input.IdempotencyKey + ":mirror",
+		OrgID:          mirrorOrgID,
+		Provider:       FeedbackProvider,
+		Direction:      DirectionInbound,
+		Subject:        subject,
+		From:           ParticipantInput{Name: reporter, Email: fromEmail},
+		BodyText:       body,
+	})
+	if err != nil {
+		log.Printf("conversation-core-go: feedback mirror ingest failed (org=%s mirror_org=%s): %v", input.OrgID, mirrorOrgID, err)
+		return
+	}
+	if mirrorResult == nil || mirrorResult.Detail == nil {
+		log.Printf("conversation-core-go: feedback mirror produced no conversation (org=%s mirror_org=%s)", input.OrgID, mirrorOrgID)
+		return
+	}
+	if !mirrorResult.Created {
+		// Idempotent replay -- already tagged from the first mirror attempt.
+		return
+	}
+	if _, err := s.AddTag(ctx, mirrorOrgID, mirrorResult.Detail.ID, FeedbackTag, input.ActorUserID); err != nil {
+		log.Printf("conversation-core-go: feedback mirror tag failed (org=%s mirror_org=%s conversation=%s): %v", input.OrgID, mirrorOrgID, mirrorResult.Detail.ID, err)
+		return
+	}
+	if _, err := s.AddTag(ctx, mirrorOrgID, mirrorResult.Detail.ID, FeedbackMirrorTag, input.ActorUserID); err != nil {
+		log.Printf("conversation-core-go: feedback mirror cross-org tag failed (org=%s mirror_org=%s conversation=%s): %v", input.OrgID, mirrorOrgID, mirrorResult.Detail.ID, err)
+	}
 }
 
 func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Message, error) {
@@ -275,6 +459,39 @@ func (s *Service) replayOutboundIntent(ctx context.Context, intent OutboundInten
 	}
 }
 
+// ReconcileStaleOutboundIntents is the stuck-send sweep for the review-approve-send
+// path: it flips every outbound intent still `sending` after staleAfter to
+// `unknown` (a crash between ClaimOutboundIntent and
+// FinalizeOutboundIntent/MarkOutboundIntentOutcome — see
+// PGRepository.ReconcileStaleOutboundIntents) and publishes the same
+// SubjectAIActionSendUnknown alert the live send path already emits for an
+// ambiguous outcome, so operators see it exactly once regardless of which
+// path produced it. It never contacts a provider and never retries
+// automatically — a `sending` row does not prove the provider was never
+// called, so blind retransmission could double-send a message the customer
+// already received (e.g. a duplicate email). Intended to be invoked
+// periodically by consumers.OutboundIntentReconciler.
+func (s *Service) ReconcileStaleOutboundIntents(ctx context.Context, staleAfter time.Duration) ([]OutboundIntent, error) {
+	reconciled, err := s.repository.ReconcileStaleOutboundIntents(ctx, staleAfter)
+	if err != nil {
+		return nil, err
+	}
+	for _, intent := range reconciled {
+		log.Printf("conversation-core-go: reconciled stale outbound intent %s (org=%s conversation=%s ai_action=%s provider=%s) sending -> unknown", intent.ID, intent.OrgID, intent.ConversationID, intent.AIActionID, intent.Provider)
+		s.publish(ctx, SubjectAIActionSendUnknown, &ConversationDetail{ConversationSummary: ConversationSummary{
+			ID:    intent.ConversationID,
+			OrgID: intent.OrgID,
+		}}, nil, intent.ActorUserID, map[string]any{
+			"ai_action_id":    intent.AIActionID,
+			"idempotency_key": intent.IdempotencyKey,
+			"provider":        intent.Provider,
+			"status":          OutboundIntentUnknown,
+			"error_code":      OutboundIntentErrorStaleSendingTimeout,
+		})
+	}
+	return reconciled, nil
+}
+
 // OutboundRequestFingerprint binds a durable intent to its exact tenant,
 // conversation, approval, actor, route, and content without persisting a second
 // copy of message content in the ledger.
@@ -369,6 +586,45 @@ func (s *Service) RemoveTag(ctx context.Context, orgID, conversationID, tag, act
 	return detail, nil
 }
 
+// aiActionEditableFields is the closed set of fields promote() actually reads
+// from payload.suggested_fields (ai_action_executor.go). Any edited-fields key
+// outside this set is dropped silently -- mirroring the JSON-decode posture
+// where an unrecognized field is simply never bound, not an error over the
+// whole request.
+var aiActionEditableFields = map[string]bool{
+	"category":  true,
+	"priority":  true,
+	"severity":  true,
+	"intent":    true,
+	"team_id":   true,
+	"team_name": true,
+}
+
+// whitelistAIActionFieldEdits filters a reviewer's edited fields down to the
+// non-empty, whitelisted keys, and only for an approval -- a reject must never
+// carry edited fields through to the repository, even defensively (the
+// frontend never sends them for reject; this is the backstop).
+func whitelistAIActionFieldEdits(fields map[string]string, decision string) map[string]string {
+	if decision != "approved" || len(fields) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range fields {
+		if !aiActionEditableFields[key] {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) error {
 	input.OrgID = strings.TrimSpace(input.OrgID)
 	input.AIActionID = strings.TrimSpace(input.AIActionID)
@@ -384,6 +640,7 @@ func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) erro
 	if input.Decision != "approved" && input.Decision != "rejected" {
 		return fmt.Errorf("%w: decision must be 'approved' or 'rejected'", ErrInvalidInput)
 	}
+	input.EditedFields = whitelistAIActionFieldEdits(input.EditedFields, input.Decision)
 	if err := s.repository.ReviewAIAction(ctx, input); err != nil {
 		return err
 	}
@@ -877,6 +1134,20 @@ func (s *Service) UpdateTicketChecklistItem(ctx context.Context, input UpdateTic
 	return s.repository.UpdateTicketChecklistItem(ctx, input)
 }
 
+// HardPurgeByOrg hard-deletes every conversation_* row this service holds for
+// orgID. It is the conversation-core half of the cross-plane GDPR erasure
+// fan-out (velion.gdpr.erasure.requested, consumed by
+// consumers.OrgErasureConsumer). No lifecycle event is published for it: the
+// org — and everyone who could ever read one — is gone by the time this runs,
+// so there is no audience left to notify.
+func (s *Service) HardPurgeByOrg(ctx context.Context, orgID string) error {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.HardPurgeByOrg(ctx, orgID)
+}
+
 func (s *Service) publishTicket(ctx context.Context, subject string, ticket *Ticket, actorUserID string) {
 	if ticket == nil {
 		return
@@ -1014,8 +1285,8 @@ func validateInboundEvent(event InboundEvent) error {
 	if event.IDempotencyKey == "" || event.IDempotencyKey == ":::" {
 		return fmt.Errorf("%w: idempotency_key or provider refs are required", ErrInvalidInput)
 	}
-	if event.Direction != DirectionInbound {
-		return fmt.Errorf("%w: inbound event direction must be inbound", ErrInvalidInput)
+	if event.Direction != DirectionInbound && !(event.Provider == "teams" && event.Direction == DirectionOutbound) {
+		return fmt.Errorf("%w: event direction must be inbound, except for trusted Teams sync history", ErrInvalidInput)
 	}
 	if event.Subject == "" {
 		event.Subject = "(no subject)"

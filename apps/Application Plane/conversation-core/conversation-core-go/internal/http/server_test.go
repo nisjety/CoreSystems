@@ -25,6 +25,21 @@ const (
 
 var conversationTestNonce atomic.Uint64
 
+func TestListFilterFromRequestParsesConversationCursor(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(stdhttp.MethodGet, "/api/v1/conversations?limit=25&cursor_updated=2026-07-10T09%3A00%3A00Z&cursor_id=conversation-older", nil)
+
+	filter := listFilterFromRequest(ctx, "org-1")
+
+	if filter.CursorUpdated == nil || !filter.CursorUpdated.Equal(time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("cursor updated = %v, want parsed UTC time", filter.CursorUpdated)
+	}
+	if filter.CursorID != "conversation-older" {
+		t.Fatalf("cursor id = %q, want conversation-older", filter.CursorID)
+	}
+}
+
 func TestDeliveryUnknownUsesReconciliationRequiredErrorEnvelope(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
@@ -147,6 +162,18 @@ func TestConversationWriteRoutesRejectReadOnlyMembership(t *testing.T) {
 	router := newRouter(&Handler{}, testVerifier(t))
 	body := []byte(`{"body_text":"hello"}`)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/conversations/conversation-1/messages", bytes.NewReader(body))
+	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "viewer")
+
+	response := performRequest(router, request)
+	if response.Code != stdhttp.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestFeedbackRouteRejectsReadOnlyMembership(t *testing.T) {
+	router := newRouter(&Handler{}, testVerifier(t))
+	body := []byte(`{"body_text":"hello","idempotency_key":"demo-feedback-viewer-0001"}`)
+	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/feedback", bytes.NewReader(body))
 	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "viewer")
 
 	response := performRequest(router, request)

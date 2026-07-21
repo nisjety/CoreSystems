@@ -21,21 +21,37 @@ type Config struct {
 	NovuBaseURL    string // optional — override for EU region
 	DeliveryMode   string // "novu" or explicit fail-closed "disabled"
 
+	// SharedNATSURL/SharedNATSUser/SharedNATSPassword configure a SECOND,
+	// narrowly-scoped connection to the cross-plane control-shared-nats
+	// broker (identity "notification-core-gdpr"), used only by the
+	// org-deletion subscriber (internal/consumers/org_deletion_consumer.go).
+	// Deliberately DISTINCT env var names from NATS_SHARED_URL, which this
+	// deployment's docker-compose already points at the plane-local broker
+	// (see docker-compose.yml comments "priority 1/2 in Go config chain") —
+	// reusing that name here would be neutralized by that existing wiring.
+	// Empty SharedNATSURL disables the org-deletion subscriber without
+	// affecting the plane-local NATS client or any other consumer.
+	SharedNATSURL      string
+	SharedNATSUser     string
+	SharedNATSPassword string
 }
 
 func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		HTTPPort:        getEnvInt("PORT", 3140),
-		DatabaseURL:     strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		NATSURL:         strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://velion-nats:4222")))),
-		NATSUser:        strings.TrimSpace(getEnv("NATS_USER", "")),
-		NATSPassword:    strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
-		ServiceName:     getEnv("SERVICE_NAME", "notification-core"),
-		NovuSecretKey:   strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
-		NovuBaseURL:     strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),
-		DeliveryMode:    strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_MODE", "disabled"))),
+		HTTPPort:           getEnvInt("PORT", 3140),
+		DatabaseURL:        strings.TrimSpace(getEnv("DATABASE_URL", "")),
+		NATSURL:            strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://velion-nats:4222")))),
+		NATSUser:           strings.TrimSpace(getEnv("NATS_USER", "")),
+		NATSPassword:       strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
+		ServiceName:        getEnv("SERVICE_NAME", "notification-core"),
+		NovuSecretKey:      strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
+		NovuBaseURL:        strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),
+		DeliveryMode:       strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_MODE", "disabled"))),
+		SharedNATSURL:      strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_URL", "")),
+		SharedNATSUser:     strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_USER", "")),
+		SharedNATSPassword: strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_PASSWORD", "")),
 		DelegationKeys: map[string]string{
 			"velion-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
 			"support-worker": strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),

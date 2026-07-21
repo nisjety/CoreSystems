@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -22,6 +23,19 @@ type Config struct {
 	NATSPassword   string
 	ServiceName    string
 	DelegationKeys map[string]string
+	// SharedNATSURL/SharedNATSUser/SharedNATSPassword configure a SECOND,
+	// narrowly-scoped connection to the cross-plane control-shared-nats
+	// broker (identity "conversation-core-gdpr"), used only by the GDPR
+	// org-erasure consumer (internal/consumers/org_erasure_consumer.go).
+	// Deliberately DISTINCT env var names from NATSURL's own fallback chain
+	// above, which already treats the literal name NATS_SHARED_URL as an
+	// alternate Application-Plane-LOCAL broker URL — reusing that name here
+	// would silently collide with that existing fallback. Empty
+	// SharedNATSURL disables the org-erasure consumer without affecting the
+	// plane-local NATS client or any other consumer.
+	SharedNATSURL      string
+	SharedNATSUser     string
+	SharedNATSPassword string
 	// IntegrationInternalKey is restricted to integration-corev2's internal
 	// webhook-event read. Tenant APIs use only a tenant-bound Auth Core service
 	// JWT; caller-supplied org/user headers are never an authority boundary.
@@ -32,6 +46,27 @@ type Config struct {
 	IntegrationServiceCredential string
 	AttestationPrivateKey        ed25519.PrivateKey
 	AttestationKeyID             string
+	// OutboundReconcileInterval is how often the stuck-send sweep
+	// (consumers.OutboundIntentReconciler) runs. OutboundReconcileStaleAfter is
+	// how long an outbound intent may sit in `sending` before the sweep flips
+	// it to `unknown` for operator reconciliation. Both always have a positive
+	// default, independent of whether outbound send is configured, so the
+	// sweep is never accidentally disabled by omission.
+	OutboundReconcileInterval   time.Duration
+	OutboundReconcileStaleAfter time.Duration
+	// FeedbackMirrorOrgID is the Velion-owned monitored organization that every
+	// pilot-feedback submission (conversation.Service.SubmitFeedback) is
+	// mirrored into, in addition to the submitter's own org. This exists
+	// because conversation-core-go has no cross-org/platform-admin read
+	// bypass: in the open pilot each external company gets its own isolated
+	// org, so without a mirror, feedback submitted from inside an external
+	// org's product session would be invisible to the team -- nobody on the
+	// team is a member of that org's Inbox. Empty disables mirroring entirely
+	// (not an error -- SubmitFeedback logs a warning and the submitter's
+	// own-org copy still always succeeds). Update this single value if the
+	// team's own operating org ever changes; never hardcode the literal org
+	// id anywhere else in the codebase.
+	FeedbackMirrorOrgID string
 }
 
 // DraftReplySendEnabled reports whether the outbound-send (draft.reply) leg is
@@ -52,12 +87,15 @@ func Load() (*Config, error) {
 
 	attestationPrivateKeyEncoded := strings.TrimSpace(getEnv("CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY", ""))
 	cfg := &Config{
-		HTTPPort:     getEnvInt("PORT", 3160),
-		DatabaseURL:  strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		NATSURL:      strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
-		NATSUser:     strings.TrimSpace(getEnv("NATS_USER", "")),
-		NATSPassword: strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
-		ServiceName:  strings.TrimSpace(getEnv("SERVICE_NAME", "conversation-core-go")),
+		HTTPPort:           getEnvInt("PORT", 3160),
+		DatabaseURL:        strings.TrimSpace(getEnv("DATABASE_URL", "")),
+		NATSURL:            strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
+		NATSUser:           strings.TrimSpace(getEnv("NATS_USER", "")),
+		NATSPassword:       strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
+		ServiceName:        strings.TrimSpace(getEnv("SERVICE_NAME", "conversation-core-go")),
+		SharedNATSURL:      strings.TrimSpace(getEnv("CONVERSATION_GDPR_SHARED_NATS_URL", "")),
+		SharedNATSUser:     strings.TrimSpace(getEnv("CONVERSATION_GDPR_SHARED_NATS_USER", "")),
+		SharedNATSPassword: strings.TrimSpace(getEnv("CONVERSATION_GDPR_SHARED_NATS_PASSWORD", "")),
 		DelegationKeys: map[string]string{
 			"velion-gateway":      strings.TrimSpace(getEnv("CONVERSATION_GATEWAY_SERVICE_TOKEN", "")),
 			"conversation-ingest": strings.TrimSpace(getEnv("CONVERSATION_CORE_INGEST_SERVICE_TOKEN", "")),
@@ -70,6 +108,9 @@ func Load() (*Config, error) {
 		IntegrationServiceID:         strings.TrimSpace(getEnv("CONVERSATION_INTEGRATION_SERVICE_ID", "")),
 		IntegrationServiceCredential: strings.TrimSpace(getEnv("CONVERSATION_INTEGRATION_SERVICE_API_KEY", "")),
 		AttestationKeyID:             strings.TrimSpace(getEnv("CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID", "")),
+		OutboundReconcileInterval:    time.Duration(getEnvPositiveInt("CONVERSATION_OUTBOUND_RECONCILE_INTERVAL_SECONDS", 300)) * time.Second,
+		OutboundReconcileStaleAfter:  time.Duration(getEnvPositiveInt("CONVERSATION_OUTBOUND_RECONCILE_STALE_AFTER_SECONDS", 900)) * time.Second,
+		FeedbackMirrorOrgID:          strings.TrimSpace(getEnv("FEEDBACK_MIRROR_ORG_ID", "")),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -219,6 +260,21 @@ func getEnvInt(key string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 1 || parsed > 65535 {
+		return fallback
+	}
+	return parsed
+}
+
+// getEnvPositiveInt is like getEnvInt but without the 65535 port-range
+// clamp, for settings measured in seconds (e.g. reconciliation interval/
+// timeout) rather than a port number.
+func getEnvPositiveInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
 		return fallback
 	}
 	return parsed

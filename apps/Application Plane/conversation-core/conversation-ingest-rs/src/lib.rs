@@ -127,7 +127,7 @@ pub enum NormalizeError {
     MissingSender,
     #[error("body_text or body_html is required")]
     MissingBody,
-    #[error("email ingress accepts inbound direction only")]
+    #[error("outbound direction is only accepted for trusted synced chat providers")]
     InvalidDirection,
 }
 
@@ -463,7 +463,7 @@ pub fn normalize_email_event(mut raw: RawEmailEvent) -> Result<CanonicalEvent, N
     raw.message_id_header = raw.message_id_header.trim().to_owned();
     raw.references_header = raw.references_header.trim().to_owned();
     raw.in_reply_to_header = raw.in_reply_to_header.trim().to_owned();
-    raw.direction = normalize_direction(&raw.direction)?;
+    raw.direction = normalize_direction(&raw.direction, &raw.provider)?;
     raw.subject = normalize_subject(&raw.subject);
     raw.from.name = raw.from.name.trim().to_owned();
     raw.from.email = raw.from.email.trim().to_lowercase();
@@ -547,9 +547,10 @@ fn normalize_token(value: &str) -> String {
     }
 }
 
-fn normalize_direction(value: &str) -> Result<String, NormalizeError> {
+fn normalize_direction(value: &str, provider: &str) -> Result<String, NormalizeError> {
     match value.trim().to_lowercase().as_str() {
         "" | "inbound" => Ok("inbound".into()),
+        "outbound" if provider == "teams" => Ok("outbound".into()),
         _ => Err(NormalizeError::InvalidDirection),
     }
 }
@@ -670,6 +671,17 @@ mod tests {
         let error =
             normalize_email_event(raw).expect_err("outbound email must not enter inbound contract");
         assert!(matches!(error, NormalizeError::InvalidDirection));
+    }
+
+    #[test]
+    fn normalize_email_event_accepts_synced_teams_outbound_direction() {
+        let mut raw = raw_event();
+        raw.provider = "teams".into();
+        raw.direction = "outbound".into();
+
+        let event =
+            normalize_email_event(raw).expect("Teams self-authored history is trusted sync data");
+        assert_eq!(event.direction, "outbound");
     }
 
     #[test]
