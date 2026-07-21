@@ -3,8 +3,9 @@
 //! public Brønnøysund Enhetsregisteret (company registry).
 //!
 //! These are the first NON-research read tools in the governed multi-tool loop:
-//! `yr_weather`, `traffic`, `news`, `track_shipment` (all via information-core's
-//! internal HTTP surface, guarded by `x-internal-api-key`), and
+//! `yr_weather`, `traffic`, and `news` via information-core's internal HTTP
+//! surface, guarded by `x-internal-api-key`; shipment tracking is tenant-scoped
+//! through shipping-core, and
 //! `company_lookup` (the public, unauthenticated Brønnøysund API — only the open
 //! distribution, which carries no personal data).
 //!
@@ -20,7 +21,6 @@
 //!   GET {INFORMATION_CORE_URL}/api/v1/weather?lat&lon  → Yr forecast
 //!   GET {INFORMATION_CORE_URL}/api/v1/traffic?lat&lon&radius → SVV stations
 //!   GET {INFORMATION_CORE_URL}/api/v1/news?category&limit   → RSS articles
-//!   GET {INFORMATION_CORE_URL}/api/v1/shipping/track?trackingNumber → Bring
 //!   GET {BRREG_API_URL}/enheter?navn=… | /enheter/{orgnr}   → company registry
 
 // `# Errors` prose for the obvious `Result<String, String>` helpers is noise;
@@ -41,7 +41,6 @@ const DEFAULT_BRREG_API_URL: &str = "https://data.brreg.no/enhetsregisteret/api"
 /// Cap on how many news articles / company matches we render to the model.
 const MAX_NEWS_ARTICLES: usize = 8;
 const MAX_COMPANY_MATCHES: usize = 8;
-const MAX_TRACKING_EVENTS: usize = 6;
 const MAX_TEXT_CHARS: usize = 280;
 
 /// HTTP client for information-core + the public company registry. Cheap to
@@ -167,21 +166,6 @@ impl InfoToolsClient {
         }
         let value = self.get_info("/api/v1/news", &query).await?;
         Ok(format_news(category, &value))
-    }
-
-    /// `track_shipment` → GET `/api/v1/shipping/track?trackingNumber`. Returns
-    /// the current carrier status + recent event history.
-    pub async fn track_shipment(&self, tracking_number: &str) -> Result<String, String> {
-        if tracking_number.trim().is_empty() {
-            return Err("track_shipment requires a non-empty tracking number".to_owned());
-        }
-        let value = self
-            .get_info(
-                "/api/v1/shipping/track",
-                &[("trackingNumber", tracking_number.trim().to_owned())],
-            )
-            .await?;
-        Ok(format_tracking(tracking_number, &value))
     }
 
     /// `company_lookup` → public Brønnøysund Enhetsregisteret. A 9-digit input is
@@ -352,48 +336,6 @@ fn format_news(category: &str, value: &Value) -> String {
             let _ = write!(out, "\n   {link}");
         }
         out.push('\n');
-    }
-    out
-}
-
-/// Format a Bring `/shipping/track` response into agent-readable text (pure).
-fn format_tracking(tracking_number: &str, value: &Value) -> String {
-    let status = pick_string(value, &["status", "statusCode"]);
-    let description = pick_string(value, &["description"]);
-    let carrier = pick_string(value, &["carrier"]);
-    let eta = pick_string(value, &["estimatedDelivery", "estimated_delivery"]);
-    let mut out = format!("Shipment {tracking_number}");
-    if !carrier.is_empty() {
-        let _ = write!(out, " ({carrier})");
-    }
-    let _ = write!(
-        out,
-        ": {}",
-        if status.is_empty() {
-            "status unknown"
-        } else {
-            &status
-        }
-    );
-    if !description.is_empty() {
-        let _ = write!(out, " — {description}");
-    }
-    if !eta.is_empty() {
-        let _ = write!(out, ". Estimated delivery: {eta}");
-    }
-    let events = pick_array(value, &["events", "history"]);
-    if !events.is_empty() {
-        out.push_str("\nRecent events:\n");
-        for e in events.iter().take(MAX_TRACKING_EVENTS) {
-            let ts = pick_string(e, &["timestamp", "time", "date"]);
-            let desc = pick_string(e, &["description", "status"]);
-            let loc = pick_string(e, &["location", "place"]);
-            let _ = write!(out, "  - {ts} {desc}");
-            if !loc.is_empty() {
-                let _ = write!(out, " @ {loc}");
-            }
-            out.push('\n');
-        }
     }
     out
 }
@@ -650,33 +592,6 @@ mod tests {
     fn news_empty_is_informative() {
         let out = format_news("", &json!({ "articles": [] }));
         assert!(out.contains("No latest news"));
-    }
-
-    #[test]
-    fn tracking_renders_status_eta_and_events() {
-        let v = json!({
-            "trackingNumber": "370000000000000000",
-            "status": "In transit",
-            "description": "Package is on its way",
-            "carrier": "Bring/Posten",
-            "estimatedDelivery": "2026-06-15",
-            "events": [
-                { "timestamp": "2026-06-13T10:00:00", "description": "Loaded on vehicle", "location": "Oslo, NO" }
-            ]
-        });
-        let out = format_tracking("370000000000000000", &v);
-        assert!(out.contains("(Bring/Posten)"));
-        assert!(out.contains("In transit"));
-        assert!(out.contains("Package is on its way"));
-        assert!(out.contains("Estimated delivery: 2026-06-15"));
-        assert!(out.contains("Loaded on vehicle"));
-        assert!(out.contains("@ Oslo, NO"));
-    }
-
-    #[test]
-    fn tracking_unknown_status_is_safe() {
-        let out = format_tracking("ABC", &json!({}));
-        assert!(out.contains("status unknown"));
     }
 
     #[test]

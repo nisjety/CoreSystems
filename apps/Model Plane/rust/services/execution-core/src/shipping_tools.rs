@@ -19,6 +19,7 @@
 //! Transport:
 //!   POST {SHIPPING_CORE_URL}/api/quotes                → quotes cheapest-first
 //!   GET  {SHIPPING_CORE_URL}/api/carriers              → registered fleet
+//!   GET  {SHIPPING_CORE_URL}/api/tracking/{tracking_no} → tenant-scoped tracking
 //!   POST {SHIPPING_CORE_URL}/api/bookings[+/confirm]   → gated booking
 //!
 //! Responses are parsed defensively as `serde_json::Value` like the other
@@ -40,6 +41,7 @@ const DEFAULT_AUTH_CORE_URL: &str = "http://host.docker.internal:3011";
 /// Cap on quotes rendered to the model — the engine already sorts
 /// cheapest-first, so the head is the interesting part.
 const MAX_QUOTES: usize = 10;
+const MAX_TRACKING_EVENTS: usize = 6;
 
 /// Input for a quote request, mirroring shipping-core's wire shape
 /// (`internal/quoteengine/http.go` quoteRequestDTO — snake_case JSON).
@@ -362,6 +364,39 @@ impl ShippingToolsClient {
         Ok(render_carriers(&value))
     }
 
+    /// GET /api/tracking/{tracking_no} — resolve an existing shipment only in
+    /// the verified organization and render its current persisted/event state.
+    pub async fn track_shipment(&self, tracking_no: &str, org_id: &str) -> Result<String, String> {
+        let tracking_no = tracking_no.trim();
+        if tracking_no.is_empty()
+            || tracking_no.len() > 120
+            || !tracking_no
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("track_shipment requires a bounded tracking number".to_owned());
+        }
+        let token = self.mint_ingestion_token(org_id, "shipping:read").await?;
+        let resp = self
+            .http
+            .get(format!("{}/api/tracking/{}", self.base_url, tracking_no))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("shipping-core /api/tracking request failed: {e}"))?;
+        let status = resp.status();
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("shipping-core /api/tracking decode failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "shipping-core /api/tracking returned {status}: {value}"
+            ));
+        }
+        Ok(render_tracking(&value))
+    }
+
     async fn mint_ingestion_token(&self, org_id: &str, scope: &str) -> Result<String, String> {
         let org_id = org_id.trim();
         if org_id.is_empty() {
@@ -534,6 +569,44 @@ fn render_carriers(value: &Value) -> String {
     s
 }
 
+fn render_tracking(value: &Value) -> String {
+    let tracking_no = value
+        .get("tracking_no")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = value
+        .get("current_status")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("status unknown");
+    let mut out = format!("Shipment {tracking_no}: {status}");
+    if let Some(events) = value.get("events").and_then(Value::as_array) {
+        if !events.is_empty() {
+            out.push_str("\nRecent events:\n");
+            for event in events.iter().take(MAX_TRACKING_EVENTS) {
+                let event_status = event
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("status unknown");
+                let description = event
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let occurred_at = event
+                    .get("occurred_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let _ = write!(out, "  - {occurred_at} {event_status}");
+                if !description.is_empty() {
+                    let _ = write!(out, ": {description}");
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +645,22 @@ mod tests {
         let s = render_carriers(&value);
         assert!(s.contains("Bring (both, demo prices)"));
         assert!(s.contains("UPS (b2b, sandbox, unverified: not verified)"));
+    }
+
+    #[test]
+    fn renders_tenant_scoped_tracking_events() {
+        let value = serde_json::json!({
+            "tracking_no": "370000000000000000",
+            "current_status": "In transit",
+            "events": [{
+                "status": "Loaded on vehicle",
+                "description": "Parcel accepted",
+                "occurred_at": "2026-06-13T10:00:00Z"
+            }]
+        });
+        let output = render_tracking(&value);
+        assert!(output.contains("Shipment 370000000000000000: In transit"));
+        assert!(output.contains("Loaded on vehicle: Parcel accepted"));
     }
 
     #[tokio::test]

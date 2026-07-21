@@ -340,7 +340,7 @@ pub(crate) async fn execute_step_with_browser_grant(
     } else if tool_name == NEWS_TOOL {
         execute_news(tool_input).await
     } else if tool_name == TRACK_SHIPMENT_TOOL {
-        execute_track_shipment(tool_input).await
+        execute_track_shipment(tool_input, org_id).await
     } else if tool_name == COMPANY_LOOKUP_TOOL {
         execute_company_lookup(tool_input).await
     } else if tool_name == GET_SHIPPING_QUOTES_TOOL {
@@ -788,7 +788,7 @@ async fn execute_news(tool_input: &str) -> tool_bridge::ToolExecution {
 
 /// `track_shipment` tool — input JSON `{"tracking_number": String}`. Returns
 /// carrier status + recent events via information-core (Bring). Read-only.
-async fn execute_track_shipment(tool_input: &str) -> tool_bridge::ToolExecution {
+async fn execute_track_shipment(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct TrackInput {
         tracking_number: String,
@@ -797,12 +797,12 @@ async fn execute_track_shipment(tool_input: &str) -> tool_bridge::ToolExecution 
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid track_shipment input: {e}")),
     };
-    let Some(client) = crate::info_tools::InfoToolsClient::from_env() else {
+    let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
         return tool_error(
-            "track_shipment unavailable: info tools client could not be built".to_owned(),
+            "track_shipment unavailable: shipping tools client could not be built".to_owned(),
         );
     };
-    match client.track_shipment(&input.tracking_number).await {
+    match client.track_shipment(&input.tracking_number, org_id).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
