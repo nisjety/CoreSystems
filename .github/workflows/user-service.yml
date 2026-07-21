@@ -2,17 +2,21 @@
 
 name: User Service CI/CD
 
+# NOTE: this file previously filtered on 'services/user-service/**', a path
+# that has never existed in this repo (the service lives at
+# apps/Control Plane/user-core) — the workflow could never trigger. Fixed to
+# the real path so user-core's tests (including the Postgres-gated
+# cross-tenant/GDPR/ACL suites under TEST_DATABASE_URL) actually gate merges.
 on:
   push:
     branches: [main, develop]
     paths:
-      - 'services/user-service/**'
-      - 'libraries/go-common/**'
+      - 'apps/Control Plane/user-core/**'
       - '.github/workflows/user-service.yml'
   pull_request:
     branches: [main, develop]
     paths:
-      - 'services/user-service/**'
+      - 'apps/Control Plane/user-core/**'
 
 env:
   SERVICE_NAME: user-service
@@ -24,22 +28,44 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./services/user-service
+        working-directory: 'apps/Control Plane/user-core'
+    # user-core's Postgres-gated integration suites (acl_repository_test.go,
+    # authz_facade_live_test.go, gdpr_audit_outbox_postgres_test.go,
+    # gdpr_erasure_saga_postgres_test.go) self-provision their own schema
+    # via CREATE SCHEMA/CREATE TABLE against TEST_DATABASE_URL and silently
+    # t.Skip() when it is unset — without this service container they never
+    # ran in CI at all.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: user_core
+          POSTGRES_PASSWORD: user_core
+          POSTGRES_DB: user_core_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U user_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          cache-dependency-path: services/user-service/go.sum
-      
+          cache-dependency-path: 'apps/Control Plane/user-core/go.sum'
+
       - name: Install dependencies
         run: go mod download
-      
+
       - name: Run tests
+        env:
+          TEST_DATABASE_URL: postgres://user_core:user_core@localhost:5432/user_core_test?sslmode=disable
         run: go test -v ./...
-      
+
       - name: Build
         run: go build -v ./cmd/server
 
@@ -51,14 +77,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Log in to registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -70,11 +96,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-      
+
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
-          context: ./services/user-service
+          context: 'apps/Control Plane/user-core'
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

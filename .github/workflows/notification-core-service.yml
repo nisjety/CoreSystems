@@ -1,0 +1,45 @@
+name: Notification Core CI
+
+# notification-core (apps/Application Plane/notification-core) had zero CI
+# workflows of any kind before this file. Its DB-adjacent test file
+# (internal/database/migrate_test.go) exercises migration apply/rollback logic
+# against fakes (fakeMigrationExecutor/fakeMigrationTx) and asserts migration
+# SQL text on disk, not a live Postgres; internal/config/config_test.go only
+# t.Setenv's a fake DATABASE_URL string to test config parsing. No t.Skip or
+# DSN env-var-gated integration suite was found anywhere in the module — so
+# no service containers are needed to run `go test ./...` here.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Application Plane/notification-core/**'
+      - '.github/workflows/notification-core-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Application Plane/notification-core/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Application Plane/notification-core'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: 'apps/Application Plane/notification-core/go.sum'
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Build
+        run: go build -v ./cmd/server

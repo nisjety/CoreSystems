@@ -1,0 +1,44 @@
+name: Conversation Core (Go) CI
+
+# conversation-core-go (apps/Application Plane/conversation-core/conversation-core-go)
+# had zero CI workflows of any kind before this file. Its test suite is fully
+# self-contained: internal/integration and internal/consumers tests run
+# against in-process fakes/httptest, internal/database/migrations_contract_test.go
+# only asserts against the migration SQL text on disk, and no t.Skip / DSN
+# env-var-gated Postgres or NATS integration suite was found anywhere in the
+# module — so no service containers are needed to run `go test ./...` here.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Application Plane/conversation-core/conversation-core-go/**'
+      - '.github/workflows/conversation-core-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Application Plane/conversation-core/conversation-core-go/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Application Plane/conversation-core/conversation-core-go'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: 'apps/Application Plane/conversation-core/conversation-core-go/go.sum'
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Build
+        run: go build -v ./cmd/server

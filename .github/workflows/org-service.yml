@@ -2,17 +2,24 @@
 
 name: Org Service CI/CD
 
+# NOTE: this file previously filtered on 'services/org-service/**', a path
+# that has never existed in this repo (the service lives at
+# apps/Control Plane/org-core) — the workflow could never trigger. Fixed to
+# the real path so org-core's tests actually gate merges, including the
+# cross-tenant RLS negative tests (internal/database, TEST_DATABASE_URL) and
+# the CONTROL_LIFECYCLE_TEST_DATABASE_URL-gated org/rbac/http lifecycle
+# suites, both of which previously skipped silently with no CI running them
+# at all.
 on:
   push:
     branches: [main, develop]
     paths:
-      - 'services/org-service/**'
-      - 'libraries/go-common/**'
+      - 'apps/Control Plane/org-core/**'
       - '.github/workflows/org-service.yml'
   pull_request:
     branches: [main, develop]
     paths:
-      - 'services/org-service/**'
+      - 'apps/Control Plane/org-core/**'
 
 env:
   SERVICE_NAME: org-service
@@ -24,22 +31,71 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./services/org-service
+        working-directory: 'apps/Control Plane/org-core'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: org_core
+          POSTGRES_PASSWORD: org_core
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U org_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          cache-dependency-path: services/org-service/go.sum
-      
+          cache-dependency-path: 'apps/Control Plane/org-core/go.sum'
+
       - name: Install dependencies
         run: go mod download
-      
+
+      # internal/database's cross-tenant RLS tests
+      # (TestProjectionGuardPoliciesEnforceTransactionOrgScope,
+      # TestStrictRLSPoliciesFailClosedWithoutOrgScope) assert org-scoped
+      # transactions cannot see or mutate another org's rows, and require the
+      # org_core_app role (normally created by migration 009) to already
+      # exist. internal/rbac, internal/org, and internal/http's
+      # CONTROL_LIFECYCLE_TEST_DATABASE_URL suites self-apply org-core's
+      # migrations via database.RunMigrations at test time, but first call
+      # testfixture.VerifyLifecycleMarker to refuse running destructive
+      # lifecycle assertions against anything but a runner-created disposable
+      # database — so a fixture marker row has to exist before `go test` runs.
+      - name: Bootstrap Postgres role + lifecycle fixture marker
+        env:
+          PGHOST: localhost
+          PGUSER: org_core
+          PGPASSWORD: org_core
+        run: |
+          set -euo pipefail
+          psql -d postgres -v ON_ERROR_STOP=1 -c \
+            "CREATE ROLE org_core_app NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;"
+          createdb org_test
+          createdb org_lifecycle
+          fixture_id="$(openssl rand -hex 24)"
+          psql -d org_lifecycle -v ON_ERROR_STOP=1 -c "
+            CREATE TABLE control_lifecycle_fixture (
+              fixture_id    TEXT PRIMARY KEY,
+              database_name TEXT NOT NULL
+            );
+            INSERT INTO control_lifecycle_fixture (fixture_id, database_name)
+            VALUES ('$fixture_id', 'org_lifecycle');"
+          echo "CONTROL_LIFECYCLE_FIXTURE_ID=$fixture_id" >> "$GITHUB_ENV"
+
       - name: Run tests
-        run: go test -v ./...
-      
+        env:
+          TEST_DATABASE_URL: postgres://org_core:org_core@localhost:5432/org_test?sslmode=disable
+          CONTROL_LIFECYCLE_TEST_DATABASE_URL: postgres://org_core:org_core@localhost:5432/org_lifecycle?sslmode=disable
+        run: go test -v -p 1 ./...
+
       - name: Build
         run: go build -v ./cmd/server
 
@@ -51,14 +107,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Log in to registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -70,11 +126,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-      
+
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
-          context: ./services/org-service
+          context: 'apps/Control Plane/org-core'
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

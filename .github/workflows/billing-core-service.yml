@@ -1,0 +1,87 @@
+name: Billing Core CI
+
+# billing-core (apps/Control Plane/billing-core) had zero CI workflows of any
+# kind before this file. Its CONTROL_LIFECYCLE_TEST_DATABASE_URL-gated suites
+# (internal/http/lifecycle_postgres_test.go, internal/billing/lifecycle_postgres_test.go)
+# self-apply billing-core's own migrations via database.RunMigrations at test
+# time, but first call testfixture.VerifyLifecycleMarker — same pattern as
+# org-core's org-service.yml — to refuse running destructive lifecycle
+# assertions against anything but a runner-created disposable
+# "billing_lifecycle" database, so a fixture marker row has to exist before
+# `go test` runs. Unlike org-core, billing-core's migrations do not create or
+# depend on a dedicated Postgres role (no CREATE ROLE / RLS policy references
+# a billing-specific role), so no role-bootstrap step is needed here — only
+# the disposable database + fixture marker.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Control Plane/billing-core/**'
+      - '.github/workflows/billing-core-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Control Plane/billing-core/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Control Plane/billing-core'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: billing_core
+          POSTGRES_PASSWORD: billing_core
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U billing_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: 'apps/Control Plane/billing-core/go.sum'
+
+      - name: Install dependencies
+        run: go mod download
+
+      # internal/http and internal/billing's CONTROL_LIFECYCLE_TEST_DATABASE_URL
+      # suites refuse to run against anything but a database carrying this
+      # fixture marker row (testfixture.VerifyLifecycleMarker) — see
+      # apps/Control Plane/billing-core/internal/testfixture/lifecycle.go.
+      - name: Bootstrap lifecycle fixture marker
+        env:
+          PGHOST: localhost
+          PGUSER: billing_core
+          PGPASSWORD: billing_core
+        run: |
+          set -euo pipefail
+          createdb billing_lifecycle
+          fixture_id="$(openssl rand -hex 24)"
+          psql -d billing_lifecycle -v ON_ERROR_STOP=1 -c "
+            CREATE TABLE control_lifecycle_fixture (
+              fixture_id    TEXT PRIMARY KEY,
+              database_name TEXT NOT NULL
+            );
+            INSERT INTO control_lifecycle_fixture (fixture_id, database_name)
+            VALUES ('$fixture_id', 'billing_lifecycle');"
+          echo "CONTROL_LIFECYCLE_FIXTURE_ID=$fixture_id" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        env:
+          CONTROL_LIFECYCLE_TEST_DATABASE_URL: postgres://billing_core:billing_core@localhost:5432/billing_lifecycle?sslmode=disable
+        run: go test -v -p 1 ./...
+
+      - name: Build
+        run: go build -v ./cmd/server

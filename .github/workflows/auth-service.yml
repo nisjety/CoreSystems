@@ -2,16 +2,23 @@
 
 name: Auth Service CI/CD
 
+# NOTE: this file previously filtered on 'services/auth-service/**', a path
+# that has never existed in this repo (the service lives at
+# apps/Control Plane/auth-core) — the workflow could never trigger. Fixed to
+# the real path, same bug as user-service.yml/org-service.yml. auth-core's
+# own Postgres-gated Jest specs (*.postgres.spec.ts, CONTROL_LIFECYCLE_TEST_
+# DATABASE_URL) are not additionally wired here — out of scope for this fix,
+# tracked as a follow-up.
 on:
   push:
     branches: [main, develop]
     paths:
-      - 'services/auth-service/**'
+      - 'apps/Control Plane/auth-core/**'
       - '.github/workflows/auth-service.yml'
   pull_request:
     branches: [main, develop]
     paths:
-      - 'services/auth-service/**'
+      - 'apps/Control Plane/auth-core/**'
 
 env:
   SERVICE_NAME: auth-service
@@ -23,16 +30,16 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./services/auth-service
+        working-directory: 'apps/Control Plane/auth-core'
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'pnpm'
-          cache-dependency-path: services/auth-service/package-lock.json
+          cache-dependency-path: 'apps/Control Plane/auth-core/pnpm-lock.yaml'
       
       - name: Install dependencies
         run: pnpm install
@@ -77,7 +84,7 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
-          context: ./services/auth-service
+          context: 'apps/Control Plane/auth-core'
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

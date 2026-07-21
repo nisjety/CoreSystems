@@ -4,7 +4,9 @@ name: Velion v3 CI
 # (apps/Frontend Plane/velionv3). GitHub Actions only executes workflows from
 # the repository-root .github/workflows, so this lives at the monorepo root but
 # is path-scoped to the v3 frontend so it does not fire on unrelated plane
-# changes. Mirrors apps/Data Plane v2/.github/workflows/ci.yml.
+# changes. Mirrors .github/workflows/dataplane-v2-ci.yml (itself moved to the
+# root for the same reason — it used to live nested under apps/Data Plane
+# v2/.github/workflows/ci.yml, where GitHub never executed it).
 on:
   pull_request:
     branches: [main]
