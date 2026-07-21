@@ -603,6 +603,12 @@ describe('KnowledgePage', () => {
           },
         }, 202)
       }
+      // Selective-ingest resolution reads the user's preferences before the
+      // crawl. An unset crawlIngestMode defaults to 'auto', so this explicit
+      // add-source crawl must send ingest:true (else quarry persists nothing).
+      if (url === '/api/v1/preferences') {
+        return makeFetchResponse({ data: {} })
+      }
       return makeFetchResponse(knowledgePayload)
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -619,12 +625,14 @@ describe('KnowledgePage', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /start gjennomsøking/i }))
 
-    // The typed URL must reach the request payload sent to the backend...
+    // The typed URL must reach the request payload sent to the backend, and the
+    // resolved ingest decision (auto default → true) must ride along so the
+    // crawl actually persists into Knowledge...
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/knowledge/crawl',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ url: 'https://docs.velion.ai', maxPages: 16 }),
+        body: JSON.stringify({ url: 'https://docs.velion.ai', maxPages: 16, ingest: true }),
       }),
     ))
 

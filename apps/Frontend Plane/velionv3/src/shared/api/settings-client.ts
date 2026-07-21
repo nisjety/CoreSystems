@@ -48,9 +48,36 @@ export interface UserPreferences {
   timezone?: string
   notifications?: Record<string, boolean>
   // Phase 6 selective ingest: whether crawl/scrape results are saved to the
-  // knowledge base. 'never' (default) = browsing only; 'auto' = always save;
-  // 'prompt' = ask after each crawl. Drives the `ingest` flag on crawl requests.
+  // knowledge base. Unset defaults to 'auto' (always save) — an explicit
+  // "add website to Knowledge" crawl persisting is the only non-surprising
+  // behavior; 'never' = browsing only; 'prompt' = ask after each crawl. Drives
+  // the `ingest` flag on crawl requests. See resolveCrawlIngest.
   crawlIngestMode?: CrawlIngestMode
+}
+
+/**
+ * The default crawl-ingest mode when a user has never set the preference.
+ * 'auto' so an explicit "add this website to my Knowledge base" crawl actually
+ * persists (owner=user, private until shared) instead of silently discarding
+ * every page — the failure the add-source card's "flow into Knowledge" copy
+ * promised against. A user who explicitly picked 'never' in Settings is always
+ * respected: this default only fills a genuinely-unset preference.
+ */
+export const DEFAULT_CRAWL_INGEST_MODE: CrawlIngestMode = 'auto'
+
+/**
+ * Resolve the user's crawl-ingest preference into the boolean `ingest` flag a
+ * crawl request carries. Shared by every explicit add-to-Knowledge crawl entry
+ * point (dashboard composer, page-picker, Knowledge add-source modal) so they
+ * cannot drift — before this, the add-source modal path sent no flag at all and
+ * quarry defaulted to never-persist. Reads preferences once; on lookup failure
+ * falls back to the default mode rather than blocking the crawl.
+ *
+ * @param confirmPrompt invoked only for the 'prompt' mode; return true to persist.
+ */
+export async function resolveCrawlIngest(confirmPrompt: () => boolean): Promise<boolean> {
+  const mode = (await getPreferences().catch(() => null))?.crawlIngestMode ?? DEFAULT_CRAWL_INGEST_MODE
+  return mode === 'auto' || (mode === 'prompt' && confirmPrompt())
 }
 
 export interface ApiKey {

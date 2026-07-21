@@ -25,14 +25,31 @@ type Item struct {
 	WebURL       string    `json:"web_url,omitempty"`
 }
 
+// Drive is one SharePoint/OneDrive document library on a site — the unit a
+// finspo source is registered against. `ID` is the Graph drive id the register
+// form needs; `DriveType` is Graph's `driveType` (documentLibrary, business,
+// personal, …). Surfaced by ListDrives so the UI can present a pick-a-library
+// step instead of asking the user to hand-enter a raw `b!…` drive id.
+type Drive struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	DriveType string `json:"drive_type,omitempty"`
+	WebURL    string `json:"web_url,omitempty"`
+}
+
 type Browser interface {
 	ListSites(ctx context.Context, organizationID string) ([]Site, error)
+	ListDrives(ctx context.Context, organizationID string, siteID string) ([]Drive, error)
 	ListItems(ctx context.Context, organizationID string, siteID string, path string) ([]Item, error)
 }
 
 type DisconnectedBrowser struct{}
 
 func (DisconnectedBrowser) ListSites(context.Context, string) ([]Site, error) {
+	return nil, ErrNotConfigured
+}
+
+func (DisconnectedBrowser) ListDrives(context.Context, string, string) ([]Drive, error) {
 	return nil, ErrNotConfigured
 }
 

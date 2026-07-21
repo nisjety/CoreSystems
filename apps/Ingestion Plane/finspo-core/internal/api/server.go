@@ -102,6 +102,31 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
+	v1.Get("/sites/:siteID/drives", func(c *fiber.Ctx) error {
+		siteID := strings.TrimSpace(c.Params("siteID"))
+		if siteID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"success": false,
+				"error":   "siteID is required",
+			})
+		}
+
+		organizationID := auth.OrganizationID(c)
+		drives, err := browser.ListDrives(c.UserContext(), organizationID, siteID)
+		if err != nil {
+			return writeSharePointError(c, err)
+		}
+
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"site_id": siteID,
+				"count":   len(drives),
+				"drives":  drives,
+			},
+		})
+	})
+
 	v1.Get("/sites/:siteID/items", func(c *fiber.Ctx) error {
 		siteID := strings.TrimSpace(c.Params("siteID"))
 		if siteID == "" {

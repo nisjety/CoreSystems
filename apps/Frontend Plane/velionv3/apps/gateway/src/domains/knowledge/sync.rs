@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -176,6 +176,85 @@ pub(super) async fn sync_workspace(
         "finspoFailures": finspo_failures,
     }))
     .into_response()
+}
+
+/// `GET /api/v1/knowledge/sharepoint/sites` — list the org's SharePoint sites
+/// (via finspo's Graph browser) so the Add-source UI can offer a pick-a-site
+/// step instead of asking the user to hand-enter a raw composite Site ID.
+/// Read-only; requires the org's Microsoft integration to be connected (finspo
+/// returns `503 not_configured` otherwise, surfaced verbatim).
+pub(super) async fn list_sharepoint_sites(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Response {
+    let org = crate::upstream::authorized_org_id(&state, &user).await;
+    if org.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("no_active_org", "No active organization found.")),
+        )
+            .into_response();
+    }
+    let actor = shared::actor_for(&user);
+    let url = format!("{}/api/v1/sharepoint/sites", state.finspo_core_url);
+    match shared::fetch_json(&state, Method::GET, &url, None, Some(&org), &actor, LIST_TIMEOUT).await
+    {
+        Some(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        None => (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "sharepoint_sites_unavailable",
+                "Could not list SharePoint sites. Connect a Microsoft 365 integration first.",
+            )),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/knowledge/sharepoint/sites/:site_id/drives` — list a site's
+/// document libraries (drives) so the UI can offer a pick-a-library step that
+/// auto-fills the Drive ID / name / type on the register form.
+pub(super) async fn list_sharepoint_drives(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(site_id): Path<String>,
+) -> Response {
+    let org = crate::upstream::authorized_org_id(&state, &user).await;
+    if org.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("no_active_org", "No active organization found.")),
+        )
+            .into_response();
+    }
+    let site = site_id.trim();
+    if site.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("site_id_required", "A SharePoint site is required.")),
+        )
+            .into_response();
+    }
+    let actor = shared::actor_for(&user);
+    // finspo's route param is a Graph site id; percent-encode it so a composite
+    // id containing commas/slashes survives the upstream path.
+    let encoded = urlencoding::encode(site);
+    let url = format!(
+        "{}/api/v1/sharepoint/sites/{}/drives",
+        state.finspo_core_url, encoded
+    );
+    match shared::fetch_json(&state, Method::GET, &url, None, Some(&org), &actor, LIST_TIMEOUT).await
+    {
+        Some(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        None => (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "sharepoint_drives_unavailable",
+                "Could not list document libraries for this site.",
+            )),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn register_sharepoint(

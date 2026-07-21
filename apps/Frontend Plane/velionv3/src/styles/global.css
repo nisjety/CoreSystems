@@ -546,6 +546,16 @@ textarea:focus-visible {
     background-color 160ms ease;
 }
 
+/* Keep the desktop product shell at the composition that was designed for
+   browser zoom 90%, while preserving the full viewport at browser zoom 100%.
+   Mobile remains at native scale for readable responsive layouts. */
+@media (min-width: 768px) {
+  .core-product-shell {
+    height: calc(100dvh / 0.9);
+    zoom: 0.9;
+  }
+}
+
 .core-navbar {
   position: fixed;
   inset: 0 0 auto;
@@ -19807,6 +19817,46 @@ textarea:focus-visible {
 
 .knowledge-modal-action {
   margin-top: 16px;
+}
+
+/* SharePoint site → library picker (Add source modal) */
+.knowledge-sp-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.knowledge-modal-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.knowledge-sp-manual-toggle {
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  color: var(--velion-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.knowledge-sp-manual-toggle:hover {
+  color: var(--velion-text);
+  text-decoration: underline;
+}
+
+.knowledge-sp-spin {
+  animation: knowledge-sp-spin 900ms linear infinite;
+}
+
+@keyframes knowledge-sp-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .knowledge-provider-grid {

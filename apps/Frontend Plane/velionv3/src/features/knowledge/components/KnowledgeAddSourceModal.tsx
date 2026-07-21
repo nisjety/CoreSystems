@@ -1,8 +1,9 @@
-import { ArrowUpRight, FileUp, FolderPlus, Globe2, HardDriveUpload } from 'lucide-solid'
+import { ArrowUpRight, FileUp, FolderPlus, Globe2, HardDriveUpload, RefreshCw } from 'lucide-solid'
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
 import { Button } from '@/shared/ui/Button'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { useI18n } from '@/shared/i18n'
+import type { SharePointDrive, SharePointSite } from '@/shared/api/knowledge-client'
 
 type ConnectProvider = {
   detail: string
@@ -29,6 +30,8 @@ export function KnowledgeAddSourceModal(props: {
   busy: boolean
   onClose: () => void
   onConnectProvider: (provider: ConnectProvider) => Promise<void> | void
+  onListSharePointSites: () => Promise<SharePointSite[]>
+  onListSharePointDrives: (siteId: string) => Promise<SharePointDrive[]>
   onRegisterSharePoint: (input: SharePointSourceForm) => Promise<void>
   onStartWebsiteCrawl: (input: { maxPages?: number; url: string }) => Promise<void>
   onUploadFiles: (files: File[]) => Promise<void>
@@ -37,6 +40,70 @@ export function KnowledgeAddSourceModal(props: {
   const i18n = useI18n()
   let fileInputRef!: HTMLInputElement
   const [selectedFiles, setSelectedFiles] = createSignal<File[]>([])
+
+  // SharePoint picker state: load the org's sites, pick one, load its document
+  // libraries, pick one → register. Falls back to manual id entry via a toggle.
+  const [spSites, setSpSites] = createSignal<SharePointSite[]>([])
+  const [spDrives, setSpDrives] = createSignal<SharePointDrive[]>([])
+  const [spSelectedSite, setSpSelectedSite] = createSignal<SharePointSite | null>(null)
+  const [spSelectedDrive, setSpSelectedDrive] = createSignal<SharePointDrive | null>(null)
+  const [spLoadingSites, setSpLoadingSites] = createSignal(false)
+  const [spLoadingDrives, setSpLoadingDrives] = createSignal(false)
+  const [spError, setSpError] = createSignal<string | null>(null)
+  const [spManual, setSpManual] = createSignal(false)
+
+  const loadSpSites = async () => {
+    setSpError(null)
+    setSpLoadingSites(true)
+    try {
+      const sites = await props.onListSharePointSites()
+      setSpSites(sites)
+      if (sites.length === 0) {
+        setSpError(i18n.tr('Ingen SharePoint-nettsteder funnet. Koble til Microsoft 365 først.', 'No SharePoint sites found. Connect Microsoft 365 first.'))
+      }
+    } catch (error) {
+      setSpError(error instanceof Error ? error.message : i18n.tr('Kunne ikke laste nettsteder.', 'Could not load sites.'))
+    } finally {
+      setSpLoadingSites(false)
+    }
+  }
+
+  const selectSpSite = async (site: SharePointSite | null) => {
+    setSpSelectedSite(site)
+    setSpSelectedDrive(null)
+    setSpDrives([])
+    if (!site) return
+    setSpError(null)
+    setSpLoadingDrives(true)
+    try {
+      const drives = await props.onListSharePointDrives(site.id)
+      setSpDrives(drives)
+      if (drives.length === 0) {
+        setSpError(i18n.tr('Ingen dokumentbiblioteker på dette nettstedet.', 'No document libraries on this site.'))
+      } else if (drives.length === 1) {
+        setSpSelectedDrive(drives[0] ?? null)
+      }
+    } catch (error) {
+      setSpError(error instanceof Error ? error.message : i18n.tr('Kunne ikke laste biblioteker.', 'Could not load libraries.'))
+    } finally {
+      setSpLoadingDrives(false)
+    }
+  }
+
+  const submitSpPicker = async () => {
+    const site = spSelectedSite()
+    const drive = spSelectedDrive()
+    if (!site || !drive) return
+    await props.onRegisterSharePoint({
+      siteId: site.id,
+      siteWebUrl: site.web_url ?? '',
+      driveId: drive.id,
+      driveName: drive.name || site.display_name || site.name,
+      driveType: drive.drive_type || 'documentLibrary',
+      tenantId: '',
+    })
+  }
+
   const [sharePoint, setSharePoint] = createSignal<SharePointSourceForm>({
     driveId: '',
     driveName: '',
@@ -199,59 +266,157 @@ export function KnowledgeAddSourceModal(props: {
         <section class="knowledge-modal-card">
           <ModalCardHeading
             icon={<FolderPlus class="size-5" />}
-            title={i18n.tr('Registrer SharePoint-stasjon', 'Register SharePoint drive')}
-            description={i18n.tr('Lagrer en Finspo-kilde og starter umiddelbart en SharePoint- eller OneDrive-synkronisering.', 'Persists a Finspo source and immediately starts a SharePoint or OneDrive sync.')}
+            title={i18n.tr('Legg til SharePoint-bibliotek', 'Add SharePoint library')}
+            description={i18n.tr('Velg et nettsted og et dokumentbibliotek fra Microsoft 365 — så synkroniserer Velion det inn i Kunnskap.', 'Pick a site and a document library from Microsoft 365 — Velion syncs it into Knowledge.')}
           />
 
-          <div class="knowledge-modal-form-grid">
-            <Field
-              label={i18n.tr('Nettsted-ID', 'Site ID')}
-              value={sharePoint().siteId}
-              onChange={(value) => setSharePoint((current) => ({ ...current, siteId: value }))}
-              placeholder="contoso.sharepoint.com,site-id,web-id"
-            />
-            <Field
-              label={i18n.tr('Stasjon-ID', 'Drive ID')}
-              value={sharePoint().driveId}
-              onChange={(value) => setSharePoint((current) => ({ ...current, driveId: value }))}
-              placeholder="b!drive-id"
-            />
-            <Field
-              label={i18n.tr('Stasjonsnavn', 'Drive name')}
-              value={sharePoint().driveName}
-              onChange={(value) => setSharePoint((current) => ({ ...current, driveName: value }))}
-              placeholder={i18n.tr('Support-kunnskap', 'Support knowledge')}
-            />
-            <Field
-              label={i18n.tr('Stasjonstype', 'Drive type')}
-              value={sharePoint().driveType}
-              onChange={(value) => setSharePoint((current) => ({ ...current, driveType: value }))}
-              placeholder="documentLibrary"
-            />
-            <Field
-              label={i18n.tr('Nettsted-URL', 'Site URL')}
-              value={sharePoint().siteWebUrl}
-              onChange={(value) => setSharePoint((current) => ({ ...current, siteWebUrl: value }))}
-              placeholder="https://contoso.sharepoint.com/sites/Support"
-            />
-            <Field
-              label={i18n.tr('Leier-ID', 'Tenant ID')}
-              value={sharePoint().tenantId}
-              onChange={(value) => setSharePoint((current) => ({ ...current, tenantId: value }))}
-              placeholder={i18n.tr('Valgfritt', 'Optional')}
-            />
-          </div>
-
-          <Button
-            variant="primary"
-            size="sm"
-            class="knowledge-modal-action"
-            disabled={props.busy || !sharePoint().siteId.trim() || !sharePoint().driveId.trim()}
-            onClick={() => void props.onRegisterSharePoint(sharePoint())}
+          <Show
+            when={!spManual()}
+            fallback={
+              <div class="knowledge-modal-form-grid">
+                <Field
+                  label={i18n.tr('Nettsted-ID', 'Site ID')}
+                  value={sharePoint().siteId}
+                  onChange={(value) => setSharePoint((current) => ({ ...current, siteId: value }))}
+                  placeholder="contoso.sharepoint.com,site-id,web-id"
+                />
+                <Field
+                  label={i18n.tr('Stasjon-ID', 'Drive ID')}
+                  value={sharePoint().driveId}
+                  onChange={(value) => setSharePoint((current) => ({ ...current, driveId: value }))}
+                  placeholder="b!drive-id"
+                />
+                <Field
+                  label={i18n.tr('Stasjonsnavn', 'Drive name')}
+                  value={sharePoint().driveName}
+                  onChange={(value) => setSharePoint((current) => ({ ...current, driveName: value }))}
+                  placeholder={i18n.tr('Support-kunnskap', 'Support knowledge')}
+                />
+                <Field
+                  label={i18n.tr('Stasjonstype', 'Drive type')}
+                  value={sharePoint().driveType}
+                  onChange={(value) => setSharePoint((current) => ({ ...current, driveType: value }))}
+                  placeholder="documentLibrary"
+                />
+                <Field
+                  label={i18n.tr('Nettsted-URL', 'Site URL')}
+                  value={sharePoint().siteWebUrl}
+                  onChange={(value) => setSharePoint((current) => ({ ...current, siteWebUrl: value }))}
+                  placeholder="https://contoso.sharepoint.com/sites/Support"
+                />
+                <Field
+                  label={i18n.tr('Leier-ID', 'Tenant ID')}
+                  value={sharePoint().tenantId}
+                  onChange={(value) => setSharePoint((current) => ({ ...current, tenantId: value }))}
+                  placeholder={i18n.tr('Valgfritt', 'Optional')}
+                />
+              </div>
+            }
           >
-            <FolderPlus class="size-4" />
-            {i18n.tr('Registrer og synkroniser', 'Register and sync')}
-          </Button>
+            <div class="knowledge-sp-picker">
+              <Show
+                when={spSites().length > 0}
+                fallback={
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={props.busy || spLoadingSites()}
+                    onClick={() => void loadSpSites()}
+                  >
+                    <RefreshCw class={`size-4 ${spLoadingSites() ? 'knowledge-sp-spin' : ''}`} />
+                    {spLoadingSites()
+                      ? i18n.tr('Laster nettsteder ...', 'Loading sites ...')
+                      : i18n.tr('Last inn SharePoint-nettsteder', 'Load SharePoint sites')}
+                  </Button>
+                }
+              >
+                <label class="velion-settings-field">
+                  <span>{i18n.tr('Nettsted', 'Site')}</span>
+                  <select
+                    value={spSelectedSite()?.id ?? ''}
+                    disabled={props.busy || spLoadingDrives()}
+                    onChange={(event) =>
+                      void selectSpSite(spSites().find((site) => site.id === event.currentTarget.value) ?? null)
+                    }
+                  >
+                    <option value="">{i18n.tr('Velg et nettsted …', 'Select a site …')}</option>
+                    <For each={spSites()}>
+                      {(site) => <option value={site.id}>{site.display_name || site.name}</option>}
+                    </For>
+                  </select>
+                </label>
+
+                <Show when={spSelectedSite()}>
+                  <label class="velion-settings-field">
+                    <span>{i18n.tr('Dokumentbibliotek', 'Document library')}</span>
+                    <select
+                      value={spSelectedDrive()?.id ?? ''}
+                      disabled={props.busy || spLoadingDrives() || spDrives().length === 0}
+                      onChange={(event) =>
+                        setSpSelectedDrive(spDrives().find((drive) => drive.id === event.currentTarget.value) ?? null)
+                      }
+                    >
+                      <option value="">
+                        {spLoadingDrives()
+                          ? i18n.tr('Laster biblioteker …', 'Loading libraries …')
+                          : i18n.tr('Velg et bibliotek …', 'Select a library …')}
+                      </option>
+                      <For each={spDrives()}>
+                        {(drive) => <option value={drive.id}>{drive.name}</option>}
+                      </For>
+                    </select>
+                  </label>
+                </Show>
+              </Show>
+
+              <Show when={spError()}>
+                {(message) => (
+                  <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">
+                    {message()}
+                  </p>
+                )}
+              </Show>
+            </div>
+          </Show>
+
+          <div class="knowledge-modal-action-row">
+            <Show
+              when={!spManual()}
+              fallback={
+                <Button
+                  variant="primary"
+                  size="sm"
+                  class="knowledge-modal-action"
+                  disabled={props.busy || !sharePoint().siteId.trim() || !sharePoint().driveId.trim()}
+                  onClick={() => void props.onRegisterSharePoint(sharePoint())}
+                >
+                  <FolderPlus class="size-4" />
+                  {i18n.tr('Registrer og synkroniser', 'Register and sync')}
+                </Button>
+              }
+            >
+              <Button
+                variant="primary"
+                size="sm"
+                class="knowledge-modal-action"
+                disabled={props.busy || !spSelectedSite() || !spSelectedDrive()}
+                onClick={() => void submitSpPicker()}
+              >
+                <FolderPlus class="size-4" />
+                {i18n.tr('Registrer og synkroniser', 'Register and sync')}
+              </Button>
+            </Show>
+
+            <button
+              type="button"
+              class="knowledge-sp-manual-toggle"
+              onClick={() => setSpManual((value) => !value)}
+            >
+              {spManual()
+                ? i18n.tr('← Bruk nettsted-velger', '← Use site picker')
+                : i18n.tr('Skriv inn ID-er manuelt', 'Enter IDs manually')}
+            </button>
+          </div>
         </section>
       </div>
     </div>

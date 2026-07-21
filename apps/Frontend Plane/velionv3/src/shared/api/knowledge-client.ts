@@ -792,3 +792,41 @@ function numberField(record: Record<string, unknown>, key: string): number | und
   const value = record[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
+
+// ── SharePoint browse (pick a site, then a document library) ────────────────
+// Backs the Add-source modal's SharePoint picker so users choose from their
+// connected Microsoft 365 sites/libraries instead of hand-entering raw Graph
+// ids. Both proxy to finspo's Graph browser via the gateway and require the
+// org's Microsoft integration to be connected (otherwise the gateway returns a
+// bounded error that the caller surfaces).
+
+export interface SharePointSite {
+  id: string
+  name: string
+  display_name?: string
+  web_url?: string
+  description?: string
+}
+
+export interface SharePointDrive {
+  id: string
+  name: string
+  drive_type?: string
+  web_url?: string
+}
+
+export async function listSharePointSites(orgId: string): Promise<SharePointSite[]> {
+  const payload = await requestJson<{ data?: { sites?: SharePointSite[] } }>(
+    '/api/v1/knowledge/sharepoint/sites',
+    { headers: orgHeaders(orgId) },
+  )
+  return payload.data?.sites ?? []
+}
+
+export async function listSharePointDrives(orgId: string, siteId: string): Promise<SharePointDrive[]> {
+  const payload = await requestJson<{ data?: { drives?: SharePointDrive[] } }>(
+    `/api/v1/knowledge/sharepoint/sites/${encodeURIComponent(siteId)}/drives`,
+    { headers: orgHeaders(orgId) },
+  )
+  return payload.data?.drives ?? []
+}

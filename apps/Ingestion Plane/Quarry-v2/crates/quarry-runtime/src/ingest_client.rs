@@ -98,8 +98,17 @@ impl IngestClient {
         Self::pre_check_zdr(request)?;
         ensure_durable_ingest_allowed(request.zdr)?;
 
+        // `org:data:read_all` marks this as a SYSTEM/connector ingest, not an
+        // interactive end-user write. documents-api's applyVisibilityPolicy
+        // reads it (via viewerID) to stamp crawled pages `visibility=org` so the
+        // whole tenant sees the crawled knowledge base. Without it, quarry-edge
+        // is treated as a plain viewer and every crawled doc lands
+        // `visibility=private, owner=service:quarry-edge` — persisted but
+        // invisible to every real user session (owner=self OR visibility=org
+        // matches neither). The scope is granted to the quarry-edge principal in
+        // the Control Plane service-principal registry.
         let token_request = ServiceTokenRequest::data_plane(
-            ["documents:write"],
+            ["documents:write", "org:data:read_all"],
             "persist verified Quarry evidence",
         );
         let bearer = match &self.auth {

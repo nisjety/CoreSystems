@@ -45,6 +45,16 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/sharepoint",
             post(sync::register_sharepoint),
         )
+        // SharePoint browse: pick a site, then a document library, instead of
+        // hand-entering raw Microsoft Graph ids on the register form.
+        .route(
+            "/api/v1/knowledge/sharepoint/sites",
+            get(sync::list_sharepoint_sites),
+        )
+        .route(
+            "/api/v1/knowledge/sharepoint/sites/:site_id/drives",
+            get(sync::list_sharepoint_drives),
+        )
         // Retrieval
         .route(
             "/api/v1/knowledge/search",

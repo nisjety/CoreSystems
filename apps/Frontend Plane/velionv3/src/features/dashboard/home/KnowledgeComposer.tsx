@@ -62,7 +62,7 @@ import {
   type Product,
   type ProductExtraction,
 } from '@/shared/api/knowledge-client'
-import { getPreferences } from '@/shared/api/settings-client'
+import { resolveCrawlIngest } from '@/shared/api/settings-client'
 import { cn } from '@/shared/lib/cn'
 import { useI18n } from '@/shared/i18n'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
@@ -463,20 +463,16 @@ export function KnowledgeComposer(props: {
     setDiscovery(null)
     const maxPages = crawlMaxPages()
     // Phase 6 selective ingest: resolve the user's crawl_ingest_mode → ingest
-    // flag. auto = always save; never = working-set only; prompt = ask now.
-    // (The promote capability is quarry's /v1/crawl|/v1/batch with ingest=true,
-    // wired in Phase 2 — owner=user, private. 'prompt' simply gates it on a
-    // confirm so nothing is saved unless the user says so.) Default never.
-    const ingestMode = (await getPreferences().catch(() => null))?.crawlIngestMode ?? 'never'
-    const ingest =
-      ingestMode === 'auto' ||
-      (ingestMode === 'prompt' &&
-        window.confirm(
-          i18n.tr(
-            'Lagre disse sidene i kunnskapsbasen din? (privat for deg til du deler dem)',
-            'Save these pages to your knowledge base? (private to you until you share them)',
-          ),
-        ))
+    // flag (shared resolver; unset defaults to 'auto' so an explicit add-to-
+    // Knowledge crawl actually persists — owner=user, private until shared).
+    const ingest = await resolveCrawlIngest(() =>
+      window.confirm(
+        i18n.tr(
+          'Lagre disse sidene i kunnskapsbasen? (synlig for organisasjonen din)',
+          'Save these pages to the knowledge base? (visible to your organization)',
+        ),
+      ),
+    )
     const key = addJob({
       agentMode: agentMode(),
       detail: agentMode()
@@ -552,18 +548,17 @@ export function KnowledgeComposer(props: {
     const host = hostnameOf(discovery()?.url || urls[0] || '')
     // Phase 6 selective ingest, CrawlPagePicker parity fix: this flow never
     // resolved the user's crawl_ingest_mode at all, so "Velg sider" could
-    // never persist to the knowledge base regardless of preference. Resolve
-    // it the same way startCrawlJob does before handing off to quarry.
-    const ingestMode = (await getPreferences().catch(() => null))?.crawlIngestMode ?? 'never'
-    const ingest =
-      ingestMode === 'auto' ||
-      (ingestMode === 'prompt' &&
-        window.confirm(
-          i18n.tr(
-            'Lagre disse sidene i kunnskapsbasen din? (privat for deg til du deler dem)',
-            'Save these pages to your knowledge base? (private to you until you share them)',
-          ),
-        ))
+    // never persist to the knowledge base regardless of preference. Same shared
+    // resolver as startCrawlJob (unset → 'auto'): picking specific pages to add
+    // is an explicit persist intent.
+    const ingest = await resolveCrawlIngest(() =>
+      window.confirm(
+        i18n.tr(
+          'Lagre disse sidene i kunnskapsbasen? (synlig for organisasjonen din)',
+          'Save these pages to the knowledge base? (visible to your organization)',
+        ),
+      ),
+    )
     const key = addJob({
       detail: i18n.tr(`Crawler ${urls.length} valgte sider ...`, `Crawling ${urls.length} selected pages ...`),
       ingestRequested: ingest,

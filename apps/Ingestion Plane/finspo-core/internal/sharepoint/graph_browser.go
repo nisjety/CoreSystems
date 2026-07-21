@@ -119,6 +119,68 @@ func (b *GraphBrowser) ListSites(ctx context.Context, organizationID string) ([]
 	return allSites, nil
 }
 
+type drivesPage struct {
+	Value []struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		DriveType string `json:"driveType"`
+		WebURL    string `json:"webUrl"`
+	} `json:"value"`
+	ODataNextLink string `json:"@odata.nextLink"`
+}
+
+// ListDrives returns every document library (drive) on a SharePoint site via
+// Graph `GET /v1.0/sites/{siteID}/drives`, so the UI can offer a pick-a-library
+// step. `siteID` is a Graph site id (as returned by ListSites), URL-path-safe
+// already; it is interpolated directly like ListItems does.
+func (b *GraphBrowser) ListDrives(ctx context.Context, organizationID string, siteID string) ([]Drive, error) {
+	token, err := b.accessToken(ctx, organizationID)
+	if err != nil {
+		return nil, err
+	}
+
+	var allDrives []Drive
+	nextURL := b.baseURL + "/v1.0/sites/" + siteID + "/drives"
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create list drives request: %w", err)
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+
+		response, err := b.httpClient.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("list drives request failed: %w", err)
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			return nil, readGraphError("list drives request", response)
+		}
+
+		var page drivesPage
+		if err := json.NewDecoder(response.Body).Decode(&page); err != nil {
+			return nil, fmt.Errorf("decode list drives response: %w", err)
+		}
+
+		for _, drive := range page.Value {
+			allDrives = append(allDrives, Drive{
+				ID:        drive.ID,
+				Name:      drive.Name,
+				DriveType: drive.DriveType,
+				WebURL:    drive.WebURL,
+			})
+		}
+
+		if page.ODataNextLink == "" {
+			break
+		}
+		nextURL = page.ODataNextLink
+	}
+
+	return allDrives, nil
+}
+
 func (b *GraphBrowser) ListItems(ctx context.Context, organizationID string, siteID string, itemPath string) ([]Item, error) {
 	token, err := b.accessToken(ctx, organizationID)
 	if err != nil {

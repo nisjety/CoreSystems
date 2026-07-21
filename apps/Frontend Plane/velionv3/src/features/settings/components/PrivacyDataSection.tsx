@@ -59,13 +59,18 @@ export function PrivacyDataSection() {
   }
 
   // ── Knowledge ingestion (Phase 6 selective ingest) ─────────────────────────
-  const [ingestMode, setIngestMode] = createSignal<CrawlIngestMode>('never')
+  // Unset defaults to 'auto' to match the crawl composer (KnowledgeComposer):
+  // an explicit "add website to Knowledge" crawl persists by default, so the
+  // Settings toggle must show 'auto' as the active mode until the user changes
+  // it — otherwise the displayed default ('never') would contradict the actual
+  // behavior. Persisted pages are owner=user / private until shared.
+  const [ingestMode, setIngestMode] = createSignal<CrawlIngestMode>('auto')
   const [savingMode, setSavingMode] = createSignal(false)
   const [modeError, setModeError] = createSignal<string | null>(null)
 
   onMount(() => {
     void getPreferences()
-      .then((prefs) => setIngestMode(prefs.crawlIngestMode ?? 'never'))
+      .then((prefs) => setIngestMode(prefs.crawlIngestMode ?? 'auto'))
       .catch(() => undefined)
   })
 
@@ -194,8 +199,8 @@ export function PrivacyDataSection() {
         </div>
         <p class="velion-privacy-danger__note">
           {i18n.tr(
-            'Styrer om sider du krabber eller skraper lagres i kunnskapsbasen din (privat for deg helt til du deler dem). Nettlesing lagrer aldri automatisk.',
-            'Controls whether pages you crawl or scrape are saved to your knowledge base (private to you until you share them). Browsing never saves automatically.',
+            'Styrer om sider du krabber eller skraper lagres i kunnskapsbasen (synlig for hele organisasjonen din). Nettlesing lagrer aldri automatisk.',
+            'Controls whether pages you crawl or scrape are saved to the knowledge base (visible to your whole organization). Browsing never saves automatically.',
           )}
         </p>
         <label class="velion-settings-field">
@@ -205,9 +210,9 @@ export function PrivacyDataSection() {
             disabled={savingMode()}
             onChange={(event) => void changeIngestMode(event.currentTarget.value as CrawlIngestMode)}
           >
-            <option value="never">{i18n.tr('Lagre aldri — kun nettlesing (standard)', 'Never save — browse only (default)')}</option>
-            <option value="auto">{i18n.tr('Lagre alltid til kunnskapsbasen min', 'Always save to my knowledge base')}</option>
+            <option value="auto">{i18n.tr('Lagre alltid til kunnskapsbasen min (standard)', 'Always save to my knowledge base (default)')}</option>
             <option value="prompt">{i18n.tr('Spør meg etter hver krabbing', 'Ask me after each crawl')}</option>
+            <option value="never">{i18n.tr('Lagre aldri — kun nettlesing', 'Never save — browse only')}</option>
           </select>
         </label>
         <Show when={modeError()}>

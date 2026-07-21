@@ -54,7 +54,13 @@ import {
 // page refetched the workspace once at crawl-start (before any page had
 // finished ingesting) and then never again, leaving "Tracked web sources"
 // stuck on stale/empty data until a manual reload.
-import { streamCrawlRunEvents } from '@/shared/api/knowledge-client'
+import {
+  listSharePointDrives,
+  listSharePointSites,
+  streamCrawlRunEvents,
+  type SharePointDrive,
+  type SharePointSite,
+} from '@/shared/api/knowledge-client'
 import {
   generateOperatingMap,
   loadOperatingMap,
@@ -66,6 +72,7 @@ import {
 } from '@/shared/api/operating-map-client'
 import { getSessionContext } from '@/shared/api/auth-client'
 import { requestForm, requestJson } from '@/shared/api/http'
+import { resolveCrawlIngest } from '@/shared/api/settings-client'
 import { Button } from '@/shared/ui/Button'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { VelionSegmented, VelionSegmentedButton } from '@/shared/ui/velion/VelionSegmented'
@@ -434,6 +441,14 @@ export default function KnowledgePage() {
     }
   }
 
+  async function handleListSharePointSites(): Promise<SharePointSite[]> {
+    return listSharePointSites(activeOrgId)
+  }
+
+  async function handleListSharePointDrives(siteId: string): Promise<SharePointDrive[]> {
+    return listSharePointDrives(activeOrgId, siteId)
+  }
+
   async function handleConnectProvider(provider: {
     detail: string
     id: string
@@ -484,9 +499,22 @@ export default function KnowledgePage() {
     setBusyAction('crawl')
     setNotice(null)
     try {
+      // Selective ingest: this add-source flow previously sent NO ingest flag,
+      // so quarry defaulted to never-persist and the crawl added 0 docs despite
+      // the modal promising pages "flow into Knowledge". Resolve the user's
+      // crawl_ingest_mode the same way the dashboard composer does (unset →
+      // 'auto', so an explicit add-source crawl persists as owner=user/private).
+      const ingest = await resolveCrawlIngest(() =>
+        window.confirm(
+          i18n.tr(
+            'Lagre disse sidene i kunnskapsbasen? (synlig for organisasjonen din)',
+            'Save these pages to the knowledge base? (visible to your organization)',
+          ),
+        ),
+      )
       const result = await requestJson<CrawlStartResult>('/api/v1/knowledge/crawl', {
         method: 'POST',
-        body: JSON.stringify(input),
+        body: JSON.stringify({ ...input, ingest }),
       })
       setNotice({
         tone: 'good',
@@ -697,6 +725,8 @@ export default function KnowledgePage() {
           providers={buildConnectProviders(i18n.tr)}
           onClose={() => setAddSourceOpen(false)}
           onConnectProvider={handleConnectProvider}
+          onListSharePointSites={handleListSharePointSites}
+          onListSharePointDrives={handleListSharePointDrives}
           onRegisterSharePoint={handleRegisterSharePoint}
           onStartWebsiteCrawl={handleStartWebsiteCrawl}
           onUploadFiles={handleUploadFiles}

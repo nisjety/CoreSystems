@@ -13,9 +13,10 @@ import (
 )
 
 type stubBrowser struct {
-	sites []sharepoint.Site
-	items []sharepoint.Item
-	err   error
+	sites  []sharepoint.Site
+	drives []sharepoint.Drive
+	items  []sharepoint.Item
+	err    error
 
 	receivedOrgID  string
 	receivedSiteID string
@@ -28,6 +29,15 @@ func (s *stubBrowser) ListSites(_ context.Context, orgID string) ([]sharepoint.S
 		return nil, s.err
 	}
 	return s.sites, nil
+}
+
+func (s *stubBrowser) ListDrives(_ context.Context, orgID, siteID string) ([]sharepoint.Drive, error) {
+	s.receivedOrgID = orgID
+	s.receivedSiteID = siteID
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.drives, nil
 }
 
 func (s *stubBrowser) ListItems(_ context.Context, orgID, siteID, path string) ([]sharepoint.Item, error) {
