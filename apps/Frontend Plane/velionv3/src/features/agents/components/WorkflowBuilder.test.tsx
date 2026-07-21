@@ -15,11 +15,11 @@ describe('WorkflowBuilder', () => {
       </AgentsProvider>
     ))
 
-    expect(screen.getByRole('heading', { name: 'Generate Social Media Post' })).toBeTruthy()
-    expect(screen.getByRole('textbox', { name: 'Workflow prompt' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Generer innlegg til sosiale medier' })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: 'Arbeidsflyt-prompt' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Generate Caption' })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Select Update Status to DONE workflow node' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Velg arbeidsflytnoden Update Status to DONE' }))
 
     expect(screen.getByRole('heading', { name: 'Update Status' })).toBeTruthy()
     expect(screen.getAllByText('Google Sheets').length).toBeGreaterThan(0)
@@ -34,15 +34,15 @@ describe('WorkflowBuilder', () => {
       </AgentsProvider>
     ))
 
-    // Visible "Design preview" label is present.
-    expect(screen.getByText('Design preview')).toBeTruthy()
+    // Visible "Design preview" label is present (rendered in Norwegian by default).
+    expect(screen.getByText('Designforhåndsvisning')).toBeTruthy()
 
     // The dead Test Run / Publish controls are gone (no backend implied).
     expect(screen.queryByRole('button', { name: 'Test Run' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Publish' })).toBeNull()
 
     // The prompt composer is inert: no working "Generate" affordance.
-    expect((screen.getByRole('textbox', { name: 'Workflow prompt' }) as HTMLInputElement).disabled).toBe(true)
-    expect((screen.getByRole('button', { name: 'Generate workflow' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('textbox', { name: 'Arbeidsflyt-prompt' }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Generer arbeidsflyt' }) as HTMLButtonElement).disabled).toBe(true)
   })
 })

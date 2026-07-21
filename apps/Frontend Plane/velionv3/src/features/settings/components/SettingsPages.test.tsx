@@ -106,27 +106,27 @@ describe('settings profile page', () => {
 
     render(() => <AccountSettingsPage />)
 
-    expect(screen.getByRole('heading', { name: /profile settings/i, level: 1 })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /profilinnstillinger/i, level: 1 })).toBeTruthy()
     expect(screen.queryByRole('navigation', { name: /settings sections/i })).toBeNull()
     expect(screen.getByTestId('settings-profile-content').className).toContain('velion-settings-content--account')
 
-    const displayName = screen.getByRole('textbox', { name: /display name/i }) as HTMLInputElement
+    const displayName = screen.getByRole('textbox', { name: /visningsnavn/i }) as HTMLInputElement
     await waitFor(() => expect(displayName.value).toBe('Mae Jensen'))
-    expect((screen.getByRole('textbox', { name: /first name/i }) as HTMLInputElement).value).toBe('Mae')
-    expect((screen.getByRole('textbox', { name: /last name/i }) as HTMLInputElement).value).toBe('Jensen')
-    expect((screen.getByRole('textbox', { name: /job title/i }) as HTMLInputElement).value).toBe('Support lead')
-    expect((screen.getByRole('textbox', { name: /department/i }) as HTMLInputElement).value).toBe('Customer operations')
-    expect((screen.getByRole('textbox', { name: /primary email/i }) as HTMLInputElement).value).toBe('mae@example.com')
-    expect((screen.getByRole('combobox', { name: /^language$/i }) as HTMLSelectElement).value).toBe('nb-NO')
-    expect((screen.getByRole('combobox', { name: /^time zone$/i }) as HTMLSelectElement).value).toBe('Europe/Oslo')
-    expect((screen.getByRole('combobox', { name: /^theme$/i }) as HTMLSelectElement).value).toBe('dark')
-    expect((screen.getByRole('combobox', { name: /^availability status$/i }) as HTMLSelectElement).value).toBe('online')
-    expect(screen.getByRole('switch', { name: /email notifications/i }).getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByRole('switch', { name: /push notifications/i }).getAttribute('aria-checked')).toBe('false')
+    expect((screen.getByRole('textbox', { name: /fornavn/i }) as HTMLInputElement).value).toBe('Mae')
+    expect((screen.getByRole('textbox', { name: /etternavn/i }) as HTMLInputElement).value).toBe('Jensen')
+    expect((screen.getByRole('textbox', { name: /stillingstittel/i }) as HTMLInputElement).value).toBe('Support lead')
+    expect((screen.getByRole('textbox', { name: /avdeling/i }) as HTMLInputElement).value).toBe('Customer operations')
+    expect((screen.getByRole('textbox', { name: /primær e-post/i }) as HTMLInputElement).value).toBe('mae@example.com')
+    expect((screen.getByRole('combobox', { name: /^språk$/i }) as HTMLSelectElement).value).toBe('nb-NO')
+    expect((screen.getByRole('combobox', { name: /^tidssone$/i }) as HTMLSelectElement).value).toBe('Europe/Oslo')
+    expect((screen.getByRole('combobox', { name: /^tema$/i }) as HTMLSelectElement).value).toBe('dark')
+    expect((screen.getByRole('combobox', { name: /^tilgjengelighetsstatus$/i }) as HTMLSelectElement).value).toBe('online')
+    expect(screen.getByRole('switch', { name: /e-postvarsler/i }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByRole('switch', { name: /push-varsler/i }).getAttribute('aria-checked')).toBe('false')
     expect(screen.getByText('Google')).toBeTruthy()
-    expect(screen.getByRole('switch', { name: /profile visibility/i }).getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByText(/saved to your Velion account/i)).toBeTruthy()
-    expect(screen.getByRole('button', { name: /save profile/i })).toBeTruthy()
+    expect(screen.getByRole('switch', { name: /profilsynlighet/i }).getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText(/lagres på Velion-kontoen din/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /lagre profil/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /^security$/i })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /delete account/i })).toBeNull()
   })
@@ -146,12 +146,12 @@ describe('workspace settings page', () => {
     expect(screen.getByRole('heading', { name: /workspace settings/i, level: 1 })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /must have/i })).toBeNull()
     expect(screen.queryByText('Workspace name, URL, and primary domain')).toBeNull()
-    expect(screen.getByRole('heading', { name: /verified domains/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /verifiserte domener/i })).toBeTruthy()
     // De-faked: no fabricated verified domains; honest empty state instead.
-    expect(screen.getByText(/no domains have been verified/i)).toBeTruthy()
+    expect(screen.getByText(/ingen domener er verifisert/i)).toBeTruthy()
     expect(screen.queryByText('support.aquatiq.no')).toBeNull()
-    expect(screen.getByRole('button', { name: /edit schedule/i })).toBeTruthy()
-    expect((screen.getByRole('textbox', { name: /workspace name/i }) as HTMLInputElement).value).toBe('aquatiq-as')
+    expect(screen.getByRole('button', { name: /rediger tidsplan/i })).toBeTruthy()
+    expect((screen.getByRole('textbox', { name: /arbeidsområdenavn/i }) as HTMLInputElement).value).toBe('aquatiq-as')
     expect(screen.queryByRole('textbox', { name: /invite by email/i })).toBeNull()
   })
 
@@ -159,8 +159,8 @@ describe('workspace settings page', () => {
     render(() => <VelionWorkspaceSettingsPage section="members" />)
 
     expect(screen.getByRole('heading', { name: /members & roles/i, level: 1 })).toBeTruthy()
-    expect(screen.getByRole('textbox', { name: /invite by email/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /built-in roles/i })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: /inviter via e-post/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /innebygde roller/i })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /create role/i })).toBeNull()
     expect(screen.queryByText('Agent')).toBeNull()
     expect(screen.queryByRole('textbox', { name: /workspace name/i })).toBeNull()
@@ -196,22 +196,22 @@ describe('workspace settings page', () => {
     render(() => <VelionWorkspaceSettingsPage section="members" />)
     expect(await screen.findByText('teammate@example.com')).toBeTruthy()
 
-    fireEvent.input(screen.getByRole('textbox', { name: /invite by email/i }), {
+    fireEvent.input(screen.getByRole('textbox', { name: /inviter via e-post/i }), {
       target: { value: 'new@example.com' },
     })
-    fireEvent.change(screen.getByRole('combobox', { name: /^role$/i }), {
+    fireEvent.change(screen.getByRole('combobox', { name: /^rolle$/i }), {
       target: { value: 'admin' },
     })
-    fireEvent.click(screen.getByRole('button', { name: /invite member/i }))
+    fireEvent.click(screen.getByRole('button', { name: /inviter medlem/i }))
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([path]) => path === '/api/v1/orgs/org_1/members/invite')
       expect(JSON.parse(String(call?.[1]?.body))).toEqual({ email: 'new@example.com', role: 'admin' })
     })
 
     await waitFor(() => expect(
-      (screen.getByRole('combobox', { name: /role for teammate/i }) as HTMLSelectElement).disabled,
+      (screen.getByRole('combobox', { name: /rolle for teammate/i }) as HTMLSelectElement).disabled,
     ).toBe(false))
-    fireEvent.change(screen.getByRole('combobox', { name: /role for teammate/i }), {
+    fireEvent.change(screen.getByRole('combobox', { name: /rolle for teammate/i }), {
       target: { value: 'admin' },
     })
     await waitFor(() => {
@@ -219,10 +219,10 @@ describe('workspace settings page', () => {
     })
 
     await waitFor(() => expect(
-      (screen.getByRole('button', { name: /remove teammate/i }) as HTMLButtonElement).disabled,
+      (screen.getByRole('button', { name: /fjern teammate/i }) as HTMLButtonElement).disabled,
     ).toBe(false))
-    fireEvent.click(screen.getByRole('button', { name: /remove teammate/i }))
-    fireEvent.click(screen.getByRole('button', { name: /confirm remove teammate/i }))
+    fireEvent.click(screen.getByRole('button', { name: /fjern teammate/i }))
+    fireEvent.click(screen.getByRole('button', { name: /bekreft fjerning av teammate/i }))
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/org_1/members/user_2')).toBe(true)
     })
@@ -261,15 +261,15 @@ describe('workspace settings page', () => {
     // Phase 4 PR-2 de-fake: no real org-security source is wired behind the
     // gateway, so the MFA control must render OFF and DISABLED — never shown
     // enabled from a literal (the prior `enabled: true` was a fabricated posture).
-    const mfa = screen.getByRole('switch', { name: /require mfa for admins/i })
+    const mfa = screen.getByRole('switch', { name: /krev mfa for administratorer/i })
     expect(mfa.getAttribute('aria-checked')).toBe('false')
     expect(
       mfa.hasAttribute('disabled')
       || mfa.getAttribute('aria-disabled') === 'true'
       || mfa.getAttribute('data-disabled') !== null,
     ).toBe(true)
-    expect(screen.getByRole('combobox', { name: /session duration/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /recent security events/i })).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: /øktvarighet/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /nylige sikkerhetshendelser/i })).toBeTruthy()
     expect(await screen.findByText('member.removed - ok')).toBeTruthy()
     expect(screen.getByText('user_admin · admin · req_audit_17')).toBeTruthy()
   })
@@ -363,13 +363,13 @@ describe('workspace settings page', () => {
 
     render(() => <VelionWorkspaceSettingsPage section="integrations" />)
 
-    expect(await screen.findByRole('heading', { name: /publishing, inbox, and campaign adapters/i })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: /publisering, innboks og kampanjeadaptere/i })).toBeTruthy()
     expect((await screen.findAllByText('Facebook')).length).toBeGreaterThan(0)
     expect((await screen.findAllByText('Snapchat')).length).toBeGreaterThan(0)
-    expect(screen.getByText(/Page publishing, comments, inbox, and analytics/i)).toBeTruthy()
-    expect(screen.getByText(/Ads, creative, campaign, and reporting workflows/i)).toBeTruthy()
-    expect(screen.getByText('publish-ready')).toBeTruthy()
-    expect(screen.getByRole('link', { name: /open calendar/i }).getAttribute('href')).toBe('/social/calendar')
+    expect(screen.getByText(/Sidepublisering, kommentarer, innboks og analyse/i)).toBeTruthy()
+    expect(screen.getByText(/Annonser, kreativt innhold, kampanje- og rapporteringsarbeidsflyt/i)).toBeTruthy()
+    expect(screen.getByText('klar for publisering')).toBeTruthy()
+    expect(screen.getByRole('link', { name: /åpne kalender/i }).getAttribute('href')).toBe('/social/calendar')
   })
 
   it('does not present soft-deleted provider connections as connected', async () => {
@@ -410,8 +410,8 @@ describe('workspace settings page', () => {
     render(() => <VelionWorkspaceSettingsPage section="integrations" />)
 
     expect(await screen.findByText('Slack')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Connect' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Koble til' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Koble fra' })).toBeNull()
   })
 
   it('shows provider-verified incomplete Meta authorization as needing reconnect', async () => {
@@ -436,11 +436,11 @@ describe('workspace settings page', () => {
 
 	render(() => <VelionWorkspaceSettingsPage section="integrations" />)
 
-	const attentionMetric = (await screen.findByText('Attention')).parentElement
+	const attentionMetric = (await screen.findByText('Krever oppmerksomhet')).parentElement
 	expect(attentionMetric).toBeTruthy()
 	expect(within(attentionMetric as HTMLElement).getByText('1')).toBeTruthy()
-	expect(screen.getAllByText('Needs reconnect')).toHaveLength(2)
-	expect(screen.getAllByRole('button', { name: 'Reconnect' })).toHaveLength(2)
+	expect(screen.getAllByText('Krever ny tilkobling')).toHaveLength(2)
+	expect(screen.getAllByRole('button', { name: 'Koble til på nytt' })).toHaveLength(2)
   })
 
   it('clears connection state and reloads integrations when the active organization changes', async () => {
@@ -490,12 +490,12 @@ describe('workspace settings page', () => {
 
     render(() => <VelionWorkspaceSettingsPage section="integrations" />)
 
-    expect(await screen.findByRole('button', { name: 'Disconnect' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: 'Koble fra' })).toBeTruthy()
 
     markSessionOnboardingComplete({ id: 'org_two', name: 'Two', role: 'owner' })
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Connect' })).toBeTruthy())
-    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Koble til' })).toBeTruthy())
+    expect(screen.queryByRole('button', { name: 'Koble fra' })).toBeNull()
   })
 
   it('renders billing with live account data and prefers embedded Nexi checkout over its hosted URL', async () => {
@@ -540,11 +540,11 @@ describe('workspace settings page', () => {
 
     expect(screen.getByRole('heading', { name: /billing/i, level: 1 })).toBeTruthy()
     expect((await screen.findAllByText(/trialing/i)).length).toBeGreaterThan(0)
-    expect(screen.getByRole('heading', { name: /choose plan/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /activate advanced/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /velg plan/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /aktiver advanced/i })).toBeTruthy()
     expect(screen.queryByText('Current plan, renewal date, and upgrade path')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: /activate advanced/i }))
+    fireEvent.click(screen.getByRole('button', { name: /aktiver advanced/i }))
 
     expect(await screen.findByRole('region', { name: /payment checkout/i })).toBeTruthy()
     expect(fetchMock).toHaveBeenCalledWith(expect.stringMatching('/api/v1/billing/checkout$'), expect.objectContaining({
@@ -557,7 +557,7 @@ describe('workspace settings page', () => {
     expect(screen.getByRole('heading', { name: /sso/i, level: 1 })).toBeTruthy()
     // De-faked: SSO is honestly "Not configured" — the fabricated provider form,
     // connection test, and attribute mapping panels were removed.
-    expect(screen.getByText(/single sign-on is not configured/i)).toBeTruthy()
+    expect(screen.getByText(/ikke konfigurert for denne organisasjonen/i)).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /connection test/i })).toBeNull()
     expect(screen.queryByRole('heading', { name: /attribute mapping/i })).toBeNull()
     expect(screen.queryByText('SSO provider selection and verified domain')).toBeNull()

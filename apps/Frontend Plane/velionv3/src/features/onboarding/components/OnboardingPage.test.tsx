@@ -59,7 +59,7 @@ describe('OnboardingPage paywall commit guard', () => {
       plan: 'enterprise',
     })
 
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({}), {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({}), {
       headers: { 'Content-Type': 'application/json' },
       status: 200,
     }))

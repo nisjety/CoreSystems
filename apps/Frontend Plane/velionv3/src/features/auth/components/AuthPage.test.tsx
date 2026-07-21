@@ -242,7 +242,7 @@ describe('AuthPage email verification OTP flow', () => {
     expect(submitButton).toBeTruthy()
     fireEvent.click(submitButton as HTMLButtonElement)
 
-    const loadingButton = await screen.findByRole('button', { name: 'Logger inn...' })
+    const loadingButton = await screen.findByRole('button', { name: /^Logger inn/ })
     expect((loadingButton as HTMLButtonElement).disabled).toBe(true)
 
     signIn.resolve(jsonResponse({

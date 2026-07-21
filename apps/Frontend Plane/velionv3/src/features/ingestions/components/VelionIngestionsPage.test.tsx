@@ -55,22 +55,24 @@ describe('VelionIngestionsPage', () => {
     mockIngestionApi()
     renderIngestions()
 
-    expect(screen.getByRole('heading', { name: 'Ingestions', level: 1 })).toBeTruthy()
-    expect(screen.getByText(/run crawls and extracts, inspect evidence/i)).toBeTruthy()
-    expect(screen.getByRole('button', { name: /runs/i }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('button', { name: /schedules/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /sources/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /evidence/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /profiles/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /refresh/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /start a run/i })).toBeTruthy()
-    expect((screen.getByRole('combobox', { name: /run type/i }) as HTMLSelectElement).value).toBe('scrape')
-    expect(screen.getByRole('textbox', { name: /target url/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /start run/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /recent runs/i })).toBeTruthy()
-    expect(screen.getByRole('link', { name: /open knowledge/i }).getAttribute('href')).toBe('/knowledge')
+    // Component default locale is Norwegian ('no'); i18n.tr(no, en) renders the
+    // Norwegian string by default, so assertions match the rendered Norwegian text.
+    expect(screen.getByRole('heading', { name: 'Innhenting', level: 1 })).toBeTruthy()
+    expect(screen.getByText(/kjør crawler og uttrekk, inspiser bevis/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /kjøringer/i }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: /tidsplaner/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /kilder/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /bevis/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /profiler/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /oppdater/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /start en kjøring/i })).toBeTruthy()
+    expect((screen.getByRole('combobox', { name: /kjøringstype/i }) as HTMLSelectElement).value).toBe('scrape')
+    expect(screen.getByRole('textbox', { name: /mål-url/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /start kjøring/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /nylige kjøringer/i })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /åpne kunnskap/i }).getAttribute('href')).toBe('/knowledge')
 
-    await waitFor(() => expect(screen.getByText(/no durable runs yet/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/ingen varige kjøringer ennå/i)).toBeTruthy())
   })
 
   it('runs an on-demand monitoring check and renders real history (no scheduling control)', async () => {
@@ -112,19 +114,19 @@ describe('VelionIngestionsPage', () => {
 
     renderIngestions()
 
-    fireEvent.click(screen.getByRole('button', { name: /monitoring/i }))
+    fireEvent.click(screen.getByRole('button', { name: /overvåking/i }))
 
-    expect(screen.getByRole('heading', { name: /check a page for changes/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /sjekk en side for endringer/i })).toBeTruthy()
     // On-demand only: there must be no cron / schedule affordance on this surface.
     expect(screen.queryByText(/cron/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /save schedule/i })).toBeNull()
 
-    const urlField = screen.getByRole('textbox', { name: /page url/i })
+    const urlField = screen.getByRole('textbox', { name: /side-url/i })
     fireEvent.input(urlField, { target: { value: 'https://example.com/' } })
-    fireEvent.click(screen.getByRole('button', { name: /check now/i }))
+    fireEvent.click(screen.getByRole('button', { name: /sjekk nå/i }))
 
     // The live result and the real baseline history both render.
-    await waitFor(() => expect(screen.getByText(/latest check/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/siste sjekk/i)).toBeTruthy())
     await waitFor(() => expect(screen.getByText(/blake3:deadbeefcafe/i)).toBeTruthy())
   })
 
@@ -173,19 +175,19 @@ describe('VelionIngestionsPage', () => {
     )
 
     renderIngestions()
-    fireEvent.click(screen.getByRole('button', { name: /sources/i }))
+    fireEvent.click(screen.getByRole('button', { name: /kilder/i }))
 
     // Honest empty state before anything is registered.
-    await waitFor(() => expect(screen.getByText(/no durable source records yet/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/ingen varige kilderegistreringer ennå/i)).toBeTruthy())
 
     // Fill + submit the create form.
-    fireEvent.input(screen.getByRole('textbox', { name: /^name$/i }), {
+    fireEvent.input(screen.getByRole('textbox', { name: /^navn$/i }), {
       target: { value: 'Acme pricing' },
     })
     fireEvent.input(screen.getByRole('textbox', { name: /^url$/i }), {
       target: { value: 'https://acme.example/pricing' },
     })
-    fireEvent.click(screen.getByRole('button', { name: /add source/i }))
+    fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
 
     // The newly created source appears after the post-create refetch.
     await waitFor(() => expect(screen.getByText('Acme pricing')).toBeTruthy())
@@ -201,8 +203,8 @@ describe('VelionIngestionsPage', () => {
     expect('orgId' in sentBody).toBe(false)
 
     // Remove it; the list returns to the honest empty state.
-    fireEvent.click(screen.getByRole('button', { name: /remove/i }))
-    await waitFor(() => expect(screen.getByText(/no durable source records yet/i)).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: /fjern/i }))
+    await waitFor(() => expect(screen.getByText(/ingen varige kilderegistreringer ennå/i)).toBeTruthy())
 
     const deleteCall = calls.find((c) => c.url.includes('/api/ingestions/sources/') && c.method === 'DELETE')
     expect(deleteCall).toBeTruthy()

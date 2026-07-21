@@ -57,9 +57,9 @@ describe('InboxAside Velion actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('button', { name: 'Velion' }))
-    const action = screen.getByText('Assess & route').closest('.velion-inbox-action-suggestion')
+    const action = screen.getByText('Vurder og rut').closest('.velion-inbox-action-suggestion')
     expect(action).toBeTruthy()
-    fireEvent.click(within(action as HTMLElement).getByRole('button', { name: 'Run' }))
+    fireEvent.click(within(action as HTMLElement).getByRole('button', { name: 'Kjør' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined

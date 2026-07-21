@@ -35,7 +35,7 @@ describe('SocialCommercePage', () => {
 
     // Catalog card renders with its real name and offers a product drill-down.
     expect(screen.getByText('Spring Collection')).toBeTruthy()
-    const viewProducts = screen.getByRole('button', { name: 'View products' })
+    const viewProducts = screen.getByRole('button', { name: 'Vis produkter' })
     fireEvent.click(viewProducts)
 
     await waitForCommerce(() => expect(screen.getByText('Aquatiq Widget')).toBeTruthy())
@@ -60,9 +60,9 @@ describe('SocialCommercePage', () => {
     renderCommerce()
 
     await waitForCommerce(() =>
-      expect(screen.getByText(/No metric snapshots recorded yet/)).toBeTruthy(),
+      expect(screen.getByText(/Ingen statistikkbilder registrert ennå/)).toBeTruthy(),
     )
-    expect(screen.getByText(/No commerce catalogs/)).toBeTruthy()
+    expect(screen.getByText(/Ingen handelskataloger/)).toBeTruthy()
   })
 })
 

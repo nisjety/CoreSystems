@@ -68,7 +68,7 @@ describe('AcceptInvitationPage', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderInvitation()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Aksepter invitasjon' }))
 
     expect(await screen.findByText('Dashboard')).toBeTruthy()
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
@@ -123,10 +123,10 @@ describe('AcceptInvitationPage', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderInvitation()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Aksepter invitasjon' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/expired, already accepted, or no longer valid/i)).toBeTruthy()
+      expect(screen.getByText(/utløpt, allerede akseptert, eller ikke lenger gyldig/i)).toBeTruthy()
     })
     expect(screen.queryByText('Dashboard')).toBeNull()
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
@@ -181,7 +181,7 @@ describe('AcceptInvitationPage', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderInvitation()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Aksepter invitasjon' }))
 
     expect(await screen.findByText('Dashboard')).toBeTruthy()
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
@@ -241,10 +241,10 @@ describe('AcceptInvitationPage', () => {
     await switchActiveOrganization('org_a')
     await loadSession({ disableAuthCookieCache: true })
     renderInvitation()
-    fireEvent.click(screen.getByRole('button', { name: 'Accept invitation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Aksepter invitasjon' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/expired, already accepted, or no longer valid/i)).toBeTruthy()
+      expect(screen.getByText(/utløpt, allerede akseptert, eller ikke lenger gyldig/i)).toBeTruthy()
     })
     expect(screen.queryByText('Dashboard')).toBeNull()
   })

@@ -374,11 +374,11 @@ describe('KnowledgePage', () => {
   it('renders the live overview payload', async () => {
     renderKnowledgePage()
 
-    expect(await screen.findByRole('heading', { name: /^folders$/i })).toBeTruthy()
-    expect((screen.getByRole('combobox', { name: /select knowledge collection/i }) as HTMLSelectElement).value).toBe('all')
-    expect(screen.getByRole('heading', { name: /^integrations$/i, level: 2 })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /^files$/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /tracked web sources/i })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: /^mapper$/i })).toBeTruthy()
+    expect((screen.getByRole('combobox', { name: /velg kunnskapssamling/i }) as HTMLSelectElement).value).toBe('all')
+    expect(screen.getByRole('heading', { name: /^integrasjoner$/i, level: 2 })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /^filer$/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /sporede nettkilder/i })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /data plane status/i })).toBeNull()
     expect(screen.getByRole('heading', { name: /support knowledge/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /microsoft 365/i })).toBeTruthy()
@@ -389,11 +389,11 @@ describe('KnowledgePage', () => {
   it('exposes the Docs toolbar and switches the overview layout accessibly', async () => {
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
+    await screen.findByRole('heading', { name: /^mapper$/i })
 
-    expect(screen.getByRole('textbox', { name: /search knowledge base/i })).toBeTruthy()
-    const gridView = screen.getByRole('button', { name: /grid view/i })
-    const listView = screen.getByRole('button', { name: /list view/i })
+    expect(screen.getByRole('textbox', { name: /søk i kunnskapsbasen/i })).toBeTruthy()
+    const gridView = screen.getByRole('button', { name: /rutenettvisning/i })
+    const listView = screen.getByRole('button', { name: /listevisning/i })
     expect(gridView.getAttribute('aria-pressed')).toBe('true')
     expect(listView.getAttribute('aria-pressed')).toBe('false')
 
@@ -401,21 +401,21 @@ describe('KnowledgePage', () => {
 
     expect(listView.getAttribute('aria-pressed')).toBe('true')
     expect(gridView.getAttribute('aria-pressed')).toBe('false')
-    expect(screen.getByRole('button', { name: /filter knowledge/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /filtrer kunnskap/i })).toBeTruthy()
   })
 
   it('switches from overview to graph and chunks using live data', async () => {
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
-    fireEvent.click(screen.getByRole('button', { name: /graph/i }))
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /graf/i }))
 
-    expect(screen.getByRole('region', { name: /raggraph relationship map/i })).toBeTruthy()
+    expect(screen.getByRole('region', { name: /raggraph-relasjonskart/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /shipping policy/i, level: 2 })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /chunks/i }))
+    fireEvent.click(screen.getByRole('button', { name: /utdrag/i }))
 
-    expect(screen.getByRole('heading', { name: /^sources$/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /^kilder$/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /returns policy/i })).toBeTruthy()
   })
 
@@ -470,8 +470,8 @@ describe('KnowledgePage', () => {
 
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
-    fireEvent.click(screen.getByRole('button', { name: /ai map/i }))
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
 
     expect(screen.getByRole('heading', { name: /evidence-grounded ai rollout map/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /no operating map yet/i })).toBeTruthy()
@@ -523,33 +523,33 @@ describe('KnowledgePage', () => {
 
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
-    fireEvent.click(screen.getByRole('button', { name: /ai map/i }))
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
 
     expect(await screen.findByRole('heading', { name: /accepted operating map/i })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /create blueprint/i }))
 
-    await waitFor(() => expect(screen.getByText(/blueprint suggestion saved for agents review/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/agentmal-forslag lagret for gjennomgang i agenter/i)).toBeTruthy())
     expect((screen.getByRole('button', { name: /suggested/i }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('opens the add source modal', async () => {
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
-    fireEvent.click(screen.getByRole('button', { name: /add source/i }))
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
 
-    expect(screen.getByRole('dialog', { name: /add knowledge source/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /upload files/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /connect a workspace/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /crawl a website/i })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: /legg til kunnskapskilde/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /last opp filer/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /koble til et arbeidsområde/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /gjennomsøk et nettsted/i })).toBeTruthy()
   })
 
   it('filters live knowledge by collection and search query', async () => {
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
-    fireEvent.change(screen.getByRole('combobox', { name: /select knowledge collection/i }), {
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.change(screen.getByRole('combobox', { name: /velg kunnskapssamling/i }), {
       target: { value: 'provider:microsoft' },
     })
 
@@ -558,7 +558,7 @@ describe('KnowledgePage', () => {
     expect(screen.getAllByText(/returns policy/i)[0]).toBeTruthy()
     expect(screen.queryAllByText(/shipping faq/i)).toHaveLength(0)
 
-    const search = screen.getByRole('textbox', { name: /search files and sources/i })
+    const search = screen.getByRole('textbox', { name: /søk i filer og kilder/i })
     fireEvent.input(search, { target: { value: 'returns' } })
 
     expect(screen.getAllByText(/returns policy/i)[0]).toBeTruthy()
@@ -575,8 +575,8 @@ describe('KnowledgePage', () => {
 
     renderKnowledgePage()
 
-    expect(await screen.findByRole('heading', { name: /^folders$/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /^files$/i })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: /^mapper$/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /^filer$/i })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /data plane status/i })).toBeNull()
   })
 
@@ -609,15 +609,15 @@ describe('KnowledgePage', () => {
 
     renderKnowledgePage()
 
-    await screen.findByRole('heading', { name: /^folders$/i })
-    fireEvent.click(screen.getByRole('button', { name: /add source/i }))
-    fireEvent.input(screen.getByLabelText(/website url/i), {
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
+    fireEvent.input(screen.getByLabelText(/nettadresse/i), {
       target: { value: 'https://docs.velion.ai' },
     })
-    fireEvent.input(screen.getByLabelText(/max pages/i), {
+    fireEvent.input(screen.getByLabelText(/maks antall sider/i), {
       target: { value: '16' },
     })
-    fireEvent.click(screen.getByRole('button', { name: /start crawl/i }))
+    fireEvent.click(screen.getByRole('button', { name: /start gjennomsøking/i }))
 
     // The typed URL must reach the request payload sent to the backend...
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -630,9 +630,9 @@ describe('KnowledgePage', () => {
 
     // ...and the confirmation message must display that same URL — not
     // "undefined" — even though the response never echoes it back.
-    await waitFor(() => expect(screen.getByText(/started a website crawl for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/startet en gjennomsøking av nettstedet for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
     expect(screen.queryByText(/undefined/i)).toBeNull()
-    expect(screen.getByText(/track run crawl-1/i)).toBeTruthy()
+    expect(screen.getByText(/følg kjøring crawl-1/i)).toBeTruthy()
   })
 
   it('refetches the knowledge workspace once the crawl run-event stream reaches completion', async () => {
@@ -682,16 +682,16 @@ describe('KnowledgePage', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderKnowledgePage()
-    await screen.findByRole('heading', { name: /^folders$/i })
+    await screen.findByRole('heading', { name: /^mapper$/i })
     const callsBeforeCrawl = sourcesCallCount
 
-    fireEvent.click(screen.getByRole('button', { name: /add source/i }))
-    fireEvent.input(screen.getByLabelText(/website url/i), {
+    fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
+    fireEvent.input(screen.getByLabelText(/nettadresse/i), {
       target: { value: 'https://docs.velion.ai' },
     })
-    fireEvent.click(screen.getByRole('button', { name: /start crawl/i }))
+    fireEvent.click(screen.getByRole('button', { name: /start gjennomsøking/i }))
 
-    await waitFor(() => expect(screen.getByText(/started a website crawl for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/startet en gjennomsøking av nettstedet for https:\/\/docs\.velion\.ai/i)).toBeTruthy())
 
     // Two refetches are expected: the immediate one right after the crawl
     // starts, and the completion-triggered one once the SSE stream ends.

@@ -37,10 +37,10 @@ describe('SocialOperationsPage', () => {
     renderSocialOperations('accounts')
 
     await waitForSocial(() => expect(screen.getByText('Acme LinkedIn')).toBeTruthy())
-    expect(screen.getByText('Tracked providers')).toBeTruthy()
-    expect(screen.getByText('Publish capable')).toBeTruthy()
-    expect(screen.getByText(/Required capabilities present/)).toBeTruthy()
-    expect(screen.getByText(/Missing social.post.write/)).toBeTruthy()
+    expect(screen.getByText('Sporede leverandører')).toBeTruthy()
+    expect(screen.getByText('Kan publisere')).toBeTruthy()
+    expect(screen.getByText(/Nødvendige funksjoner er på plass/)).toBeTruthy()
+    expect(screen.getByText(/Mangler social.post.write/)).toBeTruthy()
 
     const fetchMock = vi.mocked(fetch)
     expect(fetchMock.mock.calls.some(([url, init]) =>
@@ -55,10 +55,10 @@ describe('SocialOperationsPage', () => {
     renderSocialOperations('drafts')
 
     await waitForSocial(() => expect(screen.getByText('Launch reel')).toBeTruthy())
-    expect(screen.getByText(/Media-first platforms need a ready image or video/)).toBeTruthy()
+    expect(screen.getByText(/Mediaførste plattformer trenger et klart bilde eller en video/)).toBeTruthy()
 
-    const metrics = screen.getByLabelText('Drafts metrics')
-    expect(within(metrics).getByText('Needs media')).toBeTruthy()
+    const metrics = screen.getByLabelText('Utkast nøkkeltall')
+    expect(within(metrics).getByText('Trenger media')).toBeTruthy()
     expect(within(metrics).getAllByText('1').length).toBeGreaterThanOrEqual(2)
   })
 
@@ -102,7 +102,7 @@ describe('SocialOperationsPage', () => {
     renderSocialOperations('approvals')
 
     await waitForSocial(() => expect(screen.getByText('Legal review')).toBeTruthy())
-    expect(screen.getByText(/Human review is required/)).toBeTruthy()
+    expect(screen.getByText(/Manuell gjennomgang kreves/)).toBeTruthy()
 
     cleanup()
     renderSocialOperations('campaigns')
@@ -120,9 +120,9 @@ describe('SocialOperationsPage', () => {
 
     renderSocialOperations('competitors')
 
-    await waitForSocial(() => expect(screen.getByText(/No database-backed competitor watch records were loaded/)).toBeTruthy())
+    await waitForSocial(() => expect(screen.getByText(/Ingen databaseforankrede konkurrentovervåking-poster ble lastet/)).toBeTruthy())
     expect(screen.queryByText('LinkedIn competitor lane')).toBeNull()
-    expect(within(screen.getByLabelText('Competitor watch metrics')).getAllByText('0')).toHaveLength(2)
+    expect(within(screen.getByLabelText('Konkurrentovervåking nøkkeltall')).getAllByText('0')).toHaveLength(2)
   })
 })
 

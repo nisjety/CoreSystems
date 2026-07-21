@@ -244,13 +244,13 @@ describe('TicketingPage', () => {
 
     expect((await screen.findAllByText('TCK-REFUND')).length).toBeGreaterThan(1)
     expect(screen.getByRole('heading', { name: /refund blocked after delivery issue/i })).toBeTruthy()
-    expect(screen.getByText('Auto-created ticket')).toBeTruthy()
+    expect(screen.getByText('Auto-opprettet sak')).toBeTruthy()
     expect(screen.getAllByText('Urgent escalation SLA').length).toBeGreaterThan(1)
     expect(screen.getByText('Order 1001')).toBeTruthy()
     expect(screen.getByText('Refund review')).toBeTruthy()
 
-    const context = screen.getByRole('complementary', { name: 'Ticket context' })
-    expect(within(context).getByText('Queue health')).toBeTruthy()
+    const context = screen.getByRole('complementary', { name: 'Sakkontekst' })
+    expect(within(context).getByText('Køhelse')).toBeTruthy()
     expect(within(context).getByText('Escalate billing and prepare customer update')).toBeTruthy()
     expect(within(context).getByText('Route refund tickets')).toBeTruthy()
   })
@@ -275,20 +275,20 @@ describe('TicketingPage', () => {
     renderTicketing()
 
     await screen.findAllByText('TCK-REFUND')
-    const context = screen.getByRole('complementary', { name: 'Ticket context' })
+    const context = screen.getByRole('complementary', { name: 'Sakkontekst' })
     const macroDescription = within(context).getByText('Escalate billing and prepare customer update')
     const macroButton = macroDescription.closest('button')
     if (!macroButton) throw new Error('Expected refund handoff macro button')
     fireEvent.click(macroButton)
-    await waitFor(() => expect(screen.getByText(/macro "refund handoff" applied/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/makroen "refund handoff" ble kjørt/i)).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add checklist' }))
-    await waitFor(() => expect(screen.getByText('Checklist added.')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Legg til sjekkliste' }))
+    await waitFor(() => expect(screen.getByText('Sjekkliste lagt til.')).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resolve' }))
-    await waitFor(() => expect(screen.getByText('Ticket resolved.')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Løs' }))
+    await waitFor(() => expect(screen.getByText('Saken er løst.')).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Social follow-up' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sosial oppfølging' }))
     await waitFor(() => expect(window.location.pathname).toBe('/social/drafts'))
 
     const fetchMock = vi.mocked(fetch)

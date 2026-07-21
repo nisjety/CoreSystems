@@ -61,7 +61,10 @@ describe('AgentsPage', () => {
   it('shows the five v2 agent role entry points on the first screen', () => {
     renderWithProviders(() => <AgentsPage />)
 
-    expect(screen.getByRole('heading', { name: /one agent system for the entire customer journey/i })).toBeTruthy()
+    // AgentsPage now renders this heading through i18n.tr(no, en); the test
+    // environment's default locale is Norwegian ('no'), so the Norwegian
+    // string is what actually renders.
+    expect(screen.getByRole('heading', { name: /ett agentsystem for hele kundereisen/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /service agent/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /sales agent/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /ecommerce agent/i })).toBeTruthy()
@@ -77,10 +80,12 @@ describe('AgentsPage', () => {
 
     expect(screen.getByRole('heading', { name: /^playground$/i, level: 1 })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /velion support agent/i })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /select update subscription add-on/i })).toBeTruthy()
-    expect(screen.getByRole('textbox', { name: /instructions system prompt/i })).toBeTruthy()
+    // These aria-labels/text are now i18n.tr(no, en) calls that render the
+    // Norwegian string under the test environment's default 'no' locale.
+    expect(screen.getByRole('button', { name: /velg tillegg for abonnementsoppdatering/i })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: /systemprompt for instruksjoner/i })).toBeTruthy()
     expect(screen.getByRole('combobox', { name: /model/i })).toBeTruthy()
-    await waitFor(() => expect(screen.getByText('Live support actions connected')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Live supporthandlinger tilkoblet')).toBeTruthy())
   })
 
   it('opens the workflow builder and configures a selected workflow node', () => {
@@ -88,18 +93,25 @@ describe('AgentsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /workflow builder/i }))
 
-    expect(screen.getByRole('heading', { name: /generate social media post/i })).toBeTruthy()
+    // WorkflowCanvas's top-bar heading and the canvas/prompt aria-labels are
+    // i18n.tr(no, en) calls; the test environment's default 'no' locale renders
+    // the Norwegian string. "Generate Caption" / "Post on Instagram" come from
+    // the hardcoded (untranslated) workflow node/inspector data, so those stay
+    // in English.
+    expect(screen.getByRole('heading', { name: /generer innlegg til sosiale medier/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /generate caption/i })).toBeTruthy()
-    expect(screen.getByRole('region', { name: /workflow canvas/i })).toBeTruthy()
-    expect(screen.getByRole('textbox', { name: /workflow prompt/i })).toBeTruthy()
+    expect(screen.getByRole('region', { name: /arbeidsflyt-lerret/i })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: /arbeidsflyt-prompt/i })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /select post on instagram workflow node/i }))
+    fireEvent.click(screen.getByRole('button', { name: /velg arbeidsflytnoden post on instagram/i }))
 
     expect(screen.getByRole('heading', { name: /post on instagram/i })).toBeTruthy()
     // Phase 3 PR-1 removed the dead Test Run / Publish controls and labelled the
     // WorkflowBuilder a design preview; assert that honesty label (not the
-    // now-removed Test Run button) here.
-    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+    // now-removed Test Run button) here. DesignPreviewBadge's default label is
+    // now i18n.tr('Designforhåndsvisning', 'Design preview'), which renders the
+    // Norwegian string under the test environment's default 'no' locale.
+    expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
   })
 })
 
@@ -110,15 +122,18 @@ describe('AgentsPage honesty sweep (Phase 4)', () => {
   it('labels the ecommerce store workspace as a design preview and disables Review/Apply', () => {
     renderWithProviders(() => <AgentsPage />, '/agents?agent=ecommerce&feature=commerce-store')
 
-    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
-    expect((screen.getByRole('button', { name: 'Review' }) as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('button', { name: 'Apply' }) as HTMLButtonElement).disabled).toBe(true)
+    // DesignPreviewBadge's default label and the Review/Apply button copy on
+    // the commerce-store surface are now i18n.tr(no, en) calls, rendering the
+    // Norwegian strings under the test environment's default 'no' locale.
+    expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
+    expect((screen.getByRole('button', { name: 'Vurder' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Bruk' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('disables the preview-only meeting-slot picker on the sales booking workspace', () => {
     renderWithProviders(() => <AgentsPage />, '/agents?agent=sales&feature=sales-booking')
 
-    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
     const disabledButtons = screen.getAllByRole('button').filter((button) => (button as HTMLButtonElement).disabled)
     expect(disabledButtons.length).toBeGreaterThan(1)
   })

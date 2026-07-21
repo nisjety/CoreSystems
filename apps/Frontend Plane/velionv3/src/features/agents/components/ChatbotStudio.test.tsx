@@ -54,16 +54,21 @@ describe('ChatbotStudio', () => {
 
     renderWithProviders(() => <ChatbotStudio />, '/agents?agent=chatbot')
 
+    // NOTE: strings below are Norwegian ('no') — the app's default locale, which
+    // is also the test environment's default. ChatbotStudio/ChatbotPlayground
+    // render via i18n.tr(noText, enText), so the Norwegian literal is what
+    // actually renders (see src/shared/i18n/locales.ts pickLocaleText + the
+    // fallbackI18n used when no I18nProvider wraps the tree, as here).
     expect(screen.getByRole('heading', { name: 'Playground' })).toBeTruthy()
-    expect(screen.getByRole('combobox', { name: 'Model' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Select update subscription add-on' })).toBeTruthy()
-    expect(screen.getByText('1 Tool Enabled')).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: 'Modell' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Velg tillegg for abonnementsoppdatering' })).toBeTruthy()
+    expect(screen.getByText('1 verktøy aktivert')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
-    expect(screen.getByText('Tool ready to enable')).toBeTruthy()
-    expect(screen.queryByText('Remove selected tool')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Tøm' }))
+    expect(screen.getByText('Verktøy klart til å aktiveres')).toBeTruthy()
+    expect(screen.queryByText('Fjern valgt verktøy')).toBeNull()
 
-    await waitFor(() => expect(screen.getByText('Live support actions connected')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Live supporthandlinger tilkoblet')).toBeTruthy())
 
     const fetchCalls = fetchMock.mock.calls as unknown as Array<[unknown, { credentials?: RequestCredentials } | undefined]>
     expect(fetchCalls.some(([url, init]) =>
@@ -77,8 +82,8 @@ describe('ChatbotStudio', () => {
 
     renderWithProviders(() => <ChatbotStudio />, '/agents?agent=chatbot&view=analytics')
 
-    expect(screen.getByRole('heading', { name: 'Analytics' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Chat count' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Analyse' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Antall samtaler' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Playground' })).toBeNull()
   })
 })
@@ -87,12 +92,16 @@ describe('ChatbotStudio', () => {
 // carry a "Design preview" badge AND have its action-implying controls disabled,
 // so nothing implies a backend that does not exist yet.
 describe('ChatbotStudio honesty sweep (Phase 4)', () => {
+  // NOTE: headings/actions below are Norwegian ('no') literals — the app's and
+  // test environment's default locale — since ChatbotStudio renders via
+  // i18n.tr(noText, enText) and no I18nProvider wraps this tree (see the
+  // top-level note on the first test in this file).
   const surfaces: Array<{ view: string; heading: RegExp; deadAction: RegExp }> = [
-    { view: 'analytics', heading: /^analytics$/i, deadAction: /live event window/i },
-    { view: 'insights', heading: /^insights$/i, deadAction: /live event window/i },
-    { view: 'actions', heading: /^tools$/i, deadAction: /create tool/i },
-    { view: 'integrations', heading: /^integrations$/i, deadAction: /add integration/i },
-    { view: 'leads', heading: /^leads$/i, deadAction: /export/i },
+    { view: 'analytics', heading: /^analyse$/i, deadAction: /live hendelsesvindu/i },
+    { view: 'insights', heading: /^innsikt$/i, deadAction: /live hendelsesvindu/i },
+    { view: 'actions', heading: /^verktøy$/i, deadAction: /opprett verktøy/i },
+    { view: 'integrations', heading: /^integrasjoner$/i, deadAction: /legg til integrasjon/i },
+    { view: 'leads', heading: /^leads$/i, deadAction: /eksporter/i },
   ]
 
   for (const surface of surfaces) {
@@ -102,7 +111,7 @@ describe('ChatbotStudio honesty sweep (Phase 4)', () => {
       renderWithProviders(() => <ChatbotStudio />, `/agents?agent=chatbot&view=${surface.view}`)
 
       expect(screen.getByRole('heading', { name: surface.heading, level: 1 })).toBeTruthy()
-      expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
 
       const action = screen.getAllByRole('button', { name: surface.deadAction })[0] as HTMLButtonElement
       expect(action.disabled).toBe(true)
@@ -113,16 +122,16 @@ describe('ChatbotStudio honesty sweep (Phase 4)', () => {
     stubRuntimeFetch()
 
     renderWithProviders(() => <ChatbotStudio />, '/agents?agent=chatbot&view=install')
-    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
-    expect((screen.getByRole('button', { name: 'Manage' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
+    expect((screen.getByRole('button', { name: 'Administrer' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('labels the chat-logs surface and disables the download control', () => {
     stubRuntimeFetch()
 
     renderWithProviders(() => <ChatbotStudio />, '/agents?agent=chatbot&view=chat-logs')
-    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
-    expect((screen.getByRole('button', { name: /download chat logs/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
+    expect((screen.getByRole('button', { name: /last ned chattelogger/i }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('labels the playground but keeps its real local controls interactive', () => {
@@ -130,11 +139,11 @@ describe('ChatbotStudio honesty sweep (Phase 4)', () => {
 
     renderWithProviders(() => <ChatbotStudio />, '/agents?agent=chatbot&view=playground')
 
-    expect(screen.getAllByText('Design preview').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
     // Dead affordance is neutralized...
-    expect((screen.getByRole('button', { name: /^compare$/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: /^sammenlign$/i }) as HTMLButtonElement).disabled).toBe(true)
     // ...but the genuinely-wired local tool-pool controls stay interactive.
-    expect((screen.getByRole('button', { name: 'Clear' }) as HTMLButtonElement).disabled).toBe(false)
-    expect((screen.getByRole('button', { name: 'Select update subscription add-on' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Tøm' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Velg tillegg for abonnementsoppdatering' }) as HTMLButtonElement).disabled).toBe(false)
   })
 })

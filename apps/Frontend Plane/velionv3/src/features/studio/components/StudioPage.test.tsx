@@ -24,12 +24,14 @@ describe('StudioPage', () => {
   it('opens to an honest empty canvas and can add an editable text block', () => {
     renderWithRouter(() => <StudioPage section="canvas" />)
 
-    expect(screen.getByText('Launch canvas')).toBeTruthy()
-    expect(screen.getByLabelText('Studio canvas workspace')).toBeTruthy()
+    // Component defaults to the Norwegian locale text (i18n.tr(no, en) with no
+    // I18nProvider in the render tree resolves to the Norwegian string).
+    expect(screen.getByText('Lanseringslerret')).toBeTruthy()
+    expect(screen.getByLabelText('Studio-lerretsarbeidsområde')).toBeTruthy()
     // Phase 4 PR-3 seed strip: the canvas starts empty (no fabricated demo blocks).
-    expect(screen.getByText('Start a Studio board')).toBeTruthy()
+    expect(screen.getByText('Start et Studio-brett')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add Text block' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Legg til Tekst-blokk' }))
 
     expect(screen.getAllByText('Text note 1').length).toBeGreaterThanOrEqual(1)
     fireEvent.input(screen.getByDisplayValue('Text note 1'), {
@@ -42,18 +44,18 @@ describe('StudioPage', () => {
     renderWithRouter(() => <StudioPage section="canvas" />)
 
     // Build up from the empty canvas, then duplicate the added block.
-    fireEvent.click(screen.getByRole('button', { name: 'Add Text block' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Duplicate selected block' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Legg til Tekst-blokk' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Dupliser valgt blokk' }))
 
     expect(screen.getByDisplayValue('Text note 1 copy')).toBeTruthy()
 
     // Delete both blocks; the empty-state affordance returns.
-    fireEvent.click(screen.getByRole('button', { name: 'Delete selected block' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Delete selected block' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Slett valgt blokk' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Slett valgt blokk' }))
 
-    expect(screen.getByText('Start a Studio board')).toBeTruthy()
+    expect(screen.getByText('Start et Studio-brett')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Text' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Tekst' }))
 
     expect(screen.getByDisplayValue('Text note 1')).toBeTruthy()
   })
@@ -63,10 +65,10 @@ describe('StudioPage', () => {
     renderWithRouter(() => <StudioPage section="canvas" />)
 
     await waitFor(() => {
-      expect((screen.getByRole('button', { name: 'Send to drafts' }) as HTMLButtonElement).disabled).toBe(false)
+      expect((screen.getByRole('button', { name: 'Send til utkast' }) as HTMLButtonElement).disabled).toBe(false)
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Send to drafts' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send til utkast' }))
 
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([url, init]) => (
@@ -81,7 +83,7 @@ describe('StudioPage', () => {
       ))).toBe(true)
     })
 
-    expect(screen.getByText(/Social draft created/)).toBeTruthy()
+    expect(screen.getByText(/Sosialt utkast opprettet/)).toBeTruthy()
   })
 })
 
