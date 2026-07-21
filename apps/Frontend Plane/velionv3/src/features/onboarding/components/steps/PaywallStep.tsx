@@ -405,7 +405,7 @@ function planCopy(planId: PlanId, i18n: PaywallI18n): { name: string; descriptio
           'For small teams validating a simple chatbot.',
         ),
         features: [
-          i18n.tr('4 kr per henvendelse løst av AI', 'NOK 4 per AI-resolved inquiry'),
+          i18n.tr('Bruksbasert prising for AI-løste henvendelser', 'Usage-based AI resolution pricing'),
           i18n.tr('Chatbot + delt innboks', 'Chatbot + shared inbox'),
           i18n.tr('Nettside og kunnskapskilder', 'Website and knowledge sources'),
         ],
@@ -418,7 +418,7 @@ function planCopy(planId: PlanId, i18n: PaywallI18n): { name: string; descriptio
           'For teams that need automation, routing, and multiple sources.',
         ),
         features: [
-          i18n.tr('3,50 kr per henvendelse løst av AI', 'NOK 3.50 per AI-resolved inquiry'),
+          i18n.tr('Bruksbasert prising for AI-løste henvendelser', 'Usage-based AI resolution pricing'),
           i18n.tr('Automasjon og ruting', 'Automation and routing'),
           i18n.tr('Flere team-innbokser', 'Multiple team inboxes'),
           i18n.tr('20 Lite-seter inkludert', '20 Lite seats included'),
@@ -432,7 +432,7 @@ function planCopy(planId: PlanId, i18n: PaywallI18n): { name: string; descriptio
           'For larger support teams with reporting and controls.',
         ),
         features: [
-          i18n.tr('2,90 kr per henvendelse løst av AI', 'NOK 2.90 per AI-resolved inquiry'),
+          i18n.tr('Bruksbasert prising for AI-løste henvendelser', 'Usage-based AI resolution pricing'),
           i18n.tr('SSO og identitetsstyring', 'SSO and identity controls'),
           i18n.tr('SLA, rapportering og multibrand', 'SLA, reporting, and multibrand'),
           i18n.tr('50 Lite-seter inkludert', '50 Lite seats included'),

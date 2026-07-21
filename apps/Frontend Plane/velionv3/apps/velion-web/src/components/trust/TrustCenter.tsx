@@ -203,11 +203,12 @@ function ResidencySection() {
 							ZDR — ærlig omfang
 						</h3>
 						<p className="velion-body mt-5 text-pretty">
-							Zero Data Retention binder modell-leverandøren (ingen trening eller
-							lagring på prompts). Velion beholder fortsatt egen kjørehistorikk,
-							samtaler og revisjon etter sin lagringsplan. Kun Azure OpenAI
-							Sweden Central-stien er bekreftet ZDR&nbsp;+&nbsp;EØS i dag — andre
-							leverandører er under avklaring.
+							Zero Data Retention er et valgfritt, betalt Pro/Enterprise-tillegg
+							organisasjonen selv slår på. Når det er aktivert binder det
+							modell-leverandøren (ingen trening eller lagring på prompts); er det
+							av, beholder Velion fortsatt egen kjørehistorikk, samtaler og revisjon
+							etter sin lagringsplan. Kun Azure OpenAI Sweden Central-stien støtter
+							ZDR&nbsp;+&nbsp;EØS i dag — andre leverandører er under avklaring.
 						</p>
 					</div>
 				</aside>

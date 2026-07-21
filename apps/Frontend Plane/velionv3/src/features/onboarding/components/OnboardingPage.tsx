@@ -19,6 +19,7 @@ import {
   type OnboardingState,
   type PlanId,
   type Step,
+  onboardingPlanCards,
   onboardingSteps,
 } from '@/features/onboarding/lib/model'
 import { createOnboardingState } from '@/features/onboarding/lib/onboarding-state'
@@ -52,7 +53,8 @@ import {
   recommendationText,
   withRecommendationTranslation,
 } from '@/features/onboarding/lib/plan-recommendation'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
+import { ContactSalesModal } from '@/features/onboarding/components/ContactSalesModal'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
 import { ConnectStepContent, ConnectStepVisual } from '@/features/onboarding/components/steps/ConnectStep'
 import { IntroStepContent, IntroStepVisual } from '@/features/onboarding/components/steps/IntroStep'
@@ -87,6 +89,7 @@ export default function OnboardingPage() {
   const [submittingOrg, setSubmittingOrg] = createSignal(false)
   const [connectingId, setConnectingId] = createSignal<string>()
   const [committingPlan, setCommittingPlan] = createSignal(false)
+  const [contactSalesOpen, setContactSalesOpen] = createSignal(false)
   // Armed on connect-step hover (only when a source is connected) to start the
   // plan recommendation early, so it's ready by the time the user reaches the
   // paywall. No-integration users still trigger it on entering the paywall.
@@ -357,7 +360,7 @@ export default function OnboardingPage() {
   createEffect(() => {
     const reason = recommendationQuery.error
     if (state.step !== 'paywall' || !reason) return
-    setError(reason instanceof Error ? reason.message : 'Could not compute a recommendation.')
+    setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke beregne en anbefaling.', en: 'Could not compute a recommendation.' }))
   })
 
   function advanceFromIntro() {
@@ -442,7 +445,7 @@ export default function OnboardingPage() {
       },
     ).catch((reason: unknown) => {
       setState('website', 'status', 'failed')
-      setError(reason instanceof Error ? reason.message : 'Could not preview the website.')
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke forhåndsvise nettsiden.', en: 'Could not preview the website.' }))
     })
   }
 
@@ -454,7 +457,7 @@ export default function OnboardingPage() {
     try {
       setSearchResults(await actions.searchBrreg(state.organization.name))
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not search Brreg.')
+      setError(translateApiError(reason, i18n.tr, { no: 'Søket i Brreg feilet.', en: 'Could not search Brreg.' }))
     } finally {
       setSearching(false)
     }
@@ -523,7 +526,7 @@ export default function OnboardingPage() {
 
       setState('step', 'connect')
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not create the organization.')
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke opprette organisasjonen.', en: 'Could not create the organization.' }))
     } finally {
       setSubmittingOrg(false)
     }
@@ -531,7 +534,7 @@ export default function OnboardingPage() {
 
   async function connectSource(option: Pick<ConnectorOption, 'id' | 'label' | 'provider' | 'sources'>) {
     if (!state.organization.id) {
-      setError('Create the organization before connecting sources.')
+      setError(i18n.tr('Opprett organisasjonen før du kobler til kilder.', 'Create the organization before connecting sources.'))
       return
     }
 
@@ -621,7 +624,7 @@ export default function OnboardingPage() {
       }
       void queryClient.invalidateQueries({ queryKey: onboardingQueryKeys.graphPreview(orgId) })
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : `Could not connect ${option.label}.`)
+      setError(translateApiError(reason, i18n.tr, { no: `Kunne ikke koble til ${option.label}.`, en: `Could not connect ${option.label}.` }))
     } finally {
       setConnectingId(undefined)
     }
@@ -655,6 +658,17 @@ export default function OnboardingPage() {
         return
       }
 
+      // Mirrors the settings/billing guard (WorkspaceSettingsPage.startPlanCheckout):
+      // the enterprise/"Custom" tier's real price is never shown in this UI, so
+      // it must never reach a real checkout session — open the contact-sales
+      // modal instead, since custom pricing depends on what's needed beyond
+      // what Velion supports natively.
+      const planOption = onboardingPlanCards.find((item) => item.id === selectedPlan)
+      if (!planOption?.checkoutEnabled) {
+        setContactSalesOpen(true)
+        return
+      }
+
       const checkout = await actions.startCheckout({
         orgId,
         plan: selectedPlan,
@@ -675,7 +689,7 @@ export default function OnboardingPage() {
           throw new Error('Payment checkout is not configured.')
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not save the selected plan.')
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre den valgte planen.', en: 'Could not save the selected plan.' }))
     } finally {
       setCommittingPlan(false)
     }
@@ -690,9 +704,10 @@ export default function OnboardingPage() {
       setState('step', 'paywall')
     } catch (reason) {
       setError(
-        reason instanceof Error
-          ? reason.message
-          : 'Organisasjonen er ikke klar ennå. Prøv igjen før du velger plan.',
+        translateApiError(reason, i18n.tr, {
+          no: 'Organisasjonen er ikke klar ennå. Prøv igjen før du velger plan.',
+          en: 'The organization is not ready yet. Try again before choosing a plan.',
+        }),
       )
     }
   }
@@ -742,7 +757,7 @@ export default function OnboardingPage() {
       }
     } catch (reason) {
       setState('step', 'paywall')
-      setError(reason instanceof Error ? reason.message : 'Could not confirm the payment.')
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke bekrefte betalingen.', en: 'Could not confirm the payment.' }))
     } finally {
       setConfirmingCheckout(false)
     }
@@ -834,7 +849,10 @@ export default function OnboardingPage() {
       } catch (reason) {
         setFinalizingOnboarding(false)
         setAssemblyError(
-          reason instanceof Error ? reason.message : 'Kunne ikke fullføre oppsett. Prøv igjen.',
+          translateApiError(reason, i18n.tr, {
+            no: 'Kunne ikke fullføre oppsett. Prøv igjen.',
+            en: 'Could not finish setup. Try again.',
+          }),
         )
       }
     }, 1800)
@@ -1065,6 +1083,13 @@ export default function OnboardingPage() {
           onCommitPlan={commitPlan}
         />
       </OnboardingScreen>
+      <ContactSalesModal
+        open={contactSalesOpen()}
+        onClose={() => setContactSalesOpen(false)}
+        orgName={state.organization.name}
+        employeeCount={state.organization.employeeCount}
+        websiteUrl={state.website.url}
+      />
     </Show>
   )
 }

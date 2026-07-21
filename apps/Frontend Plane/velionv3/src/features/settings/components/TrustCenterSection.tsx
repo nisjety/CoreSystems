@@ -19,6 +19,7 @@ import {
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 import { getSession } from '@/shared/session/session-store'
 import { isGateOpen } from '@/shared/context/ownership-gate'
+import { useI18n } from '@/shared/i18n'
 
 /**
  * Trust Center — per-connected-app transparency.
@@ -113,28 +114,29 @@ function toolActionFor(
   return undefined
 }
 
-function retentionLabel(connection: IntegrationConnection): string {
+function retentionLabel(connection: IntegrationConnection, i18n: ReturnType<typeof useI18n>): string {
   if (connection.retention && connection.retention.trim()) return connection.retention.trim()
   switch (connection.dataClass) {
     case 'customer':
-      return 'Customer data · default org retention'
+      return i18n.tr('Kundedata · standard organisasjonsretensjon', 'Customer data · default org retention')
     case 'organization':
-      return 'Organization data · default org retention'
+      return i18n.tr('Organisasjonsdata · standard organisasjonsretensjon', 'Organization data · default org retention')
     case 'public':
-      return 'Public data · no special retention'
+      return i18n.tr('Offentlige data · ingen spesiell retensjon', 'Public data · no special retention')
     default:
       // Placeholder pending a per-connection retention contract from the backend.
-      return 'Org retention policy'
+      return i18n.tr('Organisasjonens retensjonspolicy', 'Org retention policy')
   }
 }
 
-function formatLastSync(value?: string): string {
-  if (!value) return 'Never'
+function formatLastSync(value: string | undefined, i18n: ReturnType<typeof useI18n>): string {
+  if (!value) return i18n.tr('Aldri', 'Never')
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
 }
 
 export function TrustCenterSection() {
+  const i18n = useI18n()
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
 
@@ -157,7 +159,7 @@ export function TrustCenterSection() {
       await disconnectConnection(id, connection.id)
       await refetch()
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Could not disconnect this app.')
+      setActionError(err instanceof Error ? err.message : i18n.tr('Kunne ikke koble fra denne appen.', 'Could not disconnect this app.'))
     } finally {
       setBusyConnectionId(null)
     }
@@ -166,8 +168,11 @@ export function TrustCenterSection() {
   return (
     <>
       <SectionHeader
-        title="Connected apps"
-        description="Every app the workspace has connected, what it can access, and exactly what the AI has done with it."
+        title={i18n.tr('Tilkoblede apper', 'Connected apps')}
+        description={i18n.tr(
+          'Alle apper arbeidsområdet har koblet til, hva de kan få tilgang til, og nøyaktig hva AI-en har gjort med dem.',
+          'Every app the workspace has connected, what it can access, and exactly what the AI has done with it.',
+        )}
       />
 
       {/* Per-document privacy guarantee — gated on isGateOpen() so the claim
@@ -175,15 +180,15 @@ export function TrustCenterSection() {
           (strict + live identity). It states only what the retrieval path
           delivers; no claim is shown when the gate is closed. */}
       <Show when={isGateOpen()}>
-        <section class="velion-trust-activity" aria-label="Per-document privacy">
+        <section class="velion-trust-activity" aria-label={i18n.tr('Personvern per dokument', 'Per-document privacy')}>
           <header class="velion-trust-activity__head">
-            <h3>Per-document privacy</h3>
+            <h3>{i18n.tr('Personvern per dokument', 'Per-document privacy')}</h3>
           </header>
           <p class="velion-trust-muted">
-            Documents marked Private are visible only to their owner and the people they're
-            explicitly shared with — enforced everywhere a document is read: list views, search,
-            retrieval, and the AI agent's grounding. Sharing grants are the single source of truth;
-            there is no separate display-only flag.
+            {i18n.tr(
+              'Dokumenter merket Privat er kun synlige for eieren og personene de er uttrykkelig delt med — håndhevet overalt et dokument leses: listevisninger, søk, henting og AI-agentens kildegrunnlag. Delingstillatelser er den eneste kilden til sannhet; det finnes ingen separat visningsflagg.',
+              "Documents marked Private are visible only to their owner and the people they're explicitly shared with — enforced everywhere a document is read: list views, search, retrieval, and the AI agent's grounding. Sharing grants are the single source of truth; there is no separate display-only flag.",
+            )}
           </p>
         </section>
       </Show>
@@ -200,22 +205,22 @@ export function TrustCenterSection() {
         when={data()}
         fallback={
           <p class="velion-settings-subnote" role="status" aria-busy="true">
-            Loading connected apps…
+            {i18n.tr('Laster tilkoblede apper…', 'Loading connected apps…')}
           </p>
         }
       >
         {(loaded) => (
           <>
-            <section class="velion-trust-activity" aria-label="Workspace AI activity">
+            <section class="velion-trust-activity" aria-label={i18n.tr('AI-aktivitet i arbeidsområdet', 'Workspace AI activity')}>
               <header class="velion-trust-activity__head">
                 <Sparkles size={14} aria-hidden="true" />
-                <span>AI activity in this workspace</span>
+                <span>{i18n.tr('AI-aktivitet i dette arbeidsområdet', 'AI activity in this workspace')}</span>
               </header>
               <Show
                 when={loaded().auditAvailable}
                 fallback={
                   <p class="velion-trust-muted">
-                    Telemetry pending — no AI tool-action events are flowing yet.
+                    {i18n.tr('Telemetri avventes — ingen AI-verktøyshendelser er registrert ennå.', 'Telemetry pending — no AI tool-action events are flowing yet.')}
                   </p>
                 }
               >
@@ -223,14 +228,14 @@ export function TrustCenterSection() {
                   when={loaded().workspaceActivity.totalEvents > 0}
                   fallback={
                     <p class="velion-trust-muted">
-                      No AI tool-action activity has been recorded for this workspace yet.
+                      {i18n.tr('Ingen AI-verktøysaktivitet er registrert for dette arbeidsområdet ennå.', 'No AI tool-action activity has been recorded for this workspace yet.')}
                     </p>
                   }
                 >
                   <p class="velion-trust-activity__summary">
-                    {loaded().workspaceActivity.totalEvents} recorded tool actions
+                    {loaded().workspaceActivity.totalEvents} {i18n.tr('registrerte verktøyshandlinger', 'recorded tool actions')}
                     {' · '}
-                    {loaded().workspaceActivity.zdrEvents} under zero data retention
+                    {loaded().workspaceActivity.zdrEvents} {i18n.tr('under Zero Data Retention', 'under zero data retention')}
                   </p>
                   <div class="velion-trust-chips">
                     <For each={loaded().workspaceActivity.categories}>
@@ -251,7 +256,7 @@ export function TrustCenterSection() {
                     </For>
                   </div>
                   <Show when={loaded().workspaceActivity.tools.length > 0}>
-                    <p class="velion-settings-subnote">Tools the AI invoked</p>
+                    <p class="velion-settings-subnote">{i18n.tr('Verktøy AI-en tok i bruk', 'Tools the AI invoked')}</p>
                     <div class="velion-trust-chips">
                       <For each={loaded().workspaceActivity.tools}>
                         {(tool) => (
@@ -264,8 +269,10 @@ export function TrustCenterSection() {
                     </div>
                   </Show>
                   <p class="velion-settings-subnote">
-                    Counted across the whole workspace — per-connection attribution is shown in the
-                    table below only where an event could be reliably attributed.
+                    {i18n.tr(
+                      'Talt på tvers av hele arbeidsområdet — attribusjon per tilkobling vises i tabellen under kun der en hendelse kunne knyttes pålitelig til en kilde.',
+                      'Counted across the whole workspace — per-connection attribution is shown in the table below only where an event could be reliably attributed.',
+                    )}
                   </p>
                 </Show>
               </Show>
@@ -276,21 +283,21 @@ export function TrustCenterSection() {
               fallback={
                 <div class="velion-settings-list-card">
                   <p class="velion-settings-empty-row">
-                    No apps are connected yet. Connect a source under Integrations to see it here.
+                    {i18n.tr('Ingen apper er koblet til ennå. Koble til en kilde under Integrasjoner for å se den her.', 'No apps are connected yet. Connect a source under Integrations to see it here.')}
                   </p>
                 </div>
               }
             >
-            <div class="velion-trust-table" role="table" aria-label="Connected app transparency">
+            <div class="velion-trust-table" role="table" aria-label={i18n.tr('Åpenhet om tilkoblede apper', 'Connected app transparency')}>
               <div class="velion-trust-row velion-trust-row--head" role="row">
-                <span role="columnheader">App</span>
-                <span role="columnheader">Permissions</span>
-                <span role="columnheader">Data fetched</span>
-                <span role="columnheader">Used by AI?</span>
-                <span role="columnheader">Retention</span>
-                <span role="columnheader">Last sync</span>
+                <span role="columnheader">{i18n.tr('App', 'App')}</span>
+                <span role="columnheader">{i18n.tr('Tillatelser', 'Permissions')}</span>
+                <span role="columnheader">{i18n.tr('Data hentet', 'Data fetched')}</span>
+                <span role="columnheader">{i18n.tr('Brukt av AI?', 'Used by AI?')}</span>
+                <span role="columnheader">{i18n.tr('Retensjon', 'Retention')}</span>
+                <span role="columnheader">{i18n.tr('Siste synk', 'Last sync')}</span>
                 <span role="columnheader" class="velion-trust-cell--actions">
-                  <span class="velion-trust-sr">Disconnect</span>
+                  <span class="velion-trust-sr">{i18n.tr('Koble fra', 'Disconnect')}</span>
                 </span>
               </div>
 
@@ -309,7 +316,7 @@ export function TrustCenterSection() {
                       <span class="velion-trust-cell" role="cell">
                         <Show
                           when={permissions().length > 0}
-                          fallback={<span class="velion-trust-muted">Not reported</span>}
+                          fallback={<span class="velion-trust-muted">{i18n.tr('Ikke rapportert', 'Not reported')}</span>}
                         >
                           <span class="velion-trust-chips">
                             <For each={permissions()}>
@@ -324,7 +331,7 @@ export function TrustCenterSection() {
                           when={(summary()?.dataCategories.length ?? 0) > 0}
                           fallback={
                             <span class="velion-trust-muted">
-                              {loaded().auditAvailable ? 'None recorded' : 'Telemetry pending'}
+                              {loaded().auditAvailable ? i18n.tr('Ingen registrert', 'None recorded') : i18n.tr('Telemetri avventes', 'Telemetry pending')}
                             </span>
                           }
                         >
@@ -347,25 +354,28 @@ export function TrustCenterSection() {
                           fallback={
                             <span
                               class="velion-trust-pill velion-trust-pill--idle"
-                              title="No tool-action event could be attributed to this connection. Per-connection attribution is not yet reliable, so this is not a claim that the AI has never used it."
+                              title={i18n.tr(
+                                'Ingen verktøyshendelse kunne knyttes til denne tilkoblingen. Attribusjon per tilkobling er ennå ikke pålitelig, så dette er ikke en påstand om at AI-en aldri har brukt den.',
+                                'No tool-action event could be attributed to this connection. Per-connection attribution is not yet reliable, so this is not a claim that the AI has never used it.',
+                              )}
                             >
-                              Attribution unavailable
+                              {i18n.tr('Attribusjon utilgjengelig', 'Attribution unavailable')}
                             </span>
                           }
                         >
                           <span class="velion-trust-pill velion-trust-pill--active">
                             <Sparkles size={12} aria-hidden="true" />
-                            Yes
+                            {i18n.tr('Ja', 'Yes')}
                           </span>
                         </Show>
                       </span>
 
                       <span class="velion-trust-cell velion-trust-muted" role="cell">
-                        {retentionLabel(connection)}
+                        {retentionLabel(connection, i18n)}
                       </span>
 
                       <span class="velion-trust-cell velion-trust-muted" role="cell">
-                        {formatLastSync(connection.lastSyncAt)}
+                        {formatLastSync(connection.lastSyncAt, i18n)}
                       </span>
 
                       <span class="velion-trust-cell velion-trust-cell--actions" role="cell">
@@ -374,14 +384,14 @@ export function TrustCenterSection() {
                           danger
                           disabled={busyConnectionId() === connection.id}
                           onClick={() => void handleDisconnect(connection)}
-                          aria-label={`Disconnect ${appName(loaded(), connection)}`}
+                          aria-label={`${i18n.tr('Koble fra', 'Disconnect')} ${appName(loaded(), connection)}`}
                         >
                           <Show
                             when={busyConnectionId() === connection.id}
-                            fallback={<><Unplug size={14} aria-hidden="true" /> Disconnect</>}
+                            fallback={<><Unplug size={14} aria-hidden="true" /> {i18n.tr('Koble fra', 'Disconnect')}</>}
                           >
                             <Loader2 size={14} class="velion-trust-spin" aria-hidden="true" />
-                            Disconnecting…
+                            {i18n.tr('Kobler fra…', 'Disconnecting…')}
                           </Show>
                         </SettingsButton>
                       </span>
@@ -392,10 +402,10 @@ export function TrustCenterSection() {
             </div>
 
             <p class="velion-settings-subnote">
-              <ShieldCheck size={14} aria-hidden="true" /> Disconnecting an app revokes its access
-              and purges its cached data. "Yes" under "Used by AI?" means a tool-action event was
-              attributed to this connection; "Attribution unavailable" means none could be —
-              not that the AI has never used it.
+              <ShieldCheck size={14} aria-hidden="true" /> {i18n.tr(
+                'Å koble fra en app tilbakekaller tilgangen og sletter mellomlagrede data. "Ja" under "Brukt av AI?" betyr at en verktøyshendelse ble knyttet til denne tilkoblingen; "Attribusjon utilgjengelig" betyr at ingen kunne knyttes — ikke at AI-en aldri har brukt den.',
+                'Disconnecting an app revokes its access and purges its cached data. "Yes" under "Used by AI?" means a tool-action event was attributed to this connection; "Attribution unavailable" means none could be — not that the AI has never used it.',
+              )}
             </p>
           </Show>
           </>

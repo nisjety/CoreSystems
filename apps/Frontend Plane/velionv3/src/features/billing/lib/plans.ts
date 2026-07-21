@@ -23,7 +23,7 @@ export const billingPlans: BillingPlan[] = [
     name: 'Advanced',
     priceLabel: '999 kr/mnd',
     description: 'For teams that need automation, routing, and more sources.',
-    features: ['Automations and routing', 'Multiple team inboxes', '20 Lite seats included'],
+    features: ['Automations and routing', 'Multiple team inboxes', '20 Lite seats included', 'Usage-based AI resolution pricing'],
     checkoutEnabled: true,
   },
   {
@@ -31,7 +31,7 @@ export const billingPlans: BillingPlan[] = [
     name: 'Expert',
     priceLabel: '1499 kr/mnd',
     description: 'For larger support teams with reporting and governance.',
-    features: ['SSO and identity controls', 'SLA reporting and multibrand', '50 Lite seats included'],
+    features: ['SSO and identity controls', 'SLA reporting and multibrand', '50 Lite seats included', 'Usage-based AI resolution pricing'],
     checkoutEnabled: true,
   },
   {

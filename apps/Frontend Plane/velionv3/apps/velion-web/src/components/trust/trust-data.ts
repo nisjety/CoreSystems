@@ -23,8 +23,8 @@ export const liveControls: TrustControl[] = [
 		level: "live",
 	},
 	{
-		title: "Zero Data Retention på modell-laget",
-		body: "ZDR er håndhevet i koden: inferens-cachen kortslutter både lesing og skriving når forespørselen er merket ZDR — den treffer aldri den varige prompt-cachen. Dekket av en regresjonstest. ZDR binder modell-leverandøren; Velion beholder egen historikk etter sin sletteplan.",
+		title: "Zero Data Retention — valgfritt tillegg",
+		body: "ZDR er et betalt Pro/Enterprise-tillegg organisasjonen selv slår på — av som standard. Når det er aktivert kortslutter inferens-cachen både lesing og skriving for merkede forespørsler, og de treffer aldri den varige prompt-cachen. Dekket av en regresjonstest. ZDR binder da modell-leverandøren for den organisasjonen; Velion beholder fortsatt egen historikk etter sin sletteplan.",
 		level: "live",
 	},
 	{
@@ -132,7 +132,7 @@ export const subprocessors: Subprocessor[] = [
 		purpose: "Inferens, embeddings og tale (TTS på EU-endepunkt)",
 		region: "Sweden Central (EU/EØS)",
 		level: "live",
-		note: "ZDR + EØS bekreftet på denne stien i dag.",
+		note: "EØS-residens bekreftet på denne stien i dag. ZDR er et valgfritt Pro/Enterprise-tillegg organisasjonen kan slå på for denne stien.",
 	},
 	{
 		name: "Anthropic",
@@ -163,5 +163,5 @@ export const dataClasses: string[] = [
 	"Personopplysning",
 	"Sensitiv personopplysning",
 	"Legitimasjon / hemmelighet",
-	"ZDR-flyktig",
+	"ZDR-flyktig (tillegg)",
 ];

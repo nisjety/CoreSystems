@@ -217,6 +217,11 @@ export const onboardingPlanCards: Array<{
   price: string
   description: string
   features: string[]
+  /** Mirrors billingPlans' checkoutEnabled (see @/features/billing/lib/plans):
+   * false blocks the commit path from starting a real checkout session — the
+   * enterprise/"Custom" tier's real price is never shown in this UI, so
+   * selecting it must route to sales instead of a Nexi/Hyperswitch session. */
+  checkoutEnabled: boolean
 }> = [
   {
     id: 'trial',
@@ -224,27 +229,31 @@ export const onboardingPlanCards: Array<{
     price: '0',
     description: 'Prøv Velion og agenten i 14 dager før du velger betalt plan.',
     features: ['Ingen kort kreves', '14 dagers prøveperiode', 'Oppgrader når du er klar'],
+    checkoutEnabled: true,
   },
   {
     id: 'hobby',
     name: 'Essential',
     price: '299',
     description: 'For små team som vil validere en enkel chatbot.',
-    features: ['4 kr per henvendelse løst av AI', 'Chatbot + delt innboks', 'Nettside og kunnskapskilder'],
+    features: ['Bruksbasert prising for AI-løste henvendelser', 'Chatbot + delt innboks', 'Nettside og kunnskapskilder'],
+    checkoutEnabled: true,
   },
   {
     id: 'standard',
     name: 'Advanced',
     price: '999',
     description: 'For team som trenger automasjon, ruting og flere kilder.',
-    features: ['3,50 kr per henvendelse løst av AI', 'Automasjon og ruting', 'Flere team-innbokser', '20 Lite-seter inkludert'],
+    features: ['Bruksbasert prising for AI-løste henvendelser', 'Automasjon og ruting', 'Flere team-innbokser', '20 Lite-seter inkludert'],
+    checkoutEnabled: true,
   },
   {
     id: 'pro',
     name: 'Expert',
     price: '1499',
     description: 'For større supportteam med rapportering og styring.',
-    features: ['2,90 kr per henvendelse løst av AI', 'SSO og identitetsstyring', 'SLA, rapportering og multibrand', '50 Lite-seter inkludert'],
+    features: ['Bruksbasert prising for AI-løste henvendelser', 'SSO og identitetsstyring', 'SLA, rapportering og multibrand', '50 Lite-seter inkludert'],
+    checkoutEnabled: true,
   },
   {
     id: 'enterprise',
@@ -252,6 +261,7 @@ export const onboardingPlanCards: Array<{
     price: 'Custom',
     description: 'Kontakt salg for volum, onboarding og governance.',
     features: ['Volumpris per AI-svar', 'Tilpassede vilkår', 'Utvidet onboarding', 'Dedikert success-team'],
+    checkoutEnabled: false,
   },
 ]
 

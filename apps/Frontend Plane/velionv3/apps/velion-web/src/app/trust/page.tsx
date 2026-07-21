@@ -6,11 +6,11 @@ import { TrustHeader } from "@/components/trust/TrustHeader";
 export const metadata: Metadata = {
 	title: "Trust Center — sikkerhet, personvern og AI-styring",
 	description:
-		"Velions Trust Center: forsvarbare, live kontroller (ZDR som standard, EU-residens i Sweden Central, godkjenning per handling, «Brukt av AI?»-revisjon), en ærlig sertifiserings­løype (ISO 42001, EU AI Act, SOC 2), underleverandører og dataflyt — med CLOUD Act åpent oppgitt.",
+		"Velions Trust Center: forsvarbare, live kontroller (EU-residens i Sweden Central, valgfri Zero Data Retention på Pro/Enterprise, godkjenning per handling, «Brukt av AI?»-revisjon), en ærlig sertifiserings­løype (ISO 42001, EU AI Act, SOC 2), underleverandører og dataflyt — med CLOUD Act åpent oppgitt.",
 	openGraph: {
 		title: "Velion Trust Center",
 		description:
-			"Forsvarbare, live kontroller og en ærlig sertifiserings­løype. EU-residens som standard, ZDR håndhevet i koden, og CLOUD Act åpent oppgitt.",
+			"Forsvarbare, live kontroller og en ærlig sertifiserings­løype. EU-residens som standard, valgfri Zero Data Retention (Pro/Enterprise), og CLOUD Act åpent oppgitt.",
 		locale: "nb_NO",
 		type: "website",
 	},
