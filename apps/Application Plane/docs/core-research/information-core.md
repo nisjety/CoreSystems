@@ -2,6 +2,8 @@
 
 > **2026-07-13 superseding update.** Changed source no longer generates traffic volume or speed. Traffic measurements are nullable provenance-bearing observations with measured/estimated/synthetic/unavailable type, provider/source, timestamps, units, confidence/quality, freshness, and unavailable reason; Atlas station-only results are explicitly `metadata_only`. Derived road/county metadata is labeled estimated/low-quality or unavailable. Upstream HTTP/GraphQL errors are honest and not cached; coordinate/radius/search inputs are bounded. Go race tests pass; traffic coverage is 92.0% and `Latest` 86.7%. Velion v3 and the Model formatter preserve/label provenance. None of these changed runtimes is deployed, and legacy Velion v2 still expects numeric fields. The July 11 synthetic-fact text below is historical evidence of the defect, not current source behavior.
 
+> **2026-07-21 source correction.** This historical audit predates the Norway-source expansion and the ownership repair. `information-core` no longer contains a Bring client or `/api/v1/shipping/track`; carrier tracking is owned by Ingestion Plane `shipping-core`, and Model Plane's `track_shipment` path now uses its tenant-scoped `/api/tracking/{trackingNo}` route. For the current route/source inventory, see [`information-core/docs/norway-data-sources-implementation.md`](../../information-core/docs/norway-data-sources-implementation.md).
+
 _Audit refresh: 2026-07-11. Supersedes the 2026-06-07 / 2026-07-02 note. Evidence graded
 `[live-curl]` (host curl to :3190), `[source-only]` (read from disk), `[inspect]` (docker
 inspect/ps). Docker exec/build/logs are unavailable this pass (containerd content-store
