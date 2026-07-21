@@ -1,3 +1,5 @@
+import { Eyebrow } from "@/components/ui/SectionHeading";
+import { SignalPathLayer } from "./SignalPathLayer";
 import { VelionMarkOutline } from "./VelionMark";
 
 /**
@@ -40,7 +42,16 @@ export function HeroSection() {
 				<VelionMarkOutline className="h-auto w-full" strokeWidth={2} />
 			</div>
 
+			<SignalPathLayer />
+
 			<div className="relative z-[1] mx-auto flex w-full max-w-[1680px] flex-col px-[var(--velion-edge)] pb-[clamp(112px,15vh,178px)] pt-[clamp(150px,18vh,220px)] max-[760px]:px-[var(--velion-page-pad)] max-[760px]:pb-[96px]">
+				<Eyebrow
+					className="mb-5 !text-[color-mix(in_srgb,var(--velion-c-white)_58%,transparent)]"
+					marker
+				>
+					EU-residens som standard
+				</Eyebrow>
+
 				<h1 className="max-w-[13ch] font-arbeit text-[clamp(2.85rem,5.6vw,6.9rem)] font-light leading-[0.96] tracking-[-0.045em] text-velion-c-white text-balance">
 					Fra signal til handling.
 				</h1>
@@ -49,13 +60,26 @@ export function HeroSection() {
 					Kilder, svar og godkjenning i én arbeidsflyt.
 				</p>
 
-				<div className="mt-7">
+				<div className="mt-7 flex flex-wrap items-center gap-x-10 gap-y-4">
 					<a
 						className="group inline-flex w-fit items-center gap-3 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none text-[color-mix(in_srgb,var(--velion-c-white)_72%,transparent)] transition-colors duration-300 hover:text-velion-c-white"
 						href="#produkt"
 					>
 						<span className="whitespace-nowrap">
 							Se arbeidsflyten
+						</span>
+						<span
+							aria-hidden="true"
+							className="h-px w-7 origin-left bg-current opacity-70 transition-transform duration-300 group-hover:scale-x-125"
+						/>
+					</a>
+
+					<a
+						className="group inline-flex w-fit items-center gap-3 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none text-[color-mix(in_srgb,var(--velion-c-white)_72%,transparent)] transition-colors duration-300 hover:text-velion-c-white"
+						href="#kontakt"
+					>
+						<span className="whitespace-nowrap">
+							Be om tidlig tilgang
 						</span>
 						<span
 							aria-hidden="true"

@@ -55,7 +55,7 @@ export function Footer() {
 					<div className="grid grid-cols-4 gap-x-[clamp(24px,3vw,56px)] gap-y-20 max-[900px]:grid-cols-2 max-[560px]:grid-cols-1">
 						{footerColumns.map((column, columnIndex) => (
 							<nav
-								aria-label={`Footer navigation ${columnIndex + 1}`}
+								aria-label={`Bunntekstnavigasjon ${columnIndex + 1}`}
 								className="grid content-start"
 								key={columnIndex}
 							>
@@ -82,6 +82,8 @@ export function Footer() {
 								Distribuert team
 								<br />
 								Data i EU/EØS (Sweden Central)
+								<br />
+								Partnere: Aquatiq · Prokom
 							</p>
 						</div>
 

@@ -24,9 +24,9 @@ type VelionComposerPreviewProps = {
 };
 
 const responseModes = [
-	{ icon: Sparkles, label: "Agent mode" },
-	{ icon: Zap, label: "Fast action" },
-	{ icon: Lightbulb, label: "Explain" },
+	{ icon: Sparkles, label: "Agentmodus" },
+	{ icon: Zap, label: "Hurtighandling" },
+	{ icon: Lightbulb, label: "Forklar" },
 ];
 
 function PromptPreview({
@@ -118,7 +118,7 @@ export function VelionComposerPreview({
 			<div className="mb-3 flex items-center justify-between px-1">
 				<div className="flex min-w-0 items-center gap-2">
 					<button
-						aria-label="Selected model"
+						aria-label="Valgt modell"
 						className="flex h-10 max-w-[172px] items-center gap-2 rounded-[12px] border border-black/[0.07] bg-white/90 px-3 font-protokoll text-[13px] font-medium text-[#333] shadow-[0_8px_20px_rgba(0,0,0,0.05)] backdrop-blur-sm sm:px-4"
 						tabIndex={-1}
 						type="button"
@@ -133,7 +133,7 @@ export function VelionComposerPreview({
 						type="button"
 					>
 						<Sparkles className="size-[13px] shrink-0" />
-						<span className="hidden whitespace-nowrap sm:inline">Create agent</span>
+						<span className="hidden whitespace-nowrap sm:inline">Opprett agent</span>
 					</button>
 				</div>
 
@@ -148,13 +148,13 @@ export function VelionComposerPreview({
 			</div>
 
 			<form
-				aria-label="Velion composer preview"
+				aria-label="Forhåndsvisning av Velion-komponisten"
 				className="overflow-hidden rounded-[26px] bg-white px-3 pb-3 pt-[14px] shadow-[0_20px_60px_rgba(20,21,24,0.11),0_0_0_1px_rgba(0,0,0,0.03)]"
 				onSubmit={(event) => event.preventDefault()}
 			>
 				<div className="relative px-4">
 					<label className="sr-only" htmlFor="velion-preview-composer">
-						Message Velion
+						Meld Velion
 					</label>
 					<div
 						aria-label={prompt}
@@ -177,7 +177,7 @@ export function VelionComposerPreview({
 				<div className="flex flex-col gap-3 px-3 lg:flex-row lg:items-center lg:justify-between">
 					<div className="flex min-w-0 flex-wrap items-center gap-1.5">
 						<button
-							aria-label="Add files"
+							aria-label="Legg til filer"
 							className="group flex items-center gap-1.5 font-protokoll text-[13px] text-[#888]"
 							tabIndex={-1}
 							type="button"
@@ -185,27 +185,27 @@ export function VelionComposerPreview({
 							<span className="flex size-8 items-center justify-center rounded-full bg-black/6">
 								<CirclePlus className="size-4" />
 							</span>
-							<span>add files</span>
+							<span>legg til filer</span>
 						</button>
 						<div className="mx-1 hidden h-4 w-px bg-black/10 sm:block" />
-						<ToolbarChip label="Suggestions">
+						<ToolbarChip label="Forslag">
 							<Lightbulb className="size-4" />
 						</ToolbarChip>
-						<ToolbarChip active label="Deep search">
+						<ToolbarChip active label="Dypsøk">
 							<Telescope className="size-4" />
 						</ToolbarChip>
 						<button
-							aria-label="Browse web"
+							aria-label="Søk på nettet"
 							aria-pressed="true"
 							className="flex items-center gap-1.5 rounded-lg bg-blue-50 px-3 py-[7px] font-protokoll text-[13px] font-medium text-blue-600"
 							tabIndex={-1}
 							type="button"
 						>
 							<Globe2 className="size-4" />
-							Search
+							Søk
 						</button>
 						<button
-							aria-label="Generate image"
+							aria-label="Generer bilde"
 							className="hidden items-center gap-1.5 rounded-lg px-3 py-[7px] font-protokoll text-[13px] font-medium text-[#777] md:flex"
 							tabIndex={-1}
 							type="button"
@@ -227,18 +227,18 @@ export function VelionComposerPreview({
 								);
 							})}
 						</div>
-						<ToolbarChip label="Voice mode">
+						<ToolbarChip label="Talemodus">
 							<AudioWaveform className="size-4" />
 						</ToolbarChip>
-						<ToolbarChip label="Voice input">
+						<ToolbarChip label="Taleinndata">
 							<Mic className="size-4" />
 						</ToolbarChip>
 						<button
-							aria-label="Send message"
+							aria-label="Send melding"
 							className="relative grid size-11 place-items-center rounded-[14px] bg-[#111111] text-white shadow-[0_10px_26px_rgba(0,0,0,0.16)]"
 							data-feature-send-button
 							tabIndex={-1}
-							title="Send message"
+							title="Send melding"
 							type="submit"
 						>
 							<span
