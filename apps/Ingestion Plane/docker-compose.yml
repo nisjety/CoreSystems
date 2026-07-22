@@ -703,6 +703,14 @@ services:
       # Phase 3 — background scheduler + ACL capture.
       FINSPO_SYNC_INTERVAL: ${FINSPO_SYNC_INTERVAL:-5m}
       FINSPO_CAPTURE_PERMISSIONS: ${FINSPO_CAPTURE_PERMISSIONS:-true}
+      # Content capture: download each synced DriveItem via Graph /content,
+      # extract text, and forward a real content-bearing document to Data
+      # Plane v2 (internal/content/ingestor.go). Without this only file/folder
+      # METADATA syncs, which is exactly the "SharePoint source shows 0 B"
+      # symptom. Requires the finspo-core service principal registered in
+      # auth-core with audience data-plane + documents:write + a persistent
+      # retention posture.
+      FINSPO_CAPTURE_CONTENT: ${FINSPO_CAPTURE_CONTENT:-true}
     deploy:
       resources:
         limits:
