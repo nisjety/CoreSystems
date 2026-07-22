@@ -480,9 +480,31 @@ export default function KnowledgePage() {
         ),
       })
       setAddSourceOpen(false)
-      const closePoll = window.setInterval(() => {
-        if (!authWindow.closed) return
+      // Polling `authWindow.closed` every tick logs a Cross-Origin-Opener-Policy
+      // warning once the popup navigates to the (cross-origin) provider login
+      // page — Chrome still returns a correct value here, but treat a thrown
+      // access as "can't tell yet" rather than let it kill the poll silently.
+      // `focus` on the main window is the primary, COOP-safe signal (the user
+      // switching back after finishing the provider flow); the interval is a
+      // fallback for browsers/tabs where the focus event never fires.
+      const stopPolling = () => {
         window.clearInterval(closePoll)
+        window.removeEventListener('focus', onFocus)
+      }
+      const onFocus = () => {
+        stopPolling()
+        void loadKnowledgeWorkspace()
+      }
+      window.addEventListener('focus', onFocus)
+      const closePoll = window.setInterval(() => {
+        let closed = false
+        try {
+          closed = authWindow.closed
+        } catch {
+          return
+        }
+        if (!closed) return
+        stopPolling()
         void loadKnowledgeWorkspace()
       }, 1_000)
     } catch (error) {
