@@ -310,6 +310,14 @@ func TestAppendAndFetchEvents(t *testing.T) {
 	h, db := newTestServer(t)
 	runID := quarrycontracts.NewID(quarrycontracts.KindRun)
 
+	// A run's events only resolve org_id/kind via the job that owns the
+	// run_id (see event_wire.go's toJobHistoryEvent) — GetByRunID 404s
+	// without one.
+	jobID := quarrycontracts.NewID(quarrycontracts.KindJob)
+	if err := db.Jobs().Create(store.Job{ID: jobID, OrgID: "org_a", Kind: "crawl", Status: "running", RunID: &runID}); err != nil {
+		t.Fatal(err)
+	}
+
 	// seed via store directly
 	evt := quarrycontracts.Event{
 		EventID: quarrycontracts.NewID(quarrycontracts.KindEvent),
@@ -331,15 +339,17 @@ func TestAppendAndFetchEvents(t *testing.T) {
 		t.Fatalf("append status = %d, body=%s", w.Code, w.Body.String())
 	}
 
-	// list
+	// list — decoded as jobHistoryEventWire, the shape quarry-edge's
+	// list_run_events actually requires (org_id/kind/stage/status), not
+	// the legacy quarrycontracts.Event shape this endpoint used to emit.
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/runs/"+string(runID)+"/events", nil)
 	listW := httptest.NewRecorder()
 	h.ServeHTTP(listW, listReq)
 	if listW.Code != 200 {
-		t.Fatalf("list status = %d", listW.Code)
+		t.Fatalf("list status = %d, body=%s", listW.Code, listW.Body.String())
 	}
 	var env struct {
-		Data []quarrycontracts.Event `json:"data"`
+		Data []jobHistoryEventWire `json:"data"`
 	}
 	if err := json.Unmarshal(listW.Body.Bytes(), &env); err != nil {
 		t.Fatal(err)
@@ -349,6 +359,25 @@ func TestAppendAndFetchEvents(t *testing.T) {
 	}
 	if env.Data[1].Seq != 2 {
 		t.Fatalf("control should assign next seq=2, got %d", env.Data[1].Seq)
+	}
+	if env.Data[0].OrgID != "org_a" || env.Data[0].Kind != "crawl" {
+		t.Fatalf("org_id/kind should come from the owning job, got org_id=%q kind=%q", env.Data[0].OrgID, env.Data[0].Kind)
+	}
+}
+
+// TestRunEvents_UnknownRunID_Returns404 guards the GetByRunID miss path: a
+// run_id no job ever dispatched (should never legitimately happen, but a
+// stale/forged id must not fall through to a nonsensical empty-org event
+// page) returns 404 rather than 200 with an empty or org_id-less list.
+func TestRunEvents_UnknownRunID_Returns404(t *testing.T) {
+	t.Parallel()
+	h, _ := newTestServer(t)
+	runID := quarrycontracts.NewID(quarrycontracts.KindRun)
+	req := httptest.NewRequest(http.MethodGet, "/v1/runs/"+string(runID)+"/events", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", w.Code, w.Body.String())
 	}
 }
 

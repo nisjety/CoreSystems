@@ -112,3 +112,30 @@ func TestToJobWire_AcceptsScrape(t *testing.T) {
 		t.Fatalf("org_id = %q, want org_a", wire.OrgID)
 	}
 }
+
+// TestToJobWire_ForwardsRunID guards the GET /v1/{kind}/jobs -> Ingestions
+// evidence panel path: run_id must ride along so a caller resolving a run's
+// event history (which only accepts run ids) never falls back to the job id
+// and 400s against quarry-edge. A job still queued/accepted has no run_id
+// yet, so the omitted case must stay nil rather than an empty string.
+func TestToJobWire_ForwardsRunID(t *testing.T) {
+	t.Parallel()
+	runID := quarrycontracts.NewID(quarrycontracts.KindRun)
+	withRun := store.Job{ID: quarrycontracts.NewID(quarrycontracts.KindJob), OrgID: "org_a", Kind: "crawl", Status: "completed", CreatedAt: time.Now().UnixMilli(), RunID: &runID}
+	wire, ok := toJobWire(withRun)
+	if !ok {
+		t.Fatal("toJobWire should accept crawl")
+	}
+	if wire.RunID == nil || *wire.RunID != string(runID) {
+		t.Fatalf("run_id = %v, want %s", wire.RunID, runID)
+	}
+
+	withoutRun := store.Job{ID: quarrycontracts.NewID(quarrycontracts.KindJob), OrgID: "org_a", Kind: "crawl", Status: "accepted", CreatedAt: time.Now().UnixMilli()}
+	wire, ok = toJobWire(withoutRun)
+	if !ok {
+		t.Fatal("toJobWire should accept crawl")
+	}
+	if wire.RunID != nil {
+		t.Fatalf("run_id = %v, want nil for a not-yet-dispatched job", *wire.RunID)
+	}
+}

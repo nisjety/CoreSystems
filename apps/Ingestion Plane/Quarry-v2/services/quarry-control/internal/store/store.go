@@ -97,6 +97,12 @@ type JobsStore interface {
 	// (Job{}, false) — indistinguishable from a genuinely missing id,
 	// mirroring SourcesStore.GetByOrg's guard.
 	GetByOrg(orgID string, id quarrycontracts.ID) (Job, bool)
+	// GetByRunID returns the job that owns a dispatched Temporal run id
+	// (Job.RunID, stamped by Update once the orchestrator dispatches the
+	// job — see 006_jobs_run_id.sql). Unscoped by org: callers resolving
+	// `GET /v1/runs/:id/events` don't have a caller-asserted org_id yet —
+	// the job's own OrgID IS the org_id for every event in that run.
+	GetByRunID(runID quarrycontracts.ID) (Job, bool)
 	ListBySchedule(scheduleID quarrycontracts.ID, limit int, cursor string) ([]Job, string)
 	// ListByKind returns jobs whose Kind matches exactly AND whose OrgID
 	// matches orgID, newest-first, with the same opaque keyset cursor
@@ -567,6 +573,19 @@ func (m *memJobs) GetByOrg(orgID string, id quarrycontracts.ID) (Job, bool) {
 		return Job{}, false
 	}
 	return j, true
+}
+
+// GetByRunID scans for the job whose RunID matches — the in-memory store
+// has no secondary index, but its dataset is test-only (bounded size).
+func (m *memJobs) GetByRunID(runID quarrycontracts.ID) (Job, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, j := range m.items {
+		if j.RunID != nil && *j.RunID == runID {
+			return j, true
+		}
+	}
+	return Job{}, false
 }
 
 // ListByOrg returns the org's jobs, newest-first. Mirrors ListByKind's

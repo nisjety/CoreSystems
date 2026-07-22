@@ -186,10 +186,23 @@ func scheduleSetEnabled(s store.SchedulesStore, enabled bool) http.HandlerFunc {
 }
 
 func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
+	// GET /v1/runs/{id}/events backs quarry-edge's list_run_events fallback
+	// (crates/quarry-edge/src/resource_routes.rs), which deserializes every
+	// item strictly as quarry_core::job_history::JobHistoryEvent — org_id
+	// and kind are required fields that a bare quarrycontracts.Event has no
+	// equivalent for. Resolve the owning job via GetByRunID once (every
+	// event in a run shares one org_id/kind) and translate each row through
+	// toJobHistoryEvent (event_wire.go) rather than serializing the legacy
+	// Event shape directly.
 	r.Get("/v1/runs/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		runID := quarrycontracts.ID(chi.URLParam(r, "id"))
 		if err := runID.MustKind(quarrycontracts.KindRun); err != nil {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		owner, ok := db.Jobs().GetByRunID(runID)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "no job dispatched this run_id", nil)
 			return
 		}
 		after, _ := strconv.ParseUint(r.URL.Query().Get("after_seq"), 10, 64)
@@ -198,7 +211,11 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 			limit = 100
 		}
 		evts := db.Events().ForRun(runID, after, limit)
-		httpx.WriteJSON(w, r, http.StatusOK, evts)
+		wire := make([]jobHistoryEventWire, 0, len(evts))
+		for _, evt := range evts {
+			wire = append(wire, toJobHistoryEvent(evt, owner))
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, wire)
 	})
 
 	// Append-only event log (batch). Runtime + orchestrator post here.

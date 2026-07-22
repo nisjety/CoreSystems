@@ -32,12 +32,20 @@ var validJobResourceKinds = map[string]bool{
 // org_id is store.Job's real org_id column (migration 010_jobs_org_id.sql)
 // — MountJobsByKind's ListByKind call already filters rows to the
 // edge-verified `?org_id`, so every row here already belongs to that org.
+//
+// RunID DOES have a store.Job equivalent (RunID, populated once the
+// orchestrator dispatches the job) and is required: GET
+// /v1/runs/:id/events only accepts a run id, never a job id, so any
+// consumer of this list that wants a run's event history needs it here.
+// Its previous omission meant velion's Ingestions evidence panel always
+// fell back to the job id and 400'd against quarry-edge.
 type jobWire struct {
-	JobID     string `json:"job_id"`
-	Kind      string `json:"kind"`
-	OrgID     string `json:"org_id"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"created_at"`
+	JobID     string  `json:"job_id"`
+	Kind      string  `json:"kind"`
+	OrgID     string  `json:"org_id"`
+	Status    string  `json:"status"`
+	CreatedAt string  `json:"created_at"`
+	RunID     *string `json:"run_id,omitempty"`
 }
 
 // toJobWire projects a store.Job into the JobSummary wire shape. ok is
@@ -48,11 +56,17 @@ func toJobWire(j store.Job) (jobWire, bool) {
 	if !validJobResourceKinds[j.Kind] {
 		return jobWire{}, false
 	}
+	var runID *string
+	if j.RunID != nil {
+		s := string(*j.RunID)
+		runID = &s
+	}
 	return jobWire{
 		JobID:     string(j.ID),
 		Kind:      j.Kind,
 		OrgID:     j.OrgID,
 		Status:    j.Status,
 		CreatedAt: time.UnixMilli(j.CreatedAt).UTC().Format(time.RFC3339Nano),
+		RunID:     runID,
 	}, true
 }

@@ -180,6 +180,42 @@ func (s *jobsStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Job, bo
 	return j, true
 }
 
+// GetByRunID returns the job that owns a dispatched Temporal run id, using
+// the partial index from 006_jobs_run_id.sql. Unscoped by org — see the
+// store.JobsStore doc comment for why.
+func (s *jobsStore) GetByRunID(runID quarrycontracts.ID) (store.Job, bool) {
+	var (
+		j      store.Job
+		policy []byte
+		params []byte
+		sid    *string
+		rid    *string
+		idem   *string
+	)
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
+		   FROM jobs WHERE run_id=$1`,
+		string(runID),
+	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	if err != nil {
+		return store.Job{}, false
+	}
+	_ = json.Unmarshal(policy, &j.Policy)
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &j.Params)
+	}
+	if sid != nil {
+		v := quarrycontracts.ID(*sid)
+		j.ScheduleID = &v
+	}
+	if rid != nil {
+		v := quarrycontracts.ID(*rid)
+		j.RunID = &v
+	}
+	j.IdempotencyKey = idem
+	return j, true
+}
+
 // Update replaces the mutable fields of a job (status + run_id).
 // Other fields are immutable post-creation: kind, params, policy, and
 // schedule_id are set at create-time and shouldn't change. Used by the

@@ -166,6 +166,13 @@ pub struct JobSummary {
     /// `"queued" | "running" | "completed" | "failed" | "cancelled"`.
     pub status: String,
     pub created_at: DateTime<Utc>,
+    /// The Temporal run id, populated once the orchestrator dispatches this
+    /// job (`store.Job.RunID` on the quarry-control side). Consumers that
+    /// read a run's durable event history (`GET /v1/runs/:id/events`) MUST
+    /// use this, never `job_id` — the events endpoint only accepts run ids.
+    /// `None` while the job is still queued/accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<kinds::RunKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -60,6 +60,41 @@ func TestPostgres_JobsCRUD(t *testing.T) {
 	}
 }
 
+// TestPostgres_JobsGetByRunID is the real-database counterpart to
+// TestMemoryJobs's in-memory GetByRunID coverage. Exercises the actual
+// `WHERE run_id=$1` query against the partial index from
+// 006_jobs_run_id.sql — the query resolving GET /v1/runs/:id/events'
+// owning job (org_id/kind) for the JobHistoryEvent translation.
+func TestPostgres_JobsGetByRunID(t *testing.T) {
+	db := openOrSkip(t)
+	runID := quarrycontracts.NewID(quarrycontracts.KindRun)
+	j := store.Job{
+		ID:        quarrycontracts.NewID(quarrycontracts.KindJob),
+		OrgID:     "org_getbyrunid_test",
+		Kind:      "crawl",
+		Status:    "running",
+		Policy:    quarrycontracts.DefaultRunPolicy(),
+		CreatedAt: time.Now().UnixMilli(),
+		RunID:     &runID,
+	}
+	if err := db.Jobs().Create(j); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer func() { _ = db.Jobs().Delete(j.ID) }()
+
+	got, ok := db.Jobs().GetByRunID(runID)
+	if !ok {
+		t.Fatal("GetByRunID: not found")
+	}
+	if got.ID != j.ID || got.OrgID != j.OrgID || got.Kind != j.Kind {
+		t.Fatalf("GetByRunID mismatch: %+v", got)
+	}
+
+	if _, ok := db.Jobs().GetByRunID(quarrycontracts.NewID(quarrycontracts.KindRun)); ok {
+		t.Fatal("expected miss for an unassigned run_id")
+	}
+}
+
 // TestPostgres_SourcesUpsertByOrgAndURL is the real-database counterpart to
 // the in-memory `TestMemorySources_UpsertByOrgAndURL_CollapsesDuplicates`
 // (store package). It exercises the actual `ON CONFLICT (org_id, url) WHERE
