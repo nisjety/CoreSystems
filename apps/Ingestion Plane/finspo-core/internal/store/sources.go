@@ -44,8 +44,8 @@ ON CONFLICT (organization_id, drive_id) DO UPDATE
         drive_name   = EXCLUDED.drive_name,
         drive_type   = EXCLUDED.drive_type,
         tenant_id    = COALESCE(NULLIF(EXCLUDED.tenant_id, ''), sources.tenant_id)
-RETURNING id, organization_id, tenant_id, site_id, site_web_url, drive_id,
-          drive_name, drive_type, enabled, created_at, updated_at`
+RETURNING id, organization_id, COALESCE(tenant_id, ''), site_id, COALESCE(site_web_url, ''),
+          drive_id, COALESCE(drive_name, ''), COALESCE(drive_type, ''), enabled, created_at, updated_at`
 
 	var out Source
 	err := s.pool.QueryRow(ctx, q,
