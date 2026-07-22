@@ -85,6 +85,13 @@ export type LiveKnowledgeFile = {
   source: string
   type: LiveKnowledgeSourceType
   updated: string
+  /**
+   * Origin URL for the document when the gateway workspace payload carries
+   * one (build_files in apps/gateway .../knowledge/workspace.rs does not emit
+   * it today). Optional so UI affordances that open the source render only
+   * when a real URL exists — honest empty otherwise.
+   */
+  url?: string
 }
 
 export type LiveKnowledgeGraphNode = {

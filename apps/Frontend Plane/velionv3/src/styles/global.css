@@ -34232,6 +34232,62 @@ textarea:focus-visible {
   border-left: 1px solid #e8e8e3;
 }
 
+.knowledge-toolbar-button--active {
+  border-color: #cfcfca;
+  background: #ffffff;
+  color: #171717;
+}
+
+/* Inline filter row toggled by the toolbar Filter button. */
+.knowledge-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #deded9;
+  border-radius: 10px;
+  background: #fbfbf9;
+  padding: 9px 12px;
+}
+
+.knowledge-filter-row__label {
+  color: #77776f;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.knowledge-filter-row__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-filter-chip {
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  border: 1px solid #e1e1dc;
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 0 11px;
+  color: #55554f;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.knowledge-filter-chip:hover {
+  border-color: #cfcfca;
+  color: #171717;
+}
+
+.knowledge-filter-chip--active {
+  border-color: #171717;
+  background: #171717;
+  color: #ffffff;
+}
+
 .knowledge-page-surface--docs .velion-segmented {
   height: 34px;
   border-color: #deded9;
@@ -34675,21 +34731,22 @@ textarea:focus-visible {
   line-height: 14px;
 }
 
-.knowledge-archive-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 12px;
-  color: #777770;
-}
-
-.knowledge-archive-actions span {
+/* Real per-row action: opens the file's source URL (rendered only when the
+   workspace payload carries one). Sized to match the row's recency glyph. */
+.knowledge-archive-file__open {
   display: grid;
   width: 27px;
   height: 27px;
   place-items: center;
   border: 1px solid #e1e1dc;
   border-radius: 6px;
+  background: #ffffff;
+  color: #77776f;
+}
+
+.knowledge-archive-file__open:hover {
+  border-color: #cfcfca;
+  color: #171717;
 }
 
 .knowledge-page-surface--docs .knowledge-files-search {
@@ -34838,6 +34895,40 @@ textarea:focus-visible {
 .dark .knowledge-page-surface--docs .knowledge-archive-file__icon,
 .dark .knowledge-page-surface--docs .knowledge-pulse-donut > div {
   background: #151515;
+}
+
+.dark .knowledge-page-surface--docs .knowledge-filter-row {
+  border-color: #353532;
+  background: #20201e;
+}
+
+.dark .knowledge-page-surface--docs .knowledge-filter-row__label {
+  color: #a3a39c;
+}
+
+.dark .knowledge-page-surface--docs .knowledge-filter-chip,
+.dark .knowledge-page-surface--docs .knowledge-archive-file__open {
+  border-color: #353532;
+  background: #151515;
+  color: #e7e7e2;
+}
+
+.dark .knowledge-page-surface--docs .knowledge-filter-chip:hover,
+.dark .knowledge-page-surface--docs .knowledge-archive-file__open:hover {
+  border-color: #4a4a46;
+  color: #ffffff;
+}
+
+.dark .knowledge-page-surface--docs .knowledge-filter-chip--active {
+  border-color: #f2f2ee;
+  background: #f2f2ee;
+  color: #151515;
+}
+
+.dark .knowledge-page-surface--docs .knowledge-toolbar-button--active {
+  border-color: #4a4a46;
+  background: #151515;
+  color: #ffffff;
 }
 
 @media (max-width: 1220px) {

@@ -2,7 +2,6 @@ import { A } from '@solidjs/router'
 import {
   ArrowUpRight,
   Blocks,
-  Bookmark,
   ChevronDown,
   Clock3,
   Download,
@@ -12,11 +11,8 @@ import {
   Folder,
   Grid2X2,
   List,
-  Mail,
   MoreHorizontal,
-  Pencil,
   Sparkles,
-  Trash2,
   GitBranch,
   Globe2,
   Link2,
@@ -48,6 +44,14 @@ import {
 } from '@/features/onboarding/components/steps/connectGraphScene'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
+import {
+  knowledgeAddSourceRequested,
+  knowledgeRequestedView,
+  knowledgeSearchQuery,
+  setKnowledgeAddSourceRequested,
+  setKnowledgeRequestedView,
+  setKnowledgeSearchQuery,
+} from '@/features/knowledge/state/knowledge-filter-store'
 import { isGateOpen } from '@/shared/context/ownership-gate'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { executeAction } from '@/shared/actions/action-client'
@@ -165,6 +169,7 @@ function filterKnowledgePayload(
   liveKnowledge: LiveKnowledgePayload,
   collectionId: string,
   searchQuery: string,
+  typeFilter: LiveKnowledgeSourceType | null = null,
 ): LiveKnowledgePayload {
   const normalizedQuery = searchQuery.trim().toLowerCase()
   const providerScope = collectionId.startsWith('provider:') ? collectionId.slice('provider:'.length) : null
@@ -176,6 +181,11 @@ function filterKnowledgePayload(
     collectionId === 'all' ||
     (providerScope ? providerKey === providerScope : false) ||
     (webScope ? providerKey === 'web' : false)
+  // Type filtering only constrains entities that actually carry a source type
+  // (files, sources, and — via source membership — graph nodes). Folders and
+  // integrations are groupings/systems without a document type, so the chips
+  // leave them alone rather than pretending to classify them.
+  const matchesType = (type: LiveKnowledgeSourceType) => typeFilter === null || type === typeFilter
 
   const folders = liveKnowledge.folders.filter((folder) =>
     matchesProvider(folder.providerKey) &&
@@ -187,10 +197,12 @@ function filterKnowledgePayload(
   )
   const files = liveKnowledge.files.filter((file) =>
     matchesProvider(file.providerKey) &&
+    matchesType(file.type) &&
     matchesQuery(file.name, file.addedBy, file.source, file.updated),
   )
   const sources = liveKnowledge.sources.filter((source) =>
     matchesProvider(source.providerKey) &&
+    matchesType(source.type) &&
     matchesQuery(
       source.title,
       source.description,
@@ -202,15 +214,17 @@ function filterKnowledgePayload(
   )
   const webSources = liveKnowledge.webSources.filter((source) =>
     matchesProvider(source.providerKey) &&
+    // Tracked web sources are URL targets by definition; any other type chip excludes them.
+    (typeFilter === null || typeFilter === 'URL') &&
     matchesQuery(source.name, source.url, source.kind, source.status),
   )
 
   const allowedSourceIds = new Set(sources.map((source) => source.id))
   const graphNodes = liveKnowledge.graph.nodes.filter((node) => {
-    const providerMatch = collectionId === 'all'
+    const scopeMatch = collectionId === 'all' && typeFilter === null
       ? true
       : node.sourceIds.some((sourceId) => allowedSourceIds.has(sourceId))
-    return providerMatch && matchesQuery(node.label, node.group, ...node.sourceRefs)
+    return scopeMatch && matchesQuery(node.label, node.group, ...node.sourceRefs)
   })
   const allowedNodeIds = new Set(graphNodes.map((node) => node.id))
   const graphLinks = liveKnowledge.graph.links.filter((link) =>
@@ -242,7 +256,14 @@ export default function KnowledgePage() {
   const [selectedCollectionId, setSelectedCollectionId] = createSignal('all')
   const [selectedSourceId, setSelectedSourceId] = createSignal<string | null>(null)
   const [selectedGraphNodeId, setSelectedGraphNodeId] = createSignal<string | null>(null)
-  const [searchQuery, setSearchQuery] = createSignal('')
+  // The search query is the shared knowledge-filter store signal (module
+  // scope), not page-local state, so the left sidebar's folder/source/tag
+  // clicks drive this page's filtering. Aliased to keep every existing
+  // searchQuery/setSearchQuery call site (header search boxes etc.) unchanged.
+  const searchQuery = knowledgeSearchQuery
+  const setSearchQuery = setKnowledgeSearchQuery
+  const [filtersOpen, setFiltersOpen] = createSignal(false)
+  const [typeFilter, setTypeFilter] = createSignal<LiveKnowledgeSourceType | null>(null)
   const [liveKnowledge, setLiveKnowledge] = createSignal<LiveKnowledgePayload | null>(null)
   const [operatingMap, setOperatingMap] = createSignal<OperatingMapSnapshot | null>(null)
   const [loading, setLoading] = createSignal(true)
@@ -264,7 +285,7 @@ export default function KnowledgePage() {
 
   const visibleKnowledge = createMemo(() => {
     const payload = liveKnowledge()
-    return payload ? filterKnowledgePayload(payload, selectedCollectionId(), searchQuery()) : null
+    return payload ? filterKnowledgePayload(payload, selectedCollectionId(), searchQuery(), typeFilter()) : null
   })
   const selectedSource = createMemo(() =>
     visibleKnowledge()?.sources.find((source) => source.id === selectedSourceId()) ?? visibleKnowledge()?.sources[0] ?? null,
@@ -323,6 +344,23 @@ export default function KnowledgePage() {
     }
     if (!selectedGraphNodeId() || !knowledge.graph.nodes.some((node) => node.id === selectedGraphNodeId())) {
       setSelectedGraphNodeId(knowledge.graph.nodes[0]?.id ?? null)
+    }
+  })
+
+  // One-shot requests from the shared knowledge-filter store: the sidebar's
+  // "Legg til samling" button raises the add-source flag (possibly before this
+  // page mounts, right before navigating here) — consume it exactly once.
+  createEffect(() => {
+    if (knowledgeAddSourceRequested()) {
+      setKnowledgeAddSourceRequested(false)
+      setAddSourceOpen(true)
+    }
+  })
+  createEffect(() => {
+    const requestedView = knowledgeRequestedView()
+    if (requestedView) {
+      setKnowledgeRequestedView(null)
+      setActiveView(requestedView)
     }
   })
 
@@ -679,6 +717,7 @@ export default function KnowledgePage() {
         <WorkspaceHeader
           activeView={activeView()}
           collections={liveKnowledge()?.collections ?? []}
+          filtersOpen={filtersOpen()}
           layout={overviewLayout()}
           searchQuery={searchQuery()}
           selectedCollectionId={selectedCollectionId()}
@@ -689,7 +728,18 @@ export default function KnowledgePage() {
           onLayoutChange={setOverviewLayout}
           onSearchChange={setSearchQuery}
           onSync={() => void handleSync()}
+          onToggleFilters={() => setFiltersOpen((open) => !open)}
         />
+
+        <Show when={filtersOpen()}>
+          <KnowledgeFilterRow
+            collections={liveKnowledge()?.collections ?? []}
+            selectedCollectionId={selectedCollectionId()}
+            typeFilter={typeFilter()}
+            onCollectionChange={setSelectedCollectionId}
+            onTypeFilterChange={setTypeFilter}
+          />
+        </Show>
 
         <Show when={notice()}>
           {(currentNotice) => <NoticeBanner notice={currentNotice()} />}
@@ -769,6 +819,7 @@ export default function KnowledgePage() {
 function WorkspaceHeader(props: {
   activeView: KnowledgeView
   collections: LiveKnowledgeCollection[]
+  filtersOpen: boolean
   layout: KnowledgeLayout
   searchQuery: string
   selectedCollectionId: string
@@ -779,9 +830,9 @@ function WorkspaceHeader(props: {
   onLayoutChange: (layout: KnowledgeLayout) => void
   onSearchChange: (query: string) => void
   onSync: () => void
+  onToggleFilters: () => void
 }) {
   const i18n = useI18n()
-  let collectionSelect: HTMLSelectElement | undefined
 
   return (
     <header class="knowledge-header knowledge-header--docs">
@@ -791,7 +842,6 @@ function WorkspaceHeader(props: {
           <h1 class="knowledge-header__title">{i18n.tr('Kunnskap', 'Knowledge')}</h1>
           <div class="knowledge-header__select-wrap">
             <VelionSelect
-              ref={(element) => { collectionSelect = element }}
               aria-label={i18n.tr('Velg kunnskapssamling', 'Select knowledge collection')}
               value={props.selectedCollectionId}
               onChange={(event) => props.onCollectionChange(event.currentTarget.value)}
@@ -826,10 +876,11 @@ function WorkspaceHeader(props: {
         </label>
         <button
           type="button"
-          class="knowledge-toolbar-button"
+          class={cn('knowledge-toolbar-button', props.filtersOpen && 'knowledge-toolbar-button--active')}
           aria-label={i18n.tr('Filtrer kunnskap', 'Filter knowledge')}
-          title={i18n.tr('Filtrer etter samling', 'Filter by collection')}
-          onClick={() => collectionSelect?.focus()}
+          aria-expanded={props.filtersOpen}
+          title={i18n.tr('Filtrer etter samling og type', 'Filter by collection and type')}
+          onClick={() => props.onToggleFilters()}
         >
           <Filter class="size-4" />
           <span>{i18n.tr('Filter', 'Filter')}</span>
@@ -869,6 +920,61 @@ function WorkspaceHeader(props: {
         </Button>
       </div>
     </header>
+  )
+}
+
+// The four source types the live payload actually classifies documents into
+// (LiveKnowledgeSourceType) — the chips filter on real data, nothing invented.
+const knowledgeTypeFilterOptions: LiveKnowledgeSourceType[] = ['URL', 'PDF', 'Docs', 'Notion']
+
+function KnowledgeFilterRow(props: {
+  collections: LiveKnowledgeCollection[]
+  selectedCollectionId: string
+  typeFilter: LiveKnowledgeSourceType | null
+  onCollectionChange: (collectionId: string) => void
+  onTypeFilterChange: (type: LiveKnowledgeSourceType | null) => void
+}) {
+  const i18n = useI18n()
+  return (
+    <div class="knowledge-filter-row" role="group" aria-label={i18n.tr('Kunnskapsfiltre', 'Knowledge filters')}>
+      <span class="knowledge-filter-row__label">{i18n.tr('Samling', 'Collection')}</span>
+      <div class="knowledge-header__select-wrap">
+        <VelionSelect
+          aria-label={i18n.tr('Filtrer etter samling', 'Filter by collection')}
+          value={props.selectedCollectionId}
+          onChange={(event) => props.onCollectionChange(event.currentTarget.value)}
+          class="knowledge-header__select"
+        >
+          <For each={props.collections}>
+            {(collection) => <option value={collection.id}>{collection.label}</option>}
+          </For>
+        </VelionSelect>
+        <ChevronDown class="knowledge-header__chevron" strokeWidth={2} />
+      </div>
+      <span class="knowledge-filter-row__label">{i18n.tr('Type', 'Type')}</span>
+      <div class="knowledge-filter-row__chips">
+        <button
+          type="button"
+          class={cn('knowledge-filter-chip', props.typeFilter === null && 'knowledge-filter-chip--active')}
+          aria-pressed={props.typeFilter === null}
+          onClick={() => props.onTypeFilterChange(null)}
+        >
+          {i18n.tr('Alle', 'All')}
+        </button>
+        <For each={knowledgeTypeFilterOptions}>
+          {(type) => (
+            <button
+              type="button"
+              class={cn('knowledge-filter-chip', props.typeFilter === type && 'knowledge-filter-chip--active')}
+              aria-pressed={props.typeFilter === type}
+              onClick={() => props.onTypeFilterChange(props.typeFilter === type ? null : type)}
+            >
+              {type}
+            </button>
+          )}
+        </For>
+      </div>
+    </div>
   )
 }
 
@@ -1314,13 +1420,6 @@ function FilesTable(props: {
           <h2><span class="sr-only">{i18n.tr('Filer', 'Files')}</span><span aria-hidden="true">{i18n.tr('Sprint-arkiver', 'Sprint Archives')}</span></h2>
           <p>{i18n.tr('Nyeste filer tilgjengelig for henting.', 'Latest files available to retrieval.')}</p>
         </div>
-        <div class="knowledge-archive-actions" aria-hidden="true">
-          <span><Bookmark class="size-4" /></span>
-          <span><Pencil class="size-4" /></span>
-          <span><Trash2 class="size-4" /></span>
-          <span><Mail class="size-4" /></span>
-          <span><Download class="size-4" /></span>
-        </div>
         <label class="knowledge-files-search">
           <Search class="size-4" />
           <VelionInput
@@ -1348,7 +1447,25 @@ function FilesTable(props: {
                     <p>{i18n.tr(`Delt av ${file.addedBy}`, `Shared by ${file.addedBy}`)}</p>
                     <p>{i18n.tr(`${file.source} · Oppdatert ${file.updated}`, `${file.source} · Updated ${file.updated}`)}</p>
                   </div>
-                  <Clock3 class="knowledge-archive-file__clock size-4" aria-hidden="true" />
+                  {/* Only files whose payload carries a source URL get a real
+                      open action; the rest keep the passive recency glyph —
+                      no dead buttons pretending an action exists. */}
+                  <Show
+                    when={file.url}
+                    fallback={<Clock3 class="knowledge-archive-file__clock size-4" aria-hidden="true" />}
+                  >
+                    {(url) => (
+                      <button
+                        type="button"
+                        class="knowledge-archive-file__open"
+                        aria-label={i18n.tr(`Åpne kilden for ${file.name}`, `Open the source for ${file.name}`)}
+                        title={i18n.tr('Åpne kilde-URL', 'Open source URL')}
+                        onClick={() => window.open(url(), '_blank', 'noopener,noreferrer')}
+                      >
+                        <Download class="size-4" />
+                      </button>
+                    )}
+                  </Show>
                 </article>
               )
             }}

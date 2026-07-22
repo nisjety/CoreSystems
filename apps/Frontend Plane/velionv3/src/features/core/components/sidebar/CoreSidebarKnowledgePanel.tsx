@@ -1,4 +1,4 @@
-import { A } from '@solidjs/router'
+import { A, useLocation, useNavigate } from '@solidjs/router'
 import {
   BarChart3,
   BookOpen,
@@ -21,6 +21,11 @@ import {
   SidebarPanelTitle,
   SidebarSearchField,
 } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
+import {
+  knowledgeSearchQuery,
+  setKnowledgeAddSourceRequested,
+  setKnowledgeSearchQuery,
+} from '@/features/knowledge/state/knowledge-filter-store'
 import { useI18n } from '@/shared/i18n'
 import {
   buildKnowledgeSidebarLiveData,
@@ -55,6 +60,19 @@ const sourceTypeIcon: Record<LiveKnowledgeSourceType, KnowledgeIcon> = {
 
 export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const i18n = useI18n()
+  const navigate = useNavigate()
+  const location = useLocation()
+  // Sidebar clicks drive the /knowledge main pane through the shared
+  // knowledge-filter store: the clicked item's label becomes the pane's
+  // search query (its filterKnowledgePayload matches folder/file/source
+  // titles), and a second click on the same label toggles the query off.
+  const goToKnowledge = () => {
+    if (location.pathname !== '/knowledge') navigate('/knowledge')
+  }
+  const applyKnowledgeFilter = (label: string) => {
+    setKnowledgeSearchQuery(knowledgeSearchQuery() === label ? '' : label)
+    goToKnowledge()
+  }
   const [activeMode, setActiveMode] = createSignal<KnowledgeSidebarModeId>('folders')
   const [activeFolderId, setActiveFolderId] = createSignal('')
   const [activeSourceId, setActiveSourceId] = createSignal('')
@@ -129,7 +147,18 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
             <section>
               <div class="core-sidebar-dedicated-group-header">
                 <h2 class="velion-sidebar-group-title">{i18n.tr('Samlinger', 'Collections')}</h2>
-                <button type="button" class="core-sidebar-round-add" aria-label={i18n.tr('Legg til samling', 'Add collection')} title={i18n.tr('Legg til samling', 'Add collection')}>
+                <button
+                  type="button"
+                  class="core-sidebar-round-add"
+                  aria-label={i18n.tr('Legg til samling', 'Add collection')}
+                  title={i18n.tr('Legg til samling', 'Add collection')}
+                  onClick={() => {
+                    // Raise the one-shot request BEFORE navigating so the
+                    // /knowledge page's consumer effect sees it on mount.
+                    setKnowledgeAddSourceRequested(true)
+                    goToKnowledge()
+                  }}
+                >
                   <Plus class="size-4" strokeWidth={1.9} />
                 </button>
               </div>
@@ -142,7 +171,10 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
                           activeFolderId={activeFolderId()}
                           depth={0}
                           folder={folder}
-                          onSelect={setActiveFolderId}
+                          onSelect={(selected) => {
+                            setActiveFolderId(selected.id)
+                            applyKnowledgeFilter(selected.label)
+                          }}
                         />
                       )}
                     </For>
@@ -156,7 +188,10 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
               error={error()}
               limit={4}
               loading={loading()}
-              onSelect={setActiveSourceId}
+              onSelect={(source) => {
+                setActiveSourceId(source.id)
+                applyKnowledgeFilter(source.title)
+              }}
               sources={visibleSources()}
               title={i18n.tr('Festede kilder', 'Pinned sources')}
             />
@@ -180,7 +215,10 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
             activeSourceId={activeSourceId()}
             error={error()}
             loading={loading()}
-            onSelect={setActiveSourceId}
+            onSelect={(source) => {
+              setActiveSourceId(source.id)
+              applyKnowledgeFilter(source.title)
+            }}
             sources={visibleSources()}
             title={i18n.tr('Kilder', 'Sources')}
           />
@@ -197,7 +235,12 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
                 <Show when={!error()} fallback={<SidebarEmptyState label={error() ?? i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.')} />}>
                   <For each={visibleTags()} fallback={<SidebarEmptyState label={i18n.tr('Fant ingen etiketter.', 'No tags found.')} />}>
                     {(tag) => (
-                      <button type="button" class="core-sidebar-section-link">
+                      <button
+                        type="button"
+                        class={cn('core-sidebar-section-link', knowledgeSearchQuery() === tag.label && 'core-sidebar-source-link--active')}
+                        aria-pressed={knowledgeSearchQuery() === tag.label}
+                        onClick={() => applyKnowledgeFilter(tag.label)}
+                      >
                         <KeyRound class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
                         <span>{tag.label}</span>
                         <span class="core-sidebar-count-pill">{tag.count}</span>
@@ -370,7 +413,7 @@ function KnowledgeSourcesList(props: {
   error: string | null
   limit?: number
   loading: boolean
-  onSelect: (sourceId: string) => void
+  onSelect: (source: LiveKnowledgeSource) => void
   sources: readonly LiveKnowledgeSource[]
   title: string
 }) {
@@ -393,7 +436,7 @@ function KnowledgeSourcesList(props: {
                   <button
                     type="button"
                     aria-pressed={active()}
-                    onClick={() => props.onSelect(source.id)}
+                    onClick={() => props.onSelect(source)}
                     class={cn('core-sidebar-source-link', active() && 'core-sidebar-source-link--active')}
                   >
                     <Dynamic component={sourceTypeIcon[source.type]} class="core-sidebar-dedicated-icon core-sidebar-source-link__icon" strokeWidth={1.75} />
@@ -422,7 +465,7 @@ function KnowledgeSidebarTreeItem(props: {
   activeFolderId: string
   depth: number
   folder: KnowledgeSidebarFolderNode
-  onSelect: (folderId: string) => void
+  onSelect: (folder: KnowledgeSidebarFolderNode) => void
 }) {
   const active = () => props.activeFolderId === props.folder.id
   const Icon = () => knowledgeFolderIcon(props.folder, props.depth)
@@ -432,7 +475,7 @@ function KnowledgeSidebarTreeItem(props: {
       <button
         type="button"
         aria-pressed={active()}
-        onClick={() => props.onSelect(props.folder.id)}
+        onClick={() => props.onSelect(props.folder)}
         class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
       >
         <Dynamic component={Icon()} class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
