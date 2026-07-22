@@ -18947,6 +18947,17 @@ textarea:focus-visible {
   height: 560px;
 }
 
+/* Graf tab reuses the onboarding 3D scene (.onboarding-source-graph);
+   this modifier just fits it into the light knowledge panel: rounded
+   corners against the panel body and the same 560px canvas height the
+   old static layout occupied. The dark background is intentional — the
+   design brief is to match the onboarding graph 1:1. */
+.knowledge-graph-scene {
+  min-height: 560px;
+  height: 560px;
+  border-radius: 14px;
+}
+
 .knowledge-graph-grid {
   position: absolute;
   inset: 0;

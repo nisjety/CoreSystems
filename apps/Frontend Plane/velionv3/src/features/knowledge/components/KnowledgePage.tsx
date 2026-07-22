@@ -21,8 +21,11 @@ import {
   Globe2,
   Link2,
   Map as MapIcon,
+  Minus,
   Network,
+  Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Table2,
   type LucideProps,
@@ -31,6 +34,18 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, 
 import { Dynamic } from 'solid-js/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
+// The Graf tab reuses the onboarding Connect step's 3D force-graph scene so
+// the RAGGraph relationship map matches that design (WebGL with a Canvas-2D
+// fallback, same palette/labels/interaction), instead of the old static
+// server-computed ring layout.
+import {
+  createConnectGraphScene,
+  GRAPH_CORE_COLOR,
+  hueForKey,
+  type SourceGraphSceneController,
+  type SourceGraphVisualEdge,
+  type SourceGraphVisualNode,
+} from '@/features/onboarding/components/steps/connectGraphScene'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
 import { isGateOpen } from '@/shared/context/ownership-gate'
@@ -74,6 +89,7 @@ import { getSessionContext } from '@/shared/api/auth-client'
 import { requestForm, requestJson } from '@/shared/api/http'
 import { resolveCrawlIngest } from '@/shared/api/settings-client'
 import { Button } from '@/shared/ui/Button'
+import { VelionIconButton } from '@/shared/ui/velion/VelionIconButton'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { VelionSegmented, VelionSegmentedButton } from '@/shared/ui/velion/VelionSegmented'
 import { VelionSelect } from '@/shared/ui/velion/VelionSelect'
@@ -136,14 +152,6 @@ const sourceTypeIcon: Record<LiveKnowledgeSourceType, KnowledgeIcon> = {
   Notion: Link2,
   PDF: FileText,
   URL: Globe2,
-}
-
-const graphToneClass: Record<LiveKnowledgeGraphNode['tone'], string> = {
-  core: 'knowledge-graph-node--core',
-  policy: 'knowledge-graph-node--policy',
-  product: 'knowledge-graph-node--product',
-  risk: 'knowledge-graph-node--risk',
-  support: 'knowledge-graph-node--support',
 }
 
 const folderToneClass: Record<LiveKnowledgeFolder['tone'], string> = {
@@ -1430,13 +1438,107 @@ function ChunksCanvas(props: {
   )
 }
 
+/// Degree map + radius scale drive the role/size mapping onto the onboarding
+/// scene's visual vocabulary: the highest-degree node anchors as `core`,
+/// well-connected nodes render as `hub`s, the rest as `leaf`s.
+function buildKnowledgeGraphSceneData(graph: LiveKnowledgePayload['graph']): {
+  nodes: SourceGraphVisualNode[]
+  edges: SourceGraphVisualEdge[]
+} {
+  const degrees = new Map<string, number>()
+  for (const link of graph.links) {
+    degrees.set(link.from, (degrees.get(link.from) ?? 0) + 1)
+    degrees.set(link.to, (degrees.get(link.to) ?? 0) + 1)
+  }
+  const maxRadius = Math.max(1, ...graph.nodes.map((node) => node.radius))
+  const maxDegree = Math.max(1, ...degrees.values())
+  const coreId = graph.nodes.reduce<{ id: string; degree: number } | undefined>((best, node) => {
+    const degree = degrees.get(node.id) ?? 0
+    return !best || degree > best.degree ? { id: node.id, degree } : best
+  }, undefined)?.id
+
+  const nodes = graph.nodes.map<SourceGraphVisualNode>((node) => {
+    const degree = degrees.get(node.id) ?? 0
+    const role: SourceGraphVisualNode['role'] =
+      node.id === coreId && degree > 0 ? 'core' : degree >= 2 ? 'hub' : degree === 0 ? 'standalone' : 'leaf'
+    return {
+      id: node.id,
+      label: node.label,
+      detail: node.group,
+      kind: 'knowledge',
+      strength: Math.min(1, degree / maxDegree),
+      connected: degree > 0,
+      color: node.tone === 'core' ? GRAPH_CORE_COLOR : hueForKey(node.group),
+      sizeWeight: node.radius / maxRadius,
+      role,
+      clusterKey: node.group,
+    }
+  })
+  const edges = graph.links.map<SourceGraphVisualEdge>((link) => ({
+    from: link.from,
+    to: link.to,
+    label: link.label,
+  }))
+  return { nodes, edges }
+}
+
 function GraphPanel(props: {
   graph: LiveKnowledgePayload['graph']
   selectedNode: LiveKnowledgeGraphNode | null
   onSelectNode: (nodeId: string) => void
 }) {
   const i18n = useI18n()
-  const nodeById = createMemo(() => new Map(props.graph.nodes.map((node) => [node.id, node])))
+  let hostRef!: HTMLDivElement
+  let graphRef!: HTMLDivElement
+  let sceneController: SourceGraphSceneController | undefined
+  const [zoomPercent, setZoomPercent] = createSignal(100)
+  const [hoveringNode, setHoveringNode] = createSignal(false)
+  const sceneData = createMemo(() => buildKnowledgeGraphSceneData(props.graph))
+  const hasNodes = createMemo(() => sceneData().nodes.length > 0)
+
+  onMount(() => {
+    const reducedMotion = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false
+    sceneController = createConnectGraphScene(graphRef, hostRef, {
+      reducedMotion,
+      onHoverNode: (node) => setHoveringNode(Boolean(node)),
+      onSelectNode: (pick) => {
+        if (pick) props.onSelectNode(pick.node.id)
+      },
+      onZoomChange: setZoomPercent,
+    })
+    if (sceneController) {
+      const data = sceneData()
+      sceneController.setData(data.nodes, data.edges)
+      if (props.selectedNode) sceneController.setActiveNode(props.selectedNode.id)
+      setZoomPercent(sceneController.zoomPercent())
+    }
+    onCleanup(() => {
+      sceneController?.dispose()
+      sceneController = undefined
+    })
+  })
+
+  createEffect(() => {
+    const data = sceneData()
+    sceneController?.setData(data.nodes, data.edges)
+  })
+
+  createEffect(() => {
+    // Sync external selection (e.g. cleared by parent) into the scene without
+    // re-firing onSelectNode: setActiveNode only repositions the highlight.
+    sceneController?.setActiveNode(props.selectedNode?.id)
+  })
+
+  const zoom = (direction: 1 | -1) => {
+    const next = sceneController?.zoom(direction)
+    if (next) setZoomPercent(next)
+  }
+  const reset = () => {
+    const next = sceneController?.reset()
+    if (next) setZoomPercent(next)
+  }
 
   return (
     <section class="velion-panel knowledge-graph-panel" aria-label={i18n.tr('RAGGraph-relasjonskart', 'RAGGraph relationship map')}>
@@ -1448,55 +1550,44 @@ function GraphPanel(props: {
         <GitBranch class="size-5" />
       </div>
 
-      <div class="knowledge-graph-canvas">
-        <div class="knowledge-graph-grid" aria-hidden="true" />
-        <svg class="knowledge-graph-svg" viewBox="0 0 640 420" role="img" aria-label={i18n.tr('Kunnskapskildegraf', 'Knowledge source graph')}>
-          <For each={props.graph.links}>
-            {(link) => {
-              const from = () => nodeById().get(link.from)
-              const to = () => nodeById().get(link.to)
-              const selected = () => link.from === props.selectedNode?.id || link.to === props.selectedNode?.id
-              return (
-                <Show when={from() && to()}>
-                  <line
-                    x1={from()!.x}
-                    y1={from()!.y}
-                    x2={to()!.x}
-                    y2={to()!.y}
-                    stroke={selected() ? '#111111' : '#B8B9B1'}
-                    stroke-width={selected() ? link.strength : 1}
-                    stroke-opacity={selected() ? 0.82 : 0.48}
-                  />
-                </Show>
-              )
-            }}
-          </For>
-        </svg>
-
-        <div class="knowledge-graph-node-layer">
-          <For each={props.graph.nodes}>
-            {(node) => {
-              const active = () => node.id === props.selectedNode?.id
-              return (
-                <button
-                  type="button"
-                  aria-label={i18n.tr(`Velg ${node.label}`, `Select ${node.label}`)}
-                  onClick={() => props.onSelectNode(node.id)}
-                  class={cn('knowledge-graph-node-button', active() && 'knowledge-graph-node-button--active')}
-                  style={{
-                    left: `${(node.x / 640) * 100}%`,
-                    top: `${(node.y / 420) * 100}%`,
-                    width: `${node.radius * 2}px`,
-                    height: `${node.radius * 2}px`,
-                  }}
-                >
-                  <span class={cn('knowledge-graph-node-dot', graphToneClass[node.tone])} />
-                  <span class="knowledge-graph-node-label">{node.label}</span>
-                </button>
-              )
-            }}
-          </For>
-        </div>
+      <div
+        ref={hostRef}
+        class="onboarding-source-graph knowledge-graph-scene"
+        classList={{ 'onboarding-source-graph--empty': !hasNodes() }}
+        role="region"
+        aria-label={i18n.tr('Kunnskapskildegraf', 'Knowledge source graph')}
+      >
+        <div
+          ref={graphRef}
+          class="onboarding-source-graph__engine"
+          classList={{ 'onboarding-source-graph__engine--hovering': hoveringNode() }}
+          aria-label={hasNodes()
+            ? i18n.tr('Interaktiv 3D-kunnskapsgraf', 'Interactive 3D knowledge graph')
+            : i18n.tr('Kunnskapsgraf uten noder ennå', 'Knowledge graph with no nodes yet')}
+          role="group"
+        />
+        <div class="onboarding-source-graph__glow" aria-hidden="true" />
+        <Show when={hasNodes()}>
+          <div class="onboarding-source-graph__controls">
+            <VelionIconButton aria-label={i18n.tr('Zoom ut', 'Zoom out')} size="sm" shape="rounded" tone="inverted" onClick={() => zoom(-1)}>
+              <Minus size={14} />
+            </VelionIconButton>
+            <output aria-label={i18n.tr('Graf-zoom', 'Graph zoom')} aria-live="polite">{zoomPercent()}%</output>
+            <VelionIconButton aria-label={i18n.tr('Zoom inn', 'Zoom in')} size="sm" shape="rounded" tone="inverted" onClick={() => zoom(1)}>
+              <Plus size={14} />
+            </VelionIconButton>
+            <VelionIconButton aria-label={i18n.tr('Nullstill graf', 'Reset graph')} size="sm" shape="rounded" tone="inverted" onClick={reset}>
+              <RotateCcw size={14} />
+            </VelionIconButton>
+          </div>
+        </Show>
+        <p class="sr-only" role="status" aria-live="polite">
+          {props.selectedNode
+            ? i18n.tr(`Valgt node: ${props.selectedNode.label}`, `Selected node: ${props.selectedNode.label}`)
+            : hasNodes()
+              ? i18n.tr('Ingen node valgt.', 'No graph node selected.')
+              : i18n.tr('Grafen er tom.', 'The graph is empty.')}
+        </p>
       </div>
     </section>
   )
