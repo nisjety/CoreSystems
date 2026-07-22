@@ -184,9 +184,13 @@ export default function VelionIngestionsPage() {
       setRunEvidence(null)
       return
     }
+    // The evidence endpoint only accepts Temporal run ids (`run_…`); the list
+    // rows are keyed by durable job id (`job_…`), which 400s there. Prefer the
+    // row's runId and fall back to the selection id (scrape runs' id IS a run id).
+    const evidenceId = selectedRun()?.runId ?? runId
 
     const controller = new AbortController()
-    getIngestionEvidence(runId, controller.signal)
+    getIngestionEvidence(evidenceId, controller.signal)
       .then(setRunEvidence)
       .catch(() => {
         if (!controller.signal.aborted) setRunEvidence(null)

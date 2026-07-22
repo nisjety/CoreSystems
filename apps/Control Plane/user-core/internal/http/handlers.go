@@ -887,10 +887,15 @@ func (s *Server) getPreferences(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
 		return
 	}
-	// Phase 6 selective ingest: crawl_ingest_mode defaults to "never" (browsing
-	// != remembering — nothing is persisted to the knowledge base unless the
-	// user opts in). The gateway reads this to set the per-request ingest flag.
-	knowledgeDefaults := map[string]interface{}{"crawlIngestMode": "never"}
+	// Phase 6 selective ingest: crawl_ingest_mode defaults to "auto". The only
+	// crawls this preference gates are EXPLICIT add-to-Knowledge actions (the
+	// Knowledge add-source modal and the dashboard crawl composer), where
+	// persisting is the expected outcome — the previous "never" default made
+	// every crawl silently discard its pages ("0 docs added"). Agent browsing
+	// and onboarding previews never consult this preference and stay
+	// working-set-only. Users can still pick "never"/"prompt" in Settings;
+	// this default only applies while the preference is genuinely unset.
+	knowledgeDefaults := map[string]interface{}{"crawlIngestMode": "auto"}
 	knowledgeSettings, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "knowledge", knowledgeDefaults)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get knowledge settings")

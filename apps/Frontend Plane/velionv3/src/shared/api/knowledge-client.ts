@@ -816,17 +816,21 @@ export interface SharePointDrive {
 }
 
 export async function listSharePointSites(orgId: string): Promise<SharePointSite[]> {
-  const payload = await requestJson<{ data?: { sites?: SharePointSite[] } }>(
+  // requestJson already unwraps finspo's `{ data: {...}, success }` envelope,
+  // so the payload here is the INNER object. Reading `payload.data?.sites`
+  // would double-unwrap and always yield [] — which the modal renders as
+  // "connect Microsoft 365 first" even when 65 real sites came back.
+  const payload = await requestJson<{ count?: number; sites?: SharePointSite[] }>(
     '/api/v1/knowledge/sharepoint/sites',
     { headers: orgHeaders(orgId) },
   )
-  return payload.data?.sites ?? []
+  return payload.sites ?? []
 }
 
 export async function listSharePointDrives(orgId: string, siteId: string): Promise<SharePointDrive[]> {
-  const payload = await requestJson<{ data?: { drives?: SharePointDrive[] } }>(
+  const payload = await requestJson<{ count?: number; drives?: SharePointDrive[] }>(
     `/api/v1/knowledge/sharepoint/sites/${encodeURIComponent(siteId)}/drives`,
     { headers: orgHeaders(orgId) },
   )
-  return payload.data?.drives ?? []
+  return payload.drives ?? []
 }

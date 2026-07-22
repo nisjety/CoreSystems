@@ -258,7 +258,14 @@ impl InferenceTokenClient {
                 && claims.service_id == expected_subject
                 && claims.scopes.as_slice() == [INFERENCE_SCOPE]
                 && claims.reason == TOKEN_REASON
-                && claims.zdr,
+                // Embeddings of durable documents ARE persisted (Qdrant), so the
+                // registry provisions this principal with a `persistent` retention
+                // posture — the token must carry zdr:false. Requiring zdr:true
+                // here (the old registry posture) broke every embedding call once
+                // the registry was corrected: inference-core's fail-closed ZDR
+                // chain has no verified-ZDR provider, and this local check
+                // rejected the honest zdr:false token before even sending it.
+                && !claims.zdr,
             "inference service-token claims exceeded requested authority"
         );
 

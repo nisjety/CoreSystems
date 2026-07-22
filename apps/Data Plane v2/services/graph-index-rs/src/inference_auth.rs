@@ -258,7 +258,11 @@ impl InferenceTokenClient {
                 && claims.service_id == expected_subject
                 && claims.scopes.as_slice() == [INFERENCE_SCOPE]
                 && claims.reason == TOKEN_REASON
-                && claims.zdr,
+                // Graph embeddings persist, so the registry provisions this
+                // principal `persistent` (zdr:false). See embedding-engine's
+                // inference_auth.rs for why requiring zdr:true here broke every
+                // call once the registry posture was corrected.
+                && !claims.zdr,
             "inference service-token claims exceeded requested authority"
         );
 

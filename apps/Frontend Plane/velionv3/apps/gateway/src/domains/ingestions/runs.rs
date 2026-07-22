@@ -135,6 +135,12 @@ fn to_run_item(job: &Value) -> Value {
 
     json!({
         "id": str_at(job, "job_id"),
+        // The Temporal run id, stamped once the job starts. The evidence
+        // endpoint (`/api/ingestions/evidence?runId=…`) proxies quarry-edge's
+        // `/v1/runs/{id}/events`, which strictly parses a `run_…` id — passing
+        // this job row's `id` (a `job_…` id) there is a guaranteed 400. The SPA
+        // must prefer `runId` for evidence lookups; null until the job starts.
+        "runId": str_or_null(job, "run_id"),
         "kind": kind,
         "status": str_at(job, "status"),
         "createdAt": str_at(job, "created_at"),

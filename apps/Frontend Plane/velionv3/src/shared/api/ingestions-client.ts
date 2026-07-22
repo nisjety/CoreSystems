@@ -2,6 +2,10 @@ import { requestJson } from './http'
 
 export type RunItem = {
   id: string
+  /** Temporal run id (`run_…`), stamped once the job starts. The evidence
+   * endpoint only accepts run ids — `id` is the durable job id (`job_…`)
+   * and 400s there — so evidence lookups must use this when present. */
+  runId?: string | null
   kind: string
   status: string
   createdAt: string
