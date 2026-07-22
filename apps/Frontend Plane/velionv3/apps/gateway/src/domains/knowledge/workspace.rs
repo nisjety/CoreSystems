@@ -46,7 +46,12 @@ const GRAPH_SOURCE_REF_LIMIT: usize = 80;
 const CHUNK_PREVIEW_LIMIT: usize = 3;
 const DOCUMENT_PAGE_SIZE: usize = 100;
 const DOCUMENT_MAX_PAGES: usize = 20;
-const RING_RADII: [f64; 3] = [110.0, 155.0, 195.0];
+const MIN_RING_RADIUS: f64 = 70.0;
+const MAX_RING_RADIUS: f64 = 195.0;
+/// Minimum circumferential spacing (px) budgeted per node when placing
+/// nodes around a ring — sized to clear the node dot (up to 32px radius)
+/// plus its label (`max-width: 130px` in global.css) with a small margin.
+const MIN_NODE_ARC_PX: f64 = 150.0;
 
 pub(super) async fn load_workspace(
     State(state): State<AppState>,
@@ -1232,16 +1237,53 @@ fn build_graph(snapshot: Option<&Value>, chunk_lookup: &HashMap<String, String>)
         .enumerate()
         .map(|(i, g)| (g.as_str(), i))
         .collect();
-    let total = filtered_nodes.len().max(1) as f64;
 
+    // Layout: give every distinct group (up to 8) its own ring, spread across
+    // the safe drawable radius, so different entity types separate radially
+    // instead of interleaving. Each ring's radius is also boosted when its
+    // own node count would otherwise crowd nodes closer than
+    // MIN_NODE_ARC_PX apart. Previously every node shared one of 3 fixed
+    // rings via `group_order % 3` and was spaced by its raw position across
+    // ALL nodes — unrelated groups landed on the same ring, and spacing had
+    // no relationship to how many nodes actually shared that ring, which is
+    // what produced the illegible pile of overlapping nodes/labels.
+    let group_count = groups.len().max(1);
+    let mut nodes_per_group: HashMap<&str, usize> = HashMap::new();
+    for node in &filtered_nodes {
+        *nodes_per_group.entry(node.group.as_str()).or_insert(0) += 1;
+    }
+    let base_ring_for_group = |group_order: usize| -> f64 {
+        if group_count == 1 {
+            (MIN_RING_RADIUS + MAX_RING_RADIUS) / 2.0
+        } else {
+            MIN_RING_RADIUS
+                + (group_order as f64) * (MAX_RING_RADIUS - MIN_RING_RADIUS)
+                    / ((group_count - 1) as f64)
+        }
+    };
+    let required_ring_for_count =
+        |count: usize| -> f64 { (count as f64) * MIN_NODE_ARC_PX / (std::f64::consts::PI * 2.0) };
+
+    let mut group_seen: HashMap<&str, usize> = HashMap::new();
     let mut related_labels: HashMap<String, Vec<String>> = HashMap::new();
     let nodes = filtered_nodes
         .iter()
-        .enumerate()
-        .map(|(index, node)| {
+        .map(|node| {
             let group_order = *group_index.get(node.group.as_str()).unwrap_or(&0);
-            let angle = (std::f64::consts::PI * 2.0 * index as f64) / total;
-            let ring = RING_RADII[group_order % RING_RADII.len()];
+            let count_in_group = *nodes_per_group.get(node.group.as_str()).unwrap_or(&1);
+            let index_in_group = {
+                let slot = group_seen.entry(node.group.as_str()).or_insert(0);
+                let i = *slot;
+                *slot += 1;
+                i
+            };
+            let angle =
+                (std::f64::consts::PI * 2.0 * index_in_group as f64) / (count_in_group as f64);
+            let ring = clamp(
+                base_ring_for_group(group_order).max(required_ring_for_count(count_in_group)),
+                MIN_RING_RADIUS,
+                MAX_RING_RADIUS,
+            );
             let degree = *degrees.get(&node.id).unwrap_or(&0) as f64;
             let radius = clamp(
                 16.0 + degree * 1.5 + (node.source_refs.len().min(4) as f64),
@@ -1816,6 +1858,78 @@ fn document_load_truncated(total: usize, page_size: usize, max_pages: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a synthetic graph snapshot with `groups.len()` distinct entity
+    /// types, `per_group` nodes each — the shape `build_graph` expects
+    /// (`entity_id`/`entity_text`/`entity_type` per node).
+    fn synthetic_snapshot(groups: &[&str], per_group: usize) -> Value {
+        let mut nodes = vec![];
+        for group in groups {
+            for i in 0..per_group {
+                nodes.push(json!({
+                    "entity_id": format!("{group}-{i}"),
+                    "entity_text": format!("{group} node {i}"),
+                    "entity_type": group,
+                    "source_refs": [],
+                }));
+            }
+        }
+        json!({ "nodes": nodes, "edges": [] })
+    }
+
+    fn min_center_distance(nodes: &[Value]) -> f64 {
+        let mut min_dist = f64::MAX;
+        for i in 0..nodes.len() {
+            for j in (i + 1)..nodes.len() {
+                let (xi, yi) = (nodes[i]["x"].as_f64().unwrap(), nodes[i]["y"].as_f64().unwrap());
+                let (xj, yj) = (nodes[j]["x"].as_f64().unwrap(), nodes[j]["y"].as_f64().unwrap());
+                let dist = ((xi - xj).powi(2) + (yi - yj).powi(2)).sqrt();
+                min_dist = min_dist.min(dist);
+            }
+        }
+        min_dist
+    }
+
+    #[test]
+    fn build_graph_spreads_many_same_group_nodes_apart() {
+        // Regression for the reported "RAGGraph" pile-up: 20 nodes in a
+        // single group used to be spaced by raw global index around 3
+        // fixed rings shared with every other group, producing near-
+        // identical coordinates. Each node should now clear a sane minimum
+        // separation.
+        let snapshot = synthetic_snapshot(&["produkt"], 20);
+        let chunk_lookup = HashMap::new();
+        let graph = build_graph(Some(&snapshot), &chunk_lookup);
+        let nodes = graph.value["nodes"].as_array().cloned().unwrap_or_default();
+        assert_eq!(nodes.len(), 20);
+        assert!(
+            min_center_distance(&nodes) > 20.0,
+            "expected every node pair to clear a sane minimum separation, got {}",
+            min_center_distance(&nodes)
+        );
+    }
+
+    #[test]
+    fn build_graph_gives_each_group_a_distinct_ring() {
+        // Previously `group_order % 3` meant group 0 and group 3 shared a
+        // ring. With 4 groups every one of them should now land at a
+        // different radius from the (320, 210) center.
+        let snapshot = synthetic_snapshot(&["a", "b", "c", "d"], 2);
+        let chunk_lookup = HashMap::new();
+        let graph = build_graph(Some(&snapshot), &chunk_lookup);
+        let nodes = graph.value["nodes"].as_array().cloned().unwrap_or_default();
+        let mut radii: Vec<i64> = nodes
+            .iter()
+            .map(|n| {
+                let x = n["x"].as_f64().unwrap() - 320.0;
+                let y = (n["y"].as_f64().unwrap() - 210.0) / 0.78;
+                (x * x + y * y).sqrt().round() as i64
+            })
+            .collect();
+        radii.sort_unstable();
+        radii.dedup();
+        assert_eq!(radii.len(), 4, "expected 4 distinct ring radii, got {radii:?}");
+    }
 
     #[test]
     fn document_chunk_request_uses_retrieval_contract_singular_document_id() {
