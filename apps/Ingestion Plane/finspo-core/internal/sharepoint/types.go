@@ -37,10 +37,36 @@ type Drive struct {
 	WebURL    string `json:"web_url,omitempty"`
 }
 
+// Folder is one folder inside a document library, surfaced by ListChildren so
+// the picker UI can drill below the drive root and register a folder-scoped
+// source. `Path` is drive-root-relative ("/Contracts/2026") — the exact form
+// the delta sync's scope filter compares against.
+type Folder struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	ChildCount int64  `json:"child_count"`
+	WebURL     string `json:"web_url,omitempty"`
+}
+
+// SitePage is one SharePoint site page (news post / wiki-style page) returned
+// by the Graph sitePages API. `Name` is the file name ("Home.aspx"), `Title`
+// the human headline.
+type SitePage struct {
+	ID                   string     `json:"id"`
+	Name                 string     `json:"name"`
+	Title                string     `json:"title,omitempty"`
+	Description          string     `json:"description,omitempty"`
+	PageLayout           string     `json:"page_layout,omitempty"`
+	WebURL               string     `json:"web_url,omitempty"`
+	LastModifiedDateTime *time.Time `json:"last_modified_at,omitempty"`
+}
+
 type Browser interface {
 	ListSites(ctx context.Context, organizationID string) ([]Site, error)
 	ListDrives(ctx context.Context, organizationID string, siteID string) ([]Drive, error)
 	ListItems(ctx context.Context, organizationID string, siteID string, path string) ([]Item, error)
+	ListChildren(ctx context.Context, organizationID string, driveID string, itemID string) ([]Folder, error)
 }
 
 type DisconnectedBrowser struct{}
@@ -54,6 +80,10 @@ func (DisconnectedBrowser) ListDrives(context.Context, string, string) ([]Drive,
 }
 
 func (DisconnectedBrowser) ListItems(context.Context, string, string, string) ([]Item, error) {
+	return nil, ErrNotConfigured
+}
+
+func (DisconnectedBrowser) ListChildren(context.Context, string, string, string) ([]Folder, error) {
 	return nil, ErrNotConfigured
 }
 
@@ -232,12 +262,12 @@ type PermissionLink struct {
 
 // PermissionEntry is one permission returned by /drives/{id}/items/{id}/permissions.
 type PermissionEntry struct {
-	ID                    string                 `json:"id,omitempty"`
-	Roles                 []string               `json:"roles,omitempty"`
-	GrantedToV2           *PermissionIdentitySet `json:"grantedToV2,omitempty"`
+	ID                    string                  `json:"id,omitempty"`
+	Roles                 []string                `json:"roles,omitempty"`
+	GrantedToV2           *PermissionIdentitySet  `json:"grantedToV2,omitempty"`
 	GrantedToIdentitiesV2 []PermissionIdentitySet `json:"grantedToIdentitiesV2,omitempty"`
-	Link                  *PermissionLink        `json:"link,omitempty"`
-	InheritedFrom         *ParentReference       `json:"inheritedFrom,omitempty"`
+	Link                  *PermissionLink         `json:"link,omitempty"`
+	InheritedFrom         *ParentReference        `json:"inheritedFrom,omitempty"`
 }
 
 // IsInherited reports whether this permission was inherited from a parent

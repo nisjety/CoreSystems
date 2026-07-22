@@ -1,9 +1,9 @@
-import { ArrowUpRight, FileUp, FolderPlus, Globe2, HardDriveUpload, RefreshCw } from 'lucide-solid'
+import { ArrowUpRight, FileUp, FolderPlus, FolderTree, Globe2, HardDriveUpload, RefreshCw } from 'lucide-solid'
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
 import { Button } from '@/shared/ui/Button'
 import { VelionInput } from '@/shared/ui/velion/VelionInput'
 import { useI18n } from '@/shared/i18n'
-import type { SharePointDrive, SharePointSite } from '@/shared/api/knowledge-client'
+import type { SharePointDrive, SharePointFolder, SharePointSite } from '@/shared/api/knowledge-client'
 
 type ConnectProvider = {
   detail: string
@@ -16,6 +16,9 @@ type SharePointSourceForm = {
   driveId: string
   driveName: string
   driveType: string
+  folderId?: string
+  folderPath?: string
+  kind?: 'drive' | 'site_pages'
   siteId: string
   siteWebUrl: string
   tenantId: string
@@ -32,6 +35,7 @@ export function KnowledgeAddSourceModal(props: {
   onConnectProvider: (provider: ConnectProvider) => Promise<void> | void
   onListSharePointSites: () => Promise<SharePointSite[]>
   onListSharePointDrives: (siteId: string) => Promise<SharePointDrive[]>
+  onListSharePointFolders: (driveId: string, itemId?: string) => Promise<SharePointFolder[]>
   onRegisterSharePoint: (input: SharePointSourceForm) => Promise<void>
   onStartWebsiteCrawl: (input: { maxPages?: number; url: string }) => Promise<void>
   onUploadFiles: (files: File[]) => Promise<void>
@@ -42,7 +46,10 @@ export function KnowledgeAddSourceModal(props: {
   const [selectedFiles, setSelectedFiles] = createSignal<File[]>([])
 
   // SharePoint picker state: load the org's sites, pick one, load its document
-  // libraries, pick one → register. Falls back to manual id entry via a toggle.
+  // libraries, pick one → register. A folder drill-down can narrow the scope
+  // below the library root ("use whole library" is the default), and a kind
+  // toggle switches to registering the site's pages instead of a library.
+  // Falls back to manual id entry via a toggle.
   const [spSites, setSpSites] = createSignal<SharePointSite[]>([])
   const [spDrives, setSpDrives] = createSignal<SharePointDrive[]>([])
   const [spSelectedSite, setSpSelectedSite] = createSignal<SharePointSite | null>(null)
@@ -51,6 +58,62 @@ export function KnowledgeAddSourceModal(props: {
   const [spLoadingDrives, setSpLoadingDrives] = createSignal(false)
   const [spError, setSpError] = createSignal<string | null>(null)
   const [spManual, setSpManual] = createSignal(false)
+  const [spKind, setSpKind] = createSignal<'drive' | 'site_pages'>('drive')
+
+  // Folder scope: null = whole library. While browsing, spFolderStack holds
+  // the drill-down trail (last entry = the folder whose children are shown).
+  const [spScope, setSpScope] = createSignal<SharePointFolder | null>(null)
+  const [spBrowsingFolders, setSpBrowsingFolders] = createSignal(false)
+  const [spFolderStack, setSpFolderStack] = createSignal<SharePointFolder[]>([])
+  const [spFolders, setSpFolders] = createSignal<SharePointFolder[]>([])
+  const [spLoadingFolders, setSpLoadingFolders] = createSignal(false)
+
+  const resetFolderScope = () => {
+    setSpScope(null)
+    setSpBrowsingFolders(false)
+    setSpFolderStack([])
+    setSpFolders([])
+  }
+
+  const loadSpFolders = async (driveId: string, itemId?: string) => {
+    setSpError(null)
+    setSpLoadingFolders(true)
+    try {
+      setSpFolders(await props.onListSharePointFolders(driveId, itemId))
+    } catch (error) {
+      setSpError(error instanceof Error ? error.message : i18n.tr('Kunne ikke laste mapper.', 'Could not load folders.'))
+    } finally {
+      setSpLoadingFolders(false)
+    }
+  }
+
+  const startFolderBrowse = async () => {
+    const drive = spSelectedDrive()
+    if (!drive) return
+    setSpBrowsingFolders(true)
+    setSpFolderStack([])
+    await loadSpFolders(drive.id)
+  }
+
+  const enterSpFolder = async (folder: SharePointFolder) => {
+    const drive = spSelectedDrive()
+    if (!drive) return
+    setSpFolderStack((current) => [...current, folder])
+    await loadSpFolders(drive.id, folder.id)
+  }
+
+  const goUpSpFolder = async () => {
+    const drive = spSelectedDrive()
+    if (!drive) return
+    const nextStack = spFolderStack().slice(0, -1)
+    setSpFolderStack(nextStack)
+    await loadSpFolders(drive.id, nextStack.at(-1)?.id)
+  }
+
+  const useCurrentSpFolder = () => {
+    setSpScope(spFolderStack().at(-1) ?? null)
+    setSpBrowsingFolders(false)
+  }
 
   const loadSpSites = async () => {
     setSpError(null)
@@ -72,7 +135,8 @@ export function KnowledgeAddSourceModal(props: {
     setSpSelectedSite(site)
     setSpSelectedDrive(null)
     setSpDrives([])
-    if (!site) return
+    resetFolderScope()
+    if (!site || spKind() === 'site_pages') return
     setSpError(null)
     setSpLoadingDrives(true)
     try {
@@ -90,16 +154,54 @@ export function KnowledgeAddSourceModal(props: {
     }
   }
 
+  const selectSpDrive = (drive: SharePointDrive | null) => {
+    setSpSelectedDrive(drive)
+    resetFolderScope()
+  }
+
+  const selectSpKind = async (kind: 'drive' | 'site_pages') => {
+    if (spKind() === kind) return
+    setSpKind(kind)
+    setSpSelectedDrive(null)
+    setSpDrives([])
+    resetFolderScope()
+    // Entering library mode with a site already picked: fetch its libraries
+    // now, since the site-pages branch skipped that load.
+    const site = spSelectedSite()
+    if (kind === 'drive' && site) await selectSpSite(site)
+  }
+
   const submitSpPicker = async () => {
     const site = spSelectedSite()
+    if (!site) return
+
+    if (spKind() === 'site_pages') {
+      await props.onRegisterSharePoint({
+        kind: 'site_pages',
+        siteId: site.id,
+        siteWebUrl: site.web_url ?? '',
+        driveId: '',
+        driveName: `${site.display_name || site.name} · ${i18n.tr('Områdesider', 'Site pages')}`,
+        driveType: '',
+        tenantId: '',
+      })
+      return
+    }
+
     const drive = spSelectedDrive()
-    if (!site || !drive) return
+    if (!drive) return
+    const scope = spScope()
     await props.onRegisterSharePoint({
+      kind: 'drive',
       siteId: site.id,
       siteWebUrl: site.web_url ?? '',
       driveId: drive.id,
-      driveName: drive.name || site.display_name || site.name,
+      driveName: scope
+        ? `${drive.name || site.display_name || site.name} · ${scope.path}`
+        : drive.name || site.display_name || site.name,
       driveType: drive.drive_type || 'documentLibrary',
+      folderId: scope?.id,
+      folderPath: scope?.path,
       tenantId: '',
     })
   }
@@ -266,8 +368,11 @@ export function KnowledgeAddSourceModal(props: {
         <section class="knowledge-modal-card">
           <ModalCardHeading
             icon={<FolderPlus class="size-5" />}
-            title={i18n.tr('Legg til SharePoint-bibliotek', 'Add SharePoint library')}
-            description={i18n.tr('Velg et nettsted og et dokumentbibliotek fra Microsoft 365 — så synkroniserer Velion det inn i Kunnskap.', 'Pick a site and a document library from Microsoft 365 — Velion syncs it into Knowledge.')}
+            title={i18n.tr('Legg til SharePoint-kilde', 'Add SharePoint source')}
+            description={i18n.tr(
+              'Velg et nettsted og et dokumentbibliotek (hele eller én mappe) — eller nettstedets områdesider — fra Microsoft 365, så synkroniserer Velion det inn i Kunnskap.',
+              'Pick a site and a document library (whole or one folder) — or the site’s pages — from Microsoft 365, and Velion syncs it into Knowledge.',
+            )}
           />
 
           <Show
@@ -314,6 +419,25 @@ export function KnowledgeAddSourceModal(props: {
             }
           >
             <div class="knowledge-sp-picker">
+              <div class="knowledge-sp-kind-toggle" role="group" aria-label={i18n.tr('Kildetype', 'Source type')}>
+                <Button
+                  variant={spKind() === 'drive' ? 'primary' : 'secondary'}
+                  size="sm"
+                  disabled={props.busy}
+                  onClick={() => void selectSpKind('drive')}
+                >
+                  {i18n.tr('Dokumentbibliotek', 'Document library')}
+                </Button>
+                <Button
+                  variant={spKind() === 'site_pages' ? 'primary' : 'secondary'}
+                  size="sm"
+                  disabled={props.busy}
+                  onClick={() => void selectSpKind('site_pages')}
+                >
+                  {i18n.tr('Områdesider', 'Site pages')}
+                </Button>
+              </div>
+
               <Show
                 when={spSites().length > 0}
                 fallback={
@@ -346,14 +470,14 @@ export function KnowledgeAddSourceModal(props: {
                   </select>
                 </label>
 
-                <Show when={spSelectedSite()}>
+                <Show when={spSelectedSite() && spKind() === 'drive'}>
                   <label class="velion-settings-field">
                     <span>{i18n.tr('Dokumentbibliotek', 'Document library')}</span>
                     <select
                       value={spSelectedDrive()?.id ?? ''}
                       disabled={props.busy || spLoadingDrives() || spDrives().length === 0}
                       onChange={(event) =>
-                        setSpSelectedDrive(spDrives().find((drive) => drive.id === event.currentTarget.value) ?? null)
+                        selectSpDrive(spDrives().find((drive) => drive.id === event.currentTarget.value) ?? null)
                       }
                     >
                       <option value="">
@@ -366,6 +490,110 @@ export function KnowledgeAddSourceModal(props: {
                       </For>
                     </select>
                   </label>
+                </Show>
+
+                <Show when={spKind() === 'drive' && spSelectedDrive()}>
+                  <div class="knowledge-sp-scope">
+                    <Show
+                      when={spBrowsingFolders()}
+                      fallback={
+                        <div class="knowledge-sp-scope-row">
+                          <span class="knowledge-file-chip">
+                            {spScope()?.path ?? i18n.tr('Hele biblioteket', 'Whole library')}
+                          </span>
+                          <Show when={spScope()}>
+                            <button
+                              type="button"
+                              class="knowledge-sp-manual-toggle"
+                              disabled={props.busy}
+                              onClick={() => setSpScope(null)}
+                            >
+                              {i18n.tr('Bruk hele biblioteket', 'Use whole library')}
+                            </button>
+                          </Show>
+                          <button
+                            type="button"
+                            class="knowledge-sp-manual-toggle"
+                            disabled={props.busy}
+                            onClick={() => void startFolderBrowse()}
+                          >
+                            {i18n.tr('Velg mappe …', 'Choose a folder …')}
+                          </button>
+                        </div>
+                      }
+                    >
+                      <div class="knowledge-sp-breadcrumb">
+                        {'/' + spFolderStack().map((folder) => folder.name).join('/')}
+                      </div>
+                      <Show
+                        when={!spLoadingFolders()}
+                        fallback={<span class="knowledge-muted-copy">{i18n.tr('Laster mapper …', 'Loading folders …')}</span>}
+                      >
+                        <Show
+                          when={spFolders().length > 0}
+                          fallback={<span class="knowledge-muted-copy">{i18n.tr('Ingen undermapper her.', 'No subfolders here.')}</span>}
+                        >
+                          <div class="knowledge-sp-folder-list">
+                            <For each={spFolders()}>
+                              {(folder) => (
+                                <button
+                                  type="button"
+                                  class="knowledge-sp-folder"
+                                  disabled={props.busy}
+                                  onClick={() => void enterSpFolder(folder)}
+                                >
+                                  <span>
+                                    <FolderTree class="size-4" /> {folder.name}
+                                  </span>
+                                  <small>
+                                    {typeof folder.child_count === 'number'
+                                      ? i18n.tr(`${folder.child_count} elementer`, `${folder.child_count} items`)
+                                      : ''}
+                                  </small>
+                                </button>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                      </Show>
+                      <div class="knowledge-sp-scope-row">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={props.busy || spLoadingFolders() || spFolderStack().length === 0}
+                          onClick={() => void goUpSpFolder()}
+                        >
+                          {i18n.tr('Opp et nivå', 'Up one level')}
+                        </Button>
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={props.busy || spLoadingFolders()}
+                          onClick={useCurrentSpFolder}
+                        >
+                          {spFolderStack().length === 0
+                            ? i18n.tr('Bruk hele biblioteket', 'Use whole library')
+                            : i18n.tr('Bruk denne mappen', 'Use this folder')}
+                        </Button>
+                        <button
+                          type="button"
+                          class="knowledge-sp-manual-toggle"
+                          onClick={() => setSpBrowsingFolders(false)}
+                        >
+                          {i18n.tr('Avbryt', 'Cancel')}
+                        </button>
+                      </div>
+                    </Show>
+                  </div>
+                </Show>
+
+                <Show when={spKind() === 'site_pages' && spSelectedSite()}>
+                  <p class="knowledge-muted-copy">
+                    {i18n.tr(
+                      'Alle sidene på nettstedet (nyheter, wiki-sider) synkroniseres som dokumenter.',
+                      'Every page on the site (news posts, wiki-style pages) syncs in as documents.',
+                    )}
+                  </p>
                 </Show>
               </Show>
 
@@ -399,7 +627,7 @@ export function KnowledgeAddSourceModal(props: {
                 variant="primary"
                 size="sm"
                 class="knowledge-modal-action"
-                disabled={props.busy || !spSelectedSite() || !spSelectedDrive()}
+                disabled={props.busy || !spSelectedSite() || (spKind() === 'drive' && !spSelectedDrive())}
                 onClick={() => void submitSpPicker()}
               >
                 <FolderPlus class="size-4" />

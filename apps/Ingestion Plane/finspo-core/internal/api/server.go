@@ -127,6 +127,37 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
+	// Folder drill-down for the picker UI: the folders directly under one
+	// drive item (`item_id` empty means the drive root). Files are omitted —
+	// only folders are selectable as a source scope.
+	v1.Get("/drives/:driveID/children", func(c *fiber.Ctx) error {
+		driveID := strings.TrimSpace(c.Params("driveID"))
+		if driveID == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"success": false,
+				"error":   "driveID is required",
+			})
+		}
+
+		itemID := strings.TrimSpace(c.Query("item_id", ""))
+
+		organizationID := auth.OrganizationID(c)
+		folders, err := browser.ListChildren(c.UserContext(), organizationID, driveID, itemID)
+		if err != nil {
+			return writeSharePointError(c, err)
+		}
+
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"drive_id": driveID,
+				"item_id":  itemID,
+				"count":    len(folders),
+				"folders":  folders,
+			},
+		})
+	})
+
 	v1.Get("/sites/:siteID/items", func(c *fiber.Ctx) error {
 		siteID := strings.TrimSpace(c.Params("siteID"))
 		if siteID == "" {

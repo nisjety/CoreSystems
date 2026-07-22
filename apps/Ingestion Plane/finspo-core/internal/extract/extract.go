@@ -8,8 +8,10 @@ package extract
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/ledongthuc/pdf"
 )
@@ -109,4 +111,92 @@ func extractPDF(data []byte) (out string, err error) {
 // produces a body the receiver will 400 on.
 func toValidUTF8(s string) string {
 	return strings.ToValidUTF8(s, "")
+}
+
+// HTMLToText reduces an HTML fragment to plain text: script/style subtrees
+// are dropped whole, block-level tags become newlines, every other tag a
+// space, entities are decoded, and whitespace is collapsed. It backs the
+// SharePoint site-pages ingest, where Graph hands back each text web part as
+// an `innerHtml` fragment — the forwarding contract is the same as for files
+// (plain UTF-8 text only), so tags must not leak through as content.
+func HTMLToText(input string) string {
+	if strings.TrimSpace(input) == "" {
+		return ""
+	}
+
+	var out strings.Builder
+	out.Grow(len(input))
+	rest := input
+	for {
+		lt := strings.IndexByte(rest, '<')
+		if lt < 0 {
+			out.WriteString(rest)
+			break
+		}
+		out.WriteString(rest[:lt])
+		rest = rest[lt:]
+
+		gt := strings.IndexByte(rest, '>')
+		if gt < 0 {
+			// Unterminated tag — nothing textual left worth keeping.
+			break
+		}
+		tag := strings.ToLower(strings.TrimSpace(strings.Trim(rest[1:gt], "/ ")))
+		if name, _, _ := strings.Cut(tag, " "); name != "" {
+			tag = name
+		}
+		rest = rest[gt+1:]
+
+		switch tag {
+		case "script", "style":
+			// Skip everything up to (and including) the matching close tag.
+			if end := strings.Index(strings.ToLower(rest), "</"+tag); end >= 0 {
+				rest = rest[end:]
+				if gt := strings.IndexByte(rest, '>'); gt >= 0 {
+					rest = rest[gt+1:]
+				} else {
+					rest = ""
+				}
+			} else {
+				rest = ""
+			}
+		case "p", "div", "br", "li", "ul", "ol", "tr", "table", "blockquote",
+			"section", "article", "h1", "h2", "h3", "h4", "h5", "h6":
+			out.WriteByte('\n')
+		default:
+			out.WriteByte(' ')
+		}
+	}
+
+	return collapseWhitespace(toValidUTF8(html.UnescapeString(out.String())))
+}
+
+// collapseWhitespace normalizes runs of spaces/tabs to one space and runs of
+// newlines (with surrounding spaces) to one newline, then trims the result.
+func collapseWhitespace(s string) string {
+	var out strings.Builder
+	out.Grow(len(s))
+	pendingSpace := false
+	pendingNewline := false
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r':
+			pendingNewline = true
+			pendingSpace = false
+		case unicode.IsSpace(r):
+			pendingSpace = true
+		default:
+			if pendingNewline {
+				if out.Len() > 0 {
+					out.WriteByte('\n')
+				}
+			} else if pendingSpace && out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			pendingNewline = false
+			pendingSpace = false
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }

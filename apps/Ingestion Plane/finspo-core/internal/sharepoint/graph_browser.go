@@ -181,6 +181,84 @@ func (b *GraphBrowser) ListDrives(ctx context.Context, organizationID string, si
 	return allDrives, nil
 }
 
+type childrenPage struct {
+	Value []struct {
+		ID     string           `json:"id"`
+		Name   string           `json:"name"`
+		WebURL string           `json:"webUrl"`
+		Folder *FolderFacet     `json:"folder,omitempty"`
+		Parent *ParentReference `json:"parentReference,omitempty"`
+	} `json:"value"`
+	ODataNextLink string `json:"@odata.nextLink"`
+}
+
+// ListChildren returns the FOLDERS directly under one drive item via Graph
+// `GET /v1.0/drives/{driveID}/items/{itemID}/children` (itemID "" or "root"
+// means the drive root). Files are dropped — this backs the picker UI's
+// folder drill-down, where only folders are selectable as a source scope.
+// `driveID`/`itemID` are Graph ids (URL-path-safe), interpolated directly
+// like ListDrives does with site ids.
+func (b *GraphBrowser) ListChildren(ctx context.Context, organizationID string, driveID string, itemID string) ([]Folder, error) {
+	token, err := b.accessToken(ctx, organizationID)
+	if err != nil {
+		return nil, err
+	}
+
+	target := strings.TrimSpace(itemID)
+	if target == "" {
+		target = "root"
+	}
+
+	var allFolders []Folder
+	nextURL := b.baseURL + "/v1.0/drives/" + strings.TrimSpace(driveID) + "/items/" + target +
+		"/children?$select=id,name,folder,parentReference,webUrl&$top=200"
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create list children request: %w", err)
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+
+		response, err := b.httpClient.Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("list children request failed: %w", err)
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			return nil, readGraphError("list children request", response)
+		}
+
+		var page childrenPage
+		if err := json.NewDecoder(response.Body).Decode(&page); err != nil {
+			return nil, fmt.Errorf("decode list children response: %w", err)
+		}
+
+		for _, child := range page.Value {
+			if child.Folder == nil {
+				continue
+			}
+			// Reuse DriveItem.FullPath so the folder path matches exactly what
+			// the delta sync computes for items inside it.
+			resolved := DriveItem{Name: child.Name, Parent: child.Parent}
+			allFolders = append(allFolders, Folder{
+				ID:         child.ID,
+				Name:       child.Name,
+				Path:       resolved.FullPath(),
+				ChildCount: child.Folder.ChildCount,
+				WebURL:     child.WebURL,
+			})
+		}
+
+		if page.ODataNextLink == "" {
+			break
+		}
+		nextURL = page.ODataNextLink
+	}
+
+	return allFolders, nil
+}
+
 func (b *GraphBrowser) ListItems(ctx context.Context, organizationID string, siteID string, itemPath string) ([]Item, error) {
 	token, err := b.accessToken(ctx, organizationID)
 	if err != nil {

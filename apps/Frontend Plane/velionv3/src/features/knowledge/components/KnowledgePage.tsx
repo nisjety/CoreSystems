@@ -75,9 +75,11 @@ import {
 // stuck on stale/empty data until a manual reload.
 import {
   listSharePointDrives,
+  listSharePointFolders,
   listSharePointSites,
   streamCrawlRunEvents,
   type SharePointDrive,
+  type SharePointFolder,
   type SharePointSite,
 } from '@/shared/api/knowledge-client'
 import {
@@ -457,6 +459,9 @@ export default function KnowledgePage() {
     driveId: string
     driveName: string
     driveType: string
+    folderId?: string
+    folderPath?: string
+    kind?: 'drive' | 'site_pages'
     siteId: string
     siteWebUrl: string
     tenantId: string
@@ -472,8 +477,8 @@ export default function KnowledgePage() {
       setNotice({
         tone: 'good',
         message: result.syncStarted
-          ? i18n.tr('SharePoint-stasjonen er registrert, og synkronisering er startet i Finspo.', 'SharePoint drive registered and sync started in Finspo.')
-          : i18n.tr('SharePoint-stasjonen er registrert. Synkronisering kan startes fra Kunnskap.', 'SharePoint drive registered. Sync can be started from Knowledge.'),
+          ? i18n.tr('SharePoint-kilden er registrert, og synkronisering er startet i Finspo.', 'SharePoint source registered and sync started in Finspo.')
+          : i18n.tr('SharePoint-kilden er registrert. Synkronisering kan startes fra Kunnskap.', 'SharePoint source registered. Sync can be started from Knowledge.'),
       })
       setAddSourceOpen(false)
       await loadKnowledgeWorkspace()
@@ -493,6 +498,10 @@ export default function KnowledgePage() {
 
   async function handleListSharePointDrives(siteId: string): Promise<SharePointDrive[]> {
     return listSharePointDrives(activeOrgId, siteId)
+  }
+
+  async function handleListSharePointFolders(driveId: string, itemId?: string): Promise<SharePointFolder[]> {
+    return listSharePointFolders(activeOrgId, driveId, itemId)
   }
 
   async function handleConnectProvider(provider: {
@@ -807,6 +816,7 @@ export default function KnowledgePage() {
           onConnectProvider={handleConnectProvider}
           onListSharePointSites={handleListSharePointSites}
           onListSharePointDrives={handleListSharePointDrives}
+          onListSharePointFolders={handleListSharePointFolders}
           onRegisterSharePoint={handleRegisterSharePoint}
           onStartWebsiteCrawl={handleStartWebsiteCrawl}
           onUploadFiles={handleUploadFiles}

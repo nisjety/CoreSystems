@@ -85,11 +85,18 @@ func run() error {
 		TokenProvider: tokenProvider,
 	})
 
+	pagesClient := sharepoint.NewPagesClient(sharepoint.PagesClientConfig{
+		BaseURL:       cfg.GraphBaseURL,
+		TokenProvider: tokenProvider,
+	})
+
 	// Content capture (opt-in): when enabled AND Data Plane documents are
 	// configured, download each synced file, extract text, and forward a real
-	// content-bearing document to Data Plane v2. Left nil otherwise, so the
-	// engine keeps the metadata-only behavior.
+	// content-bearing document to Data Plane v2. Site pages ride the same
+	// gate: their canvas text is forwarded through the pages ingestor. Left
+	// nil otherwise, so the engine keeps the metadata-only behavior.
 	var contentSink sync.ContentSink
+	var pageContentSink sync.PageContentSink
 	if cfg.CaptureContent && cfg.DataPlaneDocumentsURL != "" && dataPlaneTokens.Configured() {
 		contentClient := sharepoint.NewContentClient(sharepoint.ContentClientConfig{
 			BaseURL:       cfg.GraphBaseURL,
@@ -103,7 +110,13 @@ func run() error {
 			Logger:            logger,
 			ZDRClassification: cfg.ContentZDRClassification,
 		})
-		logger.Info().Msg("finspo content capture ENABLED: synced files will be forwarded to Data Plane v2 documents")
+		pageContentSink = content.NewPagesIngestor(content.PagesConfig{
+			Pages:             pagesClient,
+			Docs:              documentsClient,
+			Logger:            logger,
+			ZDRClassification: cfg.ContentZDRClassification,
+		})
+		logger.Info().Msg("finspo content capture ENABLED: synced files and site pages will be forwarded to Data Plane v2 documents")
 	}
 
 	subjects := events.NewSubjects(cfg.NATSSubjectPrefix)
@@ -118,6 +131,8 @@ func run() error {
 		PermissionsStore:   st.Permissions(),
 		CapturePermissions: cfg.CapturePermissions,
 		Content:            contentSink,
+		SitePages:          pagesClient,
+		PageContent:        pageContentSink,
 		Subjects:           subjects,
 		Logger:             logger,
 		PageLimit:          100,

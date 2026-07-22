@@ -8,8 +8,10 @@
 
 use std::time::Duration;
 
+use std::collections::HashMap;
+
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -257,6 +259,60 @@ pub(super) async fn list_sharepoint_drives(
     }
 }
 
+/// `GET /api/v1/knowledge/sharepoint/drives/:drive_id/children` — list the
+/// FOLDERS directly under one drive item (`item_id` query param; empty means
+/// the drive root) so the Add-source UI can drill below the library root and
+/// register a folder-scoped source. Files are already dropped upstream.
+pub(super) async fn list_sharepoint_folders(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(drive_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let org = crate::upstream::authorized_org_id(&state, &user).await;
+    if org.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("no_active_org", "No active organization found.")),
+        )
+            .into_response();
+    }
+    let drive = drive_id.trim();
+    if drive.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("drive_id_required", "A SharePoint drive is required.")),
+        )
+            .into_response();
+    }
+    let actor = shared::actor_for(&user);
+    let item_id = params
+        .get("item_id")
+        .map(|value| value.trim())
+        .unwrap_or_default();
+    let mut url = format!(
+        "{}/api/v1/sharepoint/drives/{}/children",
+        state.finspo_core_url,
+        urlencoding::encode(drive)
+    );
+    if !item_id.is_empty() {
+        url.push_str("?item_id=");
+        url.push_str(&urlencoding::encode(item_id));
+    }
+    match shared::fetch_json(&state, Method::GET, &url, None, Some(&org), &actor, LIST_TIMEOUT).await
+    {
+        Some(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        None => (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "sharepoint_folders_unavailable",
+                "Could not list folders for this document library.",
+            )),
+        )
+            .into_response(),
+    }
+}
+
 pub(super) async fn register_sharepoint(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -272,13 +328,19 @@ pub(super) async fn register_sharepoint(
     }
     let actor = shared::actor_for(&user);
 
+    // `kind` defaults upstream to "drive"; "site_pages" registers a site's
+    // pages instead of a library. Folder fields scope a drive source to one
+    // folder subtree — finspo validates that they arrive as a pair.
     let create_body = json!({
+        "kind": trimmed(&input, "kind"),
         "tenant_id": trimmed(&input, "tenantId"),
         "site_id": trimmed(&input, "siteId"),
         "site_web_url": trimmed(&input, "siteWebUrl"),
         "drive_id": trimmed(&input, "driveId"),
         "drive_name": trimmed(&input, "driveName"),
         "drive_type": trimmed(&input, "driveType"),
+        "folder_id": trimmed(&input, "folderId"),
+        "folder_path": trimmed(&input, "folderPath"),
         "enabled": true,
     });
     let create_url = format!("{}/api/v1/sources", state.finspo_core_url);

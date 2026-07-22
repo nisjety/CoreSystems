@@ -55,6 +55,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/sharepoint/sites/:site_id/drives",
             get(sync::list_sharepoint_drives),
         )
+        .route(
+            "/api/v1/knowledge/sharepoint/drives/:drive_id/children",
+            get(sync::list_sharepoint_folders),
+        )
         // Retrieval
         .route(
             "/api/v1/knowledge/search",

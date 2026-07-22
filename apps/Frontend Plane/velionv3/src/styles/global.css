@@ -19870,6 +19870,84 @@ textarea:focus-visible {
   }
 }
 
+/* SharePoint source-kind toggle (document library vs site pages) */
+.knowledge-sp-kind-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+/* Folder scope block: "whole library" default + drill-down browser */
+.knowledge-sp-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.knowledge-sp-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.knowledge-sp-breadcrumb {
+  font-size: 12px;
+  color: var(--velion-text-muted);
+  word-break: break-all;
+}
+
+.knowledge-sp-folder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.knowledge-sp-folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #e2dfd5;
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 8px 12px;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.knowledge-sp-folder:hover {
+  border-color: #c9c3b3;
+  background: #f7f4eb;
+}
+
+.knowledge-sp-folder:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.dark .knowledge-sp-folder {
+  border-color: var(--velion-dark-surface-soft);
+  background: var(--foreground);
+  color: var(--panel);
+}
+
+.dark .knowledge-sp-folder:hover {
+  border-color: #454a55;
+  background: #1b1d22;
+}
+
+.knowledge-sp-folder small {
+  color: var(--velion-text-muted);
+  white-space: nowrap;
+}
+
 .knowledge-provider-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

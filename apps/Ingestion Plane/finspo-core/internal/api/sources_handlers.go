@@ -33,12 +33,15 @@ type SyncRunner interface {
 }
 
 type sourceCreateRequest struct {
+	Kind       string `json:"kind,omitempty"`
 	TenantID   string `json:"tenant_id"`
 	SiteID     string `json:"site_id"`
 	SiteWebURL string `json:"site_web_url,omitempty"`
 	DriveID    string `json:"drive_id"`
 	DriveName  string `json:"drive_name,omitempty"`
 	DriveType  string `json:"drive_type,omitempty"`
+	FolderID   string `json:"folder_id,omitempty"`
+	FolderPath string `json:"folder_path,omitempty"`
 	Enabled    *bool  `json:"enabled,omitempty"`
 }
 
@@ -62,10 +65,31 @@ func createSourceHandler(reader SourceStoreReader, writer SourceStoreWriter) fib
 		if err := c.BodyParser(&body); err != nil {
 			return clientError(c, fiber.StatusBadRequest, "invalid JSON body")
 		}
+		kind := store.NormalizeKind(body.Kind)
 		body.SiteID = strings.TrimSpace(body.SiteID)
 		body.DriveID = strings.TrimSpace(body.DriveID)
-		if body.SiteID == "" || body.DriveID == "" {
-			return clientError(c, fiber.StatusBadRequest, "site_id and drive_id are required")
+		body.FolderID = strings.TrimSpace(body.FolderID)
+		body.FolderPath = store.NormalizeFolderPath(body.FolderPath)
+
+		switch kind {
+		case store.SourceKindDrive:
+			if body.SiteID == "" || body.DriveID == "" {
+				return clientError(c, fiber.StatusBadRequest, "site_id and drive_id are required")
+			}
+			// A folder scope needs BOTH halves: the path drives the delta
+			// filter, the id anchors the picker and the uniqueness key.
+			if (body.FolderID == "") != (body.FolderPath == "") {
+				return clientError(c, fiber.StatusBadRequest, "folder_id and folder_path must be provided together")
+			}
+		case store.SourceKindSitePages:
+			if body.SiteID == "" {
+				return clientError(c, fiber.StatusBadRequest, "site_id is required")
+			}
+			if body.DriveID != "" || body.FolderID != "" || body.FolderPath != "" {
+				return clientError(c, fiber.StatusBadRequest, "site_pages sources take no drive or folder scope")
+			}
+		default:
+			return clientError(c, fiber.StatusBadRequest, "kind must be \"drive\" or \"site_pages\"")
 		}
 
 		enabled := true
@@ -76,11 +100,14 @@ func createSourceHandler(reader SourceStoreReader, writer SourceStoreWriter) fib
 		src, err := writer.EnsureSource(c.UserContext(), store.Source{
 			OrganizationID: auth.OrganizationID(c),
 			TenantID:       strings.TrimSpace(body.TenantID),
+			Kind:           kind,
 			SiteID:         body.SiteID,
 			SiteWebURL:     strings.TrimSpace(body.SiteWebURL),
 			DriveID:        body.DriveID,
 			DriveName:      strings.TrimSpace(body.DriveName),
 			DriveType:      strings.TrimSpace(body.DriveType),
+			FolderID:       body.FolderID,
+			FolderPath:     body.FolderPath,
 			Enabled:        enabled,
 		})
 		if err != nil {

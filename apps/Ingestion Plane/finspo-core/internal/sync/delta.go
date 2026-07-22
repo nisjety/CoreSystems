@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,21 @@ type ContentSink interface {
 	IngestItemContent(ctx context.Context, source store.Source, item store.Item) error
 }
 
+// SitePagesLister is the narrow Graph surface the engine needs to sync a
+// site-pages source. Implemented by *sharepoint.PagesClient.
+type SitePagesLister interface {
+	ListSitePages(ctx context.Context, organizationID, siteID string) ([]sharepoint.SitePage, error)
+}
+
+// PageContentSink forwards one site page's extracted text to Data Plane v2 as
+// a content-bearing document. Optional and nil-safe like ContentSink: when
+// unset the engine captures page metadata only. Implemented by
+// *content.PagesIngestor. Calls are best-effort — one page's failure is
+// logged and the listing continues.
+type PageContentSink interface {
+	IngestSitePage(ctx context.Context, source store.Source, item store.Item, page sharepoint.SitePage) error
+}
+
 // PermissionsFetcher is the narrow Graph surface the engine needs to capture
 // ACLs. Implemented by *sharepoint.PermissionsClient.
 type PermissionsFetcher interface {
@@ -88,6 +104,8 @@ type Engine struct {
 	permissionsStore   PermissionsStore
 	capturePerms       bool
 	content            ContentSink
+	sitePages          SitePagesLister
+	pageContent        PageContentSink
 	subjects           events.Subjects
 	logger             zerolog.Logger
 	pageLimit          int
@@ -115,6 +133,14 @@ type Config struct {
 	// Plane v2 as a document. Nil keeps the metadata-only behavior.
 	Content ContentSink
 
+	// SitePages lists a site's pages for site_pages-kind sources. Required to
+	// sync those sources; drive sources ignore it.
+	SitePages SitePagesLister
+
+	// PageContent, when non-nil, forwards each synced site page's text to Data
+	// Plane v2 as a document — the site-pages analog of Content.
+	PageContent PageContentSink
+
 	// PageLimit caps the number of delta pages followed in a single SyncDrive
 	// call. 0 means "no cap" — useful for tests, but production deployments
 	// should set a finite value so a runaway initial crawl cannot starve
@@ -134,6 +160,8 @@ func NewEngine(cfg Config) *Engine {
 		permissionsStore:   cfg.PermissionsStore,
 		capturePerms:       cfg.CapturePermissions,
 		content:            cfg.Content,
+		sitePages:          cfg.SitePages,
+		pageContent:        cfg.PageContent,
 		subjects:           cfg.Subjects,
 		logger:             cfg.Logger,
 		pageLimit:          cfg.PageLimit,
@@ -157,15 +185,22 @@ type SyncResult struct {
 	DeltaLink     string    `json:"delta_link,omitempty"`
 }
 
-// SyncDrive runs the delta loop for one source. It is safe to call repeatedly:
-// on the second call the persisted deltaLink resumes from where the prior run
-// stopped.
+// SyncDrive runs one sync pass for one source. Drive sources run the Graph
+// delta loop (safe to call repeatedly: on the second call the persisted
+// deltaLink resumes from where the prior run stopped); site-pages sources run
+// a full sitePages listing (the pages API has no delta). The name predates
+// source kinds — it remains the single entry point the scheduler and the API
+// sync endpoint call for every source.
 func (e *Engine) SyncDrive(ctx context.Context, sourceID uuid.UUID) (SyncResult, error) {
 	started := time.Now().UTC()
 
 	source, err := e.sources.Get(ctx, sourceID)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("load source: %w", err)
+	}
+
+	if store.NormalizeKind(source.Kind) == store.SourceKindSitePages {
+		return e.syncSitePages(ctx, source, started)
 	}
 
 	// Decide the starting URL: persisted deltaLink wins; otherwise start fresh.
@@ -290,6 +325,21 @@ func (e *Engine) processPage(ctx context.Context, source store.Source, page shar
 			continue
 		}
 
+		// Folder-scoped source: the delta feed still enumerates the WHOLE
+		// drive, so items outside the scoped subtree are dropped here rather
+		// than persisted. Deletes above are unaffected — out-of-scope items
+		// were never upserted, so their tombstones fall through SoftDelete's
+		// ErrNotFound path.
+		if !itemInScope(source, item) {
+			e.logger.Debug().
+				Str("source_id", source.ID.String()).
+				Str("item_id", item.ID).
+				Str("path", item.FullPath()).
+				Str("folder_path", source.FolderPath).
+				Msg("delta item outside scoped folder; skipping")
+			continue
+		}
+
 		raw, err := json.Marshal(item)
 		if err != nil {
 			return upserts, deletes, fmt.Errorf("marshal raw item %s: %w", item.ID, err)
@@ -357,6 +407,27 @@ func (e *Engine) processPage(ctx context.Context, source store.Source, page shar
 	}
 
 	return upserts, deletes, nil
+}
+
+// itemInScope reports whether a delta item falls inside the source's scoped
+// folder. Sources without a folder scope accept everything.
+func itemInScope(source store.Source, item sharepoint.DriveItem) bool {
+	if source.FolderPath == "" {
+		return true
+	}
+	return pathWithinFolder(source.FolderPath, item.FullPath())
+}
+
+// pathWithinFolder reports whether itemPath is the scoped folder itself or
+// anything beneath it. SharePoint paths are case-insensitive, so the
+// comparison folds case.
+func pathWithinFolder(folderPath, itemPath string) bool {
+	scope := strings.ToLower(strings.TrimSuffix(folderPath, "/"))
+	if scope == "" {
+		return true
+	}
+	p := strings.ToLower(itemPath)
+	return p == scope || strings.HasPrefix(p, scope+"/")
 }
 
 func (e *Engine) capturePermissionsForItem(ctx context.Context, source store.Source, item store.Item) ([]store.Permission, error) {

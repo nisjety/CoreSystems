@@ -834,3 +834,25 @@ export async function listSharePointDrives(orgId: string, siteId: string): Promi
   )
   return payload.drives ?? []
 }
+
+export interface SharePointFolder {
+  id: string
+  name: string
+  path: string
+  child_count?: number
+  web_url?: string
+}
+
+/**
+ * Lists the folders directly under one drive item (`itemId` omitted = the
+ * library root) so the Add-source modal can drill into a library and register
+ * a folder-scoped source instead of the whole drive.
+ */
+export async function listSharePointFolders(orgId: string, driveId: string, itemId?: string): Promise<SharePointFolder[]> {
+  const query = itemId ? `?item_id=${encodeURIComponent(itemId)}` : ''
+  const payload = await requestJson<{ count?: number; folders?: SharePointFolder[] }>(
+    `/api/v1/knowledge/sharepoint/drives/${encodeURIComponent(driveId)}/children${query}`,
+    { headers: orgHeaders(orgId) },
+  )
+  return payload.folders ?? []
+}
