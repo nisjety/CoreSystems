@@ -191,6 +191,73 @@ func TestFinspoWorkerFailsJobWhenSourceIdentifiersMissing(t *testing.T) {
 	}
 }
 
+// TestFinspoWorkerFansOutOverRegisteredSourcesWhenJobHasNoSiteDrive guards
+// the Synkroniser-button path: a generic per-connection sync job (no
+// site_id/drive_id metadata) must sync every source the org registered in
+// finspo-core instead of failing outright — the pre-fallback behavior left
+// every manual sync dead with "requires SharePoint site_id and drive_id".
+func TestFinspoWorkerFansOutOverRegisteredSourcesWhenJobHasNoSiteDrive(t *testing.T) {
+	integration := &fakeIntegrationClient{
+		claim: store.SyncJob{
+			ID:             "sync-2",
+			OrganizationID: "org-1",
+			UserID:         "user-1",
+			ProviderKey:    "microsoft",
+		},
+	}
+	finspo := &fakeFinspoClient{
+		listSources: []handoff.FinspoSource{
+			{ID: "src-a", DriveID: "drive-a", DriveName: "Documents"},
+			{ID: "src-b", DriveID: "drive-b", DriveName: "Policies"},
+		},
+		sync: handoff.FinspoSyncResult{Status: "queued"},
+	}
+	processed, err := FinspoWorker{Integration: integration, Finspo: finspo}.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce error = %v", err)
+	}
+	if !processed {
+		t.Fatal("RunOnce processed = false, want true")
+	}
+	if !finspo.listCalled {
+		t.Fatal("ListSources was never called for the metadata-less job")
+	}
+	if len(finspo.syncedIDs) != 2 || finspo.syncedIDs[0] != "src-a" || finspo.syncedIDs[1] != "src-b" {
+		t.Fatalf("syncedIDs = %v, want both registered sources", finspo.syncedIDs)
+	}
+	if integration.progressRequest.Status != "completed" || len(integration.progressRequest.Sources) != 2 {
+		t.Fatalf("progress = %#v, want completed with 2 source refs", integration.progressRequest)
+	}
+}
+
+// TestFinspoWorkerFailsMetadataLessJobWhenNothingRegistered pins the empty
+// fallback: with no registered sources the job fails with an actionable
+// message rather than completing as a silent no-op.
+func TestFinspoWorkerFailsMetadataLessJobWhenNothingRegistered(t *testing.T) {
+	integration := &fakeIntegrationClient{
+		claim: store.SyncJob{
+			ID:             "sync-3",
+			OrganizationID: "org-1",
+			UserID:         "user-1",
+			ProviderKey:    "microsoft",
+		},
+	}
+	finspo := &fakeFinspoClient{}
+	processed, err := FinspoWorker{Integration: integration, Finspo: finspo}.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("RunOnce error = nil, want registration guidance error")
+	}
+	if !processed {
+		t.Fatal("RunOnce processed = false, want true (job was claimed)")
+	}
+	if integration.progressRequest.Status != "failed" {
+		t.Fatalf("progress status = %q, want failed", integration.progressRequest.Status)
+	}
+	if !strings.Contains(integration.progressRequest.Message, "no SharePoint sources are registered") {
+		t.Fatalf("failure message %q lacks registration guidance", integration.progressRequest.Message)
+	}
+}
+
 type fakeIntegrationClient struct {
 	claim           store.SyncJob
 	claimErr        error
@@ -230,6 +297,18 @@ type fakeFinspoClient struct {
 	ensureUserID  string
 	ensureRequest handoff.FinspoSourceRequest
 	syncSourceID  string
+	listSources   []handoff.FinspoSource
+	listErr       error
+	listCalled    bool
+	syncedIDs     []string
+}
+
+func (c *fakeFinspoClient) ListSources(_ context.Context, _ string, _ string) ([]handoff.FinspoSource, error) {
+	c.listCalled = true
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
+	return c.listSources, nil
 }
 
 func (c *fakeFinspoClient) EnsureSource(_ context.Context, orgID, userID string, input handoff.FinspoSourceRequest) (handoff.FinspoSource, error) {
@@ -244,6 +323,7 @@ func (c *fakeFinspoClient) EnsureSource(_ context.Context, orgID, userID string,
 
 func (c *fakeFinspoClient) SyncSource(_ context.Context, _ string, _ string, sourceID string) (handoff.FinspoSyncResult, error) {
 	c.syncSourceID = sourceID
+	c.syncedIDs = append(c.syncedIDs, sourceID)
 	if c.syncErr != nil {
 		return handoff.FinspoSyncResult{}, c.syncErr
 	}

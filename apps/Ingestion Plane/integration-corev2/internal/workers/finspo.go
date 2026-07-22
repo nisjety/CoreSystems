@@ -19,6 +19,11 @@ const (
 	microsoftKey   = "microsoft"
 )
 
+// errNoSiteDrive marks a claimed sync job whose metadata carries no
+// site_id/drive_id — the generic per-connection "sync now" shape, handled
+// by the registered-sources fallback rather than treated as a failure.
+var errNoSiteDrive = errors.New("sync job carries no SharePoint site_id/drive_id")
+
 type IntegrationSyncClient interface {
 	ClaimSyncJob(context.Context, handoff.SyncClaimRequest) (store.SyncJob, error)
 	UpdateSyncProgress(context.Context, string, handoff.SyncProgressRequest) (store.SyncJob, error)
@@ -27,6 +32,9 @@ type IntegrationSyncClient interface {
 type FinspoSourceClient interface {
 	EnsureSource(context.Context, string, string, handoff.FinspoSourceRequest) (handoff.FinspoSource, error)
 	SyncSource(context.Context, string, string, string) (handoff.FinspoSyncResult, error)
+	// ListSources backs the no-metadata fallback: a claimed job without
+	// site_id/drive_id syncs every source already registered for the org.
+	ListSources(context.Context, string, string) ([]handoff.FinspoSource, error)
 }
 
 // DataPlaneDocumentsClient is the subset of *handoff.DataPlaneDocumentsClient
@@ -113,6 +121,14 @@ func (w FinspoWorker) RunOnce(ctx context.Context) (bool, error) {
 
 func (w FinspoWorker) process(ctx context.Context, job store.SyncJob) error {
 	sourceRequest, sourceRef, err := finspoSourceRequest(job)
+	if errors.Is(err, errNoSiteDrive) {
+		// Generic per-connection "sync now" jobs (the Knowledge page's
+		// Synkroniser button enqueues one per microsoft connection) carry no
+		// site_id/drive_id of their own. Instead of failing — which left
+		// every manual sync dead-on-arrival — sync every SharePoint source
+		// the org has already registered in finspo-core.
+		return w.processAllRegisteredSources(ctx, job)
+	}
 	if err != nil {
 		return w.failJob(ctx, job, err)
 	}
@@ -149,6 +165,63 @@ func (w FinspoWorker) process(ctx context.Context, job store.SyncJob) error {
 		return fmt.Errorf("complete Finspo sync job: %w", err)
 	}
 	w.logSkippedDataPlaneForward(sourceID)
+	return nil
+}
+
+// processAllRegisteredSources handles the metadata-less sync-job shape by
+// fanning SyncSource out across every source the org has registered in
+// finspo-core. Partial failures don't abort the fan-out — each source's
+// outcome rides in its SyncSourceRef and the job completes as long as at
+// least one source synced; a fully-failed fan-out (or an org with nothing
+// registered) fails the job with a message that tells the user what to do.
+func (w FinspoWorker) processAllRegisteredSources(ctx context.Context, job store.SyncJob) error {
+	sources, err := w.Finspo.ListSources(ctx, job.OrganizationID, job.UserID)
+	if err != nil {
+		return w.failJob(ctx, job, fmt.Errorf("list registered Finspo sources: %w", err))
+	}
+	if len(sources) == 0 {
+		return w.failJob(ctx, job, errors.New("no SharePoint sources are registered for this organization yet — add one via Knowledge → Add source → SharePoint library"))
+	}
+
+	refs := make([]handoff.SyncSourceRef, 0, len(sources))
+	synced := 0
+	var lastErr error
+	for _, source := range sources {
+		ref := handoff.SyncSourceRef{
+			Provider:   finspoConsumer,
+			Type:       "sharepoint_drive",
+			SourceID:   source.ID,
+			ExternalID: source.DriveID,
+			Title:      firstNonEmpty(source.DriveName, "Microsoft 365 source"),
+		}
+		result, syncErr := w.Finspo.SyncSource(ctx, job.OrganizationID, job.UserID, source.ID)
+		if syncErr != nil {
+			lastErr = syncErr
+			ref.Status = "failed"
+			w.logWarn(syncErr, "registered-source sync failed")
+		} else {
+			synced++
+			ref.Status = firstNonEmpty(result.Status, "queued")
+		}
+		refs = append(refs, ref)
+	}
+	if synced == 0 {
+		return w.failJob(ctx, job, fmt.Errorf("every registered Finspo source failed to sync: %w", lastErr))
+	}
+
+	_, err = w.Integration.UpdateSyncProgress(ctx, job.ID, handoff.SyncProgressRequest{
+		Consumer: finspoConsumer,
+		Status:   "completed",
+		Message:  fmt.Sprintf("Synced %d of %d registered SharePoint sources.", synced, len(sources)),
+		Checkpoint: map[string]any{
+			"finspoSyncedSources": synced,
+			"finspoTotalSources":  len(sources),
+		},
+		Sources: refs,
+	})
+	if err != nil {
+		return fmt.Errorf("complete Finspo fan-out sync job: %w", err)
+	}
 	return nil
 }
 
@@ -208,7 +281,7 @@ func finspoSourceRequest(job store.SyncJob) (handoff.FinspoSourceRequest, handof
 	siteID := lookup("site_id", "siteId", "sharepointSiteId", "sharepoint_site_id")
 	driveID := lookup("drive_id", "driveId", "sharepointDriveId", "sharepoint_drive_id")
 	if siteID == "" || driveID == "" {
-		return handoff.FinspoSourceRequest{}, handoff.SyncSourceRef{}, errors.New("Finspo handoff requires SharePoint site_id and drive_id")
+		return handoff.FinspoSourceRequest{}, handoff.SyncSourceRef{}, errNoSiteDrive
 	}
 	request := handoff.FinspoSourceRequest{
 		SiteID:     siteID,

@@ -40,6 +40,13 @@ type FinspoSyncResult struct {
 	JobID    string `json:"job_id,omitempty"`
 }
 
+// FinspoSourceList mirrors finspo-core's GET /api/v1/sources data payload
+// (listSourcesHandler): `{count, sources}` inside the standard envelope.
+type FinspoSourceList struct {
+	Count   int            `json:"count"`
+	Sources []FinspoSource `json:"sources"`
+}
+
 func NewFinspoClient(baseURL, apiKey, apiKeyHeader string, httpClient *http.Client) *FinspoClient {
 	return &FinspoClient{
 		baseURL:      normalizeBaseURL(baseURL),
@@ -63,6 +70,26 @@ func (c *FinspoClient) EnsureSource(ctx context.Context, orgID, userID string, i
 		return FinspoSource{}, fmt.Errorf("finspo-core source request failed: %w", err)
 	}
 	return decodeEnvelope[FinspoSource]("finspo-core", resp)
+}
+
+// ListSources returns every SharePoint source already registered for the
+// organization in finspo-core. Used by the finspo worker as the fallback
+// sync target set when a claimed sync job carries no site_id/drive_id of
+// its own (the generic per-connection "sync now" path).
+func (c *FinspoClient) ListSources(ctx context.Context, orgID, userID string) ([]FinspoSource, error) {
+	req, err := c.request(ctx, http.MethodGet, c.baseURL+"/api/v1/sources", orgID, userID, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("finspo-core list sources request failed: %w", err)
+	}
+	list, err := decodeEnvelope[FinspoSourceList]("finspo-core", resp)
+	if err != nil {
+		return nil, err
+	}
+	return list.Sources, nil
 }
 
 func (c *FinspoClient) SyncSource(ctx context.Context, orgID, userID, sourceID string) (FinspoSyncResult, error) {
