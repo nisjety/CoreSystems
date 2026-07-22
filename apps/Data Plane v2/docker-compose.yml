@@ -233,9 +233,11 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
     networks:
       - dpv2-net
-      # Deliberately private: Ingestion must persist through a Data Plane API,
-      # never by holding Data Plane object-store root credentials. The visual
-      # CAS producer remains disabled until that scoped contract exists.
+      # Private by default: Ingestion never holds Data Plane object-store ROOT
+      # credentials. The visual-RAG CAS producer authenticates with the scoped
+      # `CAS_INGESTION_*` user minio-init provisions (dataplane-cas bucket
+      # only), and reaches this service via the cross-plane overlay's
+      # `dataplane-minio` alias — see docker-compose.cross-plane.yml.
     volumes:
       - dpv2_minio:/data
     deploy:
@@ -252,11 +254,25 @@ services:
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     restart: "no"
     entrypoint: ["/bin/sh", "-c"]
+    # When CAS_INGESTION_ACCESS_KEY/SECRET_KEY are both set, provision the
+    # scoped credential contract the visual-RAG CAS producer (quarry-edge's
+    # PageRenderer) authenticates with: a dedicated MinIO user whose inline
+    # policy grants object read/write on the `dataplane-cas` bucket ONLY.
+    # This is the "scoped contract" the minio service comment requires —
+    # Ingestion still never sees MINIO_ROOT_* credentials, and the scoped
+    # key cannot touch `quickwit` or any other bucket. Unset → skipped, and
+    # the producer stays disabled exactly as before.
     command:
       - >
         mc alias set dpv2 http://minio:9000 "${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}" "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}" &&
         mc mb --ignore-existing "dpv2/quickwit" &&
-        mc mb --ignore-existing "dpv2/dataplane-cas"
+        mc mb --ignore-existing "dpv2/dataplane-cas" &&
+        if [ -n "${CAS_INGESTION_ACCESS_KEY:-}" ] && [ -n "${CAS_INGESTION_SECRET_KEY:-}" ]; then
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":["arn:aws:s3:::dataplane-cas/*"]},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::dataplane-cas"]}]}' > /tmp/cas-ingestion-rw.json &&
+        mc admin user add dpv2 "${CAS_INGESTION_ACCESS_KEY}" "${CAS_INGESTION_SECRET_KEY}" &&
+        mc admin policy create dpv2 cas-ingestion-rw /tmp/cas-ingestion-rw.json &&
+        { mc admin policy attach dpv2 cas-ingestion-rw --user "${CAS_INGESTION_ACCESS_KEY}" || true; }
+        ; fi
     networks:
       - dpv2-net
     depends_on:
@@ -578,6 +594,10 @@ services:
       COHERE_EMBED_V4_API_VERSION: ${COHERE_EMBED_V4_API_VERSION:-2024-05-01-preview}
       QDRANT_VISUAL_COLLECTION: ${QDRANT_VISUAL_COLLECTION:-dataplane_page_images}
       VISUAL_EMBEDDING_DIMENSION: ${VISUAL_EMBEDDING_DIMENSION:-1536}
+      # Admits the page-image consumer alongside the signed text consumers
+      # (the quarry-edge producer does not sign envelopes yet). Default OFF;
+      # see main.rs for the narrow trust delta this gate accepts.
+      ALLOW_UNSIGNED_PAGE_IMAGE_EVENTS: ${ALLOW_UNSIGNED_PAGE_IMAGE_EVENTS:-0}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       # NOTE: the log target is the BIN/crate name `embedding_engine` (package is
       # `embedding-engine-rs`). The old `embedding_engine_rs=info` matched nothing →

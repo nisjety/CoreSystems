@@ -5,6 +5,28 @@ name: ${DATA_PLANE_COMPOSE_PROJECT:-data-plane-v2}
 # without Control, User, or Model Plane containers. Apply this overlay only
 # after the deployment-owned `inter-plane-bus` exists and has been reviewed.
 
+services:
+  # Visual-RAG CAS producer contract (quarry-edge PageRenderer, Ingestion
+  # Plane): the producer publishes `dataplane.page_images.created` to this
+  # broker and writes PNGs to the `dataplane-cas` MinIO bucket. Both infra
+  # services stay dpv2-private in the base file; this overlay exposes them on
+  # the inter-plane bus under DELIBERATELY distinct aliases (`dataplane-nats`,
+  # `dataplane-minio`) so they can never be confused with the many other
+  # `*-nats`/`*-minio` containers already on the bus. Authentication stays
+  # scoped: NATS still requires DATAPLANE_NATS_TOKEN, and MinIO access rides
+  # the bucket-scoped CAS_INGESTION_* user (never MINIO_ROOT_*) provisioned
+  # by minio-init.
+  nats:
+    networks:
+      inter-plane-bus:
+        aliases:
+          - dataplane-nats
+  minio:
+    networks:
+      inter-plane-bus:
+        aliases:
+          - dataplane-minio
+
 networks:
   inter-plane-bus:
     external: true

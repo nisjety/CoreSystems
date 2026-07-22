@@ -133,20 +133,49 @@ async fn main() -> anyhow::Result<()> {
         // These legacy consumers trust tenant and content fields in the event
         // payload. Keep every mutation arm under the same explicit dev gate
         // until producer-scoped signed envelopes are available.
-        // Visual RAG arm — Cohere Embed v4 page-image embeddings. Online only when
-        // COHERE_EMBED_V4_ENDPOINT is configured; otherwise the visual collection and
-        // consumer are skipped (text-only deployment).
         if !legacy_page_images_enabled {
             anyhow::bail!(
                 "unsigned page-image mutations are disabled outside isolated legacy development"
             );
         }
+
+        Some((consumer, nats_client, None, None))
+    } else {
+        tracing::warn!("embedding and wiki consumers disabled until signed producer-scoped envelopes are available");
+        None
+    };
+
+    // Visual RAG arm — Cohere Embed v4 page-image embeddings, decoupled from
+    // the text-event runtime selection above so a signed-consumer deployment
+    // can still run it. Online when COHERE_EMBED_V4_ENDPOINT is configured
+    // AND one of two explicit gates opens:
+    //   - the legacy dev gate (ALLOW_UNVERIFIED_LEGACY_EVENTS +
+    //     ALLOW_INSECURE_DEV_DEFAULTS, unsigned-everything path), or
+    //   - ALLOW_UNSIGNED_PAGE_IMAGE_EVENTS=1, which admits ONLY the
+    //     page-image arm alongside signed text consumers.
+    // The trust delta the dedicated gate accepts is narrow and different in
+    // kind from the text-mutation arms it stays separated from: a
+    // dataplane.page_images.created event carries no document content at all
+    // — only org_id/document_id and an image_url the consumer fetches from
+    // quarry-edge's internal serve route over the token-authenticated
+    // plane-local broker + trusted inter-plane bus. A forged event can at
+    // worst point the embedder at a wrong picture; it cannot inject document
+    // text. Producer-signed envelopes for the quarry-edge producer remain
+    // the target state; default stays OFF.
+    let page_image_events_allowed = legacy_page_images_enabled
+        || std::env::var("ALLOW_UNSIGNED_PAGE_IMAGE_EVENTS")
+            .as_deref()
+            .unwrap_or("")
+            == "1";
+    if page_image_events_allowed {
         match crate::provider::visual::VisualEmbeddingProvider::from_config(&cfg) {
             Ok(Some(visual)) => {
                 tracing::info!(
                     model = visual.model_name(),
                     "visual embedding (Embed v4) enabled"
                 );
+                let nats_client = nats_connection::connect(&cfg.nats_url).await?;
+                let js = async_nats::jetstream::new(nats_client);
                 if let Err(e) = qdrant_writer::ensure_collection(
                     &qdrant,
                     &cfg.qdrant_visual_collection,
@@ -157,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(error = %e, "visual collection ensure failed; continuing");
                 }
                 if let Err(e) = image_consumer::spawn(
-                    js.clone(),
+                    js,
                     qdrant.clone(),
                     visual,
                     cfg.qdrant_visual_collection.clone(),
@@ -174,12 +203,11 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(error = %e, "visual embedding misconfigured; continuing without visual arm")
             }
         }
-
-        Some((consumer, nats_client, None, None))
     } else {
-        tracing::warn!("embedding, wiki, and page-image consumers disabled until signed producer-scoped envelopes are available");
-        None
-    };
+        tracing::info!(
+            "page-image consumer disabled (set ALLOW_UNSIGNED_PAGE_IMAGE_EVENTS=1 to enable alongside signed consumers)"
+        );
+    }
 
     // Cross-plane GDPR organization-erasure consumer. Deliberately
     // independent of the embedding/wiki/page-image event_runtime above and

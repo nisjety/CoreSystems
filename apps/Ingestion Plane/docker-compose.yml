@@ -104,12 +104,29 @@ services:
       # documents-api (dpv2-documents-api:8010) via DATA_PLANE_INGEST_URL below.
       QUARRY_EDGE__DATA_PLANE_URL: ${DATA_PLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:8004}
       QUARRY_EDGE__DATA_PLANE_INGEST_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
-      # Phase-2 visual RAG persistence is disabled until Data Plane exposes
-      # scoped CAS/event-ingest APIs.
-      # Ingestion never receives MinIO root credentials or private NATS access.
-      QUARRY_EDGE__CAS_BUCKET: ""
-      QUARRY_EDGE__DATAPLANE_NATS_URL: ""
-      QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: ""
+      # Phase-2 visual RAG persistence — the scoped contract is now in place:
+      # Data Plane's minio-init provisions a dedicated MinIO user restricted to
+      # the `dataplane-cas` bucket (QUARRY_CAS_* below; never MINIO_ROOT_*),
+      # and its cross-plane overlay exposes the broker/object store on the
+      # inter-plane bus as `dataplane-nats`/`dataplane-minio`. All three
+      # QUARRY_EDGE__* values non-empty + a reachable broker → main.rs starts
+      # the PageRenderer producer; any missing piece logs a warn and disables
+      # the visual arm without affecting text ingest.
+      QUARRY_EDGE__CAS_BUCKET: ${QUARRY_CAS_BUCKET:-dataplane-cas}
+      QUARRY_EDGE__DATAPLANE_NATS_URL: ${QUARRY_DATAPLANE_NATS_URL:-nats://dataplane-nats:4222}
+      # The URL the embedding-engine consumer GETs rendered PNGs from —
+      # quarry-edge's own /v1/internal/page-images serve route, reachable
+      # because both containers sit on the inter-plane bus.
+      QUARRY_EDGE__EDGE_INTERNAL_BASE_URL: ${QUARRY_EDGE_INTERNAL_BASE_URL:-http://quarry-edge:8082}
+      # Data Plane broker token (PageRenderer::connect reads it from env,
+      # mirroring nats-connection-rs — credentials stay out of the URL).
+      DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:-}
+      # Bucket-scoped CAS credentials (aws-sdk env conventions; CasStore
+      # forces path-style addressing for MinIO).
+      AWS_ENDPOINT_URL: ${QUARRY_CAS_ENDPOINT:-http://dataplane-minio:9000}
+      AWS_ACCESS_KEY_ID: ${QUARRY_CAS_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${QUARRY_CAS_SECRET_KEY:-}
+      AWS_REGION: ${QUARRY_CAS_REGION:-us-east-1}
       QUARRY_EDGE__CANARY_PCT: ${QUARRY_CANARY_PCT:-100}
       QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
       QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}

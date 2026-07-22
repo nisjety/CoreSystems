@@ -72,6 +72,11 @@ impl PageRenderer {
     /// broker (where the embedding-engine consumer binds), build the CAS client,
     /// and hold the browser driver. Keeps `async_nats` + `CasStore` construction
     /// here so callers (quarry-edge `main`) don't need those deps directly.
+    ///
+    /// Authenticates with `DATAPLANE_NATS_TOKEN` when set — the same dedicated
+    /// env var Data Plane services use for their own broker (its `--auth`
+    /// single-token mode), and for the same reason: credentials deliberately
+    /// stay out of the URL so they can't leak through URL logging.
     pub async fn connect(
         browser: Arc<dyn BrowserDriver>,
         dataplane_nats_url: &str,
@@ -80,7 +85,19 @@ impl PageRenderer {
         edge_base_url: impl Into<String>,
         visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
     ) -> QuarryResult<Self> {
-        let client = async_nats::connect(dataplane_nats_url).await.map_err(|e| {
+        let token = std::env::var("DATAPLANE_NATS_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty());
+        let connect_result = match token {
+            Some(token) => {
+                async_nats::ConnectOptions::with_token(token)
+                    .connect(dataplane_nats_url)
+                    .await
+            }
+            None => async_nats::connect(dataplane_nats_url).await,
+        };
+        let client = connect_result.map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
                 format!("dataplane nats connect {dataplane_nats_url}: {e}"),
