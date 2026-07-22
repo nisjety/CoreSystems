@@ -3,6 +3,7 @@ package content
 import (
 	"context"
 	"errors"
+	"regexp"
 	"testing"
 
 	"github.com/google/uuid"
@@ -79,8 +80,14 @@ func TestIngestor_HappyPathForwardsDocument(t *testing.T) {
 	if doc.ZDRClassification != "internal" {
 		t.Errorf("zdr = %q", doc.ZDRClassification)
 	}
-	if doc.IdempotencyKey != "finspo-sp:drive-1:item-1" {
+	// Hashed key: raw Graph drive ids ("b!...") violate documents-api's
+	// idempotency_key charset, so the key is sha256(drive:item) — assert
+	// determinism + charset safety rather than the raw concatenation.
+	if doc.IdempotencyKey != itemIdempotencyKey("drive-1", "item-1") {
 		t.Errorf("idempotency = %q", doc.IdempotencyKey)
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9._:-]+$`).MatchString(itemIdempotencyKey("b!x7/y+z==", "01ITEM")) {
+		t.Error("idempotency key must stay within documents-api's allowed charset even for raw Graph ids")
 	}
 	if doc.Metadata["content_hash"] != "sha1:abc" {
 		t.Errorf("content_hash = %v", doc.Metadata["content_hash"])

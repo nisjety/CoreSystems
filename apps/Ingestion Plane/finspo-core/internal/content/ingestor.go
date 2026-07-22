@@ -7,6 +7,8 @@ package content
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -126,7 +128,10 @@ func (i *Ingestor) IngestItemContent(ctx context.Context, source store.Source, i
 		},
 		// Stable per-item key so re-sync of a changed file UPDATEs the same Data
 		// Plane document in place (re-index) rather than inserting a duplicate.
-		IdempotencyKey: "finspo-sp:" + source.DriveID + ":" + item.ItemID,
+		// Hashed because documents-api restricts idempotency_key to
+		// [alphanumerics - _ . :] and raw Graph drive ids violate that (they
+		// start with "b!"), which 400'd every single content forward.
+		IdempotencyKey: itemIdempotencyKey(source.DriveID, item.ItemID),
 	}
 	return i.docs.CreateDocument(ctx, source.OrganizationID, input)
 }
@@ -139,6 +144,14 @@ func documentTitle(item store.Item) string {
 		return item.Path
 	}
 	return item.ItemID
+}
+
+// itemIdempotencyKey derives a documents-api-safe stable key for a drive
+// item. sha256 keeps it deterministic per (drive, item) while guaranteeing
+// the [A-Za-z0-9._:-] charset the API enforces.
+func itemIdempotencyKey(driveID, itemID string) string {
+	sum := sha256.Sum256([]byte(driveID + ":" + itemID))
+	return "finspo-sp:" + hex.EncodeToString(sum[:])
 }
 
 func contentHash(item store.Item) string {
