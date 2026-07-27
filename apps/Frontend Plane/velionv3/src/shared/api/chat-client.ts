@@ -250,7 +250,16 @@ function buildToolSpecs(request: ChatInvokeRequest): WireToolSpec[] {
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
   const tools = buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
-  if (tools.length > 0) features.add('tools')
+  // Always request the tools family, even with zero client-declared specs:
+  // model-gateway merges its own builtins (tool_loop::builtin_tool_defs —
+  // fetch_url, knowledge_search) into the tool list whenever this feature is
+  // present, regardless of what the client sent (sse.rs). Without it, a plain
+  // chat turn never gets knowledge_search attached, so the model can't ground
+  // answers in the org's own ingested knowledge base unless the user happens
+  // to also toggle Browse or an action first. web_search stays gated behind
+  // its own explicit-Search-toggle check server-side, so this does not grant
+  // unrestricted web access — only the safe, always-useful builtins turn on.
+  features.add('tools')
   // Plan mode → agentic run path (orchestration-backed, supports approval gates
   // + run pause/resume). Without it the gateway uses the direct tool loop, which
   // never pauses for human approval.

@@ -54,10 +54,13 @@ describe('chat-client tool wiring', () => {
     vi.unstubAllGlobals()
   })
 
-  it('does not request the tools SSE family or web_search by default', () => {
+  it('requests the tools family by default (so knowledge_search/fetch_url attach server-side) but declares no client tools, and never web_search', () => {
     const body = buildChatWireBody({ content: 'hi' })
 
-    expect(body.features).toEqual(expect.not.arrayContaining(['tools']))
+    // model-gateway merges its own builtins (knowledge_search, fetch_url) into
+    // the tool list whenever 'tools' is present, regardless of the client's
+    // own (here empty) tools array — see buildChatWireBody's comment.
+    expect(body.features).toEqual(expect.arrayContaining(['tools']))
     expect(body.tools).toEqual([])
   })
 
