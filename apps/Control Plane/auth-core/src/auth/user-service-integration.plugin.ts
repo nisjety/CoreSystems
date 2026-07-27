@@ -8,9 +8,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
+import { redisSecondaryStorage } from '../db/redis';
 import { AuthIntegrationService } from '../internal/auth-integration.service';
 
 let authIntegrationService: AuthIntegrationService | null = null;
@@ -19,6 +20,77 @@ export function setAuthIntegrationService(service: AuthIntegrationService) {
   console.log('🔧 [Plugin] Setting AuthIntegrationService:', !!service);
   authIntegrationService = service;
   console.log('✅ [Plugin] AuthIntegrationService set successfully');
+}
+
+/**
+ * A brand-new Better Auth session never carries `activeOrganizationId` —
+ * Better Auth only sets it once something explicitly calls
+ * `/organization/set-active`, which today only happens from the manual
+ * org-switcher UI. A user who belongs to exactly one organization has
+ * nothing to actually choose, so every fresh sign-in otherwise lands them
+ * in a broken "no active org" state (every org-scoped request fails) until
+ * they manually switch once. This closes that gap without touching
+ * multi-org accounts, where the ambiguity is real and switching stays a
+ * deliberate user action.
+ *
+ * Writes both backing stores directly (Redis via the same
+ * `secondaryStorage` Better Auth itself reads sessions from, plus Postgres
+ * for any reader that goes straight to the DB) rather than calling
+ * `auth.api.setActiveOrganization` — that endpoint authenticates the caller
+ * from cookies on the INCOMING request, which for a just-created session
+ * during its own sign-in hook don't exist yet.
+ */
+async function autoActivateSoleOrganization(
+  userId: string,
+  sessionToken: string,
+): Promise<string | undefined> {
+  try {
+    const memberships = await db
+      .select({ organizationId: schema.member.organizationId })
+      .from(schema.member)
+      .where(eq(schema.member.userId, userId));
+    if (memberships.length !== 1) return undefined;
+    const organizationId = memberships[0].organizationId;
+
+    const raw = await redisSecondaryStorage.get(sessionToken);
+    if (raw) {
+      const cached = JSON.parse(raw) as {
+        session?: { activeOrganizationId?: string | null; expiresAt?: string };
+      };
+      if (cached.session && !cached.session.activeOrganizationId) {
+        const expiresAtMs = cached.session.expiresAt
+          ? new Date(cached.session.expiresAt).getTime()
+          : Date.now();
+        const ttlSeconds = Math.max(
+          1,
+          Math.floor((expiresAtMs - Date.now()) / 1000),
+        );
+        cached.session.activeOrganizationId = organizationId;
+        await redisSecondaryStorage.set(
+          sessionToken,
+          JSON.stringify(cached),
+          ttlSeconds,
+        );
+      }
+    }
+
+    await db
+      .update(schema.session)
+      .set({ activeOrganizationId: organizationId })
+      .where(eq(schema.session.token, sessionToken));
+
+    console.log(
+      `✅ [Plugin] Auto-activated sole organization ${organizationId} for user ${userId}`,
+    );
+    return organizationId;
+  } catch (error) {
+    // Best-effort UX enhancement — never let this break sign-in itself.
+    console.error(
+      '⚠️ [Plugin] Auto-activate sole organization failed:',
+      error,
+    );
+    return undefined;
+  }
 }
 
 export function userServiceIntegrationPlugin(): BetterAuthPlugin {
@@ -102,10 +174,17 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
           matcher: ({ path }) =>
             path === '/sign-in/email' || path === '/sign-in',
           handler: createAuthMiddleware(async (ctx) => {
-            if (!authIntegrationService) return;
             const user = ctx.context.user;
             const newSession = ctx.context.newSession;
             if (!user || !newSession?.session) return;
+            const activatedOrgId = await autoActivateSoleOrganization(
+              user.id,
+              newSession.session.token,
+            );
+            if (activatedOrgId) {
+              (newSession.session as any).activeOrganizationId = activatedOrgId;
+            }
+            if (!authIntegrationService) return;
             const headers = ctx.request?.headers;
             const userAgent = headers?.get('user-agent') ?? undefined;
             const ipHeader =
@@ -122,10 +201,14 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
               ipAddress: ipHeader,
               userAgent,
               provider: 'email',
-              // Better Auth does NOT set activeOrganizationId at raw sign-in time;
-              // the org plugin sets it only after explicit org selection.
-              // Pass it through anyway so if the session already carries it
-              // (re-authentication flow), the audit event fires correctly.
+              // Better Auth does NOT set activeOrganizationId at raw sign-in
+              // time; the org plugin only sets it after an explicit
+              // /organization/set-active call. autoActivateSoleOrganization
+              // above makes that call implicitly for single-org accounts and
+              // patches this in-memory session object, so this reads the
+              // freshly-activated id on that path, a carried-over id on
+              // re-authentication, or undefined for a genuinely org-less /
+              // multi-org session still awaiting a manual switch.
               activeOrganizationId:
                 (newSession.session as any).activeOrganizationId ?? undefined,
             });
@@ -159,11 +242,20 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
         {
           matcher: ({ path }) => (path ?? '').startsWith('/callback/'),
           handler: createAuthMiddleware(async (ctx) => {
-            if (!authIntegrationService) return;
             const user = ctx.context.user;
             const account = ctx.context.account;
             const newSession = ctx.context.newSession;
             if (!user || !account) return;
+            if (newSession?.session) {
+              const activatedOrgId = await autoActivateSoleOrganization(
+                user.id,
+                newSession.session.token,
+              );
+              if (activatedOrgId) {
+                (newSession.session as any).activeOrganizationId = activatedOrgId;
+              }
+            }
+            if (!authIntegrationService) return;
 
             const headers = ctx.request?.headers;
             const userAgent = headers?.get('user-agent') ?? undefined;
@@ -242,9 +334,11 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
                 ipAddress: ipHeader,
                 userAgent,
                 provider: account.providerId || 'oauth',
-                // activeOrganizationId is not set by Better Auth during the OAuth
-                // callback — org selection happens post-login. Pass through in case
-                // a re-authentication carries it on an existing session.
+                // Better Auth does not set activeOrganizationId during the OAuth
+                // callback either; autoActivateSoleOrganization above covers
+                // single-org accounts and patches this in-memory object, so
+                // this reads the freshly-activated id, a carried-over id on
+                // re-authentication, or undefined pending a manual switch.
                 activeOrganizationId:
                   (newSession.session as any).activeOrganizationId ?? undefined,
               });
