@@ -1525,10 +1525,25 @@ impl ModelGateway for GatewayService {
                 "MCP execution is restricted to the governed execution service",
             ));
         }
+        let req = request.into_inner();
+        // No live per-user bearer exists on this service-to-service path, so
+        // an OAuth-connected server's token can't be forwarded the way every
+        // other gateway->capability-core call does it — resolve one via the
+        // Model-Plane-local service secret instead. Soft-fails to None (never
+        // an error) so servers with no stored OAuth tokens are unaffected.
+        let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+            &self.state.http_client,
+            &self.state.capability_core_base_url,
+            &self.state.mcp_oauth_service_token,
+            &req.org_id,
+            &req.server_id,
+        )
+        .await;
         runtime_registries::handle_proxy_mcp_tool(
             &self.state.mcp,
             &self.state.ownership,
-            request.into_inner(),
+            req,
+            oauth_token.as_deref(),
         )
         .await
         .map(Response::new)

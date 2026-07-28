@@ -133,6 +133,16 @@ pub struct AppState {
     /// server must redirect back to a URL the browser can actually reach,
     /// never model-gateway's internal address.
     pub velion_public_origin: String,
+    /// Shared static secret proving to capability-core that a `GET
+    /// .../oauth-token` call genuinely came from model-gateway, for the one
+    /// call site (`proxy_mcp_tool`'s execution-core-triggered dispatch) that
+    /// has no live per-user bearer to forward — unlike every other
+    /// gateway->capability-core call. Deliberately Model-Plane-local rather
+    /// than a minted JWT: auth-core's service-principal minter requires a
+    /// fixed org allowlist in production, which does not fit "whichever
+    /// arbitrary tenant owns the server being called." Empty disables the
+    /// resolve path entirely (falls back to `server.token`).
+    pub mcp_oauth_service_token: String,
     /// Shared reqwest client for HTTP proxy calls to capability-core.
     pub http_client: reqwest::Client,
     /// Phase 7 B5 — model price catalogue cache (cost-core `GET /api/v1/pricing`).
@@ -252,6 +262,7 @@ impl AppState {
             capability_core_base_url: "http://localhost:8085".to_owned(),
             shipping_core_base_url: "http://localhost:8080".to_owned(),
             velion_public_origin: "http://localhost:5173".to_owned(),
+            mcp_oauth_service_token: String::new(),
             http_client: reqwest::Client::new(),
             // Pricing disabled by default (no cost-core URL); `from_env` wires it
             // from COST_CORE_URL. A disabled cache emits a null cost, never a fake.
@@ -417,6 +428,8 @@ impl AppState {
             .unwrap_or_else(|_| "http://shipping-core:8080".to_owned());
         let velion_public_origin = std::env::var("VELION_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| "http://localhost:5173".to_owned());
+        let mcp_oauth_service_token =
+            std::env::var("MCP_OAUTH_SERVICE_TOKEN").unwrap_or_default();
         let http_client = reqwest::Client::new();
         // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
         // Shared between both publisher branches below; cheap clone (Arc inner).
@@ -520,6 +533,7 @@ impl AppState {
             state.capability_core_base_url = capability_core_base_url.clone();
             state.shipping_core_base_url = shipping_core_base_url.clone();
             state.velion_public_origin = velion_public_origin.clone();
+            state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache.clone();
             state.retrieval_client = retrieval_client;
@@ -555,6 +569,7 @@ impl AppState {
             state.capability_core_base_url = capability_core_base_url.clone();
             state.shipping_core_base_url = shipping_core_base_url.clone();
             state.velion_public_origin = velion_public_origin.clone();
+            state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache;
             state.retrieval_client = retrieval_client;

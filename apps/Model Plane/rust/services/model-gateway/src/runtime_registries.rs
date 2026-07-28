@@ -989,6 +989,7 @@ pub async fn handle_proxy_mcp_tool(
     reg: &McpRegistry,
     ownership: &crate::ownership::OwnershipStore,
     req: ProxyMcpToolRequest,
+    oauth_token: Option<&str>,
 ) -> Result<ProxyMcpToolResponse, Status> {
     // Re-authorize per-user, mirroring the ListMcpTools discovery filter: a
     // client-declared mcp__<server>__<tool> name must not let a caller invoke a
@@ -1061,7 +1062,13 @@ pub async fn handle_proxy_mcp_tool(
         Status::invalid_argument(format!("invalid tools/call endpoint: {error}"))
     })?;
     let mut http_req = http.post(target).json(&body);
-    if !server.token.is_empty() {
+    // An OAuth-connected server's in-memory `token` is always empty (tokens
+    // live only in capability-core's encrypted store) — prefer a freshly
+    // resolved OAuth token when the caller supplied one, and fall back to
+    // the legacy static-token field otherwise.
+    if let Some(token) = oauth_token.filter(|t| !t.is_empty()) {
+        http_req = http_req.bearer_auth(token);
+    } else if !server.token.is_empty() {
         http_req = http_req.bearer_auth(&server.token);
     }
     let resp = match http_req.send().await {

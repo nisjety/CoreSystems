@@ -330,6 +330,55 @@ pub async fn refresh_access_token(
         .map_err(|e| McpOAuthError::TokenExchangeRejected(e.to_string()))
 }
 
+/// Resolve a stored OAuth access token for (`org_id`, `server_id`) from
+/// capability-core's system-of-record, authenticating with a shared
+/// Model-Plane-local service secret rather than a per-user bearer.
+///
+/// Deliberately soft-fail (`None`, never an error): this is on the
+/// `tools/call` dispatch path for every MCP server, including ones that
+/// were never OAuth-connected at all. An unconfigured secret, a network
+/// hiccup, or "no tokens stored for this server" must all fall back to
+/// `server.token`-based auth exactly as before, never break the call.
+///
+/// Deliberately narrow-scoped: `service_token` proves only "this is a
+/// trusted internal caller," not a specific org — unlike the minted,
+/// per-user JWTs every other gateway->capability-core call uses. The
+/// (`server_id`, `org_id`) pair still has to match a real stored row (and
+/// its AAD-bound ciphertext, see capability-core's vault) for anything to
+/// come back, so a caller can only ever resolve tokens for servers that
+/// genuinely belong to the org it asserts.
+pub async fn resolve_stored_oauth_token(
+    client: &reqwest::Client,
+    capability_core_base_url: &str,
+    service_token: &str,
+    org_id: &str,
+    server_id: &str,
+) -> Option<String> {
+    if capability_core_base_url.is_empty() || service_token.is_empty() {
+        return None;
+    }
+    let mut url = reqwest::Url::parse(&format!(
+        "{capability_core_base_url}/api/v1/mcp/{server_id}/oauth-token"
+    ))
+    .ok()?;
+    url.query_pairs_mut().append_pair("org_id", org_id);
+    let response = client
+        .get(url)
+        .header("X-Mcp-Service-Token", service_token)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    let token = body.get("access_token")?.as_str()?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +449,30 @@ mod tests {
             &[],
         );
         assert!(!url.contains("scope="));
+    }
+
+    // resolve_stored_oauth_token must never attempt a network call when
+    // unconfigured — these hit the early-return before any `.send()`, so
+    // they stay fast/deterministic without a mock server.
+    #[tokio::test]
+    async fn resolve_stored_oauth_token_short_circuits_without_base_url() {
+        let client = reqwest::Client::new();
+        let token =
+            resolve_stored_oauth_token(&client, "", "shared-secret", "org-1", "srv-1").await;
+        assert!(token.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_stored_oauth_token_short_circuits_without_service_token() {
+        let client = reqwest::Client::new();
+        let token = resolve_stored_oauth_token(
+            &client,
+            "http://capability-core:8085",
+            "",
+            "org-1",
+            "srv-1",
+        )
+        .await;
+        assert!(token.is_none());
     }
 }
