@@ -833,7 +833,7 @@ pub async fn invoke_stream_sse(
         // — see runtime_registries::mcp_tool_defs) are first-class chat tools, not
         // gated behind a separate "agent" concept: the chat surface IS the
         // product. Same dedupe rule as builtins — a client-declared spec wins.
-        for mcp_tool in crate::runtime_registries::mcp_tool_defs(
+        let mcp_tools = crate::runtime_registries::mcp_tool_defs(
             &state.mcp,
             &state.ownership,
             &org_id,
@@ -842,8 +842,14 @@ pub async fn invoke_stream_sse(
             &state.capability_core_base_url,
             &state.mcp_oauth_service_token,
         )
-        .await
-        {
+        .await;
+        tracing::debug!(
+            %org_id,
+            count = mcp_tools.len(),
+            names = ?mcp_tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            "inline chat: mcp tool advertisement for this turn"
+        );
+        for mcp_tool in mcp_tools {
             if !defs.iter().any(|d| d.name == mcp_tool.name) {
                 defs.push(mcp_tool);
             }

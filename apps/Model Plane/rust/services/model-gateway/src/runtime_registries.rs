@@ -1743,17 +1743,6 @@ pub fn handle_list_tasks(
     })
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        return s.to_string();
-    }
-    let mut end = n;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

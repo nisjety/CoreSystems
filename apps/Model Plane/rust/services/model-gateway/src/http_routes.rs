@@ -2723,18 +2723,9 @@ async fn mcp_oauth_callback(
     let Some(registered) = resp.server else {
         return fail("server registration returned no server");
     };
-    state.ownership.set(
-        &pending.org_id,
-        crate::ownership::KIND_MCP,
-        &registered.server_id,
-        ownership.clone(),
-    );
 
     if state.capability_core_base_url.is_empty() {
         state.mcp.remove(&pending.org_id, &registered.server_id);
-        state
-            .ownership
-            .remove(&pending.org_id, crate::ownership::KIND_MCP, &registered.server_id);
         return fail("capability registry is unavailable");
     }
     let payload = crate::runtime_registries::mcp_capability_payload(
@@ -2744,30 +2735,76 @@ async fn mcp_oauth_callback(
         "oauth",
     );
     let catalog_url = format!("{}/api/v1/mcp", state.capability_core_base_url);
-    let catalog_result = state
+    let catalog_response = state
         .http_client
         .post(&catalog_url)
         .bearer_auth(capability_bearer.as_str())
         .json(&payload)
         .send()
         .await;
-    let catalog_ok = catalog_result
-        .as_ref()
-        .is_ok_and(|response| response.status().is_success());
-    if !catalog_ok {
-        state.mcp.remove(&pending.org_id, &registered.server_id);
-        state
-            .ownership
-            .remove(&pending.org_id, crate::ownership::KIND_MCP, &registered.server_id);
-        return fail("capability registry rejected MCP registration");
-    }
+    let persisted_id = match catalog_response {
+        Ok(response) if response.status().is_success() => {
+            // capability-core upserts by (org_id, name): a name collision with
+            // an EARLIER registration of this same server (e.g. reconnecting
+            // after this gateway's ephemeral cache was wiped by a restart, so
+            // it proposed a brand-new id for what is durably the same server)
+            // keeps the ORIGINAL id, not the one this call proposed — every
+            // other durable record scoped to this server (mcp_oauth_tokens'
+            // FK) points at that original id, so it — not registered.server_id
+            // — is what every call from here on must address.
+            response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("id").and_then(|v| v.as_str()).map(str::to_owned))
+        }
+        Ok(response) => {
+            state.mcp.remove(&pending.org_id, &registered.server_id);
+            warn!(status = %response.status(), "MCP catalog registration rejected");
+            return fail("capability registry rejected MCP registration");
+        }
+        Err(error) => {
+            state.mcp.remove(&pending.org_id, &registered.server_id);
+            warn!(error = %error, "MCP catalog registration unavailable");
+            return fail("capability registry rejected MCP registration");
+        }
+    };
+    let server_id = match persisted_id {
+        Some(id) if id == registered.server_id => registered.server_id.clone(),
+        Some(id) => {
+            // The catalog kept a different id than this ephemeral entry —
+            // drop the orphaned one and re-insert under the id capability-core
+            // actually persisted, so this cache and the durable catalog agree.
+            state.mcp.remove(&pending.org_id, &registered.server_id);
+            let mut corrected = registered.clone();
+            corrected.server_id = id.clone();
+            if let Err(error) = crate::runtime_registries::handle_register_mcp_server(
+                &state.mcp,
+                RegisterMcpServerRequest {
+                    request_id: new_ulid(),
+                    org_id: pending.org_id.clone(),
+                    server: Some(corrected),
+                },
+            ) {
+                warn!(error = %error, "mcp oauth: could not re-key cache to the persisted id");
+            }
+            id
+        }
+        None => {
+            warn!("MCP catalog registration response had no id");
+            registered.server_id.clone()
+        }
+    };
+    state
+        .ownership
+        .set(&pending.org_id, crate::ownership::KIND_MCP, &server_id, ownership);
 
     // Tokens are stored separately from the server record, encrypted at rest
     // by capability-core — never in the gateway's own (ephemeral, plaintext)
     // in-memory cache.
     let tokens_url = format!(
         "{}/api/v1/mcp/{}/oauth-tokens",
-        state.capability_core_base_url, registered.server_id
+        state.capability_core_base_url, server_id
     );
     let tokens_payload = json!({
         "access_token": tokens.access_token,
@@ -2796,8 +2833,7 @@ async fn mcp_oauth_callback(
     }
 
     Redirect::to(&format!(
-        "{settings_url}?mcp_oauth=connected&server_id={}",
-        registered.server_id
+        "{settings_url}?mcp_oauth=connected&server_id={server_id}"
     ))
     .into_response()
 }
