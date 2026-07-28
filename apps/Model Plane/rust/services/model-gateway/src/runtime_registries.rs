@@ -569,6 +569,29 @@ pub fn mcp_capability_payload(
     // Ownership (scope/owner/shares) rides in config_json so the durable catalog
     // record stays the system-of-record for who-can-see-what, not just the
     // ephemeral gateway sidecar. `scope` reflects the real owner/org scope.
+    let mut config_json = serde_json::json!({
+        "tool_allowlist": server.tool_allowlist,
+        "owner_user_id": ownership.owner_user_id,
+        "shared_with": ownership.shared_with,
+    });
+    // capability-core refuses to catalog a credential-bearing server without a
+    // managed secret reference (`auth_kind != "none"` → `secret_ref` must parse
+    // as a secret/vault URI). For an OAuth-connected server the credential
+    // genuinely IS in a managed store — capability-core's own AES-256-GCM
+    // encrypted `mcp_oauth_tokens` row, reachable at
+    // `GET /api/v1/mcp/{id}/oauth-token` — so the reference points there rather
+    // than naming an external vault that holds nothing.
+    if auth_kind != "none" {
+        if let Some(config) = config_json.as_object_mut() {
+            config.insert(
+                "secret_ref".to_owned(),
+                serde_json::Value::String(format!(
+                    "secret://capability-core/mcp-oauth-tokens/{}",
+                    server.server_id
+                )),
+            );
+        }
+    }
     serde_json::json!({
         "id": server.server_id,
         "org_id": org_id,
@@ -576,11 +599,7 @@ pub fn mcp_capability_payload(
         "endpoint_url": server.url,
         "transport": server.transport,
         "auth_kind": auth_kind,
-        "config_json": {
-            "tool_allowlist": server.tool_allowlist,
-            "owner_user_id": ownership.owner_user_id,
-            "shared_with": ownership.shared_with,
-        },
+        "config_json": config_json,
         "scope": ownership.scope.as_wire(),
         "enabled": server.enabled,
     })
@@ -649,6 +668,44 @@ mod mcp_writethrough_tests {
         );
         assert_eq!(p["auth_kind"], "none");
         assert_eq!(p["enabled"], false);
+        // "none" needs no managed secret, and must not claim one.
+        assert!(p["config_json"].get("secret_ref").is_none());
+    }
+
+    #[test]
+    fn oauth_payload_carries_a_secret_ref_capability_core_accepts() {
+        // capability-core rejects any auth_kind != "none" whose config_json
+        // lacks a `secret_ref` parsing as a secret/vault URI with a non-empty
+        // host AND path and no user/query/fragment (validMCPSecretReference).
+        // Pin that contract here — it is enforced in another language, in
+        // another service, so nothing else in this crate would catch a drift.
+        let server = McpServer {
+            server_id: "mcp_oauth_1".into(),
+            name: "visma-net".into(),
+            url: "https://mcp.finance.visma.net/mcp".into(),
+            transport: "http".into(),
+            token: String::new(),
+            tool_allowlist: vec!["execute_query".into()],
+            enabled: true,
+        };
+        let p = mcp_capability_payload(
+            "org-9",
+            &server,
+            &crate::ownership::Ownership::user("alice"),
+            "oauth",
+        );
+        assert_eq!(p["auth_kind"], "oauth");
+        let secret_ref = p["config_json"]["secret_ref"]
+            .as_str()
+            .expect("oauth payload must carry a secret_ref");
+        let parsed = reqwest::Url::parse(secret_ref).expect("secret_ref must be a valid URI");
+        assert_eq!(parsed.scheme(), "secret");
+        assert!(parsed.host_str().is_some_and(|host| !host.is_empty()));
+        assert!(parsed.path().len() > 1, "path must be non-empty");
+        assert!(parsed.query().is_none() && parsed.fragment().is_none());
+        assert!(secret_ref.is_ascii() && secret_ref.len() <= 512);
+        // Must identify this exact server, so it resolves to the right row.
+        assert!(secret_ref.contains("mcp_oauth_1"));
     }
 }
 
