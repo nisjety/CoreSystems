@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
+	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
@@ -68,6 +70,24 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// MCP OAuth token encryption (mcp_oauth_tokens.access_token/refresh_token
+	// at rest). Optional: a missing/invalid key leaves the oauth-token(s)
+	// endpoints 503ing rather than falling back to plaintext storage.
+	var mcpVault *crypto.Vault
+	if rawKey := os.Getenv("MCP_TOKEN_ENCRYPTION_KEY"); rawKey != "" {
+		key, decodeErr := base64.StdEncoding.DecodeString(rawKey)
+		if decodeErr != nil || len(key) != 32 {
+			slog.Error("MCP_TOKEN_ENCRYPTION_KEY must be base64-encoded 32 bytes; MCP OAuth token storage disabled", "error", decodeErr)
+		} else if vault, vaultErr := crypto.NewVault(key); vaultErr != nil {
+			slog.Error("mcp token vault init failed; MCP OAuth token storage disabled", "error", vaultErr)
+		} else {
+			mcpVault = vault
+			slog.Info("mcp token vault ready")
+		}
+	} else {
+		slog.Warn("MCP_TOKEN_ENCRYPTION_KEY unset; MCP OAuth token storage disabled")
+	}
 
 	// --- registry sources ---------------------------------------------------
 	// Postgres-backed live source merged with static seed.
@@ -191,7 +211,7 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMCPHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).Register(protectedMux)
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMemoryHandler(pool).Register(protectedMux)

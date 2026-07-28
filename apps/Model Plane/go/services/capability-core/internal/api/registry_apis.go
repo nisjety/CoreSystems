@@ -25,6 +25,7 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
+	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 )
 
@@ -216,6 +217,10 @@ type MCPHandler struct {
 	pool     registryDatabase
 	pub      publisher.EventPublisher
 	resolver mcpHostResolver
+	// vault encrypts/decrypts mcp_oauth_tokens at rest. Nil (unset) makes the
+	// oauth-token(s) endpoints fail closed with 503 rather than silently
+	// storing or returning plaintext.
+	vault *crypto.Vault
 }
 
 type mcpHostResolver interface {
@@ -266,6 +271,14 @@ func NewMCPHandler(pool *pgxpool.Pool) *MCPHandler {
 // to its cache TTL. Chainable: NewMCPHandler(pool).WithPublisher(pub).Register(mux).
 func (h *MCPHandler) WithPublisher(pub publisher.EventPublisher) *MCPHandler {
 	h.pub = pub
+	return h
+}
+
+// WithVault wires MCP_TOKEN_ENCRYPTION_KEY-backed encryption for the
+// oauth-token(s) endpoints. Optional and nil-safe at construction time — but
+// those two endpoints refuse to run without it (503, never plaintext).
+func (h *MCPHandler) WithVault(vault *crypto.Vault) *MCPHandler {
+	h.vault = vault
 	return h
 }
 
@@ -698,7 +711,29 @@ func decodeStoredMCPConfig(raw any) (mcpServerConfig, error) {
 func (h *MCPHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/mcp", h.listOrCreate)
 	mux.HandleFunc("/api/v1/mcp/", func(w http.ResponseWriter, r *http.Request) {
-		id := r.URL.Path[len("/api/v1/mcp/"):]
+		rest := r.URL.Path[len("/api/v1/mcp/"):]
+		// OAuth token storage/resolution is sub-routed under the server id
+		// before falling into the plain get/patch/delete-by-id dispatch below,
+		// which expects `rest` to be a bare id.
+		if id := strings.TrimSuffix(rest, "/oauth-tokens"); id != rest {
+			switch r.Method {
+			case http.MethodPut:
+				h.oauthTokensUpsert(w, r, id)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		if id := strings.TrimSuffix(rest, "/oauth-token"); id != rest {
+			switch r.Method {
+			case http.MethodGet:
+				h.oauthTokenResolve(w, r, id)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		id := rest
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, id)
@@ -710,6 +745,165 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+// mcpOAuthTokensUpsertBody is what model-gateway POSTs right after a
+// successful authorization-code exchange, and again after every refresh.
+type mcpOAuthTokensUpsertBody struct {
+	AccessToken   string `json:"access_token"`
+	RefreshToken  string `json:"refresh_token"`
+	TokenType     string `json:"token_type"`
+	Scope         string `json:"scope"`
+	ExpiresInSecs *int64 `json:"expires_in_seconds"`
+	TokenEndpoint string `json:"token_endpoint"`
+	ClientID      string `json:"client_id"`
+}
+
+// oauthTokensUpsert stores (encrypted) OAuth tokens for an MCP server.
+func (h *MCPHandler) oauthTokensUpsert(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, ok := mcpVerifiedOrganization(r, true)
+	if !ok {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return
+	}
+	if h.vault == nil {
+		jsonErr(w, "token encryption is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxMCPRegistrationBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var body mcpOAuthTokensUpsertBody
+	if err := decoder.Decode(&body); err != nil {
+		jsonErr(w, "invalid oauth token payload", http.StatusBadRequest)
+		return
+	}
+	if body.AccessToken == "" {
+		jsonErr(w, "access_token is required", http.StatusBadRequest)
+		return
+	}
+	// Confirm the server exists and belongs to this org before attaching
+	// tokens to it — also guards against a bogus/foreign server id.
+	var exists bool
+	if err := h.pool.QueryRow(r.Context(),
+		`SELECT EXISTS(SELECT 1 FROM mcp_servers WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL)`,
+		id, orgID,
+	).Scan(&exists); err != nil {
+		slog.Error("mcp oauth token server lookup failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		jsonErr(w, "mcp server not found", http.StatusNotFound)
+		return
+	}
+
+	// AAD binds ciphertext to this exact server+org pair, mirroring
+	// integration-corev2's vault usage — ciphertext copied to another row
+	// (or another org's row of the same server id, if that were ever
+	// possible) fails to decrypt rather than silently decrypting wrong.
+	aad := []byte(id + ":" + orgID)
+	encAccess, err := h.vault.Encrypt(body.AccessToken, aad)
+	if err != nil {
+		slog.Error("encrypt mcp access token failed", "error", err)
+		jsonErr(w, "token encryption failed", http.StatusInternalServerError)
+		return
+	}
+	encRefresh := ""
+	if body.RefreshToken != "" {
+		encRefresh, err = h.vault.Encrypt(body.RefreshToken, aad)
+		if err != nil {
+			slog.Error("encrypt mcp refresh token failed", "error", err)
+			jsonErr(w, "token encryption failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	tokenType := body.TokenType
+	if tokenType == "" {
+		tokenType = "Bearer"
+	}
+	now := time.Now().UTC()
+	var expiresAt *time.Time
+	if body.ExpiresInSecs != nil {
+		t := now.Add(time.Duration(*body.ExpiresInSecs) * time.Second)
+		expiresAt = &t
+	}
+	rowID := id + ":" + orgID
+	_, err = h.pool.Exec(r.Context(), `
+		INSERT INTO mcp_oauth_tokens (id, server_id, org_id, access_token, refresh_token,
+		    token_type, scope, expires_at, token_endpoint, client_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+		ON CONFLICT (server_id, org_id) DO UPDATE SET
+		    access_token=$4, refresh_token=$5, token_type=$6, scope=$7,
+		    expires_at=$8, token_endpoint=$9, client_id=$10, updated_at=$11
+	`, rowID, id, orgID, encAccess, encRefresh, tokenType, body.Scope, expiresAt,
+		body.TokenEndpoint, body.ClientID, now)
+	if err != nil {
+		slog.Error("store mcp oauth tokens failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"stored": true})
+}
+
+// oauthTokenResolve returns the DECRYPTED current access token plus enough
+// metadata (token_endpoint, client_id) for the caller to refresh it itself —
+// capability-core stores and encrypts, it never speaks OAuth to the
+// authorization server. Requires the same write-level trust as storing: this
+// is a live credential, not a public projection.
+func (h *MCPHandler) oauthTokenResolve(w http.ResponseWriter, r *http.Request, id string) {
+	orgID, ok := mcpVerifiedOrganization(r, true)
+	if !ok {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return
+	}
+	if h.vault == nil {
+		jsonErr(w, "token encryption is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var encAccess, encRefresh, tokenType, scope, tokenEndpoint, clientID string
+	var expiresAt *time.Time
+	err := h.pool.QueryRow(r.Context(), `
+		SELECT access_token, refresh_token, token_type, scope, expires_at, token_endpoint, client_id
+		FROM mcp_oauth_tokens WHERE server_id=$1 AND org_id=$2
+	`, id, orgID).Scan(&encAccess, &encRefresh, &tokenType, &scope, &expiresAt, &tokenEndpoint, &clientID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		jsonErr(w, "no oauth tokens stored for this server", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("resolve mcp oauth token failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	aad := []byte(id + ":" + orgID)
+	accessToken, err := h.vault.Decrypt(encAccess, aad)
+	if err != nil {
+		slog.Error("decrypt mcp access token failed", "error", err)
+		jsonErr(w, "token decryption failed", http.StatusInternalServerError)
+		return
+	}
+	refreshToken := ""
+	if encRefresh != "" {
+		refreshToken, err = h.vault.Decrypt(encRefresh, aad)
+		if err != nil {
+			slog.Error("decrypt mcp refresh token failed", "error", err)
+			jsonErr(w, "token decryption failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	resp := map[string]any{
+		"access_token":   accessToken,
+		"refresh_token":  refreshToken,
+		"token_type":     tokenType,
+		"scope":          scope,
+		"token_endpoint": tokenEndpoint,
+		"client_id":      clientID,
+	}
+	if expiresAt != nil {
+		resp["expires_at"] = expiresAt.Format(time.RFC3339)
+	}
+	writeJSON(w, resp)
 }
 
 func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
