@@ -46,24 +46,32 @@ export function registerMcpServer(
   })
 }
 
+/** What `connectMcpServer` resolves to — a discriminated union on `needs_oauth`. */
+export type McpConnectResult =
+  | { needs_oauth: true; authorization_url: string }
+  | (McpServer & { needs_oauth?: false })
+
 /**
- * Begin connecting an MCP server that requires real OAuth 2.1 login (e.g.
- * Visma Net) rather than a static token. Response carries the
- * `authorization_url` to navigate the browser to next — the actual
- * connection completes on the server's own OAuth consent screen and lands
- * back on `/settings?mcp_oauth=connected|error`, not on any promise this
- * call resolves.
+ * The one entry point for adding an MCP server. Velion figures out the rest:
+ * discovers whether the server needs real OAuth 2.1 login (e.g. Visma Net)
+ * or works directly, so the caller never picks a transport or auth mode.
+ *
+ * If the result needs OAuth, navigate the browser to `authorization_url` —
+ * the connection completes on the server's own consent screen and lands back
+ * on `/settings/mcp?mcp_oauth=connected|error`, not on any promise this call
+ * resolves. Otherwise the server is already registered and returned directly.
  */
-export function startMcpOAuth(
+export function connectMcpServer(
   orgId: string,
   body: {
     name: string
     url: string
+    token?: string
     tool_allowlist?: string[]
     scope?: 'user' | 'org'
   },
-): Promise<{ authorization_url: string }> {
-  return requestJson<{ authorization_url: string }>('/api/v1/mcp/servers/oauth/start', {
+): Promise<McpConnectResult> {
+  return requestJson<McpConnectResult>('/api/v1/mcp/servers/connect', {
     method: 'POST',
     body: JSON.stringify(body),
     headers: { 'x-velion-org-id': orgId },

@@ -51,6 +51,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/mcp/servers/:server_id/share", post(share_server))
         .route("/api/v1/mcp/servers/oauth/start", post(oauth_start))
         .route("/api/v1/mcp/servers/oauth/callback", get(oauth_callback))
+        .route("/api/v1/mcp/servers/connect", post(connect_server))
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -262,6 +263,49 @@ async fn oauth_start(
     (status, body).into_response()
 }
 
+/// The single auto-detecting entry point: body is `{name, url, token?,
+/// tool_allowlist?, scope?}` — no transport or auth-kind choice. model-gateway
+/// discovers whether `url` is an OAuth 2.1 protected resource and either
+/// returns `{needs_oauth: true, authorization_url}` (the caller then
+/// navigates the browser there, same as `oauth_start`) or registers the
+/// server directly and returns it, same shape as `register_server`. Same
+/// org-admin gate for `scope == "org"`.
+async fn connect_server(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if org_scope_forbidden(&state, &user, &body).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only organization admins can create org-wide MCP servers.",
+            )),
+        )
+            .into_response();
+    }
+
+    let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let url = format!("{}/v1/mcp/servers/connect", state.model_gateway_url);
+    let (status, body) = proxy_model_json_with_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
 /// Where the external authorization server redirects the browser back to
 /// after consent. A plain top-level navigation — no fetch, no bearer
 /// header of its own — so the caller's identity comes from the same
@@ -280,13 +324,25 @@ async fn oauth_callback(
     RawQuery(query): RawQuery,
 ) -> Response {
     let fallback = format!(
-        "{}/settings?mcp_oauth=error",
+        "{}/settings/mcp?mcp_oauth=error",
         state.velion_public_origin.trim_end_matches('/')
     );
-    let token = model_token(&state, &user, &headers).await;
+    let org_id = user.active_org_id.clone().unwrap_or_default();
+
+    let Some(token) = model_token(&state, &user, &headers).await else {
+        tracing::warn!(%org_id, "mcp oauth callback: could not mint a model-gateway token");
+        return Redirect::to(&fallback).into_response();
+    };
     let capability = match required_capability_token(&state, &user, &headers).await {
         Ok(token) => token,
-        Err(_) => return Redirect::to(&fallback).into_response(),
+        Err(error) => {
+            tracing::warn!(
+                %org_id,
+                audience = error.audience.claim(),
+                "mcp oauth callback: could not mint a capability-core token"
+            );
+            return Redirect::to(&fallback).into_response();
+        }
     };
 
     let mut url = format!("{}/v1/mcp/servers/oauth/callback", state.model_gateway_url);
@@ -295,26 +351,39 @@ async fn oauth_callback(
         url.push_str(&query);
     }
     if !same_upstream_origin(&url, &state.model_gateway_url) {
+        tracing::warn!(%org_id, %url, "mcp oauth callback: target failed the upstream-origin check");
         return Redirect::to(&fallback).into_response();
     }
 
-    let mut request = state.client.get(&url);
-    if let Some(token) = token.as_deref() {
-        request = request.bearer_auth(token);
-    }
-    request = request.header("x-capability-authorization", capability.as_str());
+    let request = state
+        .client
+        .get(&url)
+        .bearer_auth(&token)
+        .header("x-capability-authorization", capability.as_str());
 
-    let Ok(upstream) = request.send().await else {
-        return Redirect::to(&fallback).into_response();
+    let upstream = match request.send().await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(%org_id, error = %error, "mcp oauth callback: model-gateway request failed");
+            return Redirect::to(&fallback).into_response();
+        }
     };
+    let upstream_status = upstream.status();
     let Some(location) = upstream.headers().get(LOCATION).cloned() else {
+        tracing::warn!(
+            %org_id,
+            status = upstream_status.as_u16(),
+            "mcp oauth callback: model-gateway response had no Location header"
+        );
         return Redirect::to(&fallback).into_response();
     };
-    let status =
-        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status = StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut response = match Response::builder().status(status).body(axum::body::Body::empty()) {
         Ok(response) => response,
-        Err(_) => return Redirect::to(&fallback).into_response(),
+        Err(error) => {
+            tracing::warn!(%org_id, error = %error, "mcp oauth callback: could not build the redirect response");
+            return Redirect::to(&fallback).into_response();
+        }
     };
     response.headers_mut().insert(LOCATION, location);
     response
