@@ -191,11 +191,13 @@ fn browser_execution_to_step_outcome(execution: tool_bridge::BrowserAgentExecuti
     }
 }
 
-/// Execute a step without a browser dispatch capability. This compatibility
-/// entry point deliberately cannot launch `browser_agent`; only the gRPC
-/// boundary may call `execute_step_with_browser_grant` after BrowserBroker
-/// revalidation. Existing internal callers therefore fail closed rather than
-/// treating a model-authored grant id as authority.
+/// Execute a step without a browser or subagent dispatch capability. This
+/// compatibility entry point deliberately cannot launch `browser_agent`; only
+/// the gRPC boundary may call `execute_step_with_browser_grant` after
+/// BrowserBroker revalidation. Existing internal callers therefore fail closed
+/// rather than treating a model-authored grant id as authority. It likewise
+/// cannot run a `subagent.*` delegation, which needs a real agent loop
+/// (`agent::run_agent`) rather than a single step.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
     tool_name: &str,
@@ -215,7 +217,7 @@ pub async fn execute_step(
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
 ) -> StepOutcome {
-    execute_step_with_browser_grant(
+    execute_step_inner(
         tool_name,
         tool_input,
         permission_mode,
@@ -233,14 +235,16 @@ pub async fn execute_step(
         inference_bearer,
         capability_policy,
         None,
+        None,
     )
     .await
 }
 
 /// Execute a step with a broker-validated browser dispatch capability. This
 /// is intentionally crate-visible so a direct agent/runtime call cannot forge
-/// the capability from JSON.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// the capability from JSON. It carries no subagent dispatcher: the single-step
+/// RPC has no loop to delegate into.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_step_with_browser_grant(
     tool_name: &str,
     tool_input: &str,
@@ -259,6 +263,102 @@ pub(crate) async fn execute_step_with_browser_grant(
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
+) -> StepOutcome {
+    execute_step_inner(
+        tool_name,
+        tool_input,
+        permission_mode,
+        hook_context,
+        org_id,
+        user_id,
+        run_id,
+        step_id,
+        session_channel,
+        browser_event_sink,
+        state,
+        zdr,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        browser_grant,
+        None,
+    )
+    .await
+}
+
+/// Execute a step with a delegated-subagent dispatch capability, for callers
+/// that ARE an agent loop ([`agent::run_agent`] and the nested loops it drives).
+/// Symmetric to `execute_step_with_browser_grant`: the capability is a Rust
+/// value only the owning boundary can supply, never a field of the tool JSON —
+/// and it deliberately carries no browser grant.
+///
+/// Routing a subagent spawn through here rather than around it keeps the
+/// capability-policy, hook, and permission gates in exactly one place, so
+/// delegation is governed identically to every other tool call.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_step_with_subagent(
+    tool_name: &str,
+    tool_input: &str,
+    permission_mode: &str,
+    hook_context: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    session_channel: Option<Channel>,
+    browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
+    zdr: bool,
+    data_plane_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+) -> StepOutcome {
+    execute_step_inner(
+        tool_name,
+        tool_input,
+        permission_mode,
+        hook_context,
+        org_id,
+        user_id,
+        run_id,
+        step_id,
+        session_channel,
+        browser_event_sink,
+        state,
+        zdr,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        None,
+        subagent_dispatch,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_step_inner(
+    tool_name: &str,
+    tool_input: &str,
+    permission_mode: &str,
+    hook_context: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    session_channel: Option<Channel>,
+    browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
+    state: Option<&crate::state::StateStore>,
+    zdr: bool,
+    data_plane_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
+    subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
 ) -> StepOutcome {
     match capability_policy.evaluate(tool_name, run_id, org_id).await {
         Ok(crate::capability_policy::CapabilityDecision::Allow) => {}
@@ -295,12 +395,6 @@ pub(crate) async fn execute_step_with_browser_grant(
         PermissionDecision::AwaitApproval => return StepOutcome::awaiting_approval(),
         PermissionDecision::Allow => {}
     }
-
-    let subagent_spawn = subagent::maybe_spawn(tool_name);
-    let subagent_note = subagent_spawn
-        .as_ref()
-        .map(|entry| format!(" [{}]", entry.summary))
-        .unwrap_or_default();
 
     // Browser-agent returns a structured lifecycle result, not a generic tool
     // string. Do this before the `ToolExecution` branch so aborted, denied,
@@ -379,11 +473,8 @@ pub(crate) async fn execute_step_with_browser_grant(
         .await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
         execute_mcp(tool_name, tool_input, org_id, user_id).await
-    } else if subagent_spawn.is_some() {
-        tool_bridge::ToolExecution {
-            output: "subagent spawned".to_owned(),
-            error: None,
-        }
+    } else if subagent::is_subagent_tool(tool_name) {
+        execute_subagent(tool_name, tool_input, subagent_dispatch).await
     } else {
         tool_bridge::execute(tool_name, tool_input)
     };
@@ -421,10 +512,44 @@ pub(crate) async fn execute_step_with_browser_grant(
         return StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"));
     }
 
-    let output = format!("{}{}", exec.output, subagent_note);
+    let output = exec.output;
     let mut outcome = StepOutcome::completed(output.clone());
     outcome.compaction_triggered = output.len() > 2048;
     outcome
+}
+
+/// Run a `subagent.*` call as a REAL nested agent loop through the dispatch
+/// capability the agent driver supplies.
+///
+/// Without a dispatcher there is no loop to delegate into — the single-step
+/// `ExecuteStep` RPC holds no inference channel, tool allowlist, or round budget
+/// — so the call fails closed with an explicit error. It must never regain the
+/// old stub's behaviour of reporting a `"spawned <tool>"` success for work that
+/// never ran: the parent then reasons from a fabricated result.
+async fn execute_subagent(
+    tool_name: &str,
+    tool_input: &str,
+    subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+) -> tool_bridge::ToolExecution {
+    let Some(dispatch) = subagent_dispatch else {
+        return tool_bridge::ToolExecution {
+            output: String::new(),
+            error: Some(format!(
+                "tool '{tool_name}' cannot run here: delegating to a subagent requires an agent \
+                 run's loop (RunAgent), not a single-step execution"
+            )),
+        };
+    };
+    match dispatch.spawn(tool_name, tool_input).await {
+        Ok(answer) => tool_bridge::ToolExecution {
+            output: answer,
+            error: None,
+        },
+        Err(error) => tool_bridge::ToolExecution {
+            output: String::new(),
+            error: Some(error),
+        },
+    }
 }
 
 /// Run a `shell` tool call as a real sandboxed process (G1). Input is JSON

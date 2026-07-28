@@ -149,10 +149,14 @@ async fn fail_tool_returns_error() {
 }
 
 #[tokio::test]
-async fn subagent_spawn_appends_summary() {
+async fn subagent_without_a_loop_to_delegate_into_fails_closed() {
+    // This entry point is the SINGLE-STEP path: it holds no inference channel,
+    // tool allowlist, or round budget, so it cannot run a delegated agent. It
+    // used to answer `completed` with a "spawned subagent.xyz" note appended,
+    // which meant a model asking for delegated work got a fabricated success.
     let outcome = runtime_loop::execute_step(
         "subagent.xyz",
-        "payload",
+        r#"{"goal":"do the thing"}"#,
         "auto",
         "",
         "",
@@ -169,8 +173,22 @@ async fn subagent_spawn_appends_summary() {
         &ALLOW_POLICY,
     )
     .await;
-    assert_eq!(outcome.status, "completed");
-    assert!(outcome.output.contains(" ["));
+    assert_eq!(outcome.status, "failed");
+    assert!(
+        outcome.error.contains("subagent.xyz") && outcome.error.contains("agent run"),
+        "the error must name the tool and why it cannot run: {}",
+        outcome.error
+    );
+    assert!(
+        outcome.output.is_empty(),
+        "a refused delegation must not produce tool output: {}",
+        outcome.output
+    );
+    assert!(
+        !outcome.error.contains("spawned"),
+        "never claim anything was spawned: {}",
+        outcome.error
+    );
 }
 
 #[tokio::test]

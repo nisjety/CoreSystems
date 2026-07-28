@@ -107,11 +107,11 @@ const MAX_TOKENS: i32 = 4096;
 /// discover a schema before acting (Visma spends 2 rounds on
 /// `list_skills` + `get_skill` before its first query), which left nothing for
 /// acting on the result, let alone recovering from it.
-const DEFAULT_MAX_ROUNDS: u32 = 12;
+pub(crate) const DEFAULT_MAX_ROUNDS: u32 = 12;
 
 /// Hard ceiling on rounds regardless of the request, so a misbehaving caller
 /// can't drive an unbounded loop.
-const MAX_ROUNDS_CEILING: u32 = 32;
+pub(crate) const MAX_ROUNDS_CEILING: u32 = 32;
 
 /// Cap on a single tool outcome rendered back into the conversation context.
 /// Matches model-gateway's `MAX_TOOL_OUTPUT_CHARS` so the same tool result is
@@ -137,6 +137,10 @@ fn data_category(tool_name: &str) -> &'static str {
         // classify honestly as `unclassified` rather than over-claim that an
         // external server returns only public, non-personal data.
         name if name.starts_with("mcp__") => "unclassified",
+        // A subagent inherits the parent's whole toolset, `knowledge_search`
+        // included, so its synthesized answer may quote the org's private
+        // corpus. Classify by the worst case it can genuinely contain.
+        name if crate::subagent::is_subagent_tool(name) => "customer_private",
         _ => "public_non_personal",
     }
 }
@@ -146,6 +150,68 @@ struct ToolStepResult {
     name: String,
     output: String,
     error: Option<String>,
+}
+
+/// Everything a round loop needs that does not change between its rounds.
+///
+/// Extracted so [`run_rounds`] is REENTRANT: the user-facing run and every
+/// delegated subagent are the same driver with a different context, rather than
+/// two implementations that drift. A subagent inherits the run's identity,
+/// credentials, tools, posture and ZDR flag verbatim through `req` — delegation
+/// is not an opportunity to re-derive scope from model input.
+struct LoopContext<'a> {
+    state: &'a crate::state::StateStore,
+    session_channel: &'a Channel,
+    inference_channel: &'a Channel,
+    /// The run this loop belongs to. A subagent runs INSIDE its parent's run, so
+    /// org/user/run/thread/ZDR are shared; only the goal and budget differ.
+    req: &'a pb::RunAgentRequest,
+    tools: Vec<pb::ToolDefinition>,
+    /// Purpose-lock scope, derived from `tools`.
+    allowlist: BTreeSet<String>,
+    data_plane_bearer: Option<&'a str>,
+    session_bearer: Option<&'a str>,
+    inference_bearer: &'a str,
+    capability_policy: &'a dyn crate::capability_policy::CapabilityPolicy,
+    terminal_tokens: &'a dyn ManagedRunTokenProvider,
+    agent_model: String,
+    permission_wire: &'static str,
+    /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
+    /// recursion via `subagent::guard_depth` and selects the run-level
+    /// behaviours (HITL pause, terminalization) only the root loop may perform.
+    depth: u32,
+    /// Prefixed onto this loop's step ids so a delegated loop's steps are
+    /// attributable to the tool call that spawned them instead of colliding
+    /// with the parent's `tool_<n>_<id>` sequence.
+    step_prefix: String,
+}
+
+/// Why a round loop stopped — without deciding what to do about it. The root run
+/// finalizes; a subagent turns the same outcome into its tool result.
+enum RoundsOutcome {
+    Answered(String),
+    Exhausted,
+    InferFailed,
+    /// A gated tool minted a durable approval and the run is paused. Root only:
+    /// a delegated loop cannot own the run's HITL pause.
+    Paused(pb::RunAgentResponse),
+}
+
+struct RoundsResult {
+    outcome: RoundsOutcome,
+    /// Inference rounds this loop drove itself.
+    rounds_executed: u32,
+    /// Inference rounds its delegated subagents drove, charged to the same
+    /// budget so N delegations cannot multiply the run's total spend.
+    delegated_rounds: u32,
+    grounded: bool,
+}
+
+impl RoundsResult {
+    /// Every inference round the run performed, this loop's and its delegates'.
+    fn total_rounds(&self) -> u32 {
+        self.rounds_executed.saturating_add(self.delegated_rounds)
+    }
 }
 
 /// Drive an agent run to a terminal answer through a governed multi-tool loop.
@@ -233,14 +299,16 @@ async fn merged_tool_defs(
     tools
 }
 
-/// Loop body driving `req` with an explicit tool allowlist. The public
-/// [`run_agent`] passes [`offered_tool_defs`]; tests inject a smaller (or
-/// gated) tool set to exercise the purpose-lock and HITL branches without a
-/// live tool backend.
-// One cohesive ReAct driver (setup → round loop → finalize); splitting it would
-// scatter the shared loop state across helpers for no clarity gain. Mirrors
-// model-gateway's `run_tool_rounds`.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Run-level driver for `req` with an explicit tool allowlist: plan transition →
+/// [`run_rounds`] → finalize. The public [`run_agent`] passes
+/// [`offered_tool_defs`]; tests inject a smaller (or gated) tool set to exercise
+/// the purpose-lock and HITL branches without a live tool backend.
+///
+/// The ReAct-style round loop itself lives in [`run_rounds`] because a delegated
+/// subagent re-enters it, and must NOT re-enter any of the run-level work here:
+/// there is exactly one plan transition and one managed terminal receipt per
+/// run, no matter how many nested loops it drove.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_with_tools(
     state: &crate::state::StateStore,
     session_channel: Channel,
@@ -269,12 +337,6 @@ async fn run_agent_with_tools(
     } else {
         req.max_rounds.min(MAX_ROUNDS_CEILING)
     };
-
-    // The run's Zero-Data-Retention flag, threaded through every inference
-    // round (so inference-core's prompt cache skips durable read/write) and
-    // onto each tool step's GDPR audit detail. Sourced from `RunAgentRequest`,
-    // which the gateway populates from the chat request's `zdr` flag.
-    let zdr = req.zdr;
 
     // Autonomous, tool-using runs need a tool-following model. A weak chat-tier
     // model (e.g. gpt-4o-mini) under-elects tools unless the prompt is forceful,
@@ -307,6 +369,82 @@ async fn run_agent_with_tools(
     )
     .await;
 
+    let context = LoopContext {
+        state,
+        session_channel: &session_channel,
+        inference_channel: &inference_channel,
+        req: &req,
+        tools,
+        allowlist,
+        data_plane_bearer: data_plane_bearer.as_deref(),
+        session_bearer: session_bearer.as_deref(),
+        inference_bearer: &inference_bearer,
+        capability_policy,
+        terminal_tokens,
+        agent_model,
+        permission_wire,
+        depth: 0,
+        step_prefix: String::new(),
+    };
+
+    // 2. The governed ReAct loop.
+    let rounds = run_rounds(&context, &req.goal, max_rounds).await?;
+    let total_rounds = rounds.total_rounds();
+    let (final_answer, success) = match rounds.outcome {
+        // Paused, not finished: the approval is already durable and the run
+        // stays non-terminal. Resume re-invokes `run_agent`.
+        RoundsOutcome::Paused(response) => return Ok(response),
+        RoundsOutcome::Answered(text) => (text, true),
+        RoundsOutcome::Exhausted | RoundsOutcome::InferFailed => {
+            (GRACEFUL_FAILURE_REPLY.to_owned(), false)
+        }
+    };
+
+    finalize(
+        state,
+        &session_channel,
+        &plan_id,
+        &req,
+        &final_answer,
+        success,
+        total_rounds,
+        rounds.grounded,
+        session_bearer.as_deref(),
+        terminal_tokens,
+    )
+    .await
+}
+
+/// The governed ReAct-style round loop: offer tools → `Infer` → dispatch requested
+/// tool calls through the gated [`runtime_loop::execute_step_with_subagent`]
+/// path → feed the outcomes back → re-infer, until the model answers or the
+/// budget is spent.
+///
+/// REENTRANT by design: [`run_subagent`] calls it again with `depth + 1` and a
+/// fresh message history, so a delegated agent is this exact machinery — same
+/// purpose-lock, same permission/hook/capability gates, same durable step
+/// records — instead of a parallel implementation. Everything that must happen
+/// exactly once per run (plan transitions, the managed terminal receipt, the
+/// assistant message) stays in the caller.
+///
+/// Mirrors model-gateway's `run_tool_rounds`.
+#[allow(clippy::too_many_lines)]
+async fn run_rounds(
+    ctx: &LoopContext<'_>,
+    goal: &str,
+    max_rounds: u32,
+) -> Result<RoundsResult, tonic::Status> {
+    let req = ctx.req;
+    // The run's Zero-Data-Retention flag, threaded through every inference round
+    // (so inference-core's prompt cache skips durable read/write) and onto each
+    // tool step's GDPR audit detail. Sourced from `RunAgentRequest`, which the
+    // gateway populates from the chat request's `zdr` flag — a nested loop
+    // inherits it rather than deciding retention for itself.
+    let zdr = req.zdr;
+
+    // ISOLATION: a fresh history seeded only with THIS loop's goal. For a
+    // subagent that is the point of delegating — a long sub-task's transcript
+    // never reaches the parent's context, only its conclusion does.
     let mut messages = vec![
         pb::ChatMessage {
             role: "system".to_owned(),
@@ -315,14 +453,15 @@ async fn run_agent_with_tools(
         },
         pb::ChatMessage {
             role: "user".to_owned(),
-            content: req.goal.clone(),
+            content: goal.to_owned(),
             name: String::new(),
         },
     ];
 
-    let mut inference = InferenceCoreClient::new(inference_channel);
+    let mut inference = InferenceCoreClient::new(ctx.inference_channel.clone());
     let mut answer: Option<String> = None;
     let mut rounds_executed: u32 = 0;
+    let mut delegated_rounds: u32 = 0;
     let mut step_seq: u32 = 0;
     let mut attempted_retrievals = BTreeSet::new();
     // HONESTY_CONTRACT: true once any knowledge_search call in this run
@@ -330,25 +469,27 @@ async fn run_agent_with_tools(
     // RunAgentResponse can report real grounding instead of a guess.
     let mut grounded = false;
 
-    for _round in 0..max_rounds {
-        heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
+    // A delegated loop's rounds are charged against the SAME budget, so a parent
+    // that delegates on every round cannot drive max_rounds² inference calls.
+    while rounds_executed + delegated_rounds < max_rounds {
+        heartbeat_managed_agent_run(ctx.session_channel, req, ctx.terminal_tokens).await?;
         rounds_executed += 1;
         let mut infer_request = tonic::Request::new(pb::InferRequest {
             request_id: req.run_id.clone(),
             org_id: req.org_id.clone(),
-            model: agent_model.clone(),
+            model: ctx.agent_model.clone(),
             provider_hint: String::new(),
             messages: messages.clone(),
             temperature: TEMPERATURE,
             max_tokens: MAX_TOKENS,
             structured_output_schema: String::new(),
             zdr,
-            tools: tools.clone(),
+            tools: ctx.tools.clone(),
             tool_choice: "auto".to_owned(),
         });
         infer_request.metadata_mut().insert(
             "authorization",
-            format!("Bearer {inference_bearer}")
+            format!("Bearer {}", ctx.inference_bearer)
                 .parse()
                 .expect("verified compact JWT is valid gRPC metadata"),
         );
@@ -359,22 +500,16 @@ async fn run_agent_with_tools(
             Err(error) => {
                 warn!(
                     run_id = %req.run_id,
+                    depth = ctx.depth,
                     error = %error,
                     "run_agent: inference failed; finalizing run as failed (graceful reply)"
                 );
-                return finalize(
-                    state,
-                    &session_channel,
-                    &plan_id,
-                    &req,
-                    GRACEFUL_FAILURE_REPLY,
-                    false,
+                return Ok(RoundsResult {
+                    outcome: RoundsOutcome::InferFailed,
                     rounds_executed,
+                    delegated_rounds,
                     grounded,
-                    session_bearer.as_deref(),
-                    terminal_tokens,
-                )
-                .await;
+                });
             }
         };
 
@@ -388,7 +523,7 @@ async fn run_agent_with_tools(
         let mut outcomes = Vec::with_capacity(response.tool_calls.len());
         for call in &response.tool_calls {
             // Purpose-lock: reject any tool not in the offered allowlist.
-            if !allowlist.contains(&call.name) {
+            if !ctx.allowlist.contains(&call.name) {
                 warn!(
                     run_id = %req.run_id,
                     tool = %call.name,
@@ -428,55 +563,99 @@ async fn run_agent_with_tools(
             // by the gate, the durable approval binding (a provider write forwards
             // this step's real approval id), and the audit step record.
             step_seq += 1;
-            let step_id = tool_step_id(&req.run_id, step_seq, call);
+            let step_id = tool_step_id(&ctx.step_prefix, step_seq, call);
 
-            let outcome = runtime_loop::execute_step(
+            // The delegated-subagent dispatch capability for THIS call: a value
+            // only this loop can construct, carrying the budget left right now.
+            // `execute_step` keeps the capability/hook/permission gates, so a
+            // subagent spawn is governed exactly like any other tool call.
+            let subagent_dispatch = LoopSubagentDispatch::new(
+                ctx,
+                &step_id,
+                max_rounds.saturating_sub(rounds_executed + delegated_rounds),
+            );
+
+            let outcome = runtime_loop::execute_step_with_subagent(
                 &call.name,
                 &call.arguments_json,
-                permission_wire,
+                ctx.permission_wire,
                 "",
                 &req.org_id,
                 &req.user_id,
                 &req.run_id,
                 &step_id,
-                Some(session_channel.clone()),
+                Some(ctx.session_channel.clone()),
                 None,
                 None,
                 zdr,
-                data_plane_bearer.as_deref(),
-                session_bearer.as_deref(),
-                Some(inference_bearer.as_str()),
-                capability_policy,
+                ctx.data_plane_bearer,
+                ctx.session_bearer,
+                Some(ctx.inference_bearer),
+                ctx.capability_policy,
+                Some(&subagent_dispatch),
             )
             .await;
+            delegated_rounds =
+                delegated_rounds.saturating_add(subagent_dispatch.rounds_consumed());
 
             // HITL: a gated tool may be reported as paused only after the
             // durable approval write succeeds. Otherwise propagate an explicit
             // unavailable error without a false AwaitingApproval state/event.
             if outcome.status == "awaiting_approval" {
-                return pause_for_approval(
-                    state,
-                    &session_channel,
-                    &req,
-                    &step_id,
-                    &call.name,
-                    rounds_executed,
-                    session_bearer.as_deref(),
-                )
-                .await;
+                if ctx.depth == 0 {
+                    let paused = pause_for_approval(
+                        ctx.state,
+                        ctx.session_channel,
+                        req,
+                        &step_id,
+                        &call.name,
+                        rounds_executed.saturating_add(delegated_rounds),
+                        ctx.session_bearer,
+                    )
+                    .await?;
+                    return Ok(RoundsResult {
+                        outcome: RoundsOutcome::Paused(paused),
+                        rounds_executed,
+                        delegated_rounds,
+                        grounded,
+                    });
+                }
+                // A delegated loop cannot own the run's pause: the approval and
+                // its resume belong to the run, and resume replays the parent
+                // from its goal — which would discard this subagent's progress
+                // and re-pause here forever. Refuse honestly instead; the tool
+                // did NOT run, and the subagent can adapt or report back.
+                warn!(
+                    run_id = %req.run_id,
+                    depth = ctx.depth,
+                    tool = %call.name,
+                    "run_agent: approval-gated tool refused inside a delegated subagent"
+                );
+                outcomes.push(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(format!(
+                        "tool '{}' requires human approval, which a delegated subagent cannot \
+                         request; report that this step needs the main agent to run it directly",
+                        call.name
+                    )),
+                });
+                continue;
             }
 
             // Non-terminal per-tool step (status "running") carrying the GDPR
             // audit detail. The managed lifecycle, not a step payload, owns
-            // terminalization.
+            // terminalization. A delegated loop records through the SAME path,
+            // so its work shows up in the Agent Run Console under the step id of
+            // the call that delegated it.
             record_tool_step(
-                &session_channel,
+                ctx.session_channel,
                 &req.run_id,
                 &step_id,
                 &call.name,
                 &outcome,
                 zdr,
-                session_bearer.as_deref(),
+                ctx.session_bearer,
             )
             .await;
 
@@ -514,30 +693,181 @@ async fn run_agent_with_tools(
         });
     }
 
-    // The loop ended either with an answer or by exhausting the round budget.
-    let (final_answer, success) = if let Some(text) = answer {
-        (text, true)
+    let outcome = if let Some(text) = answer {
+        RoundsOutcome::Answered(text)
     } else {
         warn!(
             run_id = %req.run_id,
+            depth = ctx.depth,
             rounds_executed,
+            delegated_rounds,
             "run_agent: round budget exhausted without a final answer"
         );
-        (GRACEFUL_FAILURE_REPLY.to_owned(), false)
+        RoundsOutcome::Exhausted
     };
-    finalize(
-        state,
-        &session_channel,
-        &plan_id,
-        &req,
-        &final_answer,
-        success,
+    Ok(RoundsResult {
+        outcome,
         rounds_executed,
+        delegated_rounds,
         grounded,
-        session_bearer.as_deref(),
-        terminal_tokens,
-    )
-    .await
+    })
+}
+
+/// Bridges `execute_step`'s gated dispatch back into the loop for one
+/// `subagent.*` call.
+///
+/// Constructed per tool call so the delegated loop inherits exactly the budget
+/// remaining at that point, and records what it actually spent — the parent
+/// charges those rounds to the run so repeated delegation shrinks the budget
+/// instead of resetting it.
+struct LoopSubagentDispatch<'a, 'b> {
+    parent: &'a LoopContext<'b>,
+    parent_step_id: &'a str,
+    rounds_remaining: u32,
+    consumed: std::sync::atomic::AtomicU32,
+}
+
+impl<'a, 'b> LoopSubagentDispatch<'a, 'b> {
+    fn new(parent: &'a LoopContext<'b>, parent_step_id: &'a str, rounds_remaining: u32) -> Self {
+        Self {
+            parent,
+            parent_step_id,
+            rounds_remaining,
+            consumed: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn rounds_consumed(&self) -> u32 {
+        self.consumed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[tonic::async_trait]
+impl crate::subagent::SubagentDispatch for LoopSubagentDispatch<'_, '_> {
+    async fn spawn(&self, tool_name: &str, tool_input: &str) -> Result<String, String> {
+        let (result, rounds) = run_subagent(
+            self.parent,
+            self.parent_step_id,
+            self.rounds_remaining,
+            tool_name,
+            tool_input,
+        )
+        .await;
+        self.consumed
+            .fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+}
+
+/// Run ONE delegated subagent to a final answer by re-entering [`run_rounds`],
+/// and return that answer as the delegating tool call's output.
+///
+/// Returns the rounds consumed alongside the result — including on failure —
+/// because the parent must charge them either way.
+///
+/// Every refusal path returns an explicit error the parent model can act on. The
+/// alternative (what the old stub did) is to hand back a success for work that
+/// never happened, which the parent then presents to the user as done.
+async fn run_subagent(
+    parent: &LoopContext<'_>,
+    parent_step_id: &str,
+    rounds_remaining: u32,
+    tool_name: &str,
+    tool_input: &str,
+) -> (Result<String, String>, u32) {
+    let label = crate::subagent::label(tool_name);
+    if let Err(refusal) = crate::subagent::guard_depth(parent.depth) {
+        warn!(
+            run_id = %parent.req.run_id,
+            depth = parent.depth,
+            subagent = %label,
+            "run_agent: subagent spawn refused by the recursion guard"
+        );
+        return (Err(refusal), 0);
+    }
+    let task = match crate::subagent::parse_task(tool_name, tool_input) {
+        Ok(task) => task,
+        Err(error) => return (Err(error), 0),
+    };
+    let budget = match crate::subagent::resolve_round_budget(rounds_remaining, task.max_rounds) {
+        Ok(budget) => budget,
+        Err(error) => return (Err(error), 0),
+    };
+
+    // The child inherits the run's identity, credentials, tools, posture and ZDR
+    // flag verbatim (`req` and the bearers are passed through, never re-derived
+    // from the tool JSON), so tenant isolation is exactly the parent's. What it
+    // does NOT inherit is the parent's transcript.
+    let child = LoopContext {
+        state: parent.state,
+        session_channel: parent.session_channel,
+        inference_channel: parent.inference_channel,
+        req: parent.req,
+        tools: parent.tools.clone(),
+        allowlist: parent.allowlist.clone(),
+        data_plane_bearer: parent.data_plane_bearer,
+        session_bearer: parent.session_bearer,
+        inference_bearer: parent.inference_bearer,
+        capability_policy: parent.capability_policy,
+        terminal_tokens: parent.terminal_tokens,
+        agent_model: parent.agent_model.clone(),
+        permission_wire: parent.permission_wire,
+        depth: parent.depth + 1,
+        // Hang the child's step ids off the delegating call's step id so the
+        // Agent Run Console attributes delegated work to the call that caused
+        // it, and so two sibling subagents cannot collide.
+        step_prefix: format!("{parent_step_id}."),
+    };
+
+    info!(
+        run_id = %parent.req.run_id,
+        subagent = %label,
+        depth = child.depth,
+        budget,
+        "run_agent: delegating to subagent (isolated context)"
+    );
+
+    match run_rounds(&child, &task.goal, budget).await {
+        Ok(result) => {
+            let rounds = result.total_rounds();
+            match result.outcome {
+                RoundsOutcome::Answered(text) if !text.trim().is_empty() => (Ok(text), rounds),
+                RoundsOutcome::Answered(_) => (
+                    Err(format!("subagent '{label}' returned an empty answer")),
+                    rounds,
+                ),
+                RoundsOutcome::Exhausted => (
+                    Err(format!(
+                        "subagent '{label}' spent its whole {budget}-round budget without \
+                         reaching an answer; narrow the delegated task or do it directly"
+                    )),
+                    rounds,
+                ),
+                RoundsOutcome::InferFailed => (
+                    Err(format!(
+                        "subagent '{label}' failed: inference was unavailable"
+                    )),
+                    rounds,
+                ),
+                // Unreachable: a nested loop refuses gated tools per-call rather
+                // than pausing. Kept explicit so a future change cannot turn a
+                // pause into a silent success.
+                RoundsOutcome::Paused(_) => (
+                    Err(format!(
+                        "subagent '{label}' cannot pause the run for human approval"
+                    )),
+                    rounds,
+                ),
+            }
+        }
+        Err(status) => (
+            Err(format!(
+                "subagent '{label}' failed: {}",
+                status.message()
+            )),
+            0,
+        ),
+    }
 }
 
 /// Resolve the model the agentic loop drives. Autonomous, tool-using runs need
@@ -575,15 +905,18 @@ fn mode_wire(mode: PermissionMode) -> &'static str {
     }
 }
 
-/// Stable per-tool step id: `tool_{seq}_{call_id_or_name}`.
-fn tool_step_id(run_id: &str, seq: u32, call: &pb::ToolCall) -> String {
+/// Stable per-tool step id: `{prefix}tool_{seq}_{call_id_or_name}`.
+///
+/// `prefix` is empty for the user-facing run and the delegating call's step id
+/// (plus `.`) inside a subagent, which is what keeps two nested loops' `seq`
+/// counters from producing the same step id.
+fn tool_step_id(prefix: &str, seq: u32, call: &pb::ToolCall) -> String {
     let suffix = if call.id.is_empty() {
         &call.name
     } else {
         &call.id
     };
-    let _ = run_id;
-    format!("tool_{seq}_{suffix}")
+    format!("{prefix}tool_{seq}_{suffix}")
 }
 
 /// HONESTY_CONTRACT: true when a `knowledge_search` tool outcome's JSON
@@ -699,6 +1032,17 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             name: "web_fetch".to_owned(),
             description: "Fetch and read a specific web page; returns its cleaned text content.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"}},"required":["url"]}"#.to_owned(),
+        },
+        // Delegation. Offered so the capability is actually reachable: the
+        // purpose-lock rejects any tool absent from this list, so without a
+        // definition here a `subagent.*` call could never be dispatched at all.
+        // The description states the real contract (isolated context, own
+        // budget, no nesting, no approval-gated tools) because a model that
+        // over-delegates burns the run's shared round budget.
+        pb::ToolDefinition {
+            name: "subagent.task".to_owned(),
+            description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, cannot delegate further, and cannot run tools that require human approval. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's tool rounds; capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
         },
     ]
 }
@@ -1292,11 +1636,17 @@ mod tests {
 
     // --- Inference mock: replays a scripted queue, one entry per round. ---
 
+    type ObservedMessages = Arc<Mutex<Vec<Vec<pb::ChatMessage>>>>;
+
     struct MockInference {
         script: Mutex<std::collections::VecDeque<Scripted>>,
         /// ZDR flag observed on each `InferRequest`, so a test can assert the
         /// run's `zdr` was threaded through.
         observed_zdr: Arc<Mutex<Vec<bool>>>,
+        /// Message history observed on each `InferRequest`, in call order. A
+        /// nested subagent shares this channel, so the recording is also the
+        /// evidence that its context was ISOLATED from its parent's.
+        observed_messages: ObservedMessages,
     }
 
     impl MockInference {
@@ -1304,6 +1654,7 @@ mod tests {
             Self {
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_messages: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -1311,6 +1662,15 @@ mod tests {
             Self {
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr,
+                observed_messages: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_message_recorder(steps: Vec<Scripted>, observed_messages: ObservedMessages) -> Self {
+            Self {
+                script: Mutex::new(steps.into_iter().collect()),
+                observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_messages,
             }
         }
     }
@@ -1324,10 +1684,9 @@ mod tests {
             &self,
             request: Request<pb::InferRequest>,
         ) -> Result<Response<pb::InferResponse>, Status> {
-            self.observed_zdr
-                .lock()
-                .unwrap()
-                .push(request.into_inner().zdr);
+            let observed = request.into_inner();
+            self.observed_zdr.lock().unwrap().push(observed.zdr);
+            self.observed_messages.lock().unwrap().push(observed.messages);
             // Default to a plain answer once the script is exhausted, so a loop
             // bug can't hang the test waiting for more rounds.
             let step = self
@@ -1949,6 +2308,19 @@ mod tests {
         observed_zdr: Arc<Mutex<Vec<bool>>>,
     ) -> Channel {
         spawn_inference_channel_inner(MockInference::with_zdr_recorder(script, observed_zdr)).await
+    }
+
+    /// Like [`spawn_inference_channel`] but records the message history of every
+    /// `InferRequest`, in call order, into `observed_messages`.
+    async fn spawn_inference_channel_with_messages(
+        script: Vec<Scripted>,
+        observed_messages: ObservedMessages,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference::with_message_recorder(
+            script,
+            observed_messages,
+        ))
+        .await
     }
 
     async fn spawn_inference_channel_inner(mock: MockInference) -> Channel {
@@ -2681,6 +3053,379 @@ mod tests {
             r.decisions[0].0.starts_with("appr_"),
             "a real durable approval id is threaded, got {}",
             r.decisions[0].0
+        );
+    }
+
+    // --- Delegated subagents -------------------------------------------------
+
+    /// The (output, error) Session Core persisted for `step_id`.
+    fn persisted_step(rec: &Recorder, step_id: &str) -> (String, String) {
+        if let Some((_, output, error)) = rec
+            .persisted_step_payloads
+            .iter()
+            .find(|(id, _, _)| id == step_id)
+        {
+            return (output.clone(), error.clone());
+        }
+        let step_ids: Vec<&String> = rec
+            .persisted_step_payloads
+            .iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        panic!("no persisted step '{step_id}'; recorded steps: {step_ids:?}")
+    }
+
+    /// The first user message of a recorded `InferRequest` — the goal that loop
+    /// was seeded with.
+    fn seeded_goal(messages: &[pb::ChatMessage]) -> &str {
+        messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str())
+    }
+
+    fn subagent_call(id: &str, input: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: "subagent.task".to_owned(),
+            arguments_json: input.to_owned(),
+        }
+    }
+
+    /// A tool call that dispatches for real and fails fast without a network:
+    /// `yr_weather` with no coordinates loses its serde parse inside
+    /// `execute_step`, which proves the nested loop reached real dispatch.
+    fn failing_tool_call(id: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: "yr_weather".to_owned(),
+            arguments_json: "{}".to_owned(),
+        }
+    }
+
+    // Asserts the whole delegation contract in one run: nesting, isolation,
+    // result propagation, observability, and terminal-once.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn subagent_runs_a_real_nested_loop_in_an_isolated_context_and_returns_its_answer() {
+        const DELEGATED_GOAL: &str = "Find the current Bergen weather";
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+
+        // One shared script, consumed in call order: parent delegates, the
+        // nested loop runs a tool round then answers, the parent answers from it.
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating the lookup.".to_owned(),
+                    calls: vec![subagent_call(
+                        "sub-1",
+                        &format!(r#"{{"goal":"{DELEGATED_GOAL}"}}"#),
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+                Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a delegating agent run should succeed");
+
+        // RESULT PROPAGATION: the parent answered from the subagent's real text.
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, format!("Delegated result: {SUBAGENT_ANSWER}"));
+        assert_eq!(
+            resp.rounds_executed, 4,
+            "2 parent rounds + the 2 rounds its delegate spent, all charged to the run"
+        );
+
+        // ISOLATION: the nested loop was seeded with the delegated goal only —
+        // never the parent's transcript or goal.
+        let observed = observed_messages.lock().unwrap();
+        assert_eq!(observed.len(), 4, "parent, child, child, parent");
+        assert_eq!(seeded_goal(&observed[0]), sample_request().goal);
+        assert_eq!(seeded_goal(&observed[1]), DELEGATED_GOAL);
+        assert_eq!(
+            observed[1].len(),
+            2,
+            "a fresh history: system preamble + the delegated goal, nothing inherited"
+        );
+        assert!(
+            !observed[1]
+                .iter()
+                .any(|message| message.content.contains(&sample_request().goal)),
+            "the parent's goal must not leak into the delegated context"
+        );
+        // Conversely the parent's own context never grows the child's transcript,
+        // only its conclusion.
+        assert!(
+            !observed[3]
+                .iter()
+                .any(|message| message.content.contains("Tool results")
+                    && message.content.contains("yr_weather")),
+            "the child's intermediate tool traffic must stay out of the parent's context"
+        );
+        drop(observed);
+
+        let r = rec.lock().unwrap();
+        // DURABLE OBSERVABILITY: the nested tool step is recorded through the
+        // same non-terminal audit path, keyed under the delegating call's step
+        // id, and it lands BEFORE the delegating step completes.
+        assert_eq!(
+            r.completed,
+            vec![
+                ("tool_1_sub-1.tool_1_wx-1".to_owned(), "running".to_owned()),
+                ("tool_1_sub-1".to_owned(), "running".to_owned()),
+            ],
+            "the delegated run is visible, attributed, and non-terminal"
+        );
+        assert_eq!(
+            r.managed_terminal_outcomes.len(),
+            1,
+            "TERMINAL-ONCE: a nested loop must not add a second managed receipt"
+        );
+        assert_eq!(
+            r.plan_transitions,
+            vec![
+                (pb::PlanState::Draft as i32, pb::PlanState::Executing as i32),
+                (
+                    pb::PlanState::Executing as i32,
+                    pb::PlanState::Completed as i32
+                ),
+            ],
+            "a nested loop must not add plan transitions of its own"
+        );
+
+        let (output, error) = persisted_step(&r, "tool_1_sub-1");
+        assert!(
+            output.contains(SUBAGENT_ANSWER),
+            "the subagent's answer IS the tool output: {output}"
+        );
+        assert!(error.is_empty(), "a successful delegation has no error");
+        assert!(
+            output.contains("data_category=customer_private"),
+            "a subagent inherits knowledge_search, so its result is classified private: {output}"
+        );
+        assert!(
+            !output.contains("spawned"),
+            "the fabricated 'spawned <tool>' summary is gone: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_may_not_spawn_another_subagent() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+
+        // The nested loop asks to delegate again. The recursion guard must refuse
+        // it with an explanation instead of opening a third level.
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-outer", r#"{"goal":"outer task"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-inner", r#"{"goal":"inner task"}"#)],
+                },
+                Scripted::Answer("I completed it myself.".to_owned()),
+                Scripted::Answer("Done.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused nested delegation must not fail the run");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "Done.");
+        assert_eq!(
+            observed_messages.lock().unwrap().len(),
+            4,
+            "exactly four inference rounds: no third-level loop ever started"
+        );
+
+        let r = rec.lock().unwrap();
+        let (output, error) = persisted_step(&r, "tool_1_sub-outer.tool_1_sub-inner");
+        assert!(
+            error.contains("may not spawn another subagent"),
+            "the refusal must be an explicit error the model can act on: {error}"
+        );
+        assert!(
+            output.is_empty() || !output.contains("spawned"),
+            "a refused spawn must never look like a success: {output}"
+        );
+        // The outer delegation still returned its own honest answer.
+        let (outer_output, outer_error) = persisted_step(&r, "tool_1_sub-outer");
+        assert!(outer_error.is_empty(), "{outer_error}");
+        assert!(
+            outer_output.contains("I completed it myself."),
+            "{outer_output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_honors_a_requested_budget_and_reports_exhaustion_honestly() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+
+        // A one-round subagent that spends that round on a tool call cannot
+        // answer. The parent must be told so, not handed a fake result.
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call(
+                        "sub-b",
+                        r#"{"goal":"deep research","max_rounds":1}"#,
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("The delegated lookup did not finish.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a failed delegation must not fail the parent run");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "The delegated lookup did not finish.");
+        assert_eq!(
+            observed_messages.lock().unwrap().len(),
+            3,
+            "the subagent got exactly the 1 round it asked for, not the default 12"
+        );
+
+        let r = rec.lock().unwrap();
+        let (output, error) = persisted_step(&r, "tool_1_sub-b");
+        assert!(
+            error.contains("1-round budget"),
+            "the parent is told the real budget that ran out: {error}"
+        );
+        assert_eq!(
+            output.trim_end(),
+            "[data_category=customer_private zdr=false tool=subagent.task]",
+            "an exhausted subagent contributes audit metadata only — never a result"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_budget_cannot_exceed_the_parents_remaining_rounds() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+
+        // The parent has a 2-round budget and delegates on round 1, so exactly 1
+        // round is left to lend — however many the call asks for. The delegated
+        // round is then charged to the run, which is what stops the parent from
+        // taking a second round of its own.
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call(
+                        "sub-greedy",
+                        r#"{"goal":"boil the ocean","max_rounds":99}"#,
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.max_rounds = 2;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("an exhausted run is still finalized");
+
+        assert_eq!(
+            observed_messages.lock().unwrap().len(),
+            2,
+            "1 parent round + the 1 round it had left to lend; a 99-round request \
+             cannot buy more than the run owns"
+        );
+        assert_eq!(resp.status, "failed", "the run really did run out of budget");
+        assert_eq!(resp.final_output, GRACEFUL_FAILURE_REPLY);
+        assert_eq!(
+            resp.rounds_executed, 2,
+            "the delegated round is charged to the run's budget, not free"
+        );
+
+        let r = rec.lock().unwrap();
+        let (_, error) = persisted_step(&r, "tool_1_sub-greedy");
+        assert!(
+            error.contains("1-round budget"),
+            "the clamp to the parent's remainder is what the subagent actually got: {error}"
         );
     }
 }
