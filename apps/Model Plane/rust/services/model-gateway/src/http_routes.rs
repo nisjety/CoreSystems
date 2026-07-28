@@ -2118,6 +2118,33 @@ async fn mcp_register(
     .await
 }
 
+/// Resolve the effective tool allowlist for a new MCP server: if the caller
+/// specified one explicitly, honor it verbatim (still the way to
+/// deliberately narrow scope). Otherwise auto-discover the server's
+/// `tools/list` and allow everything it reports — the rest of this connect
+/// flow already auto-detects transport and auth, so the caller shouldn't
+/// have to separately enumerate tool names by hand either. Falls back to
+/// the (empty) input unchanged if discovery fails, so the existing
+/// "tool_allowlist must contain 1 to 64 exact tool names" validation still
+/// surfaces a clear error rather than silently registering a toolless
+/// server.
+async fn resolve_tool_allowlist(url: &str, token: &str, requested: Vec<String>) -> Vec<String> {
+    if !requested.is_empty() {
+        return requested;
+    }
+    match crate::runtime_registries::http_list_tools(url, token).await {
+        Ok(tools) if !tools.is_empty() => tools.into_iter().map(|tool| tool.name).collect(),
+        Ok(_) => {
+            debug!(%url, "mcp auto-discovery: server reported zero tools");
+            requested
+        }
+        Err(error) => {
+            debug!(%url, %error, "mcp auto-discovery: tools/list failed, leaving allowlist as given");
+            requested
+        }
+    }
+}
+
 /// Register a plain (non-OAuth) MCP server — static token or none — and
 /// write through to capability-core. Shared by `mcp_register` (direct,
 /// explicit static-token registration) and `mcp_connect` (the
@@ -2146,6 +2173,11 @@ async fn register_plain_mcp_server(
     let ownership = match scope {
         crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
         crate::ownership::Scope::User => crate::ownership::Ownership::user(claims.user_id.clone()),
+    };
+    let tool_allowlist = if transport == "http" {
+        resolve_tool_allowlist(&url, &token, tool_allowlist).await
+    } else {
+        tool_allowlist
     };
     let server = McpServer {
         server_id: String::new(),
@@ -2660,13 +2692,21 @@ async fn mcp_oauth_callback(
             crate::ownership::Ownership::user(pending.user_id.clone())
         }
     };
+    // The user picked scope/visibility, never individual tool names — same
+    // auto-discovery register_plain_mcp_server uses for the non-OAuth path.
+    let tool_allowlist = resolve_tool_allowlist(
+        &pending.server_url,
+        &tokens.access_token,
+        pending.tool_allowlist,
+    )
+    .await;
     let server = McpServer {
         server_id: String::new(),
         name: pending.server_name,
         url: pending.server_url,
         transport: "http".to_owned(),
         token: String::new(),
-        tool_allowlist: pending.tool_allowlist,
+        tool_allowlist,
         enabled: true,
     };
     let resp = match crate::runtime_registries::handle_register_mcp_server(

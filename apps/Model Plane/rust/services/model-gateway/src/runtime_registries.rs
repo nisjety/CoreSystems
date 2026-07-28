@@ -194,7 +194,7 @@ impl McpRegistry {
 /// Discover an MCP server's tools over the **HTTP** bridge: `POST {url}/tools/list`.
 /// Accepts either a JSON-RPC envelope (`result.tools`) or a bare `{tools:[...]}`
 /// (the bridge may unwrap), mirroring the lenient `tools/call` bridge shape.
-async fn http_list_tools(url: &str, token: &str) -> Result<Vec<McpToolDef>, String> {
+pub(crate) async fn http_list_tools(url: &str, token: &str) -> Result<Vec<McpToolDef>, String> {
     let (http, endpoint) = safe_mcp_http_client(url).await?;
     let target = endpoint
         .join("tools/list")
