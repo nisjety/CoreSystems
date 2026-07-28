@@ -86,6 +86,81 @@ pub struct FallbackChain {
     /// EU embedding residency posture, resolved at boot from config. Drives the
     /// request-time deny-by-default gate in [`FallbackChain::create_embedding`].
     residency: EmbeddingResidency,
+    /// Per-provider default chat model, resolved at boot from the configured
+    /// deployment catalogs.
+    defaults: ProviderDefaults,
+    /// What this deployment can actually serve, used to prune tool-ladder rungs.
+    deployed: DeployedModels,
+}
+
+/// The deployment names that gate each model family on this resource.
+///
+/// `None` means "not knowable": either no provider of that family registered, or
+/// the one that did is a direct vendor API, which accepts any published model id
+/// and therefore has no deployment list to check against. Pruning on a guess
+/// would delete real fallback options, so `None` prunes nothing.
+#[derive(Debug, Clone, Default)]
+struct DeployedModels {
+    anthropic: Option<Vec<String>>,
+    openai: Option<Vec<String>>,
+}
+
+/// Default chat model per registered provider, resolved from configuration.
+///
+/// The Azure entries were compile-time constants, which is wrong for Azure: a
+/// model name there is a **deployment** name private to the resource, so a
+/// hardcoded default 404s `DeploymentNotFound` on any resource that does not
+/// happen to host it. That is precisely how every unspecified-model request died
+/// against an operator whose only chat deployment is `gpt-4o-mini` — the chain
+/// asked for `model-router`, which exists on some resources and not on theirs.
+///
+/// The direct (`anthropic` / `openai`) providers keep their compile-time
+/// defaults: their model ids are global to the vendor, not per-resource names,
+/// so there is no deployment to mismatch.
+#[derive(Debug, Clone)]
+pub struct ProviderDefaults {
+    azure_openai: String,
+    azure_anthropic: String,
+}
+
+impl Default for ProviderDefaults {
+    fn default() -> Self {
+        Self {
+            azure_openai: AZURE_MODEL_ROUTER.to_owned(),
+            azure_anthropic: super::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL.to_owned(),
+        }
+    }
+}
+
+impl ProviderDefaults {
+    fn from_config(cfg: &InferenceConfig) -> Self {
+        Self {
+            azure_openai: azure_default_deployment(
+                &cfg.azure_openai_chat_deployments,
+                AZURE_MODEL_ROUTER,
+            ),
+            azure_anthropic: azure_default_deployment(
+                &cfg.azure_anthropic_deployments,
+                super::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL,
+            ),
+        }
+    }
+}
+
+/// Pick the default deployment for an Azure-style provider.
+///
+/// `preferred` wins when the operator's catalog actually lists it — a resource
+/// that really does host Azure's auto-routing `model-router` (or the cheap
+/// `claude-haiku-4-5`) should keep getting it. Otherwise the operator's first
+/// configured deployment is the only name known to exist. An empty catalog means
+/// nothing was configured, so `preferred` is the last resort rather than a
+/// guess.
+fn azure_default_deployment(configured: &[String], preferred: &str) -> String {
+    configured
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(preferred))
+        .or_else(|| configured.first())
+        .map_or_else(|| preferred.to_owned(), String::clone)
 }
 
 /// Resolved EU embedding residency posture for the chain.
@@ -196,21 +271,13 @@ impl ThrottleState {
     }
 }
 
-/// Default chat model for a registered provider, used when the request leaves
-/// the model unspecified ("Velion Auto").
+/// How far past the resolved model the tool ladder may walk.
 ///
-/// * `azure-openai` → `model-router` (Azure's cost-optimizing auto-router).
-/// * `azure-anthropic` → cheapest Claude deployment (Haiku).
-/// * `anthropic` (direct) → first-party Claude default.
-/// * `openai` (direct) → `OpenAI` chat default.
-fn default_model_for(provider_name: &str) -> &'static str {
-    match provider_name {
-        "azure-openai" => AZURE_MODEL_ROUTER,
-        "azure-anthropic" => super::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL,
-        "anthropic" => super::anthropic::DEFAULT_ANTHROPIC_MODEL,
-        _ => super::openai::DEFAULT_OPENAI_MODEL,
-    }
-}
+/// Bounded because each rung costs a full provider walk (up to `max_retries`
+/// requests) before the next is tried, and an interactive turn cannot absorb an
+/// unbounded search. Four is what it takes to cross the whole Claude family and
+/// still reach one `OpenAI` rung on a resource with all four Claude deployments.
+const MAX_TOOL_LADDER_STEPS: usize = 4;
 
 /// Whether a registered provider can serve the requested model. Anthropic-shaped
 /// providers serve only `claude-*`; `OpenAI`-shaped providers serve everything
@@ -423,6 +490,23 @@ impl FallbackChain {
             );
         }
 
+        // Which ladder rungs this resource can actually serve. Only the Azure
+        // flavors are deployment-gated, and only when they registered and were
+        // given a catalog — the direct vendor APIs accept any published model
+        // id, so for them there is nothing authoritative to prune against.
+        let mut deployed = DeployedModels::default();
+        for (name, _) in &providers {
+            match name.as_str() {
+                "azure-anthropic" if !cfg.azure_anthropic_deployments.is_empty() => {
+                    deployed.anthropic = Some(cfg.azure_anthropic_deployments.clone());
+                }
+                "azure-openai" if !cfg.azure_openai_chat_deployments.is_empty() => {
+                    deployed.openai = Some(cfg.azure_openai_chat_deployments.clone());
+                }
+                _ => {}
+            }
+        }
+
         Self {
             providers,
             max_retries: cfg.max_retries_per_provider,
@@ -431,6 +515,8 @@ impl FallbackChain {
             policy_client,
             budget,
             residency,
+            defaults: ProviderDefaults::from_config(cfg),
+            deployed,
         }
     }
 
@@ -455,6 +541,10 @@ impl FallbackChain {
             // residency gate is exercised via dedicated unit tests below and the
             // request region. Default = deny-by-default (allow_non_eu = false).
             residency: EmbeddingResidency::default(),
+            defaults: ProviderDefaults::default(),
+            // No configured catalog, so nothing is known to be undeployed and
+            // the ladder is walked as written.
+            deployed: DeployedModels::default(),
         }
     }
 
@@ -537,6 +627,56 @@ impl FallbackChain {
             || (hint == "claude" && (name == "anthropic" || name == "azure-anthropic"))
     }
 
+    /// Default chat model for a registered provider, used when the request
+    /// leaves the model unspecified ("Velion Auto"). The Azure entries come from
+    /// the operator's configured deployment catalog — see [`ProviderDefaults`].
+    fn default_model_for(&self, provider_name: &str) -> &str {
+        match provider_name {
+            "azure-openai" => &self.defaults.azure_openai,
+            "azure-anthropic" => &self.defaults.azure_anthropic,
+            "anthropic" => super::anthropic::DEFAULT_ANTHROPIC_MODEL,
+            _ => super::openai::DEFAULT_OPENAI_MODEL,
+        }
+    }
+
+    /// Whether this deployment is known to be able to serve `model`. Unknown
+    /// catalogs answer `true` — see [`DeployedModels`].
+    fn is_deployed(&self, model: &str) -> bool {
+        let catalog = if is_anthropic_model(model) {
+            self.deployed.anthropic.as_ref()
+        } else {
+            self.deployed.openai.as_ref()
+        };
+        match catalog {
+            Some(names) => names.iter().any(|name| name.eq_ignore_ascii_case(model)),
+            None => true,
+        }
+    }
+
+    /// The ordered tool-capable models to try after `resolved`, bounded by
+    /// [`MAX_TOOL_LADDER_STEPS`] and pruned of rungs this resource cannot serve.
+    ///
+    /// Callers must only pass a model the intent layer resolved from a
+    /// `velion-*` mode. Substituting under a caller who pinned a model would
+    /// answer with something they did not ask for; "the model I chose was busy"
+    /// is their decision to make, not ours to paper over.
+    fn tool_ladder(&self, resolved: &str) -> Vec<String> {
+        let policy = self.policy.load();
+        let mut ladder: Vec<String> = Vec::new();
+        for candidate in &policy.tool_fallback_ladder {
+            if ladder.len() >= MAX_TOOL_LADDER_STEPS {
+                break;
+            }
+            let already_queued = candidate.eq_ignore_ascii_case(resolved)
+                || ladder.iter().any(|m| m.eq_ignore_ascii_case(candidate));
+            if already_queued || !self.is_deployed(candidate) {
+                continue;
+            }
+            ladder.push(candidate.clone());
+        }
+        ladder
+    }
+
     /// Perform unary inference with fallback and caching.
     ///
     /// # Errors
@@ -547,6 +687,11 @@ impl FallbackChain {
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
         let intent_req = self.resolve_intent(req).await;
+        // The ladder exists only for a model WE chose. `intent_req.is_some()` is
+        // exactly that condition — see `attempt_models`.
+        let ladder = intent_req
+            .as_ref()
+            .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
 
         // Check cache first
@@ -558,10 +703,11 @@ impl FallbackChain {
         let mut total_attempts: u32 = 0;
         let mut throttle = ThrottleState::default();
 
-        // Two passes at most: walk every provider, and if the only thing standing
-        // in the way was throttling with a short enough retry-after, honor it once
-        // and walk them again. A second throttle ends it — retrying a rate limit
-        // indefinitely is how one throttled tenant becomes a stuck queue.
+        // Two passes at most: walk every candidate model across every provider,
+        // and if the only thing standing in the way was throttling with a short
+        // enough retry-after, honor it once and walk them again. A second
+        // throttle ends it — retrying a rate limit indefinitely is how one
+        // throttled tenant becomes a stuck queue.
         for pass in 0..2u8 {
             if pass == 1 {
                 let Some(wait) = throttle.affordable_wait() else {
@@ -576,77 +722,21 @@ impl FallbackChain {
                 throttle = ThrottleState::default();
             }
 
-            for (name, provider) in &self.providers {
-                if !Self::provider_matches(name, &req.provider_hint) {
-                    continue;
-                }
-                // Skip providers that cannot serve the requested model family — a
-                // `claude-*` model must not hit the OpenAI surface (it would 404 the
-                // deployment) and vice-versa. Unspecified models pass (they resolve
-                // to the provider's default below).
-                if !provider_serves_model(name, &req.model) {
-                    continue;
-                }
-                if req.zdr && !provider.capabilities_dyn().supports_zdr {
+            for model in Self::attempt_models(&req.model, &ladder) {
+                if model != req.model {
                     warn!(
-                        provider = %name,
                         request_id = %req.request_id,
-                        "provider skipped: ZDR was required but is not verified for this deployment"
+                        resolved_model = %req.model,
+                        fallback_model = %model,
+                        "resolved model could not be served; trying the next tool-capable model"
                     );
-                    continue;
                 }
-                // "Velion Auto" / unspecified model → resolve to this provider's
-                // default so an unpinned request works against whatever provider is
-                // configured. Specified models pass through unchanged.
-                let resolved_req;
-                let call_req: &InferRequest = if is_unspecified_model(&req.model) {
-                    let mut r = req.clone();
-                    default_model_for(name).clone_into(&mut r.model);
-                    resolved_req = r;
-                    &resolved_req
-                } else {
-                    req
-                };
-                for attempt in 1..=self.max_retries {
-                    total_attempts += 1;
-                    let span = tracing::info_span!(
-                        "provider_attempt",
-                        provider = %name,
-                        attempt = attempt,
-                        request_id = %req.request_id,
-                    );
-                    let _enter = span.enter();
-
-                    match provider.infer_dyn(call_req).await {
-                        Ok(response) => {
-                            self.cache.put(req, &response);
-                            info!(
-                                provider = %name,
-                                attempt = attempt,
-                                model_used = %response.model_used,
-                                "infer succeeded"
-                            );
-                            return Ok(response);
-                        }
-                        Err(ProviderError::RateLimited { retry_after_ms }) => {
-                            warn!(
-                                provider = %name,
-                                attempt = attempt,
-                                retry_after_ms = retry_after_ms,
-                                "rate limited, moving to next provider"
-                            );
-                            throttle.record(retry_after_ms);
-                            break; // Skip remaining retries for this provider
-                        }
-                        Err(e) => {
-                            warn!(
-                                provider = %name,
-                                attempt = attempt,
-                                error = %e,
-                                "provider attempt failed"
-                            );
-                        }
-                    }
+                if let Some(response) = self
+                    .infer_one_model(req, model, &mut total_attempts, &mut throttle)
+                    .await
+                {
+                    self.cache.put(req, &response);
+                    return Ok(response);
                 }
             }
 
@@ -665,6 +755,127 @@ impl FallbackChain {
         }
     }
 
+    /// The models one pass may try, in order: the request's own model first,
+    /// then the tool ladder. Deduplicated, so no model is asked twice in a pass.
+    ///
+    /// `ladder` is empty unless the intent layer resolved the model, which is
+    /// what keeps a pinned model from being silently substituted.
+    ///
+    /// Deduplication is per pass rather than per request on purpose: the second
+    /// pass is the deliberate, once-only retry after an affordable retry-after,
+    /// and re-asking the same models is the whole point of it.
+    fn attempt_models<'a>(model: &'a str, ladder: &'a [String]) -> Vec<&'a str> {
+        let mut models = vec![model];
+        for rung in ladder {
+            if !models.iter().any(|m| m.eq_ignore_ascii_case(rung)) {
+                models.push(rung.as_str());
+            }
+        }
+        models
+    }
+
+    /// Try `model` against every provider that can serve it, with the configured
+    /// per-provider retries. `None` means nothing served it; throttling and the
+    /// attempt count accumulate into the caller's state so an exhausted chain
+    /// still reports `RateLimited` rather than generic exhaustion.
+    async fn infer_one_model(
+        &self,
+        req: &InferRequest,
+        model: &str,
+        total_attempts: &mut u32,
+        throttle: &mut ThrottleState,
+    ) -> Option<InferResponse> {
+        for (name, provider) in &self.providers {
+            if !Self::provider_matches(name, &req.provider_hint) {
+                continue;
+            }
+            // Skip providers that cannot serve the requested model family — a
+            // `claude-*` model must not hit the OpenAI surface (it would 404 the
+            // deployment) and vice-versa. Unspecified models pass (they resolve
+            // to the provider's default below).
+            if !provider_serves_model(name, model) {
+                continue;
+            }
+            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: ZDR was required but is not verified for this deployment"
+                );
+                continue;
+            }
+            let call_req = self.request_for(req, model, name);
+            for attempt in 1..=self.max_retries {
+                *total_attempts += 1;
+                let span = tracing::info_span!(
+                    "provider_attempt",
+                    provider = %name,
+                    attempt = attempt,
+                    request_id = %req.request_id,
+                );
+                let _enter = span.enter();
+
+                match provider.infer_dyn(call_req.as_ref()).await {
+                    Ok(response) => {
+                        info!(
+                            provider = %name,
+                            attempt = attempt,
+                            model_used = %response.model_used,
+                            "infer succeeded"
+                        );
+                        return Some(response);
+                    }
+                    Err(ProviderError::RateLimited { retry_after_ms }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            retry_after_ms = retry_after_ms,
+                            "rate limited, moving to next provider"
+                        );
+                        throttle.record(retry_after_ms);
+                        break; // Skip remaining retries for this provider
+                    }
+                    Err(e) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            error = %e,
+                            "provider attempt failed"
+                        );
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The request to send for `model` on `provider_name`.
+    ///
+    /// An unspecified model ("Velion Auto") becomes that provider's configured
+    /// default so an unpinned request works against whatever is deployed; a
+    /// ladder rung replaces the model so the provider — and therefore
+    /// `model_used` — reports what actually served. Borrows the caller's request
+    /// unchanged whenever no substitution is needed, so the common path still
+    /// costs no clone.
+    fn request_for<'a>(
+        &self,
+        req: &'a InferRequest,
+        model: &str,
+        provider_name: &str,
+    ) -> std::borrow::Cow<'a, InferRequest> {
+        let effective = if is_unspecified_model(model) {
+            self.default_model_for(provider_name)
+        } else {
+            model
+        };
+        if effective == req.model {
+            return std::borrow::Cow::Borrowed(req);
+        }
+        let mut rewritten = req.clone();
+        effective.clone_into(&mut rewritten.model);
+        std::borrow::Cow::Owned(rewritten)
+    }
+
     /// Perform streaming inference with fallback (no caching for streams).
     ///
     /// # Errors
@@ -676,6 +887,9 @@ impl FallbackChain {
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
         // Velion intent layer — same resolution as the unary path.
         let intent_req = self.resolve_intent(req).await;
+        let ladder = intent_req
+            .as_ref()
+            .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
 
         let mut total_attempts: u32 = 0;
@@ -698,69 +912,20 @@ impl FallbackChain {
                 throttle = ThrottleState::default();
             }
 
-            for (name, provider) in &self.providers {
-                if !Self::provider_matches(name, &req.provider_hint) {
-                    continue;
-                }
-                if !provider_serves_model(name, &req.model) {
-                    continue;
-                }
-                if req.zdr && !provider.capabilities_dyn().supports_zdr {
+            for model in Self::attempt_models(&req.model, &ladder) {
+                if model != req.model {
                     warn!(
-                        provider = %name,
                         request_id = %req.request_id,
-                        "stream provider skipped: ZDR was required but is not verified for this deployment"
+                        resolved_model = %req.model,
+                        fallback_model = %model,
+                        "resolved model could not be streamed; trying the next tool-capable model"
                     );
-                    continue;
                 }
-                // "Velion Auto" / unspecified model → resolve to this provider's default.
-                let resolved_req;
-                let call_req: &InferRequest = if is_unspecified_model(&req.model) {
-                    let mut r = req.clone();
-                    default_model_for(name).clone_into(&mut r.model);
-                    resolved_req = r;
-                    &resolved_req
-                } else {
-                    req
-                };
-                for attempt in 1..=self.max_retries {
-                    total_attempts += 1;
-                    let span = tracing::info_span!(
-                        "provider_stream_attempt",
-                        provider = %name,
-                        attempt = attempt,
-                        request_id = %req.request_id,
-                    );
-                    let _enter = span.enter();
-
-                    match provider.infer_stream_dyn(call_req).await {
-                        Ok(rx) => {
-                            info!(
-                                provider = %name,
-                                attempt = attempt,
-                                "infer_stream started"
-                            );
-                            return Ok(rx);
-                        }
-                        Err(ProviderError::RateLimited { retry_after_ms }) => {
-                            warn!(
-                                provider = %name,
-                                attempt = attempt,
-                                retry_after_ms = retry_after_ms,
-                                "rate limited, moving to next provider"
-                            );
-                            throttle.record(retry_after_ms);
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(
-                                provider = %name,
-                                attempt = attempt,
-                                error = %e,
-                                "provider stream attempt failed"
-                            );
-                        }
-                    }
+                if let Some(rx) = self
+                    .stream_one_model(req, model, &mut total_attempts, &mut throttle)
+                    .await
+                {
+                    return Ok(rx);
                 }
             }
 
@@ -776,6 +941,74 @@ impl FallbackChain {
         } else {
             Err(throttle.exhausted_error(total_attempts))
         }
+    }
+
+    /// Streaming twin of [`FallbackChain::infer_one_model`].
+    async fn stream_one_model(
+        &self,
+        req: &InferRequest,
+        model: &str,
+        total_attempts: &mut u32,
+        throttle: &mut ThrottleState,
+    ) -> Option<mpsc::Receiver<InferChunk>> {
+        for (name, provider) in &self.providers {
+            if !Self::provider_matches(name, &req.provider_hint) {
+                continue;
+            }
+            if !provider_serves_model(name, model) {
+                continue;
+            }
+            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "stream provider skipped: ZDR was required but is not verified for this deployment"
+                );
+                continue;
+            }
+            let call_req = self.request_for(req, model, name);
+            for attempt in 1..=self.max_retries {
+                *total_attempts += 1;
+                let span = tracing::info_span!(
+                    "provider_stream_attempt",
+                    provider = %name,
+                    attempt = attempt,
+                    request_id = %req.request_id,
+                );
+                let _enter = span.enter();
+
+                match provider.infer_stream_dyn(call_req.as_ref()).await {
+                    Ok(rx) => {
+                        info!(
+                            provider = %name,
+                            attempt = attempt,
+                            model_used = %call_req.model,
+                            "infer_stream started"
+                        );
+                        return Some(rx);
+                    }
+                    Err(ProviderError::RateLimited { retry_after_ms }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            retry_after_ms = retry_after_ms,
+                            "rate limited, moving to next provider"
+                        );
+                        throttle.record(retry_after_ms);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            error = %e,
+                            "provider stream attempt failed"
+                        );
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Create an embedding with provider fallback.
@@ -927,22 +1160,58 @@ mod resolution_tests {
 
     #[test]
     fn per_provider_defaults() {
+        let chain = FallbackChain::new_with_providers(Vec::new(), 1);
         assert_eq!(
-            default_model_for("anthropic"),
+            chain.default_model_for("anthropic"),
             crate::provider::anthropic::DEFAULT_ANTHROPIC_MODEL
         );
         assert_eq!(
-            default_model_for("openai"),
+            chain.default_model_for("openai"),
             crate::provider::openai::DEFAULT_OPENAI_MODEL
         );
-        // Azure OpenAI defaults to the cost-optimizing model-router, not a fixed
-        // chat model.
-        assert_eq!(default_model_for("azure-openai"), AZURE_MODEL_ROUTER);
-        assert_eq!(default_model_for("azure-openai"), "model-router");
+        // With no configured catalog, Azure OpenAI still falls back to the
+        // cost-optimizing model-router.
+        assert_eq!(chain.default_model_for("azure-openai"), AZURE_MODEL_ROUTER);
+        assert_eq!(chain.default_model_for("azure-openai"), "model-router");
         // Azure Anthropic defaults to the cheapest Claude deployment.
         assert_eq!(
-            default_model_for("azure-anthropic"),
+            chain.default_model_for("azure-anthropic"),
             crate::provider::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL
+        );
+    }
+
+    #[test]
+    fn azure_default_honors_the_configured_deployment() {
+        // The live 404: the operator's only chat deployment is `gpt-4o-mini`,
+        // and the chain asked their resource for `model-router` — a deployment
+        // that does not exist there — so every unspecified-model request came
+        // back DeploymentNotFound.
+        assert_eq!(
+            azure_default_deployment(&["gpt-4o-mini".to_owned()], AZURE_MODEL_ROUTER),
+            "gpt-4o-mini"
+        );
+        // A resource that really does host the auto-router keeps getting it,
+        // wherever the operator listed it.
+        assert_eq!(
+            azure_default_deployment(
+                &["gpt-4o-mini".to_owned(), "model-router".to_owned()],
+                AZURE_MODEL_ROUTER
+            ),
+            "model-router"
+        );
+        // Nothing configured → the legacy constant, not a guess.
+        assert_eq!(
+            azure_default_deployment(&[], AZURE_MODEL_ROUTER),
+            AZURE_MODEL_ROUTER
+        );
+        // Same latent mismatch on the Claude resource: a catalog without haiku
+        // must not default to a deployment that isn't there.
+        assert_eq!(
+            azure_default_deployment(
+                &["claude-sonnet-4-6".to_owned(), "claude-opus-4-8".to_owned()],
+                crate::provider::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL
+            ),
+            "claude-sonnet-4-6"
         );
     }
 
@@ -1405,6 +1674,339 @@ mod resolution_tests {
         };
         chain.create_embedding(&req).await.unwrap();
         assert!(*reached.lock().unwrap());
+    }
+
+    // ---------------------------------------------------------------------
+    // Tool-capable fallback ladder
+    // ---------------------------------------------------------------------
+
+    /// Serves only the models it was told it has a deployment for and rate-limits
+    /// everything else, recording every model it was asked for. Models the live
+    /// failure: Azure quota is per deployment, so one throttled deployment says
+    /// nothing about its siblings.
+    struct ThrottlingProvider {
+        asked: Arc<Mutex<Vec<String>>>,
+        serves: Vec<&'static str>,
+        retry_after_ms: u64,
+    }
+
+    impl ThrottlingProvider {
+        fn record(&self, model: &str) -> Result<(), ProviderError> {
+            self.asked.lock().unwrap().push(model.to_owned());
+            if self.serves.contains(&model) {
+                Ok(())
+            } else {
+                Err(ProviderError::RateLimited {
+                    retry_after_ms: self.retry_after_ms,
+                })
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for ThrottlingProvider {
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.record(&req.model)?;
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: req.model.clone(),
+                stop_reason: "stop".to_owned(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.record(&req.model)?;
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    /// The live topology: an Azure Foundry Claude resource plus an Azure
+    /// `OpenAI` resource, with `retry_after_ms` past the interactive budget so the
+    /// two-pass wait never fires and the ladder is the only way out.
+    fn ladder_chain(
+        asked: &Arc<Mutex<Vec<String>>>,
+        claude_serves: Vec<&'static str>,
+        openai_serves: Vec<&'static str>,
+    ) -> FallbackChain {
+        let claude: BoxedProvider = Arc::new(ThrottlingProvider {
+            asked: asked.clone(),
+            serves: claude_serves,
+            retry_after_ms: 60_000,
+        });
+        let openai: BoxedProvider = Arc::new(ThrottlingProvider {
+            asked: asked.clone(),
+            serves: openai_serves,
+            retry_after_ms: 60_000,
+        });
+        FallbackChain::new_with_providers(
+            vec![
+                ("azure-anthropic".to_owned(), claude),
+                ("azure-openai".to_owned(), openai),
+            ],
+            1,
+        )
+        .with_intent_enabled(true)
+    }
+
+    /// A `velion-balance` turn carrying a tool — the shape that floors to
+    /// `Complex` and therefore resolves to `claude-sonnet-4-6`.
+    fn tool_turn(request_id: &str, model: &str) -> InferRequest {
+        InferRequest {
+            request_id: request_id.to_owned(),
+            model: model.to_owned(),
+            messages: vec![crate::provider::ChatMessage {
+                role: "user".to_owned(),
+                content: "Kan du sjekke i Visma hva vi har tomt på lager?".to_owned(),
+                name: String::new(),
+            }],
+            tools: vec![crate::provider::ToolDefinition {
+                name: "mcp__visma__execute_query".to_owned(),
+                description: String::new(),
+                parameters_json: "{}".to_owned(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_throttled_tool_tier_falls_to_the_next_tool_capable_model() {
+        // The live failure: claude-sonnet-4-6 is 429'd with retry_after 60s,
+        // provider_serves_model keeps claude off the OpenAI surface, and the turn
+        // died with "all providers exhausted". A sibling Claude deployment has
+        // its own quota, so it is a real answer rather than a retry.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec!["claude-sonnet-4-5"], vec!["gpt-4o-mini"]);
+
+        let response = chain
+            .infer(&tool_turn("ladder-1", "velion-balance"))
+            .await
+            .expect("the ladder must find a servable tool-capable model");
+
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["claude-sonnet-4-6", "claude-sonnet-4-5"],
+            "the resolved model is tried first, then the next ladder rung"
+        );
+        // The UI reports what actually answered, not what we intended to use.
+        assert_eq!(response.model_used, "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
+    async fn the_ladder_leaves_the_claude_family_only_after_exhausting_it() {
+        // Every Claude deployment throttled → the OpenAI rung is still reachable,
+        // because a degraded-but-tool-capable answer beats a dead turn.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec![], vec!["gpt-5-mini", "gpt-4o-mini"]);
+
+        let response = chain
+            .infer(&tool_turn("ladder-2", "velion-balance"))
+            .await
+            .expect("the OpenAI rung serves once the Claude family is exhausted");
+
+        assert_eq!(response.model_used, "gpt-5-mini");
+        let asked = asked.lock().unwrap();
+        let last_claude = asked
+            .iter()
+            .rposition(|m| m.starts_with("claude"))
+            .expect("claude deployments are tried");
+        let first_openai = asked
+            .iter()
+            .position(|m| !m.starts_with("claude"))
+            .expect("an OpenAI rung is reached");
+        assert!(last_claude < first_openai, "ladder order: {asked:?}");
+    }
+
+    #[tokio::test]
+    async fn a_pinned_model_is_never_silently_substituted() {
+        // The boundary that matters: the caller asked for THIS model. Answering
+        // with a different one — with no way for them to have declined — is worse
+        // than telling them it was busy. Same chain, same throttling, no ladder.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec!["claude-sonnet-4-5"], vec!["gpt-4o-mini"]);
+
+        let error = chain
+            .infer(&tool_turn("pinned-1", "claude-sonnet-4-6"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, ProviderError::RateLimited { .. }),
+            "expected the pinned model's own throttling, got {error:?}"
+        );
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["claude-sonnet-4-6"],
+            "no model other than the pinned one may be asked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_model_that_the_intent_layer_is_off_for_is_also_not_substituted() {
+        // Belt and braces: with the intent layer disabled nothing is "resolved",
+        // so even a velion-* id must not pick up a ladder. It falls through to
+        // the per-provider default exactly as before.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let claude: BoxedProvider = Arc::new(ThrottlingProvider {
+            asked: asked.clone(),
+            serves: vec![],
+            retry_after_ms: 60_000,
+        });
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-anthropic".to_owned(), claude)], 1);
+
+        let error = chain
+            .infer(&tool_turn("pinned-2", "velion-balance"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::RateLimited { .. }));
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            [crate::provider::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL],
+        );
+    }
+
+    #[tokio::test]
+    async fn no_model_is_asked_twice_in_a_walk() {
+        // An operator ladder that repeats the resolved model, and itself, must
+        // not turn into extra load on already-throttled deployments.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec![], vec![]);
+        let mut policy = RoutingPolicy::clone(&chain.policy.load_full());
+        policy.tool_fallback_ladder = vec![
+            "claude-sonnet-4-6".to_owned(),
+            "claude-sonnet-4-5".to_owned(),
+            "CLAUDE-SONNET-4-5".to_owned(),
+            "claude-sonnet-4-6".to_owned(),
+        ];
+        chain.policy.store(Arc::new(policy));
+
+        let error = chain
+            .infer(&tool_turn("dedup-1", "velion-balance"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::RateLimited { .. }));
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["claude-sonnet-4-6", "claude-sonnet-4-5"],
+            "the resolved model and each rung are asked at most once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fully_throttled_ladder_still_reports_rate_limiting() {
+        // Regression guard for 428f580c: walking more models must not turn a
+        // recoverable 429 into a generic AllExhausted. The user needs to be told
+        // when to come back.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec![], vec![]);
+
+        let error = chain
+            .infer(&tool_turn("throttled-1", "velion-balance"))
+            .await
+            .unwrap_err();
+
+        match error {
+            ProviderError::RateLimited { retry_after_ms } => assert_eq!(retry_after_ms, 60_000),
+            other => panic!("a throttled chain must surface RateLimited, got {other:?}"),
+        }
+        assert!(
+            asked.lock().unwrap().len() > 1,
+            "the ladder should have been walked before giving up"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streaming_path_walks_the_ladder_too() {
+        // Plain chat streams, so this is the path that actually failed in
+        // production; a fix that only covered `infer` would not have helped.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec!["claude-sonnet-4-5"], vec!["gpt-4o-mini"]);
+
+        chain
+            .infer_stream(&tool_turn("stream-1", "velion-balance"))
+            .await
+            .expect("the streaming ladder must find a servable model");
+
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["claude-sonnet-4-6", "claude-sonnet-4-5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streaming_path_honors_a_pinned_model() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec!["claude-sonnet-4-5"], vec!["gpt-4o-mini"]);
+
+        let error = chain
+            .infer_stream(&tool_turn("stream-2", "claude-sonnet-4-6"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ProviderError::RateLimited { .. }));
+        assert_eq!(asked.lock().unwrap().as_slice(), ["claude-sonnet-4-6"]);
+    }
+
+    #[test]
+    fn the_ladder_is_pruned_to_deployments_that_exist_and_stays_bounded() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut chain = ladder_chain(&asked, vec![], vec![]);
+
+        // Unknown catalogs prune nothing, but the step bound still holds.
+        let unpruned = chain.tool_ladder("claude-sonnet-4-6");
+        assert!(unpruned.len() <= MAX_TOOL_LADDER_STEPS);
+        assert!(!unpruned.iter().any(|m| m == "claude-sonnet-4-6"));
+
+        // A known catalog drops rungs this resource cannot serve — otherwise the
+        // bounded walk is spent on deployments that can only 404.
+        chain.deployed = DeployedModels {
+            anthropic: Some(vec![
+                "claude-sonnet-4-6".to_owned(),
+                "claude-haiku-4-5".to_owned(),
+            ]),
+            openai: Some(vec!["gpt-4o-mini".to_owned()]),
+        };
+        assert_eq!(
+            chain.tool_ladder("claude-sonnet-4-6"),
+            ["claude-haiku-4-5", "gpt-4o-mini"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unspecified_model_uses_the_configured_azure_deployment() {
+        // Fault 1 end-to-end through the chain: the model the provider is asked
+        // for is the operator's configured deployment, not the hardcoded router.
+        let seen = Arc::new(Mutex::new(None));
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            zdr_supported: false,
+        });
+        let mut chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        chain.defaults = ProviderDefaults {
+            azure_openai: "gpt-4o-mini".to_owned(),
+            azure_anthropic: "claude-haiku-4-5".to_owned(),
+        };
+        let req = InferRequest {
+            request_id: "cfg-default-1".to_owned(),
+            model: String::new(),
+            ..Default::default()
+        };
+
+        let response = chain.infer(&req).await.unwrap();
+
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(response.model_used, "gpt-4o-mini");
     }
 
     #[tokio::test]

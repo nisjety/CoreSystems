@@ -32,6 +32,22 @@ pub struct RoutingPolicy {
     pub constrained_fraction: f64,
     /// The model id used when the budget is exhausted (the cheap fallback).
     pub cheap_fallback: String,
+    /// Ordered ladder of tool-capable models to fall to when the model the
+    /// intent layer resolved cannot be served (throttled, or its deployment is
+    /// down). Walked in order; entries the resolved model already occupies, and
+    /// entries this resource has no deployment for, are skipped.
+    ///
+    /// It exists because the model-family gate that keeps `claude-*` off the
+    /// `OpenAI` surface also means a throttled Claude deployment has nowhere
+    /// to go: one 429 on one deployment killed the whole turn. Azure allocates
+    /// quota **per deployment**, so a sibling Claude deployment is a real,
+    /// usually-healthy alternative rather than a retry of the same bucket.
+    ///
+    /// Only consulted for a model the intent layer resolved from a `velion-*`
+    /// mode — never for a model the caller pinned. An empty ladder disables the
+    /// behaviour entirely.
+    #[serde(default = "default_tool_fallback_ladder")]
+    pub tool_fallback_ladder: Vec<String>,
     /// Complexity-classifier weights and keyword list.
     pub complexity: ComplexityWeights,
     /// The (mode × complexity) → concrete model id routing table.
@@ -114,6 +130,7 @@ impl Default for RoutingPolicy {
             budget_cap_usd: 50.0,
             constrained_fraction: 0.8,
             cheap_fallback: CHEAP_FALLBACK.to_owned(),
+            tool_fallback_ladder: default_tool_fallback_ladder(),
             complexity: ComplexityWeights::default(),
             // Ladder over the deployed roster, ascending cost/capability:
             //   gpt-5-nano < gpt-4o-mini < gpt-5-mini < claude-sonnet-4-6 < claude-opus-4-8.
@@ -151,6 +168,40 @@ impl Default for RoutingPolicy {
 /// mis-tiering it fixes silently returns.
 fn default_tool_use_floors_complex() -> bool {
     true
+}
+
+/// The shipped tool-capable fallback ladder, in the order it is walked.
+///
+/// Anthropic first: these are four *separate* Azure Foundry deployments with
+/// independent quota, so a 429 on one says nothing about the others, and every
+/// one of them calls tools reliably — which is why the intent layer sends tool
+/// turns to this family in the first place. Sonnet siblings lead because they
+/// are the same capability class as the tier that was throttled; Opus before
+/// Haiku because on the second failure of a tool turn, tool-following quality is
+/// worth more than the price difference; Haiku closes the family as the cheapest
+/// rung that still calls tools.
+///
+/// The `OpenAI` rungs are last — they cost less but follow tools less reliably,
+/// and reaching them means the whole Claude resource is unavailable. `gpt-4o-mini`
+/// is final because it is the designated cheap fallback and the deployment most
+/// likely to exist on any Azure `OpenAI` resource.
+const DEFAULT_TOOL_FALLBACK_LADDER: &[&str] = &[
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "gpt-5-mini",
+    "gpt-4o-mini",
+];
+
+/// Serde default for [`RoutingPolicy::tool_fallback_ladder`] — a policy row
+/// stored before the field existed must still get a ladder, otherwise the
+/// dead-end this fixes silently returns for every operator with a stored policy.
+fn default_tool_fallback_ladder() -> Vec<String> {
+    DEFAULT_TOOL_FALLBACK_LADDER
+        .iter()
+        .map(|model| (*model).to_owned())
+        .collect()
 }
 
 impl Default for ComplexityWeights {
@@ -245,6 +296,67 @@ mod tests {
         assert_eq!(value["budget_cap_usd"], 50.0);
         assert_eq!(value["cheap_fallback"], "gpt-4o-mini");
         assert_eq!(value["complexity"]["large_total_chars"], 4000);
+    }
+
+    #[test]
+    fn default_ladder_prefers_anthropic_siblings_then_openai() {
+        let ladder = RoutingPolicy::default().tool_fallback_ladder;
+        let first_openai = ladder
+            .iter()
+            .position(|m| !m.starts_with("claude"))
+            .expect("the ladder must reach an OpenAI rung");
+        let last_claude = ladder
+            .iter()
+            .rposition(|m| m.starts_with("claude"))
+            .expect("the ladder must start in the Claude family");
+        assert!(
+            last_claude < first_openai,
+            "every Claude deployment must be tried before leaving the family: {ladder:?}"
+        );
+        assert_eq!(ladder.first().map(String::as_str), Some("claude-sonnet-4-6"));
+        assert_eq!(ladder.last().map(String::as_str), Some(CHEAP_FALLBACK));
+    }
+
+    #[test]
+    fn a_policy_stored_before_the_ladder_existed_still_gets_one() {
+        // Serde default: rows persisted by an older build carry no
+        // `tool_fallback_ladder` key. Deserializing them to an empty ladder
+        // would reinstate the dead end for exactly the operators who have a
+        // stored policy.
+        let json = serde_json::to_string(&serde_json::json!({
+            "enabled": true,
+            "budget_cap_usd": 50.0,
+            "constrained_fraction": 0.8,
+            "cheap_fallback": "gpt-4o-mini",
+            "complexity": serde_json::to_value(ComplexityWeights::default()).unwrap(),
+            "table": serde_json::to_value(RoutingPolicy::default().table).unwrap(),
+        }))
+        .expect("policy json");
+        let parsed: RoutingPolicy = serde_json::from_str(&json).expect("parse legacy policy");
+        assert_eq!(parsed.tool_fallback_ladder, default_tool_fallback_ladder());
+    }
+
+    #[test]
+    fn operators_can_replace_or_disable_the_ladder() {
+        let replaced = RoutingPolicy {
+            tool_fallback_ladder: vec!["claude-haiku-4-5".to_owned()],
+            ..RoutingPolicy::default()
+        };
+        let round_tripped: RoutingPolicy =
+            serde_json::from_str(&serde_json::to_string(&replaced).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(round_tripped.tool_fallback_ladder, ["claude-haiku-4-5"]);
+
+        // An explicitly empty ladder must survive the round trip as empty — that
+        // is how an operator opts out, and serde(default) must not refill it.
+        let disabled_source = RoutingPolicy {
+            tool_fallback_ladder: Vec::new(),
+            ..RoutingPolicy::default()
+        };
+        let disabled: RoutingPolicy =
+            serde_json::from_str(&serde_json::to_string(&disabled_source).expect("serialize"))
+                .expect("deserialize");
+        assert!(disabled.tool_fallback_ladder.is_empty());
     }
 
     #[test]
