@@ -1009,7 +1009,19 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid MCP registration", http.StatusBadRequest)
 			return
 		}
-		_, err = h.pool.Exec(r.Context(), `
+		// ON CONFLICT (org_id, name) intentionally never touches `id` — a
+		// second registration under the same name (e.g. reconnecting after
+		// model-gateway's ephemeral cache was wiped by a restart, so it
+		// proposes a brand-new id for what is durably the same server) must
+		// keep the ORIGINAL id, since every other durable record scoped to
+		// this server (mcp_oauth_tokens' FK, ownership) points at it.
+		// RETURNING id is required, not cosmetic: without it this handler
+		// echoed back the caller-supplied id even when the conflict path
+		// silently kept a different one, so a caller's own follow-up call
+		// (e.g. the OAuth callback's token-storage PUT) would address a row
+		// that never existed under that id and 404.
+		var persistedID string
+		err = h.pool.QueryRow(r.Context(), `
 			INSERT INTO mcp_servers (id, org_id, name, description, endpoint_url, transport, auth_kind,
 			    config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
@@ -1017,8 +1029,9 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			    description=$4, endpoint_url=$5, transport=$6, auth_kind=$7,
 			    config_json=$8, scope=$9, enabled=$10, rollout_state=$11,
 			    risk_level=$12, updated_at=$14
+			RETURNING id
 		`, s.ID, s.OrgID, s.Name, s.Description, s.EndpointURL, s.Transport, s.AuthKind,
-			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now)
+			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now).Scan(&persistedID)
 		if err != nil {
 			slog.Error("persist MCP server failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -1027,11 +1040,11 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		// Reconcile (matrix §4.3): notify cache holders an MCP server changed.
 		// Best-effort — never block the mutation on event emission.
 		if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindMCPServer,
-			reconcile.ActionRegistered, s.ID, s.OrgID); eerr != nil {
-			slog.Warn("reconcile emit failed", "kind", reconcile.KindMCPServer, "id", s.ID, "error", eerr)
+			reconcile.ActionRegistered, persistedID, s.OrgID); eerr != nil {
+			slog.Warn("reconcile emit failed", "kind", reconcile.KindMCPServer, "id", persistedID, "error", eerr)
 		}
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"id": s.ID})
+		writeJSON(w, map[string]any{"id": persistedID})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
