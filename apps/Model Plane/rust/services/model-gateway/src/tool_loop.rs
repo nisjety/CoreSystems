@@ -20,7 +20,9 @@ use mp_contracts::model_plane::v1::{
 use serde_json::Value;
 
 use crate::{
-    auth::VerifiedDataPlaneBearer as VerifiedBearer, sse_events::ChatEvent, state::AppState,
+    auth::{VerifiedDataPlaneBearer as VerifiedBearer, VerifiedIngestionBearer},
+    sse_events::ChatEvent,
+    state::AppState,
 };
 
 /// Max tool rounds before forcing a final, tool-free answer.
@@ -460,6 +462,65 @@ async fn dispatch_brreg_lookup_tool(state: &AppState, call: &ToolCall) -> ToolOu
     }
 }
 
+/// `shipping.get_quotes` → shipping-core's carrier-fleet quote fan-out
+/// (Ingestion Plane). Forwards the call's arguments verbatim as the request
+/// body — they already match shipping-core's `QuoteRequest` shape (see
+/// action-registry.ts's `shippingQuoteInput`). Requires the caller's own
+/// verified "ingestion" audience bearer; never a service-wide credential, so
+/// a tool call can't reach shipping-core for a tenant the caller isn't
+/// authorized for.
+async fn dispatch_shipping_quotes_tool(
+    state: &AppState,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    call: &ToolCall,
+) -> ToolOutcome {
+    let Some(bearer) = ingestion_bearer else {
+        return err_outcome(
+            call,
+            "shipping.get_quotes requires a verified ingestion bearer",
+        );
+    };
+    let args = match serde_json::from_str::<Value>(&call.arguments_json) {
+        Ok(args) if args.is_object() => args,
+        _ => {
+            return err_outcome(
+                call,
+                "shipping.get_quotes requires a JSON object with 'from', 'to', and 'package'",
+            )
+        }
+    };
+
+    let url = format!("{}/api/quotes", state.shipping_core_base_url);
+    let response = match state
+        .http_client
+        .post(url)
+        .bearer_auth(bearer.as_str())
+        .json(&args)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => return err_outcome(call, format!("shipping.get_quotes request failed: {err}")),
+    };
+
+    if !response.status().is_success() {
+        return err_outcome(
+            call,
+            format!("shipping.get_quotes returned {}", response.status().as_u16()),
+        );
+    }
+
+    match response.text().await {
+        Ok(body) => ToolOutcome {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            output: body,
+            error: None,
+        },
+        Err(err) => err_outcome(call, format!("shipping.get_quotes response read failed: {err}")),
+    }
+}
+
 /// Execute a single model-requested tool call against the gateway's tool
 /// handlers. Unknown tools / bad args return an error outcome (the model is
 /// told, so it can recover). New tools plug in here (MCP proxy, etc.).
@@ -540,6 +601,7 @@ pub async fn dispatch_tool(
     session_bearer: &str,
     zdr: bool,
     call: &ToolCall,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -827,6 +889,16 @@ pub async fn dispatch_tool(
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
             dispatch_brreg_lookup_tool(state, call).await
         }
+        // Anthropic's tools[].custom.name rejects '.' (pattern ^[a-zA-Z0-9_-]{1,128}$),
+        // unlike every other provider — a single non-conforming tool name 400s the
+        // WHOLE request across the entire fallback chain, not just that one tool
+        // (live-observed: "tools.2.custom.name: String should match pattern...").
+        // The builtin below is advertised as shipping_get_quotes for that reason;
+        // still accept the dot form here since action-registry.ts / the Agent
+        // Console's explicit tool selection uses "shipping.get_quotes" as the id.
+        "shipping_get_quotes" | "shipping.get_quotes" => {
+            dispatch_shipping_quotes_tool(state, ingestion_bearer, call).await
+        }
         other => err_outcome(call, format!("unknown tool '{other}'")),
     }
 }
@@ -843,6 +915,7 @@ async fn dispatch_audited_tool(
     session_bearer: &str,
     zdr: bool,
     call: &ToolCall,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -872,6 +945,7 @@ async fn dispatch_audited_tool(
         session_bearer,
         zdr,
         call,
+        ingestion_bearer,
     )
     .await;
     let finalize = FinalizeToolActionRequest {
@@ -912,6 +986,11 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "knowledge_search".to_owned(),
             description: "Search the organization's OWN internal knowledge base (ingested documents) and return the most relevant passages. Prefer this for questions about the company's own data, docs, or products.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look up in the org knowledge base"},"top_k":{"type":"integer","description":"Max passages 1-20"}},"required":["query"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "shipping_get_quotes".to_owned(),
+            description: "Compare live shipping quotes across the connected carrier fleet (Bring, DHL, UPS, FedEx) for a given origin, destination, and package. Returns cheapest-first pricing and transit days.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"from":{"type":"object","description":"Origin address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","description":"Destination address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"package":{"type":"object","properties":{"weight_kg":{"type":"number"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"}},"required":["weight_kg","length_cm","width_cm","height_cm"]},"segment":{"type":"string","enum":["b2b","b2c"],"description":"Required by shipping-core; use b2b unless the recipient is a private individual"}},"required":["from","to","package","segment"]}"#.to_owned(),
         },
     ]
 }
@@ -1003,6 +1082,7 @@ pub async fn run_forced_web_search(
         session_bearer,
         zdr,
         &call,
+        None,
     )
     .await?;
     let mut events = vec![
@@ -1094,6 +1174,7 @@ pub async fn run_tool_rounds(
     base_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
     tool_choice: String,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
 ) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
     let mut events = Vec::new();
@@ -1164,6 +1245,7 @@ pub async fn run_tool_rounds(
                     session_bearer,
                     zdr,
                     call,
+                    ingestion_bearer,
                 )
                 .await?
             };

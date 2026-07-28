@@ -27,7 +27,7 @@ use tracing::info;
 use crate::{
     auth::{
         Claims, VerifiedCostBearer, VerifiedDataPlaneBearer as VerifiedBearer,
-        VerifiedExecutionBearer, VerifiedInferenceBearer,
+        VerifiedExecutionBearer, VerifiedIngestionBearer, VerifiedInferenceBearer,
         VerifiedSessionBearer as VerifiedModelBearer,
     },
     gateway_metrics,
@@ -197,6 +197,7 @@ pub async fn invoke_stream_sse(
     execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
     data_plane_bearer: Option<Extension<VerifiedBearer>>,
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
+    ingestion_bearer: Option<Extension<VerifiedIngestionBearer>>,
     axum::Json(req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
@@ -214,6 +215,7 @@ pub async fn invoke_stream_sse(
     let data_plane_bearer = data_plane_bearer.map(|Extension(bearer)| bearer);
     let execution_bearer = execution_bearer.map(|Extension(bearer)| bearer);
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
+    let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
     let effective_zdr = claims.effective_zdr(req.zdr);
 
@@ -891,6 +893,7 @@ pub async fn invoke_stream_sse(
             messages,
             tool_defs,
             "auto".to_owned(),
+            ingestion_bearer.as_ref(),
         )
         .await;
         let Ok(rounds) = rounds else {

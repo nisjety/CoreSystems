@@ -91,6 +91,28 @@ impl VerifiedDataPlaneBearer {
     }
 }
 
+/// A distinct `aud=ingestion` user bearer, independently verified against the
+/// Control JWKS and bound to the same subject and tenant as the Model token.
+/// Used only to call shipping-core (and any future Ingestion Plane HTTP API)
+/// on the caller's behalf — never accepted from caller-selected headers.
+#[derive(Clone)]
+pub struct VerifiedIngestionBearer(Arc<str>);
+
+impl VerifiedIngestionBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
 /// Marker proving that the public Model Gateway bearer passed verification.
 /// The ingress credential is deliberately not retained: every downstream
 /// boundary uses its own independently verified audience token.
@@ -402,6 +424,28 @@ where
     }
 }
 
+impl fmt::Debug for VerifiedIngestionBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedIngestionBearer([REDACTED])")
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedIngestionBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+}
+
 impl Claims {
     fn principal_kind(&self) -> Result<PrincipalKind, StatusCode> {
         match self.principal_type.as_deref().unwrap_or("user") {
@@ -679,6 +723,21 @@ async fn verify_delegated_data_plane_bearer(
     .map(|token| token.map(|token| VerifiedDataPlaneBearer::new(&token)))
 }
 
+async fn verify_delegated_ingestion_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedIngestionBearer>, StatusCode> {
+    verify_delegated_user_bearer(
+        headers,
+        "x-ingestion-authorization",
+        "INGESTION_AUTH_AUDIENCE",
+        "ingestion",
+        model_claims,
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedIngestionBearer::new(&token)))
+}
+
 async fn verify_delegated_capability_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
@@ -901,6 +960,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         let inference_bearer = verify_delegated_inference_bearer(req.headers(), &claims).await?;
         let execution_bearer = verify_delegated_execution_bearer(req.headers(), &claims).await?;
         let browser_bearer = verify_delegated_browser_bearer(req.headers(), &claims).await?;
+        let ingestion_bearer = verify_delegated_ingestion_bearer(req.headers(), &claims).await?;
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
@@ -924,6 +984,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         }
         if let Some(browser_bearer) = browser_bearer {
             req.extensions_mut().insert(browser_bearer);
+        }
+        if let Some(ingestion_bearer) = ingestion_bearer {
+            req.extensions_mut().insert(ingestion_bearer);
         }
         return Ok(next.run(req).await);
     }
@@ -1006,6 +1069,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         inference_bearer,
         execution_bearer,
         browser_bearer,
+        ingestion_bearer,
     ) = match principal_kind {
         PrincipalKind::User => (
             verify_delegated_data_plane_bearer(req.headers(), &token_data.claims).await?,
@@ -1015,6 +1079,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
             verify_delegated_inference_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_execution_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_browser_bearer(req.headers(), &token_data.claims).await?,
+            verify_delegated_ingestion_bearer(req.headers(), &token_data.claims).await?,
         ),
         PrincipalKind::Service => {
             if req.headers().contains_key("x-data-plane-authorization")
@@ -1023,6 +1088,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
                 || req.headers().contains_key("x-session-authorization")
                 || req.headers().contains_key("x-execution-authorization")
                 || req.headers().contains_key("x-browser-authorization")
+                || req.headers().contains_key("x-ingestion-authorization")
             {
                 warn!("service principal can delegate only its matching inference credential");
                 return Err(StatusCode::FORBIDDEN);
@@ -1030,7 +1096,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
             let inference_bearer =
                 verify_delegated_service_inference_bearer(req.headers(), &token_data.claims)
                     .await?;
-            (None, None, None, None, inference_bearer, None, None)
+            (None, None, None, None, inference_bearer, None, None, None)
         }
     };
     req.extensions_mut().insert(token_data.claims);
@@ -1056,6 +1122,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
     }
     if let Some(browser_bearer) = browser_bearer {
         req.extensions_mut().insert(browser_bearer);
+    }
+    if let Some(ingestion_bearer) = ingestion_bearer {
+        req.extensions_mut().insert(ingestion_bearer);
     }
     Ok(next.run(req).await)
 }

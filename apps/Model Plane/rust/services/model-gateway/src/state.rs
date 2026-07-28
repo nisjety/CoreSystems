@@ -124,6 +124,9 @@ pub struct AppState {
     pub capability_client: CapabilityCoreClient<Channel>,
     /// Base URL of the capability-core HTTP API (e.g. "<http://capability-core:8085>").
     pub capability_core_base_url: String,
+    /// Base URL of shipping-core's HTTP API (Ingestion Plane carrier aggregator),
+    /// e.g. "<http://shipping-core:8080>". Used by the `shipping.get_quotes` tool.
+    pub shipping_core_base_url: String,
     /// Shared reqwest client for HTTP proxy calls to capability-core.
     pub http_client: reqwest::Client,
     /// Phase 7 B5 — model price catalogue cache (cost-core `GET /api/v1/pricing`).
@@ -241,6 +244,7 @@ impl AppState {
             memory_client: MemoryServiceClient::new(memory_channel),
             capability_client: CapabilityCoreClient::new(capability_channel),
             capability_core_base_url: "http://localhost:8085".to_owned(),
+            shipping_core_base_url: "http://localhost:8080".to_owned(),
             http_client: reqwest::Client::new(),
             // Pricing disabled by default (no cost-core URL); `from_env` wires it
             // from COST_CORE_URL. A disabled cache emits a null cost, never a fake.
@@ -402,6 +406,8 @@ impl AppState {
         )?);
         let capability_core_base_url = std::env::var("CAPABILITY_CORE_HTTP_URL")
             .unwrap_or_else(|_| "http://localhost:8085".to_owned());
+        let shipping_core_base_url = std::env::var("SHIPPING_CORE_URL")
+            .unwrap_or_else(|_| "http://shipping-core:8080".to_owned());
         let http_client = reqwest::Client::new();
         // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
         // Shared between both publisher branches below; cheap clone (Arc inner).
@@ -502,7 +508,8 @@ impl AppState {
             state.browser_client = browser_client;
             state.memory_client = memory_client;
             state.capability_client = capability_client;
-            state.capability_core_base_url = capability_core_base_url;
+            state.capability_core_base_url = capability_core_base_url.clone();
+            state.shipping_core_base_url = shipping_core_base_url.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache.clone();
             state.retrieval_client = retrieval_client;
@@ -535,7 +542,8 @@ impl AppState {
             state.browser_client = browser_client;
             state.memory_client = memory_client;
             state.capability_client = capability_client;
-            state.capability_core_base_url = capability_core_base_url;
+            state.capability_core_base_url = capability_core_base_url.clone();
+            state.shipping_core_base_url = shipping_core_base_url.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache;
             state.retrieval_client = retrieval_client;
