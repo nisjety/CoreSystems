@@ -128,6 +128,74 @@ fn is_anthropic_model(model: &str) -> bool {
 /// Azure `OpenAI` provider is serving them.
 const AZURE_MODEL_ROUTER: &str = "model-router";
 
+/// Longest a throttled request may wait before the chain is retried.
+///
+/// Moving to the next provider stays the primary response to a 429 — it is
+/// instant and usually succeeds. But when every matching provider is throttled
+/// (commonly: only one is configured for the model family) the chain used to
+/// discard `retry_after_ms` and fail, turning a few seconds of throttling into a
+/// dead turn. Waiting is only the better answer while the wait is short enough
+/// that a person is still willing to sit through it; past that, telling them
+/// when to come back beats holding a request open. Chat is interactive, so the
+/// default is deliberately small.
+const DEFAULT_RATE_LIMIT_MAX_WAIT_MS: u64 = 8_000;
+
+fn rate_limit_max_wait() -> Duration {
+    static MAX_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *MAX_WAIT.get_or_init(|| {
+        let ms = std::env::var("INFERENCE_RATE_LIMIT_MAX_WAIT_MS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_RATE_LIMIT_MAX_WAIT_MS);
+        Duration::from_millis(ms)
+    })
+}
+
+/// Throttling seen while walking the provider chain.
+///
+/// Kept separate from the generic failure count because the two need different
+/// answers: a throttled chain is worth waiting for or reporting with a time, and
+/// a broken one is not.
+#[derive(Debug, Default, Clone, Copy)]
+struct ThrottleState {
+    /// Shortest `retry_after_ms` any throttled provider asked for — the soonest
+    /// moment a retry could plausibly succeed.
+    soonest_retry_ms: Option<u64>,
+}
+
+impl ThrottleState {
+    fn record(&mut self, retry_after_ms: u64) {
+        self.soonest_retry_ms = Some(match self.soonest_retry_ms {
+            Some(current) => current.min(retry_after_ms),
+            None => retry_after_ms,
+        });
+    }
+
+    fn throttled(self) -> bool {
+        self.soonest_retry_ms.is_some()
+    }
+
+    /// The wait to honor before retrying the chain, or `None` when the provider's
+    /// own retry-after exceeds what an interactive request should absorb.
+    fn affordable_wait(self) -> Option<Duration> {
+        let wait = Duration::from_millis(self.soonest_retry_ms?);
+        (wait <= rate_limit_max_wait()).then_some(wait)
+    }
+
+    /// The error a throttled, exhausted chain should return.
+    ///
+    /// `RateLimited` rather than `AllExhausted` on purpose: it carries the
+    /// retry-after, so a caller can say "try again in about a minute" instead of
+    /// reporting a generic failure for something that is neither permanent nor
+    /// the user's fault.
+    fn exhausted_error(self, attempts: u32) -> ProviderError {
+        match self.soonest_retry_ms {
+            Some(retry_after_ms) => ProviderError::RateLimited { retry_after_ms },
+            None => ProviderError::AllExhausted { attempts },
+        }
+    }
+}
+
 /// Default chat model for a registered provider, used when the request leaves
 /// the model unspecified ("Velion Auto").
 ///
@@ -488,77 +556,103 @@ impl FallbackChain {
         }
 
         let mut total_attempts: u32 = 0;
+        let mut throttle = ThrottleState::default();
 
-        for (name, provider) in &self.providers {
-            if !Self::provider_matches(name, &req.provider_hint) {
-                continue;
-            }
-            // Skip providers that cannot serve the requested model family — a
-            // `claude-*` model must not hit the OpenAI surface (it would 404 the
-            // deployment) and vice-versa. Unspecified models pass (they resolve
-            // to the provider's default below).
-            if !provider_serves_model(name, &req.model) {
-                continue;
-            }
-            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+        // Two passes at most: walk every provider, and if the only thing standing
+        // in the way was throttling with a short enough retry-after, honor it once
+        // and walk them again. A second throttle ends it — retrying a rate limit
+        // indefinitely is how one throttled tenant becomes a stuck queue.
+        for pass in 0..2u8 {
+            if pass == 1 {
+                let Some(wait) = throttle.affordable_wait() else {
+                    break;
+                };
                 warn!(
-                    provider = %name,
                     request_id = %req.request_id,
-                    "provider skipped: ZDR was required but is not verified for this deployment"
+                    wait_ms = wait.as_millis(),
+                    "every matching provider was rate limited; honoring retry-after once"
                 );
-                continue;
+                tokio::time::sleep(wait).await;
+                throttle = ThrottleState::default();
             }
-            // "Velion Auto" / unspecified model → resolve to this provider's
-            // default so an unpinned request works against whatever provider is
-            // configured. Specified models pass through unchanged.
-            let resolved_req;
-            let call_req: &InferRequest = if is_unspecified_model(&req.model) {
-                let mut r = req.clone();
-                default_model_for(name).clone_into(&mut r.model);
-                resolved_req = r;
-                &resolved_req
-            } else {
-                req
-            };
-            for attempt in 1..=self.max_retries {
-                total_attempts += 1;
-                let span = tracing::info_span!(
-                    "provider_attempt",
-                    provider = %name,
-                    attempt = attempt,
-                    request_id = %req.request_id,
-                );
-                let _enter = span.enter();
 
-                match provider.infer_dyn(call_req).await {
-                    Ok(response) => {
-                        self.cache.put(req, &response);
-                        info!(
-                            provider = %name,
-                            attempt = attempt,
-                            model_used = %response.model_used,
-                            "infer succeeded"
-                        );
-                        return Ok(response);
-                    }
-                    Err(ProviderError::RateLimited { retry_after_ms }) => {
-                        warn!(
-                            provider = %name,
-                            attempt = attempt,
-                            retry_after_ms = retry_after_ms,
-                            "rate limited, moving to next provider"
-                        );
-                        break; // Skip remaining retries for this provider
-                    }
-                    Err(e) => {
-                        warn!(
-                            provider = %name,
-                            attempt = attempt,
-                            error = %e,
-                            "provider attempt failed"
-                        );
+            for (name, provider) in &self.providers {
+                if !Self::provider_matches(name, &req.provider_hint) {
+                    continue;
+                }
+                // Skip providers that cannot serve the requested model family — a
+                // `claude-*` model must not hit the OpenAI surface (it would 404 the
+                // deployment) and vice-versa. Unspecified models pass (they resolve
+                // to the provider's default below).
+                if !provider_serves_model(name, &req.model) {
+                    continue;
+                }
+                if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                    warn!(
+                        provider = %name,
+                        request_id = %req.request_id,
+                        "provider skipped: ZDR was required but is not verified for this deployment"
+                    );
+                    continue;
+                }
+                // "Velion Auto" / unspecified model → resolve to this provider's
+                // default so an unpinned request works against whatever provider is
+                // configured. Specified models pass through unchanged.
+                let resolved_req;
+                let call_req: &InferRequest = if is_unspecified_model(&req.model) {
+                    let mut r = req.clone();
+                    default_model_for(name).clone_into(&mut r.model);
+                    resolved_req = r;
+                    &resolved_req
+                } else {
+                    req
+                };
+                for attempt in 1..=self.max_retries {
+                    total_attempts += 1;
+                    let span = tracing::info_span!(
+                        "provider_attempt",
+                        provider = %name,
+                        attempt = attempt,
+                        request_id = %req.request_id,
+                    );
+                    let _enter = span.enter();
+
+                    match provider.infer_dyn(call_req).await {
+                        Ok(response) => {
+                            self.cache.put(req, &response);
+                            info!(
+                                provider = %name,
+                                attempt = attempt,
+                                model_used = %response.model_used,
+                                "infer succeeded"
+                            );
+                            return Ok(response);
+                        }
+                        Err(ProviderError::RateLimited { retry_after_ms }) => {
+                            warn!(
+                                provider = %name,
+                                attempt = attempt,
+                                retry_after_ms = retry_after_ms,
+                                "rate limited, moving to next provider"
+                            );
+                            throttle.record(retry_after_ms);
+                            break; // Skip remaining retries for this provider
+                        }
+                        Err(e) => {
+                            warn!(
+                                provider = %name,
+                                attempt = attempt,
+                                error = %e,
+                                "provider attempt failed"
+                            );
+                        }
                     }
                 }
+            }
+
+            if !throttle.throttled() {
+                // Nothing was throttled, so waiting cannot help.
+                break;
             }
         }
 
@@ -567,9 +661,7 @@ impl FallbackChain {
                 "no matching provider deployment has verified ZDR support".to_owned(),
             ))
         } else {
-            Err(ProviderError::AllExhausted {
-                attempts: total_attempts,
-            })
+            Err(throttle.exhausted_error(total_attempts))
         }
     }
 
@@ -587,69 +679,93 @@ impl FallbackChain {
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
 
         let mut total_attempts: u32 = 0;
+        let mut throttle = ThrottleState::default();
 
-        for (name, provider) in &self.providers {
-            if !Self::provider_matches(name, &req.provider_hint) {
-                continue;
-            }
-            if !provider_serves_model(name, &req.model) {
-                continue;
-            }
-            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+        // Same two-pass shape as the unary path — see the comment there. This is
+        // the path plain chat streams through, so it is the one that turned a
+        // recoverable 429 into a failed turn.
+        for pass in 0..2u8 {
+            if pass == 1 {
+                let Some(wait) = throttle.affordable_wait() else {
+                    break;
+                };
                 warn!(
-                    provider = %name,
                     request_id = %req.request_id,
-                    "stream provider skipped: ZDR was required but is not verified for this deployment"
+                    wait_ms = wait.as_millis(),
+                    "every matching streaming provider was rate limited; honoring retry-after once"
                 );
-                continue;
+                tokio::time::sleep(wait).await;
+                throttle = ThrottleState::default();
             }
-            // "Velion Auto" / unspecified model → resolve to this provider's default.
-            let resolved_req;
-            let call_req: &InferRequest = if is_unspecified_model(&req.model) {
-                let mut r = req.clone();
-                default_model_for(name).clone_into(&mut r.model);
-                resolved_req = r;
-                &resolved_req
-            } else {
-                req
-            };
-            for attempt in 1..=self.max_retries {
-                total_attempts += 1;
-                let span = tracing::info_span!(
-                    "provider_stream_attempt",
-                    provider = %name,
-                    attempt = attempt,
-                    request_id = %req.request_id,
-                );
-                let _enter = span.enter();
 
-                match provider.infer_stream_dyn(call_req).await {
-                    Ok(rx) => {
-                        info!(
-                            provider = %name,
-                            attempt = attempt,
-                            "infer_stream started"
-                        );
-                        return Ok(rx);
-                    }
-                    Err(ProviderError::RateLimited { retry_after_ms }) => {
-                        warn!(
-                            provider = %name,
-                            attempt = attempt,
-                            retry_after_ms = retry_after_ms,
-                            "rate limited, moving to next provider"
-                        );
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(
-                            provider = %name,
-                            attempt = attempt,
-                            error = %e,
-                            "provider stream attempt failed"
-                        );
+            for (name, provider) in &self.providers {
+                if !Self::provider_matches(name, &req.provider_hint) {
+                    continue;
+                }
+                if !provider_serves_model(name, &req.model) {
+                    continue;
+                }
+                if req.zdr && !provider.capabilities_dyn().supports_zdr {
+                    warn!(
+                        provider = %name,
+                        request_id = %req.request_id,
+                        "stream provider skipped: ZDR was required but is not verified for this deployment"
+                    );
+                    continue;
+                }
+                // "Velion Auto" / unspecified model → resolve to this provider's default.
+                let resolved_req;
+                let call_req: &InferRequest = if is_unspecified_model(&req.model) {
+                    let mut r = req.clone();
+                    default_model_for(name).clone_into(&mut r.model);
+                    resolved_req = r;
+                    &resolved_req
+                } else {
+                    req
+                };
+                for attempt in 1..=self.max_retries {
+                    total_attempts += 1;
+                    let span = tracing::info_span!(
+                        "provider_stream_attempt",
+                        provider = %name,
+                        attempt = attempt,
+                        request_id = %req.request_id,
+                    );
+                    let _enter = span.enter();
+
+                    match provider.infer_stream_dyn(call_req).await {
+                        Ok(rx) => {
+                            info!(
+                                provider = %name,
+                                attempt = attempt,
+                                "infer_stream started"
+                            );
+                            return Ok(rx);
+                        }
+                        Err(ProviderError::RateLimited { retry_after_ms }) => {
+                            warn!(
+                                provider = %name,
+                                attempt = attempt,
+                                retry_after_ms = retry_after_ms,
+                                "rate limited, moving to next provider"
+                            );
+                            throttle.record(retry_after_ms);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(
+                                provider = %name,
+                                attempt = attempt,
+                                error = %e,
+                                "provider stream attempt failed"
+                            );
+                        }
                     }
                 }
+            }
+
+            if !throttle.throttled() {
+                break;
             }
         }
 
@@ -658,9 +774,7 @@ impl FallbackChain {
                 "no matching streaming provider deployment has verified ZDR support".to_owned(),
             ))
         } else {
-            Err(ProviderError::AllExhausted {
-                attempts: total_attempts,
-            })
+            Err(throttle.exhausted_error(total_attempts))
         }
     }
 
@@ -1143,6 +1257,68 @@ mod resolution_tests {
             !*reached.lock().unwrap(),
             "provider must NOT be reached when residency rejects"
         );
+    }
+
+    #[test]
+    fn throttle_state_keeps_the_soonest_retry_after() {
+        // The soonest retry is the one worth waiting for; a slower provider's
+        // longer window must not decide the wait.
+        let mut throttle = ThrottleState::default();
+        throttle.record(9_000);
+        throttle.record(1_500);
+        throttle.record(57_000);
+        assert_eq!(throttle.soonest_retry_ms, Some(1_500));
+    }
+
+    #[test]
+    fn a_short_retry_after_is_waited_out() {
+        let mut throttle = ThrottleState::default();
+        throttle.record(1_200);
+        assert_eq!(
+            throttle.affordable_wait(),
+            Some(Duration::from_millis(1_200))
+        );
+    }
+
+    #[test]
+    fn a_long_retry_after_is_reported_instead_of_waited_out() {
+        // The live failure was retry_after_ms = 57_000. Holding an interactive
+        // request open for a minute is worse than telling the user when to
+        // return, so this must NOT become a wait.
+        let mut throttle = ThrottleState::default();
+        throttle.record(57_000);
+        assert_eq!(throttle.affordable_wait(), None);
+        assert!(matches!(
+            throttle.exhausted_error(3),
+            ProviderError::RateLimited {
+                retry_after_ms: 57_000
+            }
+        ));
+    }
+
+    #[test]
+    fn a_throttled_chain_reports_rate_limiting_not_generic_exhaustion() {
+        // Regression guard for the live bug: retry_after_ms was discarded and the
+        // chain returned AllExhausted, so a recoverable 429 reached the user as a
+        // generic failure with no indication it was temporary.
+        let mut throttle = ThrottleState::default();
+        throttle.record(4_000);
+        match throttle.exhausted_error(2) {
+            ProviderError::RateLimited { retry_after_ms } => assert_eq!(retry_after_ms, 4_000),
+            other => panic!("throttling must survive as RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unthrottled_chain_still_reports_exhaustion() {
+        // Genuine breakage must not be mislabeled as throttling — nothing to wait
+        // for, and a retry-after would be a fabrication.
+        let throttle = ThrottleState::default();
+        assert!(!throttle.throttled());
+        assert!(matches!(
+            throttle.exhausted_error(5),
+            ProviderError::AllExhausted { attempts: 5 }
+        ));
     }
 
     #[tokio::test]
