@@ -78,6 +78,22 @@ pub struct ComplexityWeights {
     pub keyword_score: i32,
     /// Added when tools are present or `tool_choice == "required"`.
     pub tool_use_score: i32,
+    /// Whether offering tools raises complexity to `Complex` outright, rather
+    /// than only adding [`Self::tool_use_score`].
+    ///
+    /// On by default because scoring alone put tool turns in the WRONG tier: with
+    /// the shipped weights, tools contribute 2 against a `complex_threshold` of
+    /// 3, so an ordinary tool-bearing question (no code fence, no reasoning
+    /// keyword) landed on `Moderate` — a model that receives the tool
+    /// definitions and then declines to call them, and answers "I don't have
+    /// access" instead. A tool a model won't invoke is worse than no tool: the
+    /// user is told the capability is missing when it is right there.
+    ///
+    /// Operator-tunable because it trades money for reliability: a turn that
+    /// would not have needed its tools still pays the top tier for the round
+    /// where that is discovered.
+    #[serde(default = "default_tool_use_floors_complex")]
+    pub tool_use_floors_complex: bool,
     /// Conversation turn count above which `+deep_conversation_score` is added.
     pub deep_conversation_turns: usize,
     pub deep_conversation_score: i32,
@@ -130,6 +146,13 @@ impl Default for RoutingPolicy {
     }
 }
 
+/// Serde default for [`ComplexityWeights::tool_use_floors_complex`] — a policy
+/// row stored before the field existed must still floor tool turns, or the
+/// mis-tiering it fixes silently returns.
+fn default_tool_use_floors_complex() -> bool {
+    true
+}
+
 impl Default for ComplexityWeights {
     /// The inline literals from `intent::classify`:
     /// chars>4000 → +2, >1200 → +1; last-user>800 → +1; code-fence → +1;
@@ -145,6 +168,7 @@ impl Default for ComplexityWeights {
             code_fence_score: 1,
             keyword_score: 1,
             tool_use_score: 2,
+            tool_use_floors_complex: true,
             deep_conversation_turns: 12,
             deep_conversation_score: 1,
             moderate_threshold: 1,

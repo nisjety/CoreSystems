@@ -1188,6 +1188,16 @@ pub struct ToolRounds {
     /// streamed as they happened, and a caller replaying this list would emit
     /// each one twice.
     pub events: Vec<ChatEvent>,
+    /// The concrete model inference-core actually resolved for the tool phase,
+    /// so the final answer can be produced by the SAME model.
+    ///
+    /// Without this the answer call re-resolves from scratch — and because tools
+    /// are withheld from it by design, a tool-heavy turn classifies as trivial
+    /// and lands on the cheapest tier. That model never saw the tool
+    /// definitions, so when asked about an integration it just used, it says the
+    /// system has no access to it. Reusing the tool phase's model is what stops
+    /// the answer contradicting the work.
+    pub resolved_model: Option<String>,
 }
 
 /// Where a tool event goes the moment it happens.
@@ -1298,6 +1308,9 @@ pub async fn run_forced_web_search(
     Ok(ToolRounds {
         messages,
         events: events.into_buffer(),
+        // The forced search runs no tool-deciding inference of its own, so it has
+        // no resolved model to hand on; the answer call resolves as usual.
+        resolved_model: None,
     })
 }
 
@@ -1365,6 +1378,7 @@ pub async fn run_tool_rounds(
     sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
+    let mut resolved_model: Option<String> = None;
     let mut events = match sink {
         Some(sink) => ToolEvents::Live(sink),
         None => ToolEvents::Buffered(Vec::new()),
@@ -1411,7 +1425,13 @@ pub async fn run_tool_rounds(
             inference_bearer,
         ));
         let resp = match infer.await {
-            Ok(r) => r.into_inner(),
+            Ok(r) => {
+                let resp = r.into_inner();
+                if !resp.model_used.trim().is_empty() {
+                    resolved_model = Some(resp.model_used.clone());
+                }
+                resp
+            }
             Err(e) => {
                 tracing::warn!(error = %e.message(), "tool-round infer failed; ending loop");
                 // Ending here is not the same as the model deciding it has
@@ -1504,6 +1524,7 @@ pub async fn run_tool_rounds(
     Ok(ToolRounds {
         messages,
         events: events.into_buffer(),
+        resolved_model,
     })
 }
 
@@ -1771,6 +1792,20 @@ mod tests {
             rounds <= MAX_TOOL_ROUNDS_CEILING,
             "budget {rounds} exceeds the hard spend ceiling"
         );
+    }
+
+    #[test]
+    fn tool_rounds_carry_the_resolved_model_so_the_answer_matches_the_work() {
+        // Regression guard: the answer call re-resolved from scratch with tools
+        // withheld, so a 14-tool-call Visma turn classified as trivial, landed on
+        // the cheapest tier, and that model — never having seen the tools — told
+        // the user Velion had no Visma access.
+        let rounds = ToolRounds {
+            messages: vec![],
+            events: vec![],
+            resolved_model: Some("claude-sonnet-4-6".to_owned()),
+        };
+        assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
     #[test]

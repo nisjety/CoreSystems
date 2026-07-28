@@ -1013,6 +1013,10 @@ pub async fn invoke_stream_sse(
         let sink =
             crate::sse_events::RichEventSink::new(tx.clone(), features.clone(), req_id.clone());
 
+        // Starts as the requested id (possibly a `velion-*` mode); the tool phase
+        // replaces it with the concrete model it resolved.
+        let mut answer_model = model_clone.clone();
+
         if tool_defs.iter().any(|tool| tool.name == "web_search") {
             if client_requested_web_search
                 || crate::tool_loop::should_force_web_search(&tool_phase_query)
@@ -1089,12 +1093,20 @@ pub async fn invoke_stream_sse(
                 return;
             };
             messages = rounds.messages;
+            // Answer with the model that did the work. Re-resolving here would
+            // classify a tool-heavy turn as trivial — tools are withheld from the
+            // answer call by design — and hand it to the cheapest tier, which
+            // never saw the tool definitions and therefore tells the user the
+            // system has no access to an integration it just queried.
+            if let Some(tool_phase_model) = rounds.resolved_model {
+                answer_model = tool_phase_model;
+            }
         }
 
         let mut grpc_req = InferRequest {
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
-            model: model_clone.clone(),
+            model: answer_model.clone(),
             provider_hint: String::new(),
             messages,
             temperature: 0.7,

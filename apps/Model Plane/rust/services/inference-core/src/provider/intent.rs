@@ -145,7 +145,17 @@ pub fn classify(
     }
 
     // Tool use needs a capable, tool-following model.
-    if !tools.is_empty() || tool_choice.eq_ignore_ascii_case("required") {
+    let tools_offered = !tools.is_empty() || tool_choice.eq_ignore_ascii_case("required");
+    if tools_offered {
+        // Not merely "more expensive" — the cheap tiers are the wrong TOOL for
+        // the job. Given real MCP tools they decline to call them and answer "I
+        // don't have access", which reads to the user as a missing integration
+        // rather than a routing choice. Scoring alone left this one point short
+        // of the tier that has a tool-following model, so an ordinary tool
+        // question tipped on whether it happened to contain a keyword.
+        if w.tool_use_floors_complex {
+            return Complexity::Complex;
+        }
         score += w.tool_use_score;
     }
 
@@ -402,6 +412,81 @@ mod tests {
             classify(&policy(), &[user("hi")], &[], "auto"),
             Complexity::Simple
         );
+    }
+
+    /// A tool definition shaped like the MCP tools the chat path advertises.
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_offered_tool_reaches_the_tool_capable_tier() {
+        // The live regression: this exact question, with the 10 Visma MCP tools
+        // attached, scored Moderate (tools contribute 2 against a threshold of 3)
+        // and was served by a model that then declined to call any of them and
+        // told the user it had no Visma access.
+        assert_eq!(
+            classify(
+                &policy(),
+                &[user("Kan du sjekke i Visma hva vi har tomt på lager akkurat nå?")],
+                &[tool("mcp__srv__execute_query")],
+                "auto"
+            ),
+            Complexity::Complex
+        );
+    }
+
+    #[test]
+    fn required_tool_choice_reaches_the_tool_capable_tier_without_definitions() {
+        assert_eq!(
+            classify(&policy(), &[user("hi")], &[], "required"),
+            Complexity::Complex
+        );
+    }
+
+    #[test]
+    fn a_toolless_turn_is_unaffected_by_the_floor() {
+        // The floor must not quietly promote every turn — a plain question with
+        // no tools still tiers on its own merits.
+        assert_eq!(
+            classify(&policy(), &[user("hi")], &[], "auto"),
+            Complexity::Simple
+        );
+    }
+
+    #[test]
+    fn operators_can_disable_the_floor_and_get_scoring_back() {
+        let mut p = policy();
+        p.complexity.tool_use_floors_complex = false;
+        // Back to the old arithmetic: tool_use_score 2 clears moderate (1) but
+        // not complex (3).
+        assert_eq!(
+            classify(&p, &[user("hi")], &[tool("mcp__srv__execute_query")], "auto"),
+            Complexity::Moderate
+        );
+    }
+
+    #[test]
+    fn a_policy_stored_before_the_floor_existed_still_floors() {
+        // Serde default: a row persisted by an older build has no
+        // `tool_use_floors_complex` key, and must not silently reinstate the
+        // mis-tiering.
+        let weights: crate::provider::routing_policy::ComplexityWeights =
+            serde_json::from_str(&serde_json::to_string(&serde_json::json!({
+                "large_total_chars": 4000, "large_total_chars_score": 2,
+                "medium_total_chars": 1200, "medium_total_chars_score": 1,
+                "long_user_turn_chars": 800, "long_user_turn_score": 1,
+                "code_fence_score": 1, "keyword_score": 1, "tool_use_score": 2,
+                "deep_conversation_turns": 12, "deep_conversation_score": 1,
+                "moderate_threshold": 1, "complex_threshold": 3, "keywords": []
+            }))
+            .expect("weights json"))
+            .expect("weights without the new key must deserialize");
+        assert!(weights.tool_use_floors_complex);
     }
 
     #[test]
