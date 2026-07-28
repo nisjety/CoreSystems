@@ -32,8 +32,8 @@ use serde_json::Value;
 use crate::{
     config::AppState,
     domains::chat::shared::{
-        delegated_auth_unavailable, model_token, proxy_model_json_with_capability,
-        required_capability_token,
+        data_plane_authorization_value, delegated_auth_unavailable, model_token,
+        proxy_model_json_with_capability, required_capability_token,
     },
     envelope::error,
     middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
@@ -355,11 +355,21 @@ async fn oauth_callback(
         return Redirect::to(&fallback).into_response();
     }
 
+    // `x-capability-authorization` must carry the same "Bearer <jwt>" shape
+    // model-gateway's decode_delegated_bearer expects (mirroring
+    // proxy_model_json_with_delegations) — a bare token here fails
+    // strip_prefix("Bearer ") and model-gateway 401s the whole request with
+    // nothing to log on its side, since a malformed delegated header looks
+    // identical to one that was never sent.
+    let Some(capability_header) = data_plane_authorization_value(&capability) else {
+        tracing::warn!(%org_id, "mcp oauth callback: capability token could not be formatted as a header value");
+        return Redirect::to(&fallback).into_response();
+    };
     let request = state
         .client
         .get(&url)
         .bearer_auth(&token)
-        .header("x-capability-authorization", capability.as_str());
+        .header("x-capability-authorization", capability_header);
 
     let upstream = match request.send().await {
         Ok(upstream) => upstream,
