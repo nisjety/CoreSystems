@@ -312,6 +312,25 @@ services:
       # graph-grounding path already targets.
       SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
       DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
+      # shipping-core (Ingestion Plane) — backs the shipping_get_quotes plain-
+      # chat builtin. Without this the gateway falls back to localhost:8080,
+      # unreachable from inside this container; execution-core's own agentic
+      # tool reaches the same service via its separate SHIPPING_CORE_URL_EXEC.
+      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}
+      # Velion's own public origin, as seen by a user's browser through the
+      # velionv3 gateway. Used only to build the OAuth redirect_uri for MCP
+      # server connections (e.g. Visma Net) — an external authorization
+      # server must redirect back to a URL the browser can actually reach,
+      # never this container's internal address.
+      VELION_PUBLIC_ORIGIN: ${VELION_PUBLIC_ORIGIN:-http://localhost:5173}
+      # Shared Model-Plane-local secret authenticating this gateway's
+      # GET .../oauth-token call to capability-core when resolving an
+      # OAuth-connected MCP server's token at tools/call dispatch time (no
+      # live per-user bearer exists on that execution-core-triggered path).
+      # Must match capability-core's own MCP_OAUTH_SERVICE_TOKEN below. Empty
+      # disables the resolve path — servers with no stored OAuth tokens are
+      # unaffected either way.
+      MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
     networks:
       default: {}
       inter-plane-bus:
@@ -690,6 +709,19 @@ services:
       LETTA_TOOL_SEARCH_LIMIT: ${LETTA_TOOL_SEARCH_LIMIT:-50}
       LETTA_TOOL_SEARCH_MAX_RESPONSE_BYTES: ${LETTA_TOOL_SEARCH_MAX_RESPONSE_BYTES:-262144}
       LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK: ${LETTA_TOOL_SEARCH_ALLOW_INSECURE_LOOPBACK:-false}
+      # AES-256-GCM key encrypting mcp_oauth_tokens at rest (access_token /
+      # refresh_token columns). Must be base64 and decode to exactly 32
+      # bytes. Unset leaves the oauth-token(s) endpoints 503ing rather than
+      # falling back to plaintext storage — generate with, e.g.,
+      # `openssl rand -base64 32`.
+      MCP_TOKEN_ENCRYPTION_KEY: ${MCP_TOKEN_ENCRYPTION_KEY:-}
+      # Shared Model-Plane-local secret accepted on GET .../oauth-token as an
+      # alternative to the normal per-user JWT principal — model-gateway's
+      # execution-core-triggered tools/call dispatch has no live per-user
+      # bearer to present. Must match model-gateway's own
+      # MCP_OAUTH_SERVICE_TOKEN above. Empty disables that one path; the
+      # per-user JWT path is unaffected either way.
+      MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
     depends_on:
