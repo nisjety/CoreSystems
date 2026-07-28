@@ -4583,6 +4583,18 @@ pub struct InvokeRequest {
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
+    /// Display name of the org the caller is acting as, stamped by the BFF
+    /// gateway from the verified session (never client-suppliable — the raw
+    /// browser doesn't reach this endpoint directly). Framing text only: used
+    /// to tell the model who "we"/"us"/"our" refers to. Never used for
+    /// authorization or retrieval scoping — that stays keyed off the verified
+    /// `org_id` claim regardless of what this string says.
+    #[serde(default)]
+    pub org_name: Option<String>,
+    /// Display name of the signed-in user, same provenance/trust notes as
+    /// `org_name`. Used to tell the model who "I"/"me"/"my" refers to.
+    #[serde(default)]
+    pub user_name: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).

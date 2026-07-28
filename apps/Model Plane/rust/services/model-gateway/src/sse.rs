@@ -737,6 +737,14 @@ pub async fn invoke_stream_sse(
             },
         );
     }
+    // Identity context: who the model is talking to. Inserted last of the
+    // position-0 messages so it lands FIRST overall, ahead of the grounding
+    // content it primes — the model should know "we"/"our" means org_name
+    // before it reads org-scoped retrieved text. Absent (org_name unset, e.g.
+    // a caller that bypasses the BFF gateway) → no message, unchanged behavior.
+    if let Some(identity_message) = identity_context_message(&req) {
+        messages.insert(0, identity_message);
+    }
     // Skills: match this turn against the org's skill catalogue (disk-loaded +
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
@@ -2124,6 +2132,40 @@ fn generated_image_state_message(messages: &[ChatMessage]) -> Option<ChatMessage
         role: "system".to_owned(),
         content: "Conversation state: the assistant already generated an image artifact in this thread. If the user asks whether an image was made, answer yes and reference generated-image.png."
             .to_owned(),
+        name: String::new(),
+    })
+}
+
+/// Tells the model whose org/user it's acting for, so pronouns resolve without
+/// the user having to name their own company every turn. `org_name`/`user_name`
+/// are stamped by the BFF gateway from the verified session (see
+/// `InvokeRequest` docs) — never client-suppliable — but are framing text
+/// only: retrieval and authorization stay scoped by the verified `org_id`
+/// claim regardless of what these strings say. `None` when `org_name` is
+/// absent (e.g. a caller that bypasses the gateway) so behavior is unchanged
+/// for any path that doesn't supply it.
+fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
+    let org_name = req
+        .org_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let user_name = req
+        .user_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let content = match user_name {
+        Some(user_name) => format!(
+            "You are Velion, the AI assistant currently helping {org_name}. The signed-in user is {user_name}. When they say \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Velion itself. When they say \"I\", \"me\", or \"my\", they mean themselves, {user_name}. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
+        ),
+        None => format!(
+            "You are Velion, the AI assistant currently helping {org_name}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Velion itself. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
+        ),
+    };
+    Some(ChatMessage {
+        role: "system".to_owned(),
+        content,
         name: String::new(),
     })
 }
