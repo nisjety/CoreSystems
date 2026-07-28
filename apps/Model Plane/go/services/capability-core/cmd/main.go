@@ -220,7 +220,13 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken).Register(protectedMux)
+	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
+	mcpHandler.Register(protectedMux)
+	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
+	// comment — this one route authenticates itself (X-Mcp-Service-Token) and
+	// must not sit behind the per-user JWT middleware wrapping protectedMux
+	// below, which a service-to-service caller has no bearer to satisfy.
+	mcpHandler.RegisterInternal(publicMux)
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMemoryHandler(pool).Register(protectedMux)

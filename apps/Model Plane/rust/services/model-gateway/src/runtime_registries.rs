@@ -368,6 +368,26 @@ pub async fn mcp_tool_defs(
         })
         .map(|e| e.value().clone())
         .collect();
+    tracing::debug!(
+        %org_id,
+        %user_id,
+        candidates = ?reg
+            .inner
+            .iter()
+            .filter(|e| e.key().0 == org_id)
+            .map(|e| {
+                let s = e.value();
+                (
+                    s.server_id.clone(),
+                    s.enabled,
+                    ownership.usable(org_id, crate::ownership::KIND_MCP, &s.server_id, user_id),
+                    ownership.get(org_id, crate::ownership::KIND_MCP, &s.server_id).map(|o| o.owner_user_id),
+                )
+            })
+            .collect::<Vec<_>>(),
+        matched = servers.len(),
+        "mcp_tool_defs: candidate servers for this org (id, enabled, usable_by_caller, owner_user_id)"
+    );
 
     let mut defs: Vec<ToolDefinition> = Vec::new();
     for server in servers {
@@ -379,10 +399,20 @@ pub async fn mcp_tool_defs(
             &server.server_id,
         )
         .await;
-        let tools = match mcp_discover_cached(reg, org_id, &server, oauth_token.as_deref()).await {
-            Some(discovered) => filter_allowlist(discovered, &server.tool_allowlist),
+        let discovered = mcp_discover_cached(reg, org_id, &server, oauth_token.as_deref()).await;
+        let tools = match &discovered {
+            Some(discovered) => filter_allowlist(discovered.clone(), &server.tool_allowlist),
             None => Vec::new(),
         };
+        tracing::debug!(
+            %org_id,
+            server_id = %server.server_id,
+            has_oauth_token = oauth_token.is_some(),
+            discovered_count = discovered.as_ref().map(Vec::len),
+            allowlist = ?server.tool_allowlist,
+            after_allowlist = tools.len(),
+            "mcp_tool_defs: discovery outcome for this server"
+        );
         for t in tools {
             let description = if t.description.is_empty() {
                 format!("Tool '{}' from MCP server '{}'.", t.name, server.name)

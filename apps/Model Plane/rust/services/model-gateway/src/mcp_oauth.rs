@@ -357,11 +357,17 @@ pub async fn resolve_stored_oauth_token(
     if capability_core_base_url.is_empty() || service_token.is_empty() {
         return None;
     }
+    // /api/v1/internal/... (not /api/v1/mcp/{id}/oauth-token) — capability-core
+    // wraps its normal MCP routes in a blanket per-user JWT middleware this
+    // call has no bearer to satisfy, so this endpoint is deliberately mounted
+    // outside that wrapper, gated only by the service token below.
     let mut url = reqwest::Url::parse(&format!(
-        "{capability_core_base_url}/api/v1/mcp/{server_id}/oauth-token"
+        "{capability_core_base_url}/api/v1/internal/mcp/oauth-token"
     ))
     .ok()?;
-    url.query_pairs_mut().append_pair("org_id", org_id);
+    url.query_pairs_mut()
+        .append_pair("server_id", server_id)
+        .append_pair("org_id", org_id);
     let response = client
         .get(url)
         .header("X-Mcp-Service-Token", service_token)

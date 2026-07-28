@@ -776,6 +776,18 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 	})
 }
 
+// RegisterInternal mounts the one route that must NOT sit behind this
+// service's blanket per-user JWT middleware (cmd/main.go wraps Register's
+// mux with verifier.HTTPMiddleware before anything in it runs) — the
+// execution-core-triggered tools/call dispatch path has no per-user bearer
+// to present, only the shared X-Mcp-Service-Token, which that middleware
+// doesn't understand and would reject before oauthTokenResolveInternal's
+// own (sole) gate ever ran. Callers must mount this directly on the
+// UNWRAPPED mux (main.go's publicMux), never on the one passed to Register.
+func (h *MCPHandler) RegisterInternal(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/internal/mcp/oauth-token", h.oauthTokenResolveInternal)
+}
+
 // mcpOAuthTokensUpsertBody is what model-gateway POSTs right after a
 // successful authorization-code exchange, and again after every refresh.
 type mcpOAuthTokensUpsertBody struct {
@@ -881,30 +893,44 @@ func (h *MCPHandler) oauthTokensUpsert(w http.ResponseWriter, r *http.Request, i
 // authorization server. Requires the same write-level trust as storing: this
 // is a live credential, not a public projection.
 func (h *MCPHandler) oauthTokenResolve(w http.ResponseWriter, r *http.Request, id string) {
-	var orgID string
-	// model-gateway's execution-core-triggered tools/call dispatch has no
-	// live per-user bearer to present (see mcpServiceToken doc comment) — a
-	// present X-Mcp-Service-Token switches to that path entirely rather than
-	// falling through to the JWT principal below, so a wrong/stale attempt
-	// fails closed instead of silently trying the other path.
-	if serviceToken := r.Header.Get("X-Mcp-Service-Token"); serviceToken != "" {
-		if h.mcpServiceToken == "" || !secureTokenEqual(h.mcpServiceToken, serviceToken) {
-			jsonErr(w, "invalid service token", http.StatusForbidden)
-			return
-		}
-		orgID = strings.TrimSpace(r.URL.Query().Get("org_id"))
-		if orgID == "" {
-			jsonErr(w, "org_id query parameter is required", http.StatusBadRequest)
-			return
-		}
-	} else {
-		var ok bool
-		orgID, ok = mcpVerifiedOrganization(r, true)
-		if !ok {
-			jsonErr(w, "capability write scope required", http.StatusForbidden)
-			return
-		}
+	orgID, ok := mcpVerifiedOrganization(r, true)
+	if !ok {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return
 	}
+	h.writeDecryptedOAuthToken(w, r, id, orgID)
+}
+
+// oauthTokenResolveInternal is the execution-core-triggered tools/call
+// dispatch's path: that call has no live per-user bearer to present (see
+// mcpServiceToken doc comment), so it cannot use oauthTokenResolve above,
+// which sits behind this service's blanket per-user JWT middleware
+// (cmd/main.go's verifier.HTTPMiddleware wrapping protectedMux) — a request
+// carrying only X-Mcp-Service-Token would be rejected by that middleware
+// before ever reaching this handler's body. Registered directly on the
+// unwrapped publicMux instead (see RegisterInternal), with the service
+// token as its OWN, sole gate — there is no per-user fallback here, unlike
+// oauthTokenResolve, since nothing but that one caller ever reaches this path.
+func (h *MCPHandler) oauthTokenResolveInternal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
+		return
+	}
+	serviceToken := r.Header.Get("X-Mcp-Service-Token")
+	if serviceToken == "" || h.mcpServiceToken == "" || !secureTokenEqual(h.mcpServiceToken, serviceToken) {
+		jsonErr(w, "invalid service token", http.StatusForbidden)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("server_id"))
+	orgID := strings.TrimSpace(r.URL.Query().Get("org_id"))
+	if id == "" || orgID == "" {
+		jsonErr(w, "server_id and org_id query parameters are required", http.StatusBadRequest)
+		return
+	}
+	h.writeDecryptedOAuthToken(w, r, id, orgID)
+}
+
+func (h *MCPHandler) writeDecryptedOAuthToken(w http.ResponseWriter, r *http.Request, id, orgID string) {
 	if h.vault == nil {
 		jsonErr(w, "token encryption is not configured", http.StatusServiceUnavailable)
 		return
