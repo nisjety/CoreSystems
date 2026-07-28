@@ -15,7 +15,8 @@ use std::fmt::Write as _;
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
     ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
-    ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
+    ProxyMcpToolRequest, ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition,
+    WebSearchRequest,
 };
 use serde_json::Value;
 
@@ -62,7 +63,17 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
 /// contract is available on this path.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
-    !name.starts_with("mcp__") && !matches!(name, "save_memory" | "browser_agent")
+    !matches!(name, "save_memory" | "browser_agent")
+}
+
+/// Split `mcp__<server_id>__<tool>` into `(server_id, tool)`. Mirrors
+/// execution-core's `mcp_gateway::parse_mcp_tool_name` exactly: split on the
+/// FIRST `__` after the prefix (a tool name may itself contain `__`; a
+/// `server_id` ULID does not).
+#[must_use]
+fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -595,7 +606,7 @@ fn normalize_tool_query(query: &str) -> String {
 pub async fn dispatch_tool(
     state: &AppState,
     org_id: &str,
-    _user_id: &str,
+    user_id: &str,
     thread_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
     session_bearer: &str,
@@ -898,6 +909,52 @@ pub async fn dispatch_tool(
         // Console's explicit tool selection uses "shipping.get_quotes" as the id.
         "shipping_get_quotes" | "shipping.get_quotes" => {
             dispatch_shipping_quotes_tool(state, ingestion_bearer, call).await
+        }
+        // The org's own connected MCP servers (see runtime_registries::mcp_tool_defs,
+        // which advertises these under the same mcp__<server_id>__<tool> names).
+        // Calls the same handler execution-core's governed ProxyMcpTool RPC uses —
+        // that RPC's identity.is_service() gate lives in grpc.rs's wrapper around
+        // handle_proxy_mcp_tool, not in the function itself, so calling it directly
+        // from inline chat (already an authenticated, per-user context) is not a
+        // bypass of anything.
+        other if other.starts_with("mcp__") => {
+            let Some((server_id, tool_name)) = parse_mcp_tool_name(other) else {
+                return err_outcome(call, format!("malformed mcp tool name '{other}'"));
+            };
+            let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+                &state.http_client,
+                &state.capability_core_base_url,
+                &state.mcp_oauth_service_token,
+                org_id,
+                server_id,
+            )
+            .await;
+            match crate::runtime_registries::handle_proxy_mcp_tool(
+                &state.mcp,
+                &state.ownership,
+                ProxyMcpToolRequest {
+                    request_id: String::new(),
+                    org_id: org_id.to_owned(),
+                    server_id: server_id.to_owned(),
+                    tool_name: tool_name.to_owned(),
+                    input_json: call.arguments_json.clone(),
+                    user_id: user_id.to_owned(),
+                },
+                oauth_token.as_deref(),
+            )
+            .await
+            {
+                Ok(resp) if resp.error_message.is_empty() => ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: resp.output_json,
+                    error: None,
+                },
+                Ok(resp) => err_outcome(call, resp.error_message),
+                Err(status) => {
+                    err_outcome(call, format!("mcp tool call failed: {}", status.message()))
+                }
+            }
         }
         other => err_outcome(call, format!("unknown tool '{other}'")),
     }
@@ -1284,6 +1341,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_mcp_tool_name_parses_server_and_tool() {
+        assert_eq!(
+            parse_mcp_tool_name("mcp__01ABC__read_file"),
+            Some(("01ABC", "read_file"))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_tool_name_splits_on_first_separator_so_tool_may_contain_underscores() {
+        // Mirrors execution-core's mcp_gateway::parse_mcp_tool_name exactly —
+        // a server_id is a ULID (no underscores), so splitting on the FIRST
+        // "__" is unambiguous even when the tool name itself has more.
+        assert_eq!(
+            parse_mcp_tool_name("mcp__srv__do__a__thing"),
+            Some(("srv", "do__a__thing"))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_tool_name_rejects_non_mcp_and_malformed() {
+        assert_eq!(parse_mcp_tool_name("web_search"), None);
+        assert_eq!(parse_mcp_tool_name("mcp__noseparator"), None);
+    }
+
+    #[test]
     fn inline_tool_action_identity_is_stable_and_collision_resistant() {
         let first = inline_tool_action_id("run-1", "call/a");
         assert_eq!(first, inline_tool_action_id("run-1", "call/a"));
@@ -1347,12 +1429,19 @@ mod tests {
 
     #[test]
     fn inline_loop_rejects_side_effects_that_require_governed_agentic_approval() {
-        assert!(!inline_tool_allowed("mcp__github__create_issue"));
-        assert!(!inline_tool_allowed("mcp__srv__a__b"));
         assert!(!inline_tool_allowed("save_memory"));
         assert!(!inline_tool_allowed("browser_agent"));
         assert!(inline_tool_allowed("web_search"));
         assert!(inline_tool_allowed("knowledge_search"));
+    }
+
+    #[test]
+    fn inline_loop_admits_the_orgs_own_connected_mcp_servers() {
+        // The chat surface IS the product: an org's connected MCP server must
+        // be usable from inline chat, not gated behind a separate "agent"
+        // concept — only save_memory/browser_agent remain agentic-only.
+        assert!(inline_tool_allowed("mcp__github__create_issue"));
+        assert!(inline_tool_allowed("mcp__srv__a__b"));
     }
 
     #[test]

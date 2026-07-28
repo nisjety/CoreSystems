@@ -289,6 +289,7 @@ async fn mcp_discover_cached(
     reg: &McpRegistry,
     org_id: &str,
     server: &McpServer,
+    oauth_token: Option<&str>,
 ) -> Option<Vec<McpToolDef>> {
     let key = (org_id.to_owned(), server.server_id.clone());
     if let Some(entry) = reg.catalog.get(&key) {
@@ -296,9 +297,16 @@ async fn mcp_discover_cached(
             return Some(entry.1.clone());
         }
     }
+    // An OAuth-connected server's in-memory `token` is always empty (tokens
+    // live only in capability-core's encrypted store) — same resolution the
+    // tools/call dispatch path uses (handle_proxy_mcp_tool), so discovery
+    // doesn't 401 against exactly the servers this flow exists for.
+    let token = oauth_token
+        .filter(|token| !token.is_empty())
+        .unwrap_or(&server.token);
     let discovery = async {
         match server.transport.as_str() {
-            "http" => http_list_tools(&server.url, &server.token).await,
+            "http" => http_list_tools(&server.url, token).await,
             other => Err(format!("discovery quarantined for transport {other}")),
         }
     };
@@ -329,9 +337,11 @@ async fn mcp_discover_cached(
 /// org has registered, namespaced `mcp__<server_id>__<tool>` so the gateway's
 /// `dispatch_tool` (and the model) can route calls back to the right server.
 /// This is the governed exposure bridge: without it, registered MCP servers sit
-/// in the registry but their tools never reach an execution caller. Inline chat
-/// deliberately does not consume these definitions because it lacks the
-/// execution-core approval workflow.
+/// in the registry but their tools never reach an execution caller. Both the
+/// execution-core agentic loop AND the inline chat loop consume these
+/// definitions — the chat surface IS the product, so an MCP server the user
+/// connected must be usable there too, not gated behind a separate "agent"
+/// concept.
 ///
 /// Discovery is best-effort and bounded (see [`mcp_discover_cached`]): each
 /// server's `tools/list` is fetched for real input schemas and then intersected
@@ -342,6 +352,9 @@ pub async fn mcp_tool_defs(
     ownership: &crate::ownership::OwnershipStore,
     org_id: &str,
     user_id: &str,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    mcp_oauth_service_token: &str,
 ) -> Vec<ToolDefinition> {
     // Tenant scope from the key; ownership filters to the resources THIS user may
     // use (org-wide, owned, or shared-to-them) — never another user's private.
@@ -358,7 +371,15 @@ pub async fn mcp_tool_defs(
 
     let mut defs: Vec<ToolDefinition> = Vec::new();
     for server in servers {
-        let tools = match mcp_discover_cached(reg, org_id, &server).await {
+        let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+            http_client,
+            capability_core_base_url,
+            mcp_oauth_service_token,
+            org_id,
+            &server.server_id,
+        )
+        .await;
+        let tools = match mcp_discover_cached(reg, org_id, &server, oauth_token.as_deref()).await {
             Some(discovered) => filter_allowlist(discovered, &server.tool_allowlist),
             None => Vec::new(),
         };
@@ -871,6 +892,30 @@ mod mcp_exposure_tests {
         }
     }
 
+    /// `mcp_tool_defs` with an empty OAuth-resolution config — every test
+    /// server here has no capability-core-stored token anyway, and an empty
+    /// `capability_core_base_url`/service token makes `resolve_stored_oauth_token`
+    /// short-circuit before any network attempt (see mcp_oauth.rs's own tests
+    /// for that short-circuit), so this is behaviorally identical to the
+    /// pre-OAuth-resolution signature.
+    async fn tool_defs(
+        reg: &McpRegistry,
+        ownership: &crate::ownership::OwnershipStore,
+        org_id: &str,
+        user_id: &str,
+    ) -> Vec<ToolDefinition> {
+        mcp_tool_defs(
+            reg,
+            ownership,
+            org_id,
+            user_id,
+            &reqwest::Client::new(),
+            "",
+            "",
+        )
+        .await
+    }
+
     #[test]
     fn filter_allowlist_empty_fails_closed() {
         let tools = vec![tool("read"), tool("write")];
@@ -927,7 +972,7 @@ mod mcp_exposure_tests {
             "fs",
             crate::ownership::Ownership::org(),
         );
-        let defs = mcp_tool_defs(&reg, &ownership, "org-1", "u1").await;
+        let defs = tool_defs(&reg, &ownership, "org-1", "u1").await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mcp__fs__read_file"), "got {names:?}");
         assert!(names.contains(&"mcp__fs__list_dir"), "got {names:?}");
@@ -952,7 +997,7 @@ mod mcp_exposure_tests {
                 enabled: false,
             },
         );
-        assert!(mcp_tool_defs(
+        assert!(tool_defs(
             &reg,
             &crate::ownership::OwnershipStore::new(),
             "org-2",
@@ -989,8 +1034,8 @@ mod mcp_exposure_tests {
             "s",
             crate::ownership::Ownership::org(),
         );
-        assert_eq!(mcp_tool_defs(&reg, &own, "org-a", "u1").await.len(), 1);
-        assert!(mcp_tool_defs(&reg, &own, "org-b", "u1").await.is_empty());
+        assert_eq!(tool_defs(&reg, &own, "org-a", "u1").await.len(), 1);
+        assert!(tool_defs(&reg, &own, "org-b", "u1").await.is_empty());
     }
 }
 

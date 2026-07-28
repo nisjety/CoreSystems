@@ -1551,7 +1551,8 @@ impl ModelGateway for GatewayService {
 
     /// Agent-facing tool defs for the org's enabled MCP servers, namespaced
     /// `mcp__<server_id>__<tool>` — the exposure bridge for the governed agent
-    /// loop (execution-core), reusing the same discovery the chat path uses.
+    /// loop (execution-core). Inline chat calls the same underlying
+    /// `runtime_registries::mcp_tool_defs` directly rather than this RPC.
     async fn list_mcp_tools(
         &self,
         request: Request<ListMcpToolsRequest>,
@@ -1566,6 +1567,9 @@ impl ModelGateway for GatewayService {
             &self.state.ownership,
             &req.org_id,
             &req.user_id,
+            &self.state.http_client,
+            &self.state.capability_core_base_url,
+            &self.state.mcp_oauth_service_token,
         )
         .await;
         Ok(Response::new(ListMcpToolsResponse {

@@ -829,8 +829,25 @@ pub async fn invoke_stream_sse(
                 defs.push(builtin);
             }
         }
-        // MCP tools require the execution-core approval workflow and are never
-        // exposed on this inline chat loop.
+        // The org's own connected MCP servers (namespaced mcp__<server_id>__<tool>
+        // — see runtime_registries::mcp_tool_defs) are first-class chat tools, not
+        // gated behind a separate "agent" concept: the chat surface IS the
+        // product. Same dedupe rule as builtins — a client-declared spec wins.
+        for mcp_tool in crate::runtime_registries::mcp_tool_defs(
+            &state.mcp,
+            &state.ownership,
+            &org_id,
+            &user_id,
+            &state.http_client,
+            &state.capability_core_base_url,
+            &state.mcp_oauth_service_token,
+        )
+        .await
+        {
+            if !defs.iter().any(|d| d.name == mcp_tool.name) {
+                defs.push(mcp_tool);
+            }
+        }
         defs
     } else {
         Vec::new()
