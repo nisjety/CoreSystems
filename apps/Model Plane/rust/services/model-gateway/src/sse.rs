@@ -942,7 +942,7 @@ pub async fn invoke_stream_sse(
         provider_hint: String::new(),
         messages,
         temperature: 0.7,
-        max_tokens: 1024,
+        max_tokens: answer_token_budget(),
         structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
         zdr: effective_zdr,
         ..Default::default()
@@ -1414,6 +1414,27 @@ const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
 const MAX_CONTEXT_ASSEMBLY_TOKENS: u32 = 32_768;
 
+/// Output ceiling for a user-facing answer.
+///
+/// Was a hardcoded 1024 on every answer this service has ever streamed, which
+/// silently truncates exactly the answers Velion exists to give — a supplier
+/// breakdown, a stock table, a multi-invoice summary all run past ~4k characters
+/// and simply stopped mid-sentence. 1024 is a sane cap for a *tool-call* round
+/// (see `tool_loop::max_tool_round_tokens`), never for prose the user reads.
+const DEFAULT_ANSWER_TOKENS: i32 = 4096;
+const MIN_ANSWER_TOKENS: i32 = 256;
+const MAX_ANSWER_TOKENS: i32 = 16_384;
+
+/// Max output tokens for a user-facing answer: `MODEL_GATEWAY_ANSWER_TOKENS`
+/// env override clamped to a sane band, else [`DEFAULT_ANSWER_TOKENS`].
+fn answer_token_budget() -> i32 {
+    std::env::var("MODEL_GATEWAY_ANSWER_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(DEFAULT_ANSWER_TOKENS)
+        .clamp(MIN_ANSWER_TOKENS, MAX_ANSWER_TOKENS)
+}
+
 fn context_assembly_budget() -> u32 {
     std::env::var("MODEL_GATEWAY_CONTEXT_ASSEMBLY_TOKENS")
         .ok()
@@ -1725,7 +1746,9 @@ fn vision_stream(
                     prompt,
                     model: model.clone(),
                     provider_hint: String::new(),
-                    max_tokens: 1024,
+                    // Also user-facing prose: describing an invoice or a scanned
+                    // document runs well past 1024 tokens.
+                    max_tokens: answer_token_budget(),
                 },
                 &inference_bearer,
             ))
@@ -2799,7 +2822,8 @@ async fn direct_infer(
                     name: String::new(),
                 }],
                 temperature: 0.7,
-                max_tokens: 1024,
+                // Agentic fallback still produces the answer the user reads.
+                max_tokens: answer_token_budget(),
                 structured_output_schema: String::new(),
                 // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
                 // fallback inference (was hardcoded false, ignoring the run's ZDR).

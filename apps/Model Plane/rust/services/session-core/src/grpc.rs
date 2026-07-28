@@ -2598,6 +2598,20 @@ fn push_tier(
     }
 }
 
+/// Ceiling on the share of the budget that grounding + the run's own goal may
+/// reserve ahead of raw chat history — expressed as `NUM/DEN` so history is
+/// never starved in the opposite direction either.
+const PROTECTED_BUDGET_NUM: u32 = 3;
+const PROTECTED_BUDGET_DEN: u32 = 5;
+
+/// Same estimate `try_push` charges, exposed so a tier's cost can be reserved
+/// before a lower-priority tier is allowed to spend it.
+fn estimated_tokens(content: &str) -> u32 {
+    u32::try_from(content.len())
+        .unwrap_or(u32::MAX)
+        .saturating_div(4)
+}
+
 fn try_push(
     kind: &str,
     content: String,
@@ -2665,15 +2679,55 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
         return (segments, total);
     }
 
-    for (role, content) in &inputs.thread_messages {
-        if !try_push(
-            "thread",
-            format!("{role}: {content}"),
-            budget,
-            &mut segments,
-            &mut total,
-        ) {
-            return (segments, total);
+    // Chat history is the one UNBOUNDED tier here (20 turns that now routinely
+    // carry multi-KB tool results), and it used to be spent first and allowed to
+    // `return` out of the whole assembly. So a rich ERP thread silently dropped
+    // every tier below: retrieval, knowledge, graph — and the run's own goal,
+    // which is pushed last of all. The assistant then answered a grounded
+    // question with no grounding, and reported none, which is the exact failure
+    // a cited-answer product cannot ship.
+    //
+    // So: reserve what grounding and the goal actually cost (capped at a share
+    // of the budget so history keeps room too), let history fill only the rest,
+    // and let it fall short WITHOUT aborting the tiers underneath it.
+    let prompt = match &inputs.prompt_goal {
+        Some(g) if !g.is_empty() => g.clone(),
+        _ => format!("run:{}", inputs.run_id),
+    };
+    let protected_cost = inputs
+        .retrieval_segments
+        .iter()
+        .chain(inputs.knowledge_segments.iter())
+        .chain(inputs.graph_segments.iter())
+        .map(|segment| estimated_tokens(segment))
+        .fold(0_u32, u32::saturating_add)
+        .saturating_add(estimated_tokens(&prompt));
+    let thread_budget = if budget == 0 {
+        0
+    } else {
+        let reservation_cap = budget
+            .saturating_div(PROTECTED_BUDGET_DEN)
+            .saturating_mul(PROTECTED_BUDGET_NUM);
+        budget.saturating_sub(protected_cost.min(reservation_cap))
+    };
+
+    // Newest-first while filling, then restored to chronological order: the
+    // messages that fall off must be the OLDEST. Iterating forward dropped the
+    // most recent turns instead — the ones the user is actually replying to.
+    let mut thread_kept: Vec<String> = Vec::new();
+    let mut thread_spend = total;
+    for (role, content) in inputs.thread_messages.iter().rev() {
+        let rendered = format!("{role}: {content}");
+        let est = estimated_tokens(&rendered);
+        if thread_budget != 0 && thread_spend.saturating_add(est) > thread_budget {
+            break;
+        }
+        thread_spend = thread_spend.saturating_add(est);
+        thread_kept.push(rendered);
+    }
+    for rendered in thread_kept.into_iter().rev() {
+        if !try_push("thread", rendered, budget, &mut segments, &mut total) {
+            break;
         }
     }
 
@@ -2686,15 +2740,15 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
         ("graph", &inputs.graph_segments),
     ];
     for (kind, tier) in tail_tiers {
+        // `break`, not `return`: one oversized tier must not swallow the run's
+        // own goal, which is pushed after this loop.
         if !push_all(kind, tier, budget, &mut segments, &mut total) {
-            return (segments, total);
+            break;
         }
     }
 
-    let prompt = match &inputs.prompt_goal {
-        Some(g) if !g.is_empty() => g.clone(),
-        _ => format!("run:{}", inputs.run_id),
-    };
+    // `prompt` was computed above so its cost could be reserved before history
+    // spent the budget; pushing it is what that reservation was for.
     let _ = try_push("prompt", prompt, budget, &mut segments, &mut total);
 
     (segments, total)
@@ -2953,6 +3007,107 @@ mod tests {
             run_id: String::new(),
             max_tokens: 0,
         }
+    }
+
+    /// Build a thread whose rendered messages alone would blow the budget.
+    fn flooded_thread(turns: usize, chars: usize) -> Vec<(String, String)> {
+        (0..turns)
+            .map(|n| ("user".to_owned(), format!("{n}-{}", "x".repeat(chars))))
+            .collect()
+    }
+
+    #[test]
+    fn long_thread_cannot_starve_grounding_or_the_runs_own_goal() {
+        // The regression this guards: history was spent first and `return`ed out
+        // of assembly, so a rich ERP thread silently produced an answer with no
+        // retrieval, no knowledge, no graph, and not even the question.
+        let mut i = base();
+        i.max_tokens = 512;
+        i.thread_messages = flooded_thread(40, 400);
+        i.retrieval_segments = vec!["retrieved: supplier invoice 4711".to_owned()];
+        i.knowledge_segments = vec!["kb: stocktake policy".to_owned()];
+        i.graph_segments = vec!["graph: supplier→sku".to_owned()];
+        i.prompt_goal = Some("what is empty in the warehouse?".to_owned());
+
+        let (segs, total) = assemble_segments(&i);
+        let kinds: Vec<&str> = segs.iter().map(|s| s.kind.as_str()).collect();
+
+        assert!(kinds.contains(&"retrieval"), "grounding was starved: {kinds:?}");
+        assert!(kinds.contains(&"knowledge"), "knowledge was starved: {kinds:?}");
+        assert!(kinds.contains(&"graph"), "graph was starved: {kinds:?}");
+        assert!(kinds.contains(&"prompt"), "the run's own goal was dropped: {kinds:?}");
+        assert!(kinds.contains(&"thread"), "history should still get its share");
+        assert!(total <= i.max_tokens, "budget overspent: {total}");
+    }
+
+    #[test]
+    fn thread_truncation_keeps_the_newest_turns() {
+        // Dropping the tail discarded the turns the user is actually replying to.
+        let mut i = base();
+        i.max_tokens = 256;
+        i.thread_messages = flooded_thread(30, 200);
+
+        let (segs, _) = assemble_segments(&i);
+        let threads: Vec<&str> = segs
+            .iter()
+            .filter(|s| s.kind == "thread")
+            .map(|s| s.content.as_str())
+            .collect();
+
+        assert!(!threads.is_empty(), "history was dropped entirely");
+        // Newest turn is index 29; the oldest (0) must be what falls off.
+        assert!(
+            threads.last().is_some_and(|last| last.contains("29-")),
+            "newest turn missing; kept={:?}",
+            threads.iter().map(|t| &t[..8.min(t.len())]).collect::<Vec<_>>()
+        );
+        assert!(
+            !threads.iter().any(|t| t.starts_with("user: 0-")),
+            "oldest turn survived while newer ones were dropped"
+        );
+    }
+
+    #[test]
+    fn thread_segments_stay_in_chronological_order_after_truncation() {
+        let mut i = base();
+        i.max_tokens = 512;
+        i.thread_messages = flooded_thread(20, 100);
+
+        let (segs, _) = assemble_segments(&i);
+        let indices: Vec<usize> = segs
+            .iter()
+            .filter(|s| s.kind == "thread")
+            .filter_map(|s| {
+                s.content
+                    .trim_start_matches("user: ")
+                    .split('-')
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+
+        assert!(indices.len() > 1, "need several turns to check ordering");
+        assert!(
+            indices.windows(2).all(|w| w[0] < w[1]),
+            "history must read oldest→newest, got {indices:?}"
+        );
+    }
+
+    #[test]
+    fn grounding_reservation_still_leaves_history_room() {
+        // The reservation is capped, so grounding cannot starve history either.
+        let mut i = base();
+        i.max_tokens = 1024;
+        i.thread_messages = flooded_thread(10, 200);
+        i.retrieval_segments = (0..40).map(|n| format!("retrieved-{n}-{}", "y".repeat(200))).collect();
+
+        let (segs, _) = assemble_segments(&i);
+        let kinds: Vec<&str> = segs.iter().map(|s| s.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"thread"),
+            "oversized grounding starved history: {kinds:?}"
+        );
     }
 
     #[test]

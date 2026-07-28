@@ -91,17 +91,32 @@ have taken the requested action, answer the user's request directly and clearly.
 const TEMPERATURE: f32 = 0.7;
 
 /// Max tokens for each inference round.
-const MAX_TOKENS: i32 = 1024;
+///
+/// A round emits either tool-call arguments or the final answer, so it has to
+/// fit the answer: at 1024 an agentic run would truncate exactly the long
+/// deliverables (tables, multi-record summaries) that justify running an agent
+/// instead of asking a one-shot question.
+const MAX_TOKENS: i32 = 4096;
 
 /// Default round budget when the request does not specify one.
-const DEFAULT_MAX_ROUNDS: u32 = 4;
+///
+/// Deliberately at least the inline-chat budget (`model-gateway`'s
+/// `tool_loop::max_tool_rounds`): a deployed agent is the LONG-horizon surface,
+/// so it must never get less room to work than plain chat. It was previously 4
+/// with a ceiling of 8 — below what a self-describing MCP server needs just to
+/// discover a schema before acting (Visma spends 2 rounds on
+/// `list_skills` + `get_skill` before its first query), which left nothing for
+/// acting on the result, let alone recovering from it.
+const DEFAULT_MAX_ROUNDS: u32 = 12;
 
 /// Hard ceiling on rounds regardless of the request, so a misbehaving caller
 /// can't drive an unbounded loop.
-const MAX_ROUNDS_CEILING: u32 = 8;
+const MAX_ROUNDS_CEILING: u32 = 32;
 
 /// Cap on a single tool outcome rendered back into the conversation context.
-const MAX_TOOL_CONTEXT_CHARS: usize = 4000;
+/// Matches model-gateway's `MAX_TOOL_OUTPUT_CHARS` so the same tool result is
+/// not silently richer on one surface than the other.
+const MAX_TOOL_CONTEXT_CHARS: usize = 8000;
 
 /// Graceful reply persisted to the thread when no inference round yields an
 /// answer, so a user-facing answer always exists.
@@ -708,7 +723,7 @@ does not exist:\n",
                     s,
                     "- {} → {}",
                     o.name,
-                    truncate(&o.output, MAX_TOOL_CONTEXT_CHARS)
+                    bounded_tool_context(&o.output, MAX_TOOL_CONTEXT_CHARS)
                 );
             }
         }
@@ -1104,6 +1119,24 @@ fn truncate(value: &str, max: usize) -> String {
         return value.to_owned();
     }
     value.chars().take(max).collect()
+}
+
+/// Bound a tool result headed for the MODEL, saying in words that it is partial.
+///
+/// Distinct from [`truncate`], which also feeds the durable step record where a
+/// prose marker would be noise. A bare clip is actively misleading here: the
+/// model cannot tell a complete result from a clipped one and will summarize
+/// half a page of ERP rows as though it were the whole answer.
+fn bounded_tool_context(output: &str, max: usize) -> String {
+    if output.chars().count() <= max {
+        return output.to_owned();
+    }
+    let kept: String = output.chars().take(max).collect();
+    format!(
+        "{kept}\n[truncated: result exceeded {max} characters and is INCOMPLETE. Do not treat \
+         this as the full result set. To see the rest, narrow the request — filter harder, \
+         request fewer fields, or page through it.]"
+    )
 }
 
 #[cfg(test)]

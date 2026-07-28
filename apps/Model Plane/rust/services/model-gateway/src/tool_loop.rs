@@ -26,10 +26,75 @@ use crate::{
     state::AppState,
 };
 
-/// Max tool rounds before forcing a final, tool-free answer.
-pub const MAX_TOOL_ROUNDS: usize = 3;
+/// Default max tool rounds before forcing a final, tool-free answer.
+///
+/// Deliberately generous: a real MCP server is *self-describing*, so a single
+/// business question routinely spends its first rounds just learning the remote
+/// schema before it can act. Visma, for example, needs `list_skills` →
+/// `get_skill` before the first `execute_query` — with the original cap of 3
+/// that left zero rounds to react to the query's own result, so a recoverable
+/// upstream validation error became a dead end: the model had already worked out
+/// the fix but had no round left to apply it, and the turn ended by asking the
+/// user to confirm something it could have simply retried.
+///
+/// The reference implementation treats its equivalent (`maxTurns`) as an
+/// optional guard rather than a routine budget, letting the loop run until the
+/// model stops requesting tools. We keep a hard ceiling — this is multi-tenant
+/// and every round is a billable inference — but set it high enough that
+/// discovery, execution, and at least one self-correction all fit.
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 12;
+
+/// Absolute ceiling regardless of configuration, so a bad env value cannot turn
+/// one chat turn into an unbounded spend.
+const MAX_TOOL_ROUNDS_CEILING: usize = 32;
+
+/// Max tool rounds for this process: `MAX_TOOL_ROUNDS` env override, clamped to
+/// `1..=MAX_TOOL_ROUNDS_CEILING`, else [`DEFAULT_MAX_TOOL_ROUNDS`]. Read once —
+/// the budget must not change mid-turn.
+pub fn max_tool_rounds() -> usize {
+    static ROUNDS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ROUNDS.get_or_init(|| {
+        std::env::var("MAX_TOOL_ROUNDS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|parsed| *parsed > 0)
+            .map_or(DEFAULT_MAX_TOOL_ROUNDS, |parsed| {
+                parsed.min(MAX_TOOL_ROUNDS_CEILING)
+            })
+    })
+}
+
 /// Cap on inlined page content from `fetch_url` (keeps the prompt bounded).
 const MAX_FETCH_CHARS: usize = 4_000;
+
+/// Max output tokens for a tool-deciding round.
+///
+/// Smaller than a user-facing answer (see `sse::answer_token_budget`) because
+/// this round emits tool-call arguments, not prose — but not as small as the
+/// original 1024, which a genuinely long argument can overrun: the model emits
+/// tool arguments as JSON, so hitting the cap mid-string yields malformed
+/// arguments that fail at the tool instead of failing visibly here. A real
+/// GraphQL query against an ERP schema is exactly that kind of argument.
+const TOOL_ROUND_TOKENS: i32 = 2048;
+
+/// Told to the model when the tool phase ends on an inference failure rather
+/// than because the model was satisfied, so a half-finished lookup is not
+/// mistaken for a completed one.
+const TOOL_PHASE_INTERRUPTED_NOTICE: &str =
+    "NOTE: the tool phase ended early due to a temporary inference failure, not because the \
+     available information was sufficient. Any tool results above may be incomplete, and tools \
+     you intended to call may never have run. Answer with what you can actually support, state \
+     plainly which part you could not verify, and suggest retrying — do not present an \
+     unverified answer as confirmed.";
+
+/// Cap on a single tool result inlined into the loop's context.
+///
+/// Load-bearing now that the round budget above is generous: every round
+/// re-sends the whole accumulated history, so an untruncated result is paid for
+/// again on every subsequent round. MCP replies alone are allowed up to 1 MiB
+/// (`runtime_registries::MCP_MAX_RESPONSE_BYTES`), which an ERP inventory query
+/// can genuinely approach.
+const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 /// The result of executing one model-requested tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,9 +123,11 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
         .and_then(|v| v.get(key).and_then(serde_json::Value::as_i64))
 }
 
-/// Inline chat tools execute without the execution-core approval workflow.
-/// MCP tools therefore remain agentic-only until the same signed approval
-/// contract is available on this path.
+/// Inline chat tools execute without the execution-core approval workflow, so
+/// only the two tools whose side effects genuinely require that signed approval
+/// contract are withheld here. MCP tools are deliberately NOT withheld: chat is
+/// the product surface, so an org's own connected servers must work in plain
+/// chat, with the dedicated-agent surface layered on top rather than gating it.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
     !matches!(name, "save_memory" | "browser_agent")
@@ -1083,13 +1150,32 @@ fn append_tool_outcomes(s: &mut String, outcomes: &[ToolOutcome]) {
     for o in outcomes {
         match &o.error {
             Some(e) => {
+                // Errors stay verbatim: the upstream message is usually the only
+                // thing that tells the model how to fix its next attempt (e.g. a
+                // GraphQL type error naming the offending field).
                 let _ = writeln!(s, "- {} → ERROR: {e}", o.name);
             }
             None => {
-                let _ = writeln!(s, "- {} → {}", o.name, o.output);
+                let _ = writeln!(s, "- {} → {}", o.name, bounded_tool_output(&o.output));
             }
         }
     }
+}
+
+/// Bound one tool result for inlining, and say so in words the model can act on
+/// — a bare ellipsis reads as "that is all there was", which would have it
+/// summarize a partial result set as if it were complete.
+fn bounded_tool_output(output: &str) -> String {
+    let trimmed = output.trim();
+    if trimmed.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+        return trimmed.to_owned();
+    }
+    let kept: String = trimmed.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    format!(
+        "{kept}\n[truncated: result exceeded {MAX_TOOL_OUTPUT_CHARS} characters and is INCOMPLETE. \
+         Do not treat this as the full result set. To see the rest, narrow the request — filter \
+         harder, request fewer fields, or page through it.]"
+    )
 }
 
 /// Result of resolving a request's tool calls before the final answer streams.
@@ -1211,7 +1297,7 @@ fn web_search_citations(outcome: &ToolOutcome) -> Vec<ChatEvent> {
 
 /// Run the function-calling loop to resolution: unary infer-with-tools →
 /// execute requested tools → inject results as context → repeat (capped at
-/// [`MAX_TOOL_ROUNDS`]). Stops as soon as the model stops requesting tools.
+/// [`max_tool_rounds`]). Stops as soon as the model stops requesting tools.
 /// The returned `messages` are then handed to the streaming infer (with tools
 /// withheld) to produce the final answer. Inference errors stop the loop
 /// gracefully (the normal stream path then handles the request).
@@ -1239,7 +1325,7 @@ pub async fn run_tool_rounds(
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    for _round in 0..max_tool_rounds() {
         let mut client = state.inference_client.clone();
         // Forward the delegated inference bearer — inference-core rejects a bare
         // Infer, which silently killed every model-decided tool round in prod.
@@ -1251,7 +1337,7 @@ pub async fn run_tool_rounds(
                 provider_hint: String::new(),
                 messages: messages.clone(),
                 temperature: 0.7,
-                max_tokens: 1024,
+                max_tokens: TOOL_ROUND_TOKENS,
                 structured_output_schema: String::new(),
                 zdr,
                 tools: tools.clone(),
@@ -1263,6 +1349,17 @@ pub async fn run_tool_rounds(
             Ok(r) => r.into_inner(),
             Err(e) => {
                 tracing::warn!(error = %e.message(), "tool-round infer failed; ending loop");
+                // Ending here is not the same as the model deciding it has
+                // enough: the tool phase was cut short mid-question. Say so, or
+                // the final answer streams as though the missing lookups had
+                // simply not been needed — an ungrounded answer presented with
+                // full confidence, which is the one failure mode a grounded
+                // assistant cannot afford.
+                messages.push(ChatMessage {
+                    role: "user".to_owned(),
+                    content: TOOL_PHASE_INTERRUPTED_NOTICE.to_owned(),
+                    name: String::new(),
+                });
                 break;
             }
         };
@@ -1531,6 +1628,89 @@ mod tests {
         assert_eq!(normalized["organisasjonsform"]["kode"], "AS");
         assert_eq!(normalized["antallAnsatte"], 42);
         assert_eq!(normalized["konkurs"], false);
+    }
+
+    #[test]
+    fn tool_round_budget_leaves_room_to_recover_after_self_describing_discovery() {
+        // Regression guard for the live Visma failure: `list_skills` +
+        // `get_skill` + `execute_query` is three rounds of *unavoidable* work
+        // before any result is even seen, so a budget that small cannot react to
+        // that result at all. Assert real headroom past discovery, not just ">3".
+        let rounds = max_tool_rounds();
+        assert!(
+            rounds >= 6,
+            "budget {rounds} leaves no room to act on a discovered schema and then \
+             self-correct; MCP discovery alone can consume 2-3 rounds"
+        );
+        assert!(
+            rounds <= MAX_TOOL_ROUNDS_CEILING,
+            "budget {rounds} exceeds the hard spend ceiling"
+        );
+    }
+
+    #[test]
+    fn interrupted_tool_phase_notice_forbids_presenting_it_as_verified() {
+        // A cut-short tool phase must not read to the model as "you have enough
+        // now" — that is how an ungrounded answer acquires a confident tone.
+        let notice = TOOL_PHASE_INTERRUPTED_NOTICE;
+        assert!(notice.contains("not because the available information was sufficient"));
+        assert!(notice.contains("may never have run"));
+        assert!(notice.contains("do not present an unverified answer as confirmed"));
+    }
+
+    #[test]
+    fn tool_round_output_cap_exceeds_the_original_so_long_arguments_survive() {
+        // Tool arguments are JSON; clipping mid-string yields malformed arguments
+        // that fail at the tool rather than visibly here.
+        assert!(TOOL_ROUND_TOKENS > 1024);
+    }
+
+    #[test]
+    fn bounded_tool_output_passes_small_results_through_untouched() {
+        assert_eq!(bounded_tool_output("  [{\"sku\":\"A\"}]  "), "[{\"sku\":\"A\"}]");
+    }
+
+    #[test]
+    fn bounded_tool_output_marks_a_clipped_result_as_incomplete() {
+        let huge = "x".repeat(MAX_TOOL_OUTPUT_CHARS + 500);
+        let bounded = bounded_tool_output(&huge);
+
+        assert!(bounded.chars().count() < huge.chars().count());
+        // The model must be told the set is partial — otherwise it summarizes a
+        // clipped page of ERP rows as though it were the complete answer.
+        assert!(bounded.contains("INCOMPLETE"));
+        assert!(bounded.contains("narrow the request"));
+    }
+
+    #[test]
+    fn oversized_tool_output_is_bounded_when_framed_into_context() {
+        let outcomes = vec![ToolOutcome {
+            call_id: "c1".into(),
+            name: "mcp__srv__execute_query".into(),
+            output: "y".repeat(MAX_TOOL_OUTPUT_CHARS * 3),
+            error: None,
+        }];
+
+        let ctx = format_tool_context(&outcomes);
+        assert!(ctx.contains("INCOMPLETE"));
+        // Every later round re-sends this history, so the bound is what keeps a
+        // generous round budget from compounding one huge result set.
+        assert!(ctx.chars().count() < MAX_TOOL_OUTPUT_CHARS * 2);
+    }
+
+    #[test]
+    fn tool_errors_reach_the_model_verbatim_so_it_can_self_correct() {
+        // The upstream text is the fix instruction (this exact Visma message named
+        // the offending enum), so it must not be clipped or reworded.
+        let upstream = "String cannot represent a non string value: Active";
+        let outcomes = vec![ToolOutcome {
+            call_id: "c1".into(),
+            name: "mcp__srv__execute_query".into(),
+            output: String::new(),
+            error: Some(upstream.into()),
+        }];
+
+        assert!(format_tool_context(&outcomes).contains(upstream));
     }
 
     #[test]
