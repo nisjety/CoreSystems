@@ -35,7 +35,7 @@ use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     approvals,
@@ -236,6 +236,12 @@ fn proxy_routes() -> Router<AppState> {
         // server's URL, no pre-registered app.
         .route("/v1/mcp/servers/oauth/start", post(mcp_oauth_start))
         .route("/v1/mcp/servers/oauth/callback", get(mcp_oauth_callback))
+        // The single auto-detecting entry point: caller supplies only name +
+        // url (+ optional token/allowlist/scope) and the gateway itself
+        // discovers whether OAuth is needed — no transport or auth-kind
+        // choice is ever asked for. Preferred over the two routes above,
+        // which remain for direct/explicit use.
+        .route("/v1/mcp/servers/connect", post(mcp_connect))
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -2097,9 +2103,41 @@ async fn mcp_register(
             Json(json!({ "error": "server_id is assigned by the gateway on create" })),
         ));
     }
+    register_plain_mcp_server(
+        &state,
+        &claims,
+        &headers,
+        &capability_bearer,
+        body.name,
+        body.url,
+        body.transport,
+        body.token,
+        body.tool_allowlist,
+        body.scope,
+    )
+    .await
+}
+
+/// Register a plain (non-OAuth) MCP server — static token or none — and
+/// write through to capability-core. Shared by `mcp_register` (direct,
+/// explicit static-token registration) and `mcp_connect` (the
+/// auto-detecting entry point, once discovery finds no OAuth metadata).
+#[allow(clippy::too_many_arguments)]
+async fn register_plain_mcp_server(
+    state: &AppState,
+    claims: &Claims,
+    headers: &HeaderMap,
+    capability_bearer: &VerifiedCapabilityBearer,
+    name: String,
+    url: String,
+    transport: String,
+    token: String,
+    tool_allowlist: Vec<String>,
+    scope: String,
+) -> Result<Json<Value>, HttpJsonError> {
     let org_id = claims.org_id.clone();
-    let scope = crate::ownership::Scope::from_wire(&body.scope);
-    if scope == crate::ownership::Scope::Org && !req_is_admin(&claims, &headers) {
+    let scope = crate::ownership::Scope::from_wire(&scope);
+    if scope == crate::ownership::Scope::Org && !req_is_admin(claims, headers) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "only an admin can create an org-wide MCP server" })),
@@ -2110,13 +2148,13 @@ async fn mcp_register(
         crate::ownership::Scope::User => crate::ownership::Ownership::user(claims.user_id.clone()),
     };
     let server = McpServer {
-        server_id: body.server_id,
-        name: body.name,
-        url: body.url,
-        transport: body.transport,
-        token: body.token,
-        tool_allowlist: body.tool_allowlist,
-        enabled: body.enabled,
+        server_id: String::new(),
+        name,
+        url,
+        transport,
+        token,
+        tool_allowlist,
+        enabled: true,
     };
     let resp = crate::runtime_registries::handle_register_mcp_server(
         &state.mcp,
@@ -2373,6 +2411,34 @@ async fn mcp_oauth_start(
                 Json(json!({ "error": "could not discover the MCP server's authorization metadata" })),
             )
         })?;
+    start_oauth_connection(
+        &state,
+        &claims,
+        body.name,
+        body.url,
+        body.tool_allowlist,
+        body.scope,
+        resource_metadata,
+    )
+    .await
+}
+
+/// Continue the OAuth 2.1 + DCR handshake given already-discovered
+/// protected-resource metadata: discover the authorization server, register
+/// a client (RFC 7591), stash a pending PKCE attempt, and return the
+/// `authorization_url` the browser should navigate to next. Shared by
+/// `mcp_oauth_start` (explicit OAuth connect) and `mcp_connect` (the
+/// auto-detecting entry point, once discovery confirms the server needs it).
+async fn start_oauth_connection(
+    state: &AppState,
+    claims: &Claims,
+    name: String,
+    url: String,
+    tool_allowlist: Vec<String>,
+    scope: String,
+    resource_metadata: crate::mcp_oauth::ProtectedResourceMetadata,
+) -> Result<Json<Value>, HttpJsonError> {
+    let http = reqwest::Client::new();
     let Some(authorization_server) = resource_metadata.authorization_servers.first() else {
         return Err((
             StatusCode::BAD_GATEWAY,
@@ -2426,10 +2492,10 @@ async fn mcp_oauth_start(
         crate::runtime_registries::PendingMcpOAuth::new(
             claims.org_id.clone(),
             claims.user_id.clone(),
-            body.name,
-            body.url,
-            body.tool_allowlist,
-            body.scope,
+            name,
+            url,
+            tool_allowlist,
+            scope,
             pkce.verifier,
             registration.client_id,
             auth_server_metadata.token_endpoint,
@@ -2438,9 +2504,96 @@ async fn mcp_oauth_start(
         ),
     );
 
-    Ok(Json(
-        json!({ "data": { "authorization_url": authorization_url } }),
-    ))
+    Ok(Json(json!({
+        "data": { "needs_oauth": true, "authorization_url": authorization_url }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct McpConnectBody {
+    name: String,
+    /// Public HTTPS MCP server URL. Velion auto-detects whether it needs
+    /// OAuth 2.1 login (RFC 9728 `.well-known/oauth-protected-resource`) or
+    /// works directly — the caller never picks a transport or auth mode.
+    url: String,
+    /// Only used if the server turns out NOT to need OAuth and still expects
+    /// a static bearer token. Ignored (and unnecessary) for OAuth servers.
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    tool_allowlist: Vec<String>,
+    #[serde(default = "default_mcp_scope")]
+    scope: String,
+}
+
+/// `POST /v1/mcp/servers/connect` — the single, auto-detecting entry point:
+/// the caller supplies only a name and URL (plus optional scope/allowlist/
+/// token). Discovers whether the server is an OAuth 2.1 protected resource
+/// and either starts the OAuth 2.1 + DCR handshake (`needs_oauth: true` +
+/// `authorization_url` to redirect the browser to) or registers it directly
+/// as a plain HTTP MCP server (using `token` if the caller supplied one, and
+/// returning the registered server like `mcp_register` does). No transport
+/// or auth-kind choice is ever asked for: the secure-MVP dispatch path only
+/// ever speaks HTTPS, and OAuth-vs-static is a fact about the target
+/// server, not a choice Velion's users should have to make.
+async fn mcp_connect(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    capability_bearer: VerifiedCapabilityBearer,
+    headers: HeaderMap,
+    Json(body): Json<McpConnectBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
+    let name = body.name.trim().to_owned();
+    let url = body.url.trim().to_owned();
+    if name.is_empty() || url.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name and url are required" })),
+        ));
+    }
+    if !url.starts_with("https://") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "url must be a public https:// server" })),
+        ));
+    }
+
+    let http = reqwest::Client::new();
+    match crate::mcp_oauth::discover_protected_resource(&http, &url).await {
+        Ok(resource_metadata) => {
+            start_oauth_connection(
+                &state,
+                &claims,
+                name,
+                url,
+                body.tool_allowlist,
+                body.scope,
+                resource_metadata,
+            )
+            .await
+        }
+        Err(error) => {
+            // Expected for the common case (most MCP servers aren't OAuth
+            // protected resources) — not a real error, so this stays at
+            // debug rather than warn. Falls straight through to a plain
+            // registration using whatever token (possibly none) was given.
+            debug!(%error, "mcp connect: no OAuth protected-resource metadata, registering directly");
+            register_plain_mcp_server(
+                &state,
+                &claims,
+                &headers,
+                &capability_bearer,
+                name,
+                url,
+                default_mcp_transport(),
+                body.token,
+                body.tool_allowlist,
+                body.scope,
+            )
+            .await
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2464,7 +2617,10 @@ async fn mcp_oauth_callback(
     capability_bearer: VerifiedCapabilityBearer,
     Query(query): Query<McpOAuthCallbackQuery>,
 ) -> Response {
-    let settings_url = format!("{}/settings", state.velion_public_origin.trim_end_matches('/'));
+    let settings_url = format!(
+        "{}/settings/mcp",
+        state.velion_public_origin.trim_end_matches('/')
+    );
     let fail = |reason: &str| -> Response {
         warn!(reason, "mcp oauth callback failed");
         Redirect::to(&format!("{settings_url}?mcp_oauth=error")).into_response()
