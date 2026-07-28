@@ -22,6 +22,7 @@ pub mod idempotency_registry;
 pub mod langcache;
 pub mod lsp;
 mod managed_start_key;
+pub mod mcp_http;
 pub mod mcp_jsonrpc;
 pub mod mcp_oauth;
 pub mod moderation;

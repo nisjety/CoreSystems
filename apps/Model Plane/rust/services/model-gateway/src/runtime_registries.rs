@@ -191,39 +191,19 @@ impl McpRegistry {
     }
 }
 
-/// Discover an MCP server's tools over the **HTTP** bridge: `POST {url}/tools/list`.
-/// Accepts either a JSON-RPC envelope (`result.tools`) or a bare `{tools:[...]}`
-/// (the bridge may unwrap), mirroring the lenient `tools/call` bridge shape.
+/// Discover an MCP server's tools over the real **Streamable HTTP** transport
+/// (`initialize` → `notifications/initialized` → `tools/list` against the
+/// server URL itself). See [`crate::mcp_http`] for why the previous
+/// `POST {url}/tools/list` bridge shape could never work against a genuine
+/// MCP server.
 pub(crate) async fn http_list_tools(url: &str, token: &str) -> Result<Vec<McpToolDef>, String> {
-    let (http, endpoint) = safe_mcp_http_client(url).await?;
-    let target = endpoint
-        .join("tools/list")
-        .map_err(|error| format!("invalid tools/list endpoint: {error}"))?;
-    let mut req = http.post(target).json(&serde_json::json!({}));
-    if !token.is_empty() {
-        req = req.bearer_auth(token);
-    }
-    let resp = req.send().await.map_err(|e| format!("transport: {e}"))?;
-    let status = resp.status();
-    let body = bounded_mcp_response(resp).await?;
-    if !status.is_success() {
-        return Err(format!("mcp HTTP {}: {}", status, truncate(&body, 200)));
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("invalid json: {e}"))?;
-    let tools = v
-        .get("result")
-        .and_then(|r| r.get("tools"))
-        .and_then(serde_json::Value::as_array)
-        .or_else(|| v.get("tools").and_then(serde_json::Value::as_array))
-        .ok_or_else(|| "tools/list response missing tools array".to_owned())?;
-    Ok(tools
-        .iter()
-        .filter_map(crate::mcp_jsonrpc::parse_one_tool)
-        .collect())
+    crate::mcp_http::McpHttpSession::connect(url, token)
+        .await?
+        .list_tools()
+        .await
 }
 
-async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Url), String> {
+pub(crate) async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Url), String> {
     let endpoint = reqwest::Url::parse(url).map_err(|_| "invalid MCP endpoint URL".to_owned())?;
     // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may use
     // plain HTTP and resolve to a private address — that is the whole point of a
@@ -266,7 +246,7 @@ async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Ur
     Ok((client, endpoint))
 }
 
-async fn bounded_mcp_response(mut response: reqwest::Response) -> Result<String, String> {
+pub(crate) async fn bounded_mcp_response(mut response: reqwest::Response) -> Result<String, String> {
     if response
         .content_length()
         .is_some_and(|length| length > MCP_MAX_RESPONSE_BYTES as u64)
@@ -1029,61 +1009,39 @@ pub async fn handle_proxy_mcp_tool(
         });
     }
 
-    // Secure-MVP dispatch permits only the validated HTTPS bridge transport.
-    // Legacy stdio records are quarantined even if they predate write-time
+    // Secure-MVP dispatch permits only the validated HTTPS transport. Legacy
+    // stdio records are quarantined even if they predate write-time
     // validation; they can never reach the subprocess spawn path.
     match server.transport.as_str() {
         "http" => {}
         other => {
             return Err(Status::unimplemented(format!(
-                "mcp transport {other} is quarantined; only HTTPS bridge transport is supported"
+                "mcp transport {other} is quarantined; only HTTPS transport is supported"
             )));
         }
     }
 
-    // MCP JSON-RPC over HTTP. Bridge expects POST {url}/tools/call with
-    // `{name, arguments}`. The bridge is responsible for translating to
-    // the actual MCP transport when multi-step.
     let arguments = if req.input_json.trim().is_empty() {
         serde_json::Value::Null
     } else {
         serde_json::from_str::<serde_json::Value>(&req.input_json)
             .map_err(|_| Status::invalid_argument("input_json must be valid JSON"))?
     };
-    let body = serde_json::json!({
-        "name": req.tool_name,
-        "arguments": arguments,
-    });
 
-    let (http, endpoint) = safe_mcp_http_client(&server.url)
-        .await
-        .map_err(Status::failed_precondition)?;
-    let target = endpoint.join("tools/call").map_err(|error| {
-        Status::invalid_argument(format!("invalid tools/call endpoint: {error}"))
-    })?;
-    let mut http_req = http.post(target).json(&body);
     // An OAuth-connected server's in-memory `token` is always empty (tokens
     // live only in capability-core's encrypted store) — prefer a freshly
     // resolved OAuth token when the caller supplied one, and fall back to
     // the legacy static-token field otherwise.
-    if let Some(token) = oauth_token.filter(|t| !t.is_empty()) {
-        http_req = http_req.bearer_auth(token);
-    } else if !server.token.is_empty() {
-        http_req = http_req.bearer_auth(&server.token);
-    }
-    let resp = match http_req.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(ProxyMcpToolResponse {
-                request_id: req.request_id,
-                output_json: String::new(),
-                error_message: format!("transport: {e}"),
-            });
-        }
-    };
-    let status = resp.status();
-    let body = match bounded_mcp_response(resp).await {
-        Ok(body) => body,
+    let token = oauth_token
+        .filter(|token| !token.is_empty())
+        .unwrap_or(&server.token);
+
+    // Real MCP Streamable HTTP: one JSON-RPC session against the server URL
+    // itself (see crate::mcp_http). A failed session is an outcome, not an
+    // RPC-level error, so the caller sees it as a tool result like any other
+    // dispatch failure.
+    let session = match crate::mcp_http::McpHttpSession::connect(&server.url, token).await {
+        Ok(session) => session,
         Err(error) => {
             return Ok(ProxyMcpToolResponse {
                 request_id: req.request_id,
@@ -1092,18 +1050,18 @@ pub async fn handle_proxy_mcp_tool(
             });
         }
     };
-    if !status.is_success() {
-        return Ok(ProxyMcpToolResponse {
+    match session.call_tool(&req.tool_name, &arguments).await {
+        crate::mcp_jsonrpc::McpCallOutcome::Ok(output_json) => Ok(ProxyMcpToolResponse {
+            request_id: req.request_id,
+            output_json,
+            error_message: String::new(),
+        }),
+        crate::mcp_jsonrpc::McpCallOutcome::Err(error_message) => Ok(ProxyMcpToolResponse {
             request_id: req.request_id,
             output_json: String::new(),
-            error_message: format!("mcp HTTP {}: {}", status, truncate(&body, 200)),
-        });
+            error_message,
+        }),
     }
-    Ok(ProxyMcpToolResponse {
-        request_id: req.request_id,
-        output_json: body,
-        error_message: String::new(),
-    })
 }
 
 // ====================================================================
