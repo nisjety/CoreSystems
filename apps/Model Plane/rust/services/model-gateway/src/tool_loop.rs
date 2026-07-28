@@ -1374,6 +1374,23 @@ pub async fn run_tool_rounds(
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
 
     for _round in 0..max_tool_rounds() {
+        // Every round re-sends the whole accumulated history, so a long
+        // tool-heavy turn pays for each earlier result again on every later
+        // round. Tier-1 compaction clears the oldest payloads once the carried
+        // total gets expensive; under budget it does nothing, so an ordinary
+        // turn keeps every result the model may still be reasoning over.
+        let cleared = crate::compaction::clear_stale_tool_results(
+            &mut messages,
+            crate::compaction::DEFAULT_TOOL_PAYLOAD_BUDGET,
+        );
+        if cleared > 0 {
+            tracing::debug!(
+                cleared,
+                carried_chars = crate::compaction::tool_result_payload_chars(&messages),
+                "tool loop: cleared stale tool-result payloads"
+            );
+        }
+
         let mut client = state.inference_client.clone();
         // Forward the delegated inference bearer — inference-core rejects a bare
         // Infer, which silently killed every model-decided tool round in prod.
@@ -1602,6 +1619,57 @@ mod tests {
     fn arg_parsers_tolerate_malformed_json() {
         assert_eq!(arg_str("not json", "query"), "");
         assert_eq!(arg_i64("not json", "limit"), None);
+    }
+
+    fn sample_tool_events() -> [ChatEvent; 2] {
+        [
+            ChatEvent::ToolCall {
+                id: "1".to_owned(),
+                name: "web_search".to_owned(),
+                args: serde_json::json!({}),
+            },
+            ChatEvent::ToolResult {
+                id: "1".to_owned(),
+                status: "ok".to_owned(),
+                output: "hits".to_owned(),
+                error: None,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn live_tool_events_stream_once_and_are_never_also_buffered() {
+        // The streaming caller no longer replays `ToolRounds.events`, and an
+        // event that both streamed AND buffered would reach the client twice if
+        // it ever did. This pins the invariant that makes that impossible.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let sink =
+            crate::sse_events::RichEventSink::new(tx, vec!["tools".to_owned()], "req-1".to_owned());
+        let mut events = ToolEvents::Live(&sink);
+        for event in sample_tool_events() {
+            events.push(event).await;
+        }
+
+        assert!(
+            events.into_buffer().is_empty(),
+            "a live sink must leave nothing for the caller to replay"
+        );
+
+        drop(sink);
+        let mut streamed = 0;
+        while rx.recv().await.is_some() {
+            streamed += 1;
+        }
+        assert_eq!(streamed, 2, "each event reached the client exactly once");
+    }
+
+    #[tokio::test]
+    async fn buffered_tool_events_are_returned_for_a_non_streaming_caller() {
+        let mut events = ToolEvents::Buffered(Vec::new());
+        for event in sample_tool_events() {
+            events.push(event).await;
+        }
+        assert_eq!(events.into_buffer().len(), 2);
     }
 
     fn tool_call(name: &str, args_json: &str) -> ToolCall {

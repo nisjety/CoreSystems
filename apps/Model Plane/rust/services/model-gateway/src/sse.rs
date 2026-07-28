@@ -111,6 +111,47 @@ async fn prepared_direct_failure_stream(
     message: &str,
     retryable: bool,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let terminalized = terminalize_prepared_failure(state, run, bearer, failure_code).await;
+    let (code, message, retryable) =
+        prepared_failure_report(failure_code, message, retryable, terminalized);
+    error_stream(request_id, code, message, retryable)
+}
+
+/// In-stream twin of [`prepared_direct_failure_stream`], for the same class of
+/// locally-observed failure discovered AFTER the response has already begun.
+///
+/// The handler can no longer choose a different response, so the equivalent
+/// honest error goes out on the live channel instead — and the run is still
+/// durably terminalized, because a swallowed failure here would leave the caller
+/// on a dead stream and the run queued forever.
+#[allow(clippy::too_many_arguments)] // mirrors prepared_direct_failure_stream, plus the live channel
+async fn emit_prepared_failure(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    failure_code: &'static str,
+    message: &str,
+    retryable: bool,
+) {
+    let terminalized = terminalize_prepared_failure(state, run, bearer, failure_code).await;
+    let (code, message, retryable) =
+        prepared_failure_report(failure_code, message, retryable, terminalized);
+    let event = crate::sse_events::ChatEvent::Error {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        retryable,
+    };
+    let _ = tx.send(Ok(event.to_sse(request_id))).await;
+}
+
+async fn terminalize_prepared_failure(
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    failure_code: &'static str,
+) -> bool {
     match crate::session_flow::terminalize_direct_inference_run_authenticated(
         state,
         run,
@@ -119,7 +160,7 @@ async fn prepared_direct_failure_stream(
     )
     .await
     {
-        Ok(()) => error_stream(request_id, failure_code, message, retryable),
+        Ok(()) => true,
         Err(error) => {
             tracing::error!(
                 %error,
@@ -127,13 +168,29 @@ async fn prepared_direct_failure_stream(
                 failure_code,
                 "known direct-run failure could not be durably terminalized"
             );
-            error_stream(
-                request_id,
-                "session_terminalization_failed",
-                "Unable to record the chat run's terminal state; it remains retriable.",
-                true,
-            )
+            false
         }
+    }
+}
+
+/// What the client is told about a known failure, given whether its durable
+/// terminalization succeeded. Pure so the pre-stream and in-stream paths cannot
+/// drift: a caller must never be told the turn failed cleanly when the run was
+/// left in a non-terminal state.
+fn prepared_failure_report<'a>(
+    failure_code: &'a str,
+    message: &'a str,
+    retryable: bool,
+    terminalized: bool,
+) -> (&'a str, &'a str, bool) {
+    if terminalized {
+        (failure_code, message, retryable)
+    } else {
+        (
+            "session_terminalization_failed",
+            "Unable to record the chat run's terminal state; it remains retriable.",
+            true,
+        )
     }
 }
 
@@ -652,6 +709,12 @@ pub async fn invoke_stream_sse(
         &session_run.thread_id,
         &user_content,
         &model_bearer,
+        &SummarizerContext {
+            request_id: &request_id,
+            model: &model,
+            zdr: effective_zdr,
+            inference_bearer: &inference_bearer,
+        },
     )
     .await;
     let (mut messages, used_context_assembly) = match context_assembly_messages {
@@ -866,132 +929,6 @@ pub async fn invoke_stream_sse(
             tool_defs.push(web_search);
         }
     }
-    let mut tool_events = Vec::new();
-    if tool_defs.iter().any(|tool| tool.name == "web_search") {
-        if client_requested_web_search || crate::tool_loop::should_force_web_search(&req.content) {
-            let forced = crate::tool_loop::run_forced_web_search(
-                &state,
-                &request_id,
-                &session_run.run_id,
-                &org_id,
-                &user_id,
-                &thread_scope,
-                model_bearer.as_str(),
-                effective_zdr,
-                messages,
-                &req.content,
-                None,
-            )
-            .await;
-            let Ok(forced) = forced else {
-                return prepared_direct_failure_stream(
-                    &state,
-                    &session_run,
-                    &model_bearer,
-                    &request_id,
-                    "audit_persistence_failed",
-                    "Tool action could not be durably audited",
-                    true,
-                )
-                .await;
-            };
-            messages = forced.messages;
-            tool_events.extend(forced.events);
-        }
-        tool_defs.retain(|tool| tool.name != "web_search");
-    }
-
-    if !tool_defs.is_empty() {
-        let rounds = crate::tool_loop::run_tool_rounds(
-            &state,
-            &request_id,
-            &session_run.run_id,
-            &org_id,
-            &user_id,
-            &thread_scope,
-            data_plane_bearer.as_ref(),
-            inference_bearer.as_str(),
-            model_bearer.as_str(),
-            effective_zdr,
-            &model,
-            messages,
-            tool_defs,
-            "auto".to_owned(),
-            ingestion_bearer.as_ref(),
-            None,
-        )
-        .await;
-        let Ok(rounds) = rounds else {
-            return prepared_direct_failure_stream(
-                &state,
-                &session_run,
-                &model_bearer,
-                &request_id,
-                "audit_persistence_failed",
-                "Tool action could not be durably audited",
-                true,
-            )
-            .await;
-        };
-        messages = rounds.messages;
-        tool_events.extend(rounds.events);
-    }
-
-    let grpc_req = InferRequest {
-        request_id: request_id.clone(),
-        org_id: org_id.clone(),
-        model: model.clone(),
-        provider_hint: String::new(),
-        messages,
-        temperature: 0.7,
-        max_tokens: answer_token_budget(),
-        structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
-        zdr: effective_zdr,
-        ..Default::default()
-    };
-
-    // Clone the request so a streaming failure can retry via the (working)
-    // non-streaming Infer fallback below.
-    let grpc_req_fallback = grpc_req.clone();
-    let grpc_response = state
-        .inference_client
-        .clone()
-        .infer_stream(authenticated_inference_request(grpc_req, &inference_bearer))
-        .await;
-
-    let mut grpc_stream = match grpc_response {
-        Ok(response) => response.into_inner(),
-        Err(e) => {
-            // Streaming RPC unavailable. Do NOT emit a bare `done` — that reads
-            // as a successful *empty* completion and forces every client to work
-            // around it. Fall back to the non-streaming Infer (which works) and
-            // reveal its real content in chunks: one robust endpoint, no
-            // per-client fallback duplication. If Infer also fails, the fallback
-            // emits an honest `error` event rather than a fake `done`.
-            tracing::warn!(
-                error = %e,
-                request_id = %request_id,
-                "infer_stream unavailable; falling back to non-streaming Infer"
-            );
-            return infer_fallback_stream(
-                state.clone(),
-                grpc_req_fallback,
-                request_id,
-                org_id,
-                user_id,
-                model,
-                start,
-                features,
-                grounding,
-                tool_events,
-                session_run,
-                idem_guard,
-                inference_bearer,
-                model_bearer,
-            );
-        }
-    };
-
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
     let cancels = state.cancels.clone();
@@ -1002,7 +939,14 @@ pub async fn invoke_stream_sse(
     let session_thread_id = session_run.thread_id.clone();
     let session_run_for_terminal = session_run.clone();
     let session_bearer = model_bearer.clone();
+    let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
+    let tool_phase_query = req.content.clone();
 
+    // The tool phase and the first inference call run INSIDE this task, after
+    // `connected` is already on the wire. Axum begins the HTTP response only
+    // once this handler returns, so doing that work here held the whole response
+    // back: with a 12-round tool budget a multi-step ERP question showed a dead
+    // spinner for the entire phase and then dumped everything at once.
     tokio::spawn(async move {
         // chat-parity §1: hold the idempotency claim for the stream's lifetime.
         // Dropped when the task ends (normal completion, cancel, error, or
@@ -1061,13 +1005,198 @@ pub async fn invoke_stream_sse(
             }
         }
 
-        // chat-parity §2 — emit the resolved tool_call/tool_result events
-        // (gated on the `tools` family) before the final answer streams.
-        for evt in tool_events {
-            if evt.should_emit(&features) {
-                let _ = tx.send(Ok(evt.to_sse(&req_id))).await;
+        // chat-parity §2 — function-calling tool loop. Every tool_call and
+        // tool_result now ships through this sink the moment it happens, so the
+        // user watches the work instead of a spinner. The loop returns no
+        // buffered events when a sink is supplied, which is what guarantees
+        // nothing is emitted twice.
+        let sink =
+            crate::sse_events::RichEventSink::new(tx.clone(), features.clone(), req_id.clone());
+
+        if tool_defs.iter().any(|tool| tool.name == "web_search") {
+            if client_requested_web_search
+                || crate::tool_loop::should_force_web_search(&tool_phase_query)
+            {
+                let forced = crate::tool_loop::run_forced_web_search(
+                    &session_state,
+                    &req_id,
+                    &session_run_for_terminal.run_id,
+                    &org_clone,
+                    &user_clone,
+                    &thread_scope,
+                    session_bearer.as_str(),
+                    effective_zdr,
+                    messages,
+                    &tool_phase_query,
+                    Some(&sink),
+                )
+                .await;
+                let Ok(forced) = forced else {
+                    emit_prepared_failure(
+                        &tx,
+                        &session_state,
+                        &session_run_for_terminal,
+                        &session_bearer,
+                        &req_id,
+                        "audit_persistence_failed",
+                        "Tool action could not be durably audited",
+                        true,
+                    )
+                    .await;
+                    cancels.finish(&req_id);
+                    return;
+                };
+                messages = forced.messages;
             }
+            // Withheld from the loop below whenever web search was advertised at
+            // all — not only when the forced lookup actually ran.
+            tool_defs.retain(|tool| tool.name != "web_search");
         }
+
+        if !tool_defs.is_empty() {
+            let rounds = crate::tool_loop::run_tool_rounds(
+                &session_state,
+                &req_id,
+                &session_run_for_terminal.run_id,
+                &org_clone,
+                &user_clone,
+                &thread_scope,
+                data_plane_bearer.as_ref(),
+                inference_bearer.as_str(),
+                session_bearer.as_str(),
+                effective_zdr,
+                &model_clone,
+                messages,
+                tool_defs,
+                "auto".to_owned(),
+                ingestion_bearer.as_ref(),
+                Some(&sink),
+            )
+            .await;
+            let Ok(rounds) = rounds else {
+                emit_prepared_failure(
+                    &tx,
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                    &req_id,
+                    "audit_persistence_failed",
+                    "Tool action could not be durably audited",
+                    true,
+                )
+                .await;
+                cancels.finish(&req_id);
+                return;
+            };
+            messages = rounds.messages;
+        }
+
+        let mut grpc_req = InferRequest {
+            request_id: req_id.clone(),
+            org_id: org_clone.clone(),
+            model: model_clone.clone(),
+            provider_hint: String::new(),
+            messages,
+            temperature: 0.7,
+            max_tokens: answer_token_budget(),
+            structured_output_schema,
+            zdr: effective_zdr,
+            ..Default::default()
+        };
+
+        // Prompt-too-long recovery: twelve rounds of up to 8k-char tool results
+        // can outgrow the provider's input limit. Shed the oldest history and
+        // retry instead of handing the user a hard error — bounded, because a
+        // prompt rejected for any other reason must not loop.
+        let mut length_retries: usize = 0;
+        let stream = loop {
+            let attempt = session_state
+                .inference_client
+                .clone()
+                .infer_stream(authenticated_inference_request(
+                    grpc_req.clone(),
+                    &inference_bearer,
+                ))
+                .await;
+            let error = match attempt {
+                Ok(response) => break Some(response.into_inner()),
+                Err(error) => error,
+            };
+            if !crate::compaction::is_context_length_error(error.message()) {
+                // Streaming RPC unavailable. Do NOT emit a bare `done` — that
+                // reads as a successful *empty* completion and forces every
+                // client to work around it. Fall back to the non-streaming Infer
+                // (which works) and reveal its real content in chunks: one
+                // robust endpoint, no per-client fallback duplication. If Infer
+                // also fails, the fallback emits an honest `error` event rather
+                // than a fake `done`.
+                tracing::warn!(
+                    error = %error,
+                    request_id = %req_id,
+                    "infer_stream unavailable; falling back to non-streaming Infer"
+                );
+                break None;
+            }
+            if length_retries >= MAX_CONTEXT_LENGTH_RETRIES
+                || !crate::compaction::drop_oldest_group(
+                    &mut grpc_req.messages,
+                    CONTEXT_LENGTH_DROP_GROUP,
+                    CONTEXT_LENGTH_KEEP_TAIL,
+                )
+            {
+                tracing::error!(
+                    error = %error,
+                    request_id = %req_id,
+                    length_retries,
+                    "prompt still exceeds the provider's input limit after compaction"
+                );
+                emit_prepared_failure(
+                    &tx,
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                    &req_id,
+                    "prompt_too_long",
+                    "This conversation is too long for the selected model, even after \
+                     compacting it. Start a new thread, or choose a model with a larger \
+                     context window.",
+                    false,
+                )
+                .await;
+                cancels.finish(&req_id);
+                return;
+            }
+            length_retries += 1;
+            tracing::warn!(
+                request_id = %req_id,
+                attempt = length_retries,
+                remaining_messages = grpc_req.messages.len(),
+                "provider rejected the prompt as too long; retrying with older history dropped"
+            );
+        };
+
+        let Some(mut grpc_stream) = stream else {
+            // Grounding, citations, and every tool event already went out above,
+            // so the fallback must not replay them.
+            run_infer_fallback(
+                &tx,
+                &session_state,
+                grpc_req,
+                &req_id,
+                &org_clone,
+                &user_clone,
+                &model_clone,
+                start,
+                &features,
+                grounding.as_ref(),
+                &session_run_for_terminal,
+                &inference_bearer,
+                &session_bearer,
+            )
+            .await;
+            cancels.finish(&req_id);
+            return;
+        };
 
         // Per-request sequence index used as the SSE `id:` field so a
         // reconnecting client can send `Last-Event-Id` and resume from the
@@ -1409,6 +1538,27 @@ fn chunk_for_stream(text: &str, target: usize) -> Vec<String> {
 }
 
 const MAX_THREAD_CONTEXT_MESSAGES: usize = 24;
+/// Messages kept verbatim when a thread is compacted. One short of the cap, so
+/// the retained summary takes the slot the dropped head used to occupy and the
+/// prompt still carries at most [`MAX_THREAD_CONTEXT_MESSAGES`] messages.
+const COMPACTED_TAIL_MESSAGES: usize = MAX_THREAD_CONTEXT_MESSAGES - 1;
+/// Ceiling on the tier-2 summarization call. It runs before the stream opens, so
+/// a slow summarizer must degrade to truncation rather than delay first byte.
+const COMPACTION_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+/// Retries allowed after a provider rejects the prompt for length. Matches the
+/// reference implementation's allowance: enough to recover a turn that is merely
+/// over the line, few enough that a prompt which can never fit fails fast.
+const MAX_CONTEXT_LENGTH_RETRIES: usize = 3;
+/// Messages shed per length retry. Dropping one at a time would burn the retry
+/// budget on a prompt that is far over; a small group converges in one or two.
+const CONTEXT_LENGTH_DROP_GROUP: usize = 6;
+/// Messages kept verbatim while retrying a length-rejected prompt.
+///
+/// Far smaller than [`COMPACTED_TAIL_MESSAGES`] on purpose: what pushes a turn
+/// over the provider's limit is usually the tool phase's own recent results,
+/// which sit at the END of the prompt. Protecting a full 23-message tail here
+/// would leave almost nothing to shed and the retry would be theatre.
+const CONTEXT_LENGTH_KEEP_TAIL: usize = 4;
 /// Cap on skills injected as system context per turn (keeps the prompt bounded;
 /// the matcher already ranks by keyword overlap so the top few are the relevant ones).
 const MAX_INJECTED_SKILLS: i32 = 3;
@@ -1574,12 +1724,22 @@ fn is_current_user_thread_segment(
     content == raw_turn || content == current_turn
 }
 
+/// What the tier-2 summarizer needs from the request in flight, so the thread
+/// loader keeps a readable signature.
+struct SummarizerContext<'a> {
+    request_id: &'a str,
+    model: &'a str,
+    zdr: bool,
+    inference_bearer: &'a VerifiedInferenceBearer,
+}
+
 async fn load_recent_thread_messages(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
     current_user_content: &str,
     bearer: &VerifiedModelBearer,
+    summarizer: &SummarizerContext<'_>,
 ) -> Vec<ChatMessage> {
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
@@ -1638,8 +1798,42 @@ async fn load_recent_thread_messages(
         }),
     }
 
-    if messages.len() > MAX_THREAD_CONTEXT_MESSAGES {
-        messages.drain(0..messages.len() - MAX_THREAD_CONTEXT_MESSAGES);
+    // A long thread used to lose its head to a bare `drain`, which took the
+    // user's earlier constraints with it and left no trace that anything was
+    // gone. Summarize the head into one retained message instead; if the
+    // summarizer is unavailable, `apply_head_summary` degrades to that same
+    // truncation (plus an honest marker) rather than failing the turn.
+    if let Some(head) = crate::compaction::plan_head_summary(
+        &messages,
+        MAX_THREAD_CONTEXT_MESSAGES,
+        COMPACTED_TAIL_MESSAGES,
+    ) {
+        let transcript = crate::compaction::render_head_transcript(&messages, head);
+        // Bounded because this runs BEFORE the stream opens: an unbounded
+        // summarization call would reintroduce the dead spinner that moving the
+        // tool phase into the stream task just removed. On timeout we take the
+        // truncation fallback, which is exactly the pre-compaction behaviour.
+        let summary = tokio::time::timeout(
+            COMPACTION_SUMMARY_TIMEOUT,
+            direct_infer(
+                state,
+                &format!("{}-compaction", summarizer.request_id),
+                org_id,
+                summarizer.model,
+                &crate::compaction::summary_prompt(&transcript),
+                summarizer.zdr,
+                summarizer.inference_bearer,
+            ),
+        )
+        .await
+        .unwrap_or_default();
+        if summary.is_none() {
+            tracing::warn!(
+                %thread_id,
+                "thread compaction summary unavailable; falling back to truncation"
+            );
+        }
+        messages = crate::compaction::apply_head_summary(messages, head, summary.as_deref());
     }
 
     messages
@@ -2227,312 +2421,293 @@ fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
     })
 }
 
-/// Fallback SSE stream used when `InferStream` is unavailable: call the
-/// (working) non-streaming `Infer` and reveal its content in chunks so
+/// Fallback used when `InferStream` is unavailable: call the (working)
+/// non-streaming `Infer` and reveal its content in chunks so
 /// `/v1/invoke/stream` still returns real tokens. If `Infer` ALSO fails, emit
 /// an honest `error` event — never a fake successful `done`.
+///
+/// Runs on the caller's already-open channel, because by the time the streaming
+/// RPC is known to be unavailable the response has begun: `connected`,
+/// grounding, citations, and the whole tool phase have already gone out. It
+/// therefore emits NONE of that prelude — the caller owns it, and re-emitting
+/// here would double every event the client already has.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // cohesive streaming emission, mirrors invoke_stream_sse
-fn infer_fallback_stream(
-    state: AppState,
+async fn run_infer_fallback(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    state: &AppState,
     grpc_req: InferRequest,
-    request_id: String,
-    org_id: String,
-    user_id: String,
-    model: String,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    model: &str,
     start: std::time::Instant,
-    features: Vec<String>,
-    grounding: Option<crate::retrieval::Grounding>,
-    tool_events: Vec<crate::sse_events::ChatEvent>,
-    run: crate::session_flow::SessionRun,
-    idem_guard: Option<crate::idempotency_registry::CommitGuard>,
-    inference_bearer: VerifiedInferenceBearer,
-    session_bearer: VerifiedModelBearer,
-) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
-    tokio::spawn(async move {
-        // chat-parity §1: hold the idempotency claim for the fallback stream's
-        // lifetime; released on task end (Drop), mirroring the streaming path.
-        let _idem_guard = idem_guard;
+    features: &[String],
+    grounding: Option<&crate::retrieval::Grounding>,
+    run: &crate::session_flow::SessionRun,
+    inference_bearer: &VerifiedInferenceBearer,
+    session_bearer: &VerifiedModelBearer,
+) {
+    let publisher = state.publisher.clone();
+    let buffers = state.stream_buffers.clone();
+    let thread_id = run.thread_id.clone();
+    let result = state
+        .inference_client
+        .clone()
+        .infer(authenticated_inference_request(grpc_req, inference_bearer))
+        .await;
+    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
-            let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
-            if event.should_emit(&features) {
-                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
-            }
-        }
-
-        // chat-parity §8: surface retrieved sources before the answer (gated on
-        // the `citations` family), mirroring the streaming path.
-        for c in grounding
-            .as_ref()
-            .map(|payload| payload.citations.clone())
-            .unwrap_or_default()
-        {
-            let cite = crate::sse_events::ChatEvent::Citation {
-                id: c.id,
-                title: c.title,
-                url: c.url,
-                snippet: c.snippet,
+    match result {
+        Ok(resp) => {
+            let resp = resp.into_inner();
+            let model_used = if resp.model_used.is_empty() {
+                model.to_owned()
+            } else {
+                resp.model_used.clone()
             };
-            if cite.should_emit(&features) {
-                let _ = tx.send(Ok(cite.to_sse(&request_id))).await;
-            }
-        }
+            let input_tokens = u32::try_from(resp.input_tokens).unwrap_or(0);
+            let output_tokens = u32::try_from(resp.output_tokens).unwrap_or(0);
 
-        // chat-parity §2 — emit resolved tool events before the fallback answer.
-        for evt in tool_events {
-            if evt.should_emit(&features) {
-                let _ = tx.send(Ok(evt.to_sse(&request_id))).await;
-            }
-        }
-
-        let publisher = state.publisher.clone();
-        let buffers = state.stream_buffers.clone();
-        let thread_id = run.thread_id.clone();
-        let result = state
-            .inference_client
-            .clone()
-            .infer(authenticated_inference_request(grpc_req, &inference_bearer))
-            .await;
-        let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-        match result {
-            Ok(resp) => {
-                let resp = resp.into_inner();
-                let model_used = if resp.model_used.is_empty() {
-                    model.clone()
-                } else {
-                    resp.model_used.clone()
+            let mut seq: u64 = 0;
+            for piece in chunk_for_stream(&resp.content, 48) {
+                buffers.append(request_id, seq, &piece).await;
+                let sse_chunk = SseChunk {
+                    request_id: request_id.to_owned(),
+                    delta: piece,
+                    done: false,
+                    model_used: model_used.clone(),
+                    input_tokens: 0,
+                    output_tokens: 0,
                 };
-                let input_tokens = u32::try_from(resp.input_tokens).unwrap_or(0);
-                let output_tokens = u32::try_from(resp.output_tokens).unwrap_or(0);
-
-                let mut seq: u64 = 0;
-                for piece in chunk_for_stream(&resp.content, 48) {
-                    buffers.append(&request_id, seq, &piece).await;
-                    let sse_chunk = SseChunk {
-                        request_id: request_id.clone(),
-                        delta: piece,
-                        done: false,
-                        model_used: model_used.clone(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                    };
-                    let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
-                    if tx
-                        .send(Ok(Event::default()
-                            .id(seq.to_string())
-                            .event("chunk")
-                            .data(data)))
-                        .await
-                        .is_err()
-                    {
-                        if let Err(error) =
-                            crate::session_flow::cancel_direct_inference_run_authenticated(
-                                &state,
-                                &run,
-                                &session_bearer,
-                            )
-                            .await
-                        {
-                            tracing::warn!(%error, run_id = %run.run_id, "failed to cancel disconnected fallback inference stream");
-                        }
-                        return;
-                    }
-                    seq += 1;
-                }
-                if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
-                    &state,
-                    &thread_id,
-                    &resp.content,
-                    &session_bearer,
-                )
-                .await
+                let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
+                if tx
+                    .send(Ok(Event::default()
+                        .id(seq.to_string())
+                        .event("chunk")
+                        .data(data)))
+                    .await
+                    .is_err()
                 {
-                    tracing::warn!(
-                        %error,
-                        request_id = %request_id,
-                        thread_id = %thread_id,
-                        "failed to persist fallback assistant message"
-                    );
-                    if let Err(terminal_error) =
-                        crate::session_flow::terminalize_direct_inference_run_authenticated(
-                            &state,
-                            &run,
-                            crate::session_flow::DirectInferenceTerminal::Failed(
-                                "assistant_persist_failed",
-                            ),
-                            &session_bearer,
+                    if let Err(error) =
+                        crate::session_flow::cancel_direct_inference_run_authenticated(
+                            state,
+                            run,
+                            session_bearer,
                         )
                         .await
                     {
-                        tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize fallback assistant persistence failure");
-                        let event = crate::sse_events::ChatEvent::Error {
-                            code: "session_terminalization_failed".to_owned(),
-                            message: "Unable to record the failed chat run; it remains retriable."
-                                .to_owned(),
-                            retryable: true,
-                        };
-                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
-                        return;
+                        tracing::warn!(%error, run_id = %run.run_id, "failed to cancel disconnected fallback inference stream");
                     }
-                    let event = crate::sse_events::ChatEvent::Error {
-                        code: "assistant_persist_failed".to_owned(),
-                        message: "Unable to persist the assistant response.".to_owned(),
-                        retryable: true,
-                    };
-                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
                     return;
                 }
-                if let Err(error) =
-                    crate::session_flow::terminalize_direct_inference_run_authenticated(
-                        &state,
-                        &run,
-                        crate::session_flow::DirectInferenceTerminal::Completed,
-                        &session_bearer,
-                    )
-                    .await
-                {
-                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize completed fallback inference run");
-                    let event = crate::sse_events::ChatEvent::Error {
-                        code: "session_terminalization_failed".to_owned(),
-                        message: "Unable to finalize the chat run.".to_owned(),
-                        retryable: true,
-                    };
-                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
-                    return;
-                }
-
-                let close = build_stream_envelope(
-                    &request_id,
-                    "STREAM_CLOSED",
-                    &org_id,
-                    &user_id,
-                    &model_used,
-                );
-                let _ = publisher
-                    .publish(&subjects::stream_subject("closed"), &close)
-                    .await;
-                let usage = build_usage_envelope(
-                    &request_id,
-                    &org_id,
-                    &user_id,
-                    &model_used,
-                    input_tokens,
-                    output_tokens,
-                    latency_ms,
-                );
-                let _ = publisher
-                    .publish(&subjects::usage_subject(&org_id), &usage)
-                    .await;
-                gateway_metrics::stream_closed();
-                buffers
-                    .finish(
-                        &request_id,
-                        crate::stream_buffer::StreamDone {
-                            seq,
-                            model_used: model_used.clone(),
-                            input_tokens,
-                            output_tokens,
-                        },
-                    )
-                    .await;
-
-                // chat-parity §17: opt-in usage event (real tokens + latency).
-                // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
-                // source as the durable ledger); `None` only when unreachable.
-                // Phase 7 B6 — confidence is the heuristic answer-quality score.
-                let cost_usd = state
-                    .pricing
-                    .cost_usd(
-                        &model_used,
-                        i64::from(input_tokens),
-                        i64::from(output_tokens),
-                    )
-                    .await;
-                let grounded = grounding.as_ref().is_some_and(|g| !g.citations.is_empty());
-                let confidence =
-                    crate::confidence::score(&resp.content, output_tokens, 1024, grounded);
-                let usage_event = crate::sse_events::ChatEvent::Usage {
-                    input_tokens,
-                    output_tokens,
-                    cost_usd,
-                    latency_ms,
-                    confidence,
-                };
-                if usage_event.should_emit(&features) {
-                    let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
-                }
-
-                let done_chunk = SseChunk {
-                    request_id: request_id.clone(),
-                    delta: String::new(),
-                    done: true,
-                    model_used,
-                    input_tokens,
-                    output_tokens,
-                };
-                let data = serde_json::to_string(&done_chunk).unwrap_or_default();
-                let _ = tx
-                    .send(Ok(Event::default()
-                        .id(seq.to_string())
-                        .event("done")
-                        .data(data)))
-                    .await;
+                seq += 1;
             }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
+            if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                state,
+                &thread_id,
+                &resp.content,
+                session_bearer,
+            )
+            .await
+            {
+                tracing::warn!(
+                    %error,
                     request_id = %request_id,
-                    "infer fallback also failed; emitting error event"
+                    thread_id = %thread_id,
+                    "failed to persist fallback assistant message"
                 );
-                if let Err(error) =
+                if let Err(terminal_error) =
                     crate::session_flow::terminalize_direct_inference_run_authenticated(
-                        &state,
-                        &run,
+                        state,
+                        run,
                         crate::session_flow::DirectInferenceTerminal::Failed(
-                            "inference_unavailable",
+                            "assistant_persist_failed",
                         ),
-                        &session_bearer,
+                        session_bearer,
                     )
                     .await
                 {
-                    tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize unavailable fallback inference run");
+                    tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize fallback assistant persistence failure");
                     let event = crate::sse_events::ChatEvent::Error {
                         code: "session_terminalization_failed".to_owned(),
                         message: "Unable to record the failed chat run; it remains retriable."
                             .to_owned(),
                         retryable: true,
                     };
-                    let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    let _ = tx.send(Ok(event.to_sse(request_id))).await;
                     return;
                 }
-                let close =
-                    build_stream_envelope(&request_id, "STREAM_CLOSED", &org_id, &user_id, &model);
-                let _ = publisher
-                    .publish(&subjects::stream_subject("closed"), &close)
-                    .await;
-                gateway_metrics::stream_closed();
-                // chat-parity §20: structured error — stable `code` + `retryable`
-                // so the client can branch (the `message` field is preserved for
-                // back-compat with existing error handlers).
-                let err_evt = crate::sse_events::ChatEvent::Error {
-                    code: "model_plane_unavailable".to_owned(),
-                    message: e.message().to_owned(),
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "assistant_persist_failed".to_owned(),
+                    message: "Unable to persist the assistant response.".to_owned(),
                     retryable: true,
                 };
-                let _ = tx.send(Ok(err_evt.to_sse(&request_id))).await;
+                let _ = tx.send(Ok(event.to_sse(request_id))).await;
+                return;
             }
+            if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
+                state,
+                run,
+                crate::session_flow::DirectInferenceTerminal::Completed,
+                session_bearer,
+            )
+            .await
+            {
+                tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize completed fallback inference run");
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "session_terminalization_failed".to_owned(),
+                    message: "Unable to finalize the chat run.".to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(request_id))).await;
+                return;
+            }
+
+            let close =
+                build_stream_envelope(request_id, "STREAM_CLOSED", org_id, user_id, &model_used);
+            let _ = publisher
+                .publish(&subjects::stream_subject("closed"), &close)
+                .await;
+            let usage = build_usage_envelope(
+                request_id,
+                org_id,
+                user_id,
+                &model_used,
+                input_tokens,
+                output_tokens,
+                latency_ms,
+            );
+            let _ = publisher
+                .publish(&subjects::usage_subject(org_id), &usage)
+                .await;
+            gateway_metrics::stream_closed();
+            buffers
+                .finish(
+                    request_id,
+                    crate::stream_buffer::StreamDone {
+                        seq,
+                        model_used: model_used.clone(),
+                        input_tokens,
+                        output_tokens,
+                    },
+                )
+                .await;
+
+            // chat-parity §17: opt-in usage event (real tokens + latency).
+            // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
+            // source as the durable ledger); `None` only when unreachable.
+            // Phase 7 B6 — confidence is the heuristic answer-quality score.
+            let cost_usd = state
+                .pricing
+                .cost_usd(
+                    &model_used,
+                    i64::from(input_tokens),
+                    i64::from(output_tokens),
+                )
+                .await;
+            let grounded = grounding.is_some_and(|g| !g.citations.is_empty());
+            let confidence = crate::confidence::score(&resp.content, output_tokens, 1024, grounded);
+            let usage_event = crate::sse_events::ChatEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                latency_ms,
+                confidence,
+            };
+            if usage_event.should_emit(features) {
+                let _ = tx.send(Ok(usage_event.to_sse(request_id))).await;
+            }
+
+            let done_chunk = SseChunk {
+                request_id: request_id.to_owned(),
+                delta: String::new(),
+                done: true,
+                model_used,
+                input_tokens,
+                output_tokens,
+            };
+            let data = serde_json::to_string(&done_chunk).unwrap_or_default();
+            let _ = tx
+                .send(Ok(Event::default()
+                    .id(seq.to_string())
+                    .event("done")
+                    .data(data)))
+                .await;
         }
-    });
-    Sse::new(ReceiverStream::new(rx))
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                request_id = %request_id,
+                "infer fallback also failed; emitting error event"
+            );
+            if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
+                state,
+                run,
+                crate::session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                session_bearer,
+            )
+            .await
+            {
+                tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize unavailable fallback inference run");
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "session_terminalization_failed".to_owned(),
+                    message: "Unable to record the failed chat run; it remains retriable."
+                        .to_owned(),
+                    retryable: true,
+                };
+                let _ = tx.send(Ok(event.to_sse(request_id))).await;
+                return;
+            }
+            let close = build_stream_envelope(request_id, "STREAM_CLOSED", org_id, user_id, model);
+            let _ = publisher
+                .publish(&subjects::stream_subject("closed"), &close)
+                .await;
+            gateway_metrics::stream_closed();
+            // chat-parity §20: structured error — stable `code` + `retryable`
+            // so the client can branch (the `message` field is preserved for
+            // back-compat with existing error handlers).
+            let err_evt = crate::sse_events::ChatEvent::Error {
+                code: "model_plane_unavailable".to_owned(),
+                message: e.message().to_owned(),
+                retryable: true,
+            };
+            let _ = tx.send(Ok(err_evt.to_sse(request_id))).await;
+        }
+    }
 }
 
 #[cfg(test)]
 mod fallback_tests {
     use super::{
         chunk_for_stream, generated_image_mime, generated_image_size, image_generation_model,
+        prepared_failure_report, COMPACTED_TAIL_MESSAGES, MAX_THREAD_CONTEXT_MESSAGES,
     };
+
+    #[test]
+    fn a_terminalized_failure_reports_its_own_code() {
+        assert_eq!(
+            prepared_failure_report("audit_persistence_failed", "no audit", true, true),
+            ("audit_persistence_failed", "no audit", true)
+        );
+    }
+
+    #[test]
+    fn a_non_terminalized_failure_reports_the_retriable_run_state_instead() {
+        // The turn's own failure code would tell the client the run is finished.
+        // It is not: session-core never acknowledged a terminal state, so the
+        // honest answer is the retriable one.
+        let (code, _, retryable) =
+            prepared_failure_report("prompt_too_long", "too long", false, false);
+        assert_eq!(code, "session_terminalization_failed");
+        assert!(retryable, "an unterminalized run is always still retriable");
+    }
+
+    #[test]
+    fn a_compacted_prompt_still_fits_the_thread_context_cap() {
+        // summary message + verbatim tail must not exceed what the uncompacted
+        // path would have sent.
+        assert_eq!(COMPACTED_TAIL_MESSAGES + 1, MAX_THREAD_CONTEXT_MESSAGES);
+    }
 
     #[test]
     fn chunk_for_stream_is_lossless_and_splits() {

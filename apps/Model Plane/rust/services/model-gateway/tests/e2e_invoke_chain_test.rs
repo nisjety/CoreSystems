@@ -2752,6 +2752,93 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn invoke_stream_opens_the_response_before_the_tool_phase_finishes() {
+    use futures::StreamExt as _;
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    // A deliberately slow tool phase. The handler used to await the whole phase
+    // before returning, and axum starts the HTTP response only once it does — so
+    // the client saw nothing at all until every round had finished. With a
+    // 12-round budget that is a dead spinner for the length of the phase.
+    let quarry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(3))
+                .set_body_json(serde_json::json!({
+                    "data": {
+                        "results": [{
+                            "url": "https://example.test/slow",
+                            "title": "Slow",
+                            "snippet": "slow result",
+                            "source": "mock",
+                            "score": 0.5
+                        }]
+                    }
+                })),
+        )
+        .mount(&quarry)
+        .await;
+
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    state.quarry = model_gateway::quarry::Client::new(model_gateway::quarry::Config {
+        base_url: quarry.uri(),
+        token: "test-token".to_owned(),
+        timeout: Duration::from_secs(10),
+    });
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"slow lookup","model":"m","thread_id":"thread-early-open","features":["citations"],"browse_web":true}"#,
+        ))
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut frames = resp.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_millis(1_500), frames.next())
+        .await
+        .expect("the response must open before the slow tool phase completes")
+        .expect("an SSE frame")
+        .expect("a readable SSE frame");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the first frame waited for the whole tool phase"
+    );
+    let first = String::from_utf8(first.to_vec()).unwrap();
+    assert!(first.contains("event: connected"), "{first}");
+
+    // The tool phase really was slow: without this the early frame above could
+    // pass vacuously on a mock that answered instantly.
+    let drained = tokio::time::timeout(Duration::from_secs(20), async {
+        while frames.next().await.is_some() {}
+    })
+    .await;
+    assert!(drained.is_ok(), "the stream must still run to completion");
+    assert!(
+        started.elapsed() >= Duration::from_secs(3),
+        "the tool phase did not actually block, so the early frame proves nothing"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted() {
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");

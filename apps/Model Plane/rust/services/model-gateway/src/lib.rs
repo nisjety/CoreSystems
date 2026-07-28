@@ -7,6 +7,7 @@ pub mod browser_run;
 pub mod budget;
 pub mod cancel_registry;
 pub mod capability_consumer;
+pub mod compaction;
 pub mod confidence;
 pub mod coordinator;
 pub mod dataplane;
