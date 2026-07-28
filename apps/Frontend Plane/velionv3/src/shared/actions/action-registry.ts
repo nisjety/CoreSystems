@@ -126,6 +126,25 @@ const brregLookupInput = z.object({
   size: z.number().int().min(1).max(20).default(8),
 })
 
+const shippingAddressInput = z.object({
+  name: z.string().trim().min(1),
+  postal_code: z.string().trim().min(1),
+  city: z.string().trim().min(1),
+  country: z.string().trim().length(2).describe('ISO 3166-1 alpha-2, e.g. "NO"'),
+})
+
+const shippingQuoteInput = z.object({
+  from: shippingAddressInput,
+  to: shippingAddressInput,
+  package: z.object({
+    weight_kg: z.number().positive(),
+    length_cm: z.number().positive(),
+    width_cm: z.number().positive(),
+    height_cm: z.number().positive(),
+  }),
+  segment: z.enum(['b2b', 'b2c', 'both']).default('b2b'),
+})
+
 const runOutput = z.object({
   runId: z.string(),
   status: z.enum(['queued', 'planning', 'waiting_approval', 'executing', 'completed', 'failed']),
@@ -141,6 +160,11 @@ const brregLookupOutput = z.object({
   count: z.number(),
   sourceUrl: z.string(),
   results: z.array(z.record(z.string(), z.unknown())),
+})
+
+const shippingQuoteOutput = z.object({
+  quotes: z.array(z.record(z.string(), z.unknown())),
+  errors: z.array(z.record(z.string(), z.unknown())).optional(),
 })
 
 const socialPostOutput = z.object({
@@ -280,6 +304,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: brregLookupInput,
     outputSchema: brregLookupOutput,
+  },
+  {
+    id: 'shipping.get_quotes',
+    label: 'Get shipping quotes',
+    description: 'Compare live shipping quotes across the connected carrier fleet (Bring, DHL, UPS, FedEx, plus demo carriers) for a given origin, destination, and package. Returns cheapest-first pricing and transit days, plus a per-carrier error when a specific carrier could not be reached.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: shippingQuoteInput,
+    outputSchema: shippingQuoteOutput,
   },
   {
     id: 'tickets.create',

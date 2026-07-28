@@ -368,6 +368,55 @@ pub(super) async fn dispatch_brreg_lookup(
     (StatusCode::OK, Json(execution)).into_response()
 }
 
+/// `shipping.get_quotes` → shipping-core's carrier-fleet quote fan-out. Same
+/// "ingestion" audience bearer as the dedicated `/api/v1/shipping/quotes`
+/// route (see `domains::shipping::shipping_token`) — this dispatcher exists
+/// so the model can call it as a chat tool, not just the SPA's shipping page.
+pub(super) async fn dispatch_shipping_quotes(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let cookie = cookie_header(headers);
+    let Some(token) = get_audience_token(state, &user.user_id, &cookie, "ingestion").await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "shipping_auth_unavailable",
+                "Shipping authentication is temporarily unavailable.",
+            )),
+        )
+            .into_response();
+    };
+
+    let url = format!("{}/api/quotes", state.shipping_core_url);
+    let (status, Json(resp)) = proxy_bearer_json(
+        state,
+        Method::POST,
+        &url,
+        Some(input.clone()),
+        Some(&token),
+        &user.user_id,
+    )
+    .await;
+
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+
+    let run_id = format!("shipping_quotes_{}", user.user_id);
+    let execution = ok(json!({
+        "actionId": "shipping.get_quotes",
+        "runId": run_id,
+        "status": "completed",
+        "auditId": format!("audit_{run_id}"),
+        "result": resp,
+    }));
+
+    (StatusCode::OK, Json(execution)).into_response()
+}
+
 /// `knowledge.upload_files` is structurally human-only — it needs file bytes the
 /// AI/JSON path cannot carry. Return an honest, typed error pointing at the real
 /// multipart route rather than a synthetic "queued" run.

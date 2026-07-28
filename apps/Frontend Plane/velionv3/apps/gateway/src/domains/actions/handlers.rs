@@ -13,10 +13,10 @@ use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_crawl_site, dispatch_import_source,
     dispatch_operating_map_blueprint, dispatch_operating_map_generate,
     dispatch_operating_map_review, dispatch_recrawl, dispatch_scrape_url,
-    dispatch_social_create_draft, dispatch_social_publish_post, dispatch_social_schedule_post,
-    dispatch_ticket_assign, dispatch_ticket_classify, dispatch_ticket_create,
-    dispatch_ticket_link_resource, dispatch_ticket_resolve, dispatch_ticket_update,
-    dispatch_toggle_policy, dispatch_upload_files,
+    dispatch_shipping_quotes, dispatch_social_create_draft, dispatch_social_publish_post,
+    dispatch_social_schedule_post, dispatch_ticket_assign, dispatch_ticket_classify,
+    dispatch_ticket_create, dispatch_ticket_link_resource, dispatch_ticket_resolve,
+    dispatch_ticket_update, dispatch_toggle_policy, dispatch_upload_files,
 };
 
 #[derive(Deserialize)]
@@ -45,6 +45,9 @@ pub(super) async fn execute_action(
         "knowledge.upload_files" => dispatch_upload_files().await,
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
             dispatch_brreg_lookup(&state, &user, &body.input).await
+        }
+        "shipping.get_quotes" => {
+            dispatch_shipping_quotes(&state, &user, &headers, &body.input).await
         }
         "operating_map.generate" | "operating_map.refresh" => {
             dispatch_operating_map_generate(&state, &user, &headers, &body.input, &body.action_id)
