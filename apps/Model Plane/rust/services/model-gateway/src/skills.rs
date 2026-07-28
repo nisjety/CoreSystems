@@ -23,14 +23,39 @@ use mp_contracts::model_plane::v1::{
 const DEFAULT_MATCH_LIMIT: i32 = 5;
 const MAX_MATCH_LIMIT: i32 = 20;
 
+/// Provenance prefix stamped on skills pulled from session-core, so a refresh
+/// can replace exactly those without disturbing disk/operator-pushed skills.
+/// Single source of truth for the two places that need to agree.
+const LEARNED_SOURCE_PREFIX: &str = "session-core:";
+
+/// How long an org's learned-skill pull stays fresh.
+///
+/// Was permanent: `loaded` recorded only *that* an org had been pulled, so a
+/// skill edited or deleted through capability-core stayed invisible to a running
+/// gateway until someone restarted it — which quietly contradicts the whole
+/// point of a self-improving assistant whose operators author skills in the UI.
+const DEFAULT_SKILL_CACHE_TTL_SECS: u64 = 60;
+
+fn skill_cache_ttl() -> std::time::Duration {
+    static TTL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        let secs = std::env::var("SKILL_CACHE_TTL_SECONDS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SKILL_CACHE_TTL_SECS);
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct SkillStore {
     // Keyed by (org_id, skill_id) so multi-tenant skill sets don't
     // bleed. Cheap clone (Arc<DashMap>).
     inner: Arc<DashMap<(String, String), Skill>>,
-    // Orgs whose LEARNED skills (session-core agent_skills) have been pulled in
-    // via the §G7 lazy-load, so we fetch once per org rather than per match.
-    loaded: Arc<DashMap<String, ()>>,
+    // When each org's LEARNED skills (session-core agent_skills) were last
+    // pulled via the §G7 lazy-load, so the pull is re-done on a TTL rather than
+    // exactly once per process lifetime.
+    loaded: Arc<DashMap<String, std::time::Instant>>,
 }
 
 impl SkillStore {
@@ -49,16 +74,51 @@ impl SkillStore {
         s
     }
 
-    /// Whether this org's learned skills have already been lazily loaded from
-    /// session-core (G7 read path). Used to fetch once per org.
+    /// Whether this org's learned skills were pulled from session-core (G7 read
+    /// path) recently enough to reuse. Goes stale on a TTL so an operator's edit
+    /// or deletion takes effect without a gateway restart.
     #[must_use]
     pub fn is_org_loaded(&self, org_id: &str) -> bool {
-        self.loaded.contains_key(org_id)
+        self.loaded
+            .get(org_id)
+            .is_some_and(|at| at.elapsed() < skill_cache_ttl())
     }
 
     /// Mark this org's learned skills as loaded (call after a successful pull).
     pub fn mark_org_loaded(&self, org_id: &str) {
-        self.loaded.insert(org_id.to_owned(), ());
+        self.loaded
+            .insert(org_id.to_owned(), std::time::Instant::now());
+    }
+
+    /// Make the cache match a fresh session-core pull exactly, then mark it
+    /// loaded.
+    ///
+    /// Upserts first and prunes second, deliberately: evicting up front would
+    /// leave a window where a concurrent turn matches against an org with no
+    /// learned skills at all. Pruning by id is also what makes DELETION take
+    /// effect — re-upserting alone would leave a removed skill steering answers
+    /// forever. Only `session-core:`-sourced entries are touched, so
+    /// disk/operator-pushed skills survive a refresh.
+    pub fn replace_learned(&self, org_id: &str, skills: Vec<Skill>) {
+        let mut fresh_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for skill in skills {
+            fresh_ids.insert(self.upsert(org_id, skill).id);
+        }
+        let stale: Vec<(String, String)> = self
+            .inner
+            .iter()
+            .filter(|entry| {
+                let (entry_org, skill_id) = entry.key();
+                entry_org == org_id
+                    && entry.value().source_path.starts_with(LEARNED_SOURCE_PREFIX)
+                    && !fresh_ids.contains(skill_id)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in stale {
+            self.inner.remove(&key);
+        }
+        self.mark_org_loaded(org_id);
     }
 
     fn list(&self, org_id: &str) -> Vec<Skill> {
@@ -128,7 +188,7 @@ pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
         name: a.name,
         body: a.content,
         tags: a.trigger_keywords,
-        source_path: format!("session-core:{}", a.origin),
+        source_path: format!("{LEARNED_SOURCE_PREFIX}{}", a.origin),
         min_score: 0.0,
     }
 }
@@ -248,6 +308,92 @@ mod tests {
         store.mark_org_loaded("o");
         assert!(store.is_org_loaded("o"));
         assert!(!store.is_org_loaded("other"), "tracking is per-org");
+    }
+
+    /// A learned skill as it arrives from session-core, with the provenance
+    /// prefix that makes it eligible for refresh-pruning.
+    fn learned(id: &str, name: &str) -> Skill {
+        Skill {
+            id: id.into(),
+            name: name.into(),
+            body: format!("body of {name}"),
+            tags: vec![],
+            source_path: format!("{LEARNED_SOURCE_PREFIX}learned"),
+            min_score: 0.0,
+        }
+    }
+
+    #[test]
+    fn stale_org_is_repulled_so_operator_edits_land_without_a_restart() {
+        // The regression: `loaded` was a permanent marker, so an org was pulled
+        // exactly once per process and later edits were invisible until restart.
+        let store = SkillStore::new();
+        store
+            .loaded
+            .insert("o".to_owned(), std::time::Instant::now() - skill_cache_ttl());
+
+        assert!(
+            !store.is_org_loaded("o"),
+            "a cache entry older than the TTL must read as stale"
+        );
+    }
+
+    #[test]
+    fn replace_learned_reflects_an_edited_skill_body() {
+        let store = SkillStore::new();
+        store.replace_learned("o", vec![learned("s1", "invoice-policy")]);
+        store.replace_learned(
+            "o",
+            vec![Skill {
+                body: "EDITED body".into(),
+                ..learned("s1", "invoice-policy")
+            }],
+        );
+
+        let listed = store.list("o");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].body, "EDITED body");
+    }
+
+    #[test]
+    fn replace_learned_forgets_a_deleted_skill() {
+        // Re-upserting alone would leave a deleted skill steering answers forever.
+        let store = SkillStore::new();
+        store.replace_learned(
+            "o",
+            vec![learned("s1", "keep-me"), learned("s2", "delete-me")],
+        );
+        store.replace_learned("o", vec![learned("s1", "keep-me")]);
+
+        let names: Vec<String> = store.list("o").into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["keep-me".to_owned()], "deleted skill lingered");
+    }
+
+    #[test]
+    fn replace_learned_leaves_operator_pushed_skills_alone() {
+        // Disk/operator-pushed skills have no session-core provenance and must
+        // survive a learned-skill refresh.
+        let store = SkillStore::new();
+        let pushed = store.upsert("o", s("operator-skill", &["ops"], "pushed body"));
+        store.replace_learned("o", vec![learned("s1", "learned-skill")]);
+        store.replace_learned("o", vec![]);
+
+        let names: Vec<String> = store.list("o").into_iter().map(|s| s.name).collect();
+        assert!(
+            names.contains(&"operator-skill".to_owned()),
+            "refresh clobbered a non-learned skill: {names:?}"
+        );
+        assert!(store.get("o", &pushed.id).is_some());
+    }
+
+    #[test]
+    fn replace_learned_does_not_touch_another_org() {
+        let store = SkillStore::new();
+        store.replace_learned("o", vec![learned("s1", "mine")]);
+        store.replace_learned("other", vec![learned("s9", "theirs")]);
+        store.replace_learned("other", vec![]);
+
+        assert_eq!(store.list("o").len(), 1, "sibling org's refresh bled across");
     }
 
     #[test]

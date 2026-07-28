@@ -1183,7 +1183,39 @@ pub struct ToolRounds {
     /// The conversation augmented with each round's tool-result context.
     pub messages: Vec<ChatMessage>,
     /// `tool_call` + `tool_result` events to emit (gated on the `tools` family).
+    ///
+    /// Empty when a live [`RichEventSink`] was supplied — the events were already
+    /// streamed as they happened, and a caller replaying this list would emit
+    /// each one twice.
     pub events: Vec<ChatEvent>,
+}
+
+/// Where a tool event goes the moment it happens.
+///
+/// Buffering these until the loop finished was the whole problem: with a 12-round
+/// budget the user watched a spinner for the entire tool phase, because the
+/// events describing the work only shipped once the work was over.
+enum ToolEvents<'a> {
+    /// Stream immediately (the chat path).
+    Live(&'a crate::sse_events::RichEventSink),
+    /// Collect for the caller to emit later (non-streaming callers).
+    Buffered(Vec<ChatEvent>),
+}
+
+impl ToolEvents<'_> {
+    async fn push(&mut self, event: ChatEvent) {
+        match self {
+            Self::Live(sink) => sink.emit(event).await,
+            Self::Buffered(buffer) => buffer.push(event),
+        }
+    }
+
+    fn into_buffer(self) -> Vec<ChatEvent> {
+        match self {
+            Self::Live(_) => Vec::new(),
+            Self::Buffered(buffer) => buffer,
+        }
+    }
 }
 
 /// Force a first web lookup when the client explicitly selected Search.
@@ -1202,6 +1234,7 @@ pub async fn run_forced_web_search(
     zdr: bool,
     base_messages: Vec<ChatMessage>,
     query: &str,
+    sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
     let search_query = resolve_forced_web_search_query(&base_messages, query);
     let args = serde_json::json!({
@@ -1228,13 +1261,19 @@ pub async fn run_forced_web_search(
         None,
     )
     .await?;
-    let mut events = vec![
-        ChatEvent::ToolCall {
+    let mut events = match sink {
+        Some(sink) => ToolEvents::Live(sink),
+        None => ToolEvents::Buffered(Vec::new()),
+    };
+    events
+        .push(ChatEvent::ToolCall {
             id: call.id,
             name: call.name,
             args,
-        },
-        ChatEvent::ToolResult {
+        })
+        .await;
+    events
+        .push(ChatEvent::ToolResult {
             id: outcome.call_id.clone(),
             status: if outcome.error.is_some() {
                 "error".to_owned()
@@ -1243,9 +1282,11 @@ pub async fn run_forced_web_search(
             },
             output: outcome.output.clone(),
             error: outcome.error.clone(),
-        },
-    ];
-    events.extend(web_search_citations(&outcome));
+        })
+        .await;
+    for citation in web_search_citations(&outcome) {
+        events.push(citation).await;
+    }
 
     let mut messages = base_messages;
     messages.push(ChatMessage {
@@ -1254,7 +1295,10 @@ pub async fn run_forced_web_search(
         name: String::new(),
     });
 
-    Ok(ToolRounds { messages, events })
+    Ok(ToolRounds {
+        messages,
+        events: events.into_buffer(),
+    })
 }
 
 fn web_search_citations(outcome: &ToolOutcome) -> Vec<ChatEvent> {
@@ -1318,9 +1362,13 @@ pub async fn run_tool_rounds(
     tools: Vec<ToolDefinition>,
     tool_choice: String,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
-    let mut events = Vec::new();
+    let mut events = match sink {
+        Some(sink) => ToolEvents::Live(sink),
+        None => ToolEvents::Buffered(Vec::new()),
+    };
     // Persists across rounds: an exact repeat later in the same turn is still
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
@@ -1372,11 +1420,15 @@ pub async fn run_tool_rounds(
         for call in &resp.tool_calls {
             let args = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
                 .unwrap_or_else(|_| serde_json::json!({}));
-            events.push(ChatEvent::ToolCall {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                args,
-            });
+            // Emitted BEFORE dispatch so the user sees which tool is running
+            // while it runs, not after the whole phase finishes.
+            events
+                .push(ChatEvent::ToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    args,
+                })
+                .await;
             let is_duplicate = duplicate_call_signature(call)
                 .is_some_and(|signature| !attempted_calls.insert(signature));
             let outcome = if is_duplicate {
@@ -1403,16 +1455,18 @@ pub async fn run_tool_rounds(
                 )
                 .await?
             };
-            events.push(ChatEvent::ToolResult {
-                id: outcome.call_id.clone(),
-                status: if outcome.error.is_some() {
-                    "error".to_owned()
-                } else {
-                    "ok".to_owned()
-                },
-                output: outcome.output.clone(),
-                error: outcome.error.clone(),
-            });
+            events
+                .push(ChatEvent::ToolResult {
+                    id: outcome.call_id.clone(),
+                    status: if outcome.error.is_some() {
+                        "error".to_owned()
+                    } else {
+                        "ok".to_owned()
+                    },
+                    output: outcome.output.clone(),
+                    error: outcome.error.clone(),
+                })
+                .await;
             outcomes.push(outcome);
         }
 
@@ -1430,7 +1484,10 @@ pub async fn run_tool_rounds(
         });
     }
 
-    Ok(ToolRounds { messages, events })
+    Ok(ToolRounds {
+        messages,
+        events: events.into_buffer(),
+    })
 }
 
 #[cfg(test)]

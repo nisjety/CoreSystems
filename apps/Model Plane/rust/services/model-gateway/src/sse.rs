@@ -880,6 +880,7 @@ pub async fn invoke_stream_sse(
                 effective_zdr,
                 messages,
                 &req.content,
+                None,
             )
             .await;
             let Ok(forced) = forced else {
@@ -917,6 +918,7 @@ pub async fn invoke_stream_sse(
             tool_defs,
             "auto".to_owned(),
             ingestion_bearer.as_ref(),
+            None,
         )
         .await;
         let Ok(rounds) = rounds else {
@@ -1660,8 +1662,9 @@ async fn fetch_skill_context(
     if org_id.trim().is_empty() {
         return Vec::new();
     }
-    // §G7 read path: lazily pull this org's LEARNED skills (session-core
-    // agent_skills) into the match cache once per org.
+    // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
+    // into the match cache, re-pulling once the cached copy goes stale so an
+    // operator's edit or deletion lands without a gateway restart.
     if !state.skills.is_org_loaded(org_id) {
         if let Ok(request) = authenticated_session_request(
             ListAgentSkillsRequest {
@@ -1677,12 +1680,17 @@ async fn fetch_skill_context(
                 .await
             {
                 Ok(resp) => {
-                    for a in resp.into_inner().skills {
-                        state
+                    // replace_learned, not a bare upsert loop: on a re-pull the
+                    // cache must also FORGET skills the operator deleted, or a
+                    // removed skill keeps steering answers indefinitely.
+                    state.skills.replace_learned(
+                        org_id,
+                        resp.into_inner()
                             .skills
-                            .upsert(org_id, crate::skills::agent_skill_to_skill(a));
-                    }
-                    state.skills.mark_org_loaded(org_id);
+                            .into_iter()
+                            .map(crate::skills::agent_skill_to_skill)
+                            .collect(),
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
