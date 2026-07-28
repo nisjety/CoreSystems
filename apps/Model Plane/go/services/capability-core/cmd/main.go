@@ -90,9 +90,9 @@ func main() {
 	}
 
 	// Model-Plane-local service secret for model-gateway's execution-core-
-	// triggered oauth-token resolve (no live per-user bearer exists on that
-	// path). Optional: unset simply leaves that one internal path disabled,
-	// same as today — the per-user JWT path is unaffected either way.
+	// triggered oauth-token resolve and its refresh-writeback (no live per-user
+	// bearer exists on that path). Optional: unset simply leaves those internal
+	// paths disabled — the per-user JWT paths are unaffected either way.
 	mcpServiceToken := os.Getenv("MCP_OAUTH_SERVICE_TOKEN")
 	if mcpServiceToken == "" {
 		slog.Warn("MCP_OAUTH_SERVICE_TOKEN unset; model-gateway cannot resolve OAuth-connected MCP tokens at tool-call time")
@@ -223,7 +223,7 @@ func main() {
 	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
 	mcpHandler.Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
-	// comment — this one route authenticates itself (X-Mcp-Service-Token) and
+	// comment — these routes authenticate themselves (X-Mcp-Service-Token) and
 	// must not sit behind the per-user JWT middleware wrapping protectedMux
 	// below, which a service-to-service caller has no bearer to satisfy.
 	mcpHandler.RegisterInternal(publicMux)

@@ -10,15 +10,21 @@
 //! `authorization_endpoint`, and `token_endpoint`. DCR mints a fresh
 //! `client_id` per server the first time anyone in an org connects it.
 //!
-//! This module is pure protocol logic (HTTP + PKCE/state generation) with no
-//! storage or HTTP-route concerns — see `http_routes.rs` for the
+//! This module is protocol logic (HTTP + PKCE/state generation) with no
+//! HTTP-route concerns — see `http_routes.rs` for the
 //! `/v1/mcp/servers/oauth/*` endpoints that drive this, and capability-core
-//! for where the resulting tokens are durably encrypted and stored.
+//! for where the resulting tokens are durably encrypted and stored. The one
+//! exception is `resolve_stored_oauth_token` at the bottom, which reads that
+//! store (and writes back a refreshed token) because refreshing is a protocol
+//! operation capability-core deliberately does not perform itself.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpOAuthError {
@@ -330,15 +336,54 @@ pub async fn refresh_access_token(
         .map_err(|e| McpOAuthError::TokenExchangeRejected(e.to_string()))
 }
 
-/// Resolve a stored OAuth access token for (`org_id`, `server_id`) from
+/// Seconds of headroom demanded of a stored token's `expires_at` before it is
+/// handed to a caller. The token is not used at this instant: the caller still
+/// has to build the request, complete the MCP `initialize` handshake and issue
+/// the actual `tools/list`/`tools/call`, any of which would 401 if the token
+/// died in between. A minute comfortably covers that round trip while staying
+/// far below a typical hour-long token lifetime, so it never forces a refresh
+/// that was not already almost due.
+const OAUTH_EXPIRY_SKEW_SECS: i64 = 60;
+
+/// Decrypted OAuth material as capability-core's internal resolve returns it.
+/// Everything except `expires_at` (a nullable column, omitted when unset) is
+/// always present, empty-string when the authorization server never gave it.
+#[derive(Debug, Clone, Deserialize)]
+struct StoredOAuthToken {
+    #[serde(default)]
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    #[serde(default)]
+    token_type: String,
+    #[serde(default)]
+    scope: String,
+    /// RFC 3339.
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    token_endpoint: String,
+    #[serde(default)]
+    client_id: String,
+}
+
+/// Resolve a usable OAuth access token for (`org_id`, `server_id`) from
 /// capability-core's system-of-record, authenticating with a shared
-/// Model-Plane-local service secret rather than a per-user bearer.
+/// Model-Plane-local service secret rather than a per-user bearer. Refreshes
+/// the stored token first when it has expired (or is about to), persisting the
+/// result back so the next caller does not have to.
 ///
 /// Deliberately soft-fail (`None`, never an error): this is on the
 /// `tools/call` dispatch path for every MCP server, including ones that
 /// were never OAuth-connected at all. An unconfigured secret, a network
 /// hiccup, or "no tokens stored for this server" must all fall back to
 /// `server.token`-based auth exactly as before, never break the call.
+///
+/// Also `None` — rather than the stored value — when the token is provably
+/// expired and cannot be refreshed. Returning a dead token guarantees a
+/// downstream 401 that reaches the user as "I have no access to this system,"
+/// which is indistinguishable from never having connected it; `None` at least
+/// leaves the honest "not connected" path intact.
 ///
 /// Deliberately narrow-scoped: `service_token` proves only "this is a
 /// trusted internal caller," not a specific org — unlike the minted,
@@ -377,12 +422,173 @@ pub async fn resolve_stored_oauth_token(
     if !response.status().is_success() {
         return None;
     }
-    let body: serde_json::Value = response.json().await.ok()?;
-    let token = body.get("access_token")?.as_str()?.trim();
-    if token.is_empty() {
+    let stored: StoredOAuthToken = response.json().await.ok()?;
+    let access_token = stored.access_token.trim();
+    if access_token.is_empty() {
         return None;
     }
-    Some(token.to_owned())
+    if stored_access_token_is_live(stored.expires_at.as_deref(), Utc::now()) {
+        return Some(access_token.to_owned());
+    }
+    refresh_stored_oauth_token(
+        client,
+        capability_core_base_url,
+        service_token,
+        org_id,
+        server_id,
+        &stored,
+    )
+    .await
+}
+
+/// Whether a stored access token can be handed out as-is.
+///
+/// A missing or unparseable `expires_at` means we have no proof the token is
+/// dead, so it passes through unchanged: an authorization server is free to
+/// omit `expires_in` (leaving the column NULL), and withholding a token that
+/// may well be valid would break those servers outright. Only a timestamp we
+/// can read AND that has already passed — or falls inside
+/// `OAUTH_EXPIRY_SKEW_SECS` — forces a refresh.
+fn stored_access_token_is_live(expires_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(raw) = expires_at.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let Ok(expiry) = DateTime::parse_from_rfc3339(raw) else {
+        warn!(
+            expires_at = raw,
+            "mcp oauth: unparseable stored token expiry"
+        );
+        return true;
+    };
+    expiry.with_timezone(&Utc) > now + chrono::Duration::seconds(OAUTH_EXPIRY_SKEW_SECS)
+}
+
+/// Trade the stored `refresh_token` for a fresh access token and write the
+/// result back to capability-core. `None` on any failure — see
+/// `resolve_stored_oauth_token`'s contract for why a known-dead token is never
+/// returned as a consolation.
+async fn refresh_stored_oauth_token(
+    client: &reqwest::Client,
+    capability_core_base_url: &str,
+    service_token: &str,
+    org_id: &str,
+    server_id: &str,
+    stored: &StoredOAuthToken,
+) -> Option<String> {
+    let refresh_token = stored.refresh_token.trim();
+    let token_endpoint = stored.token_endpoint.trim();
+    if refresh_token.is_empty() || token_endpoint.is_empty() {
+        warn!(
+            server_id,
+            has_refresh_token = !refresh_token.is_empty(),
+            has_token_endpoint = !token_endpoint.is_empty(),
+            "mcp oauth: stored token expired and cannot be refreshed; the server must be reconnected"
+        );
+        return None;
+    }
+    let refreshed = match refresh_access_token(
+        client,
+        token_endpoint,
+        stored.client_id.trim(),
+        refresh_token,
+    )
+    .await
+    {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            warn!(
+                server_id,
+                error = %error,
+                "mcp oauth: refresh rejected; the server must be reconnected"
+            );
+            return None;
+        }
+    };
+    let access_token = refreshed.access_token.trim().to_owned();
+    if access_token.is_empty() {
+        warn!(
+            server_id,
+            "mcp oauth: refresh returned an empty access token"
+        );
+        return None;
+    }
+
+    // RFC 6749 §6 lets the authorization server omit `refresh_token` and
+    // `scope` on a refresh, meaning "keep what you had". capability-core's
+    // upsert rewrites every column, so the stored values must be carried
+    // forward explicitly — otherwise a rotating refresh token gets wiped and
+    // the *next* refresh becomes impossible.
+    let retained_refresh = refreshed
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(refresh_token);
+    let scope = refreshed
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(stored.scope.as_str());
+    let payload = json!({
+        "access_token": access_token,
+        "refresh_token": retained_refresh,
+        "token_type": stored.token_type,
+        "scope": scope,
+        "expires_in_seconds": refreshed.expires_in,
+        "token_endpoint": token_endpoint,
+        "client_id": stored.client_id,
+    });
+    if !persist_oauth_token(
+        client,
+        capability_core_base_url,
+        service_token,
+        org_id,
+        server_id,
+        &payload,
+    )
+    .await
+    {
+        // The refreshed token is still good for this call, so hand it back.
+        // The cost of not persisting is a repeat refresh next time — and, if
+        // this server rotates refresh tokens, a stored refresh token that is
+        // now spent, which surfaces as an honest "reconnect required" rather
+        // than a silent wrong answer.
+        warn!(
+            server_id,
+            "mcp oauth: refreshed token could not be persisted; the next call will refresh again"
+        );
+    }
+    Some(access_token)
+}
+
+/// Write refreshed tokens back through capability-core's internal upsert — the
+/// service-token twin of the per-user `PUT /api/v1/mcp/{id}/oauth-tokens` that
+/// the interactive connect flow uses, for the same reason the resolve above has
+/// one: no per-user bearer exists on this path.
+async fn persist_oauth_token(
+    client: &reqwest::Client,
+    capability_core_base_url: &str,
+    service_token: &str,
+    org_id: &str,
+    server_id: &str,
+    payload: &serde_json::Value,
+) -> bool {
+    let Ok(mut url) = reqwest::Url::parse(&format!(
+        "{capability_core_base_url}/api/v1/internal/mcp/oauth-tokens"
+    )) else {
+        return false;
+    };
+    url.query_pairs_mut()
+        .append_pair("server_id", server_id)
+        .append_pair("org_id", org_id);
+    client
+        .put(url)
+        .header("X-Mcp-Service-Token", service_token)
+        .json(payload)
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 #[cfg(test)]
@@ -477,6 +683,88 @@ mod tests {
             "",
             "org-1",
             "srv-1",
+        )
+        .await;
+        assert!(token.is_none());
+    }
+
+    fn expiry_now() -> DateTime<Utc> {
+        "2026-07-28T20:37:26Z".parse().expect("fixed instant")
+    }
+
+    #[test]
+    fn already_expired_token_is_not_live() {
+        // The production incident verbatim: a token that expired at 20:19:03
+        // was still handed to a 20:37:26 chat turn, which 401'd.
+        assert!(!stored_access_token_is_live(
+            Some("2026-07-28T20:19:03+00:00"),
+            expiry_now()
+        ));
+    }
+
+    #[test]
+    fn token_expiring_inside_the_skew_is_not_live() {
+        assert!(!stored_access_token_is_live(
+            Some("2026-07-28T20:38:00Z"),
+            expiry_now()
+        ));
+    }
+
+    #[test]
+    fn token_expiring_beyond_the_skew_is_live() {
+        assert!(stored_access_token_is_live(
+            Some("2026-07-28T20:38:30Z"),
+            expiry_now()
+        ));
+    }
+
+    #[test]
+    fn absent_expiry_is_live() {
+        // Nullable column: the authorization server never sent expires_in.
+        assert!(stored_access_token_is_live(None, expiry_now()));
+        assert!(stored_access_token_is_live(Some("  "), expiry_now()));
+    }
+
+    #[test]
+    fn unparseable_expiry_is_live() {
+        // No proof of death, so no refresh — see the fn's doc comment.
+        assert!(stored_access_token_is_live(
+            Some("28.07.2026 20:19"),
+            expiry_now()
+        ));
+    }
+
+    #[test]
+    fn non_utc_expiry_offset_is_respected() {
+        // 22:19:03+02:00 is 20:19:03Z — expired. A naive string/prefix compare
+        // would read the hour as later than now and call it live.
+        assert!(!stored_access_token_is_live(
+            Some("2026-07-28T22:19:03+02:00"),
+            expiry_now()
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_token_without_refresh_material_resolves_to_none() {
+        let client = reqwest::Client::new();
+        let stored = StoredOAuthToken {
+            access_token: "expired-but-present".to_owned(),
+            refresh_token: String::new(),
+            token_type: "Bearer".to_owned(),
+            scope: String::new(),
+            expires_at: Some("2026-07-28T20:19:03+00:00".to_owned()),
+            token_endpoint: String::new(),
+            client_id: "client-123".to_owned(),
+        };
+        // No refresh_token and no token_endpoint: refusal is decided before any
+        // network call, so this stays offline and deterministic.
+        let token = refresh_stored_oauth_token(
+            &client,
+            "http://capability-core:8085",
+            "shared-secret",
+            "org-1",
+            "srv-1",
+            &stored,
         )
         .await;
         assert!(token.is_none());

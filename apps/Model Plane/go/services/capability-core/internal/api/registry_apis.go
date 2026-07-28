@@ -223,10 +223,11 @@ type MCPHandler struct {
 	// oauth-token(s) endpoints fail closed with 503 rather than silently
 	// storing or returning plaintext.
 	vault *crypto.Vault
-	// mcpServiceToken authenticates model-gateway's oauth-token GET when it
-	// has no live per-user bearer to forward (the execution-core-triggered
-	// tools/call path). Empty (unset) disables this path entirely — the
-	// endpoint then only accepts the normal per-user JWT principal. Proves
+	// mcpServiceToken authenticates model-gateway's internal oauth-token
+	// resolve and refresh-writeback when it has no live per-user bearer to
+	// forward (the execution-core-triggered tools/call path). Empty (unset)
+	// disables those paths entirely — the per-user JWT endpoints under
+	// /api/v1/mcp are unaffected either way. Proves
 	// "trusted internal caller" only, not a specific org: the caller-
 	// asserted org_id still has to match a real stored (server_id, org_id)
 	// row, so this cannot widen access beyond servers that genuinely belong
@@ -293,9 +294,9 @@ func (h *MCPHandler) WithVault(vault *crypto.Vault) *MCPHandler {
 	return h
 }
 
-// WithMCPServiceToken enables the Model-Plane-local service-to-service path
-// on GET oauth-token (see mcpServiceToken doc comment). Passing an empty
-// string leaves the path disabled, same as never calling this at all.
+// WithMCPServiceToken enables the Model-Plane-local service-to-service
+// oauth-token routes (see mcpServiceToken doc comment). Passing an empty
+// string leaves them disabled, same as never calling this at all.
 func (h *MCPHandler) WithMCPServiceToken(token string) *MCPHandler {
 	h.mcpServiceToken = token
 	return h
@@ -366,6 +367,28 @@ func secureTokenEqual(expected, received string) bool {
 	expectedDigest := sha256.Sum256([]byte(expected))
 	receivedDigest := sha256.Sum256([]byte(received))
 	return subtle.ConstantTimeCompare(expectedDigest[:], receivedDigest[:]) == 1
+}
+
+const mcpServiceTokenHeader = "X-Mcp-Service-Token"
+
+// authorizedInternalServiceCall is the sole gate on every RegisterInternal
+// route: those are mounted outside the per-user JWT middleware, so nothing
+// else stands between the network and the handler body.
+func (h *MCPHandler) authorizedInternalServiceCall(r *http.Request) bool {
+	received := r.Header.Get(mcpServiceTokenHeader)
+	if received == "" || h.mcpServiceToken == "" {
+		return false
+	}
+	return secureTokenEqual(h.mcpServiceToken, received)
+}
+
+// internalTokenTarget reads the caller-asserted (server_id, org_id) pair the
+// internal routes are scoped by. Asserted, not proven — see the
+// mcpServiceToken doc comment for why that is still containing.
+func internalTokenTarget(r *http.Request) (id, orgID string, ok bool) {
+	id = strings.TrimSpace(r.URL.Query().Get("server_id"))
+	orgID = strings.TrimSpace(r.URL.Query().Get("org_id"))
+	return id, orgID, id != "" && orgID != ""
 }
 
 func decodeMCPRegistration(w http.ResponseWriter, request *http.Request) (mcpServerRegistration, error) {
@@ -776,16 +799,17 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 	})
 }
 
-// RegisterInternal mounts the one route that must NOT sit behind this
+// RegisterInternal mounts the routes that must NOT sit behind this
 // service's blanket per-user JWT middleware (cmd/main.go wraps Register's
 // mux with verifier.HTTPMiddleware before anything in it runs) — the
 // execution-core-triggered tools/call dispatch path has no per-user bearer
 // to present, only the shared X-Mcp-Service-Token, which that middleware
-// doesn't understand and would reject before oauthTokenResolveInternal's
-// own (sole) gate ever ran. Callers must mount this directly on the
-// UNWRAPPED mux (main.go's publicMux), never on the one passed to Register.
+// doesn't understand and would reject before these handlers' own (sole)
+// gate ever ran. Callers must mount this directly on the UNWRAPPED mux
+// (main.go's publicMux), never on the one passed to Register.
 func (h *MCPHandler) RegisterInternal(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-token", h.oauthTokenResolveInternal)
+	mux.HandleFunc("/api/v1/internal/mcp/oauth-tokens", h.oauthTokensUpsertInternal)
 }
 
 // mcpOAuthTokensUpsertBody is what model-gateway POSTs right after a
@@ -807,6 +831,34 @@ func (h *MCPHandler) oauthTokensUpsert(w http.ResponseWriter, r *http.Request, i
 		jsonErr(w, "capability write scope required", http.StatusForbidden)
 		return
 	}
+	h.writeEncryptedOAuthTokens(w, r, id, orgID)
+}
+
+// oauthTokensUpsertInternal is the mirror of oauthTokenResolveInternal for
+// writes: model-gateway refreshes an expired access token itself (it owns the
+// OAuth protocol; capability-core only encrypts and stores) and has to persist
+// the result on a path with no per-user bearer, so the same shared service
+// token is this route's sole gate. Both paths funnel into the one
+// writeEncryptedOAuthTokens body below, which keeps the vault AAD binding
+// identical — a row written through either path decrypts through either.
+func (h *MCPHandler) oauthTokensUpsertInternal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.NotFound(w, r)
+		return
+	}
+	if !h.authorizedInternalServiceCall(r) {
+		jsonErr(w, "invalid service token", http.StatusForbidden)
+		return
+	}
+	id, orgID, ok := internalTokenTarget(r)
+	if !ok {
+		jsonErr(w, "server_id and org_id query parameters are required", http.StatusBadRequest)
+		return
+	}
+	h.writeEncryptedOAuthTokens(w, r, id, orgID)
+}
+
+func (h *MCPHandler) writeEncryptedOAuthTokens(w http.ResponseWriter, r *http.Request, id, orgID string) {
 	if h.vault == nil {
 		jsonErr(w, "token encryption is not configured", http.StatusServiceUnavailable)
 		return
@@ -916,14 +968,12 @@ func (h *MCPHandler) oauthTokenResolveInternal(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
-	serviceToken := r.Header.Get("X-Mcp-Service-Token")
-	if serviceToken == "" || h.mcpServiceToken == "" || !secureTokenEqual(h.mcpServiceToken, serviceToken) {
+	if !h.authorizedInternalServiceCall(r) {
 		jsonErr(w, "invalid service token", http.StatusForbidden)
 		return
 	}
-	id := strings.TrimSpace(r.URL.Query().Get("server_id"))
-	orgID := strings.TrimSpace(r.URL.Query().Get("org_id"))
-	if id == "" || orgID == "" {
+	id, orgID, ok := internalTokenTarget(r)
+	if !ok {
 		jsonErr(w, "server_id and org_id query parameters are required", http.StatusBadRequest)
 		return
 	}
