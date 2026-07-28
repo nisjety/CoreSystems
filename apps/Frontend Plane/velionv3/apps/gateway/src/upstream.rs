@@ -1417,6 +1417,7 @@ pub(crate) async fn proxy_sse_stream(
         None,
         None,
         None,
+        None,
         last_event_id,
         actor,
         zdr,
@@ -1447,6 +1448,7 @@ pub(crate) async fn proxy_sse_stream_with_session(
         None,
         None,
         session_bearer,
+        None,
         last_event_id,
         actor,
         zdr,
@@ -1466,6 +1468,7 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
+    ingestion_bearer: Option<&str>,
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
@@ -1480,6 +1483,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-data-plane-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = ingestion_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-ingestion-authorization", format!("Bearer {token}"));
     }
     if let Some(token) = cost_bearer
         .map(str::trim)

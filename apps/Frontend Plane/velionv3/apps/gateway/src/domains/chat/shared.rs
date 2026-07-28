@@ -114,6 +114,18 @@ pub(crate) async fn data_plane_token(
     get_audience_token(state, &user.user_id, &cookie_header(headers), "data-plane").await
 }
 
+/// Mint the `aud=ingestion` token model-gateway needs to call shipping-core
+/// (and any future Ingestion Plane HTTP API) on the caller's behalf for the
+/// `shipping.get_quotes` chat tool. Best-effort like `data_plane_token` — a
+/// missing credential degrades that one tool call, never the whole chat turn.
+pub(crate) async fn ingestion_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<String> {
+    get_audience_token(state, &user.user_id, &cookie_header(headers), "ingestion").await
+}
+
 /// Mint the dedicated interactive `aud=session-core` token. It is forwarded
 /// separately from the Model/Data credentials and session-core independently
 /// validates it before any durable session, run, or approval operation.

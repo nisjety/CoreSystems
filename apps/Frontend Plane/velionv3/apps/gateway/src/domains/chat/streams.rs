@@ -22,6 +22,7 @@ pub(super) async fn stream_chat(
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
+    let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
     let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
@@ -57,6 +58,7 @@ pub(super) async fn stream_chat(
         Some(&execution_token),
         Some(&cost_token),
         Some(&session_token),
+        ingestion_token.as_deref(),
         None,
         Some((&user.user_id, org_id.as_str())),
         shared::zdr_flag(&headers),

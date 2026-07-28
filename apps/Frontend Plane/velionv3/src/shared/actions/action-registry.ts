@@ -142,7 +142,7 @@ const shippingQuoteInput = z.object({
     width_cm: z.number().positive(),
     height_cm: z.number().positive(),
   }),
-  segment: z.enum(['b2b', 'b2c', 'both']).default('b2b'),
+  segment: z.enum(['b2b', 'b2c']).default('b2b'),
 })
 
 const runOutput = z.object({
