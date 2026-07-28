@@ -1,10 +1,11 @@
-import { Loader2, Plug, ShieldCheck, Trash2, Users } from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { KeyRound, Loader2, Plug, ShieldCheck, Trash2, Users } from 'lucide-solid'
+import { createMemo, createResource, createSignal, For, onMount, Show } from 'solid-js'
 import {
   deleteMcpServer,
   listMcpServers,
   registerMcpServer,
   shareMcpServer,
+  startMcpOAuth,
   type McpServer,
 } from '@/shared/api/mcp-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -73,6 +74,36 @@ export function McpServersSection() {
   // Per-server share state: the editing server id and its comma-separated ids.
   const [shareServerId, setShareServerId] = createSignal<string | null>(null)
   const [shareUserIds, setShareUserIds] = createSignal('')
+
+  // OAuth-connect form state (e.g. Visma Net) — a separate, smaller field set
+  // from the static-token form above: no transport (always http) and no
+  // token (the authorization server issues it, never the browser).
+  const [oauthName, setOauthName] = createSignal('')
+  const [oauthUrl, setOauthUrl] = createSignal('')
+  const [oauthAllowlist, setOauthAllowlist] = createSignal('')
+  const [oauthScope, setOauthScope] = createSignal<'user' | 'org'>('user')
+  const [oauthSubmitting, setOauthSubmitting] = createSignal(false)
+  const [oauthError, setOauthError] = createSignal<string | null>(null)
+  // Set once, from the `mcp_oauth` query param the callback redirect lands
+  // with — never re-derived, so a later refresh of this page doesn't re-show
+  // a stale banner for a connection attempt that already resolved.
+  const [connectionNotice, setConnectionNotice] = createSignal<'connected' | 'error' | null>(null)
+
+  onMount(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    const notice = params.get('mcp_oauth')
+    if (notice !== 'connected' && notice !== 'error') return
+    setConnectionNotice(notice)
+    params.delete('mcp_oauth')
+    const rest = params.toString()
+    window.history.replaceState(
+      null,
+      '',
+      window.location.pathname + (rest ? `?${rest}` : '') + window.location.hash,
+    )
+    if (notice === 'connected') void refetch()
+  })
 
   const list = createMemo(() => servers() ?? [])
 
@@ -186,6 +217,51 @@ export function McpServersSection() {
     }
   }
 
+  // Starts the OAuth 2.1 + DCR flow (e.g. Visma Net): the gateway discovers
+  // the server's authorization metadata and registers a client, then this
+  // navigates the browser away entirely — there is no further response to
+  // handle here. The connection completes (or fails) on the server's own
+  // consent screen and lands back on this page via the callback redirect,
+  // picked up by the onMount check above.
+  const handleOAuthConnect = async (event: Event) => {
+    event.preventDefault()
+    const id = orgId()
+    if (!id || oauthSubmitting()) return
+
+    const trimmedName = oauthName().trim()
+    const trimmedUrl = oauthUrl().trim()
+    if (!trimmedName || !trimmedUrl) {
+      setOauthError('Navn og URL er påkrevd.')
+      return
+    }
+    if (!/^https:\/\//i.test(trimmedUrl)) {
+      setOauthError('URL må starte med https:// — OAuth-oppdagelse krever en offentlig HTTPS-tjener.')
+      return
+    }
+
+    setOauthSubmitting(true)
+    setOauthError(null)
+    try {
+      const tools = parseAllowlist(oauthAllowlist())
+      const effectiveScope = oauthScope() === 'org' && isAdmin() ? 'org' : 'user'
+      const result = await startMcpOAuth(id, {
+        name: trimmedName,
+        url: trimmedUrl,
+        tool_allowlist: tools.length > 0 ? tools : undefined,
+        scope: effectiveScope,
+      })
+      window.location.href = result.authorization_url
+    } catch (err) {
+      setOauthError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke starte OAuth-tilkoblingen.',
+          en: 'Could not start the OAuth connection.',
+        }),
+      )
+      setOauthSubmitting(false)
+    }
+  }
+
   const handleDelete = async (server: McpServer) => {
     const id = orgId()
     if (!id || busyServerId()) return
@@ -216,6 +292,18 @@ export function McpServersSection() {
         title="MCP-servere"
         description="Registrer eksterne MCP-tjenere agenten kan bruke, og styr hvilke verktøy som er tillatt. Den hemmelige tokenen sendes kun ved registrering og vises aldri her."
       />
+
+      <Show when={connectionNotice() === 'connected'}>
+        <p class="velion-settings-status-message velion-settings-status-message--success" role="status">
+          Tilkoblingen ble fullført. Den nye tjeneren vises i listen under.
+        </p>
+      </Show>
+      <Show when={connectionNotice() === 'error'}>
+        <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">
+          OAuth-tilkoblingen kunne ikke fullføres. Prøv igjen, eller kontroller at tjeneren
+          støtter OAuth 2.1 med dynamisk klientregistrering.
+        </p>
+      </Show>
 
       <Show when={actionError()}>
         {(message) => (
@@ -468,6 +556,98 @@ export function McpServersSection() {
               fallback={<><Plug size={14} aria-hidden="true" /> Registrer MCP-server</>}
             >
               <Loader2 size={14} aria-hidden="true" /> Registrerer…
+            </Show>
+          </SettingsButton>
+        </div>
+      </form>
+
+      <SectionHeader
+        title="Koble til med OAuth 2.1"
+        description="For tjenere som krever ekte innlogging (f.eks. Visma Net) i stedet for en delt token. Ingen forhåndsregistrert app trengs — Velion oppdager og registrerer en klient automatisk."
+      />
+
+      <form class="velion-settings-field-grid velion-settings-field-grid--spaced" onSubmit={(event) => void handleOAuthConnect(event)}>
+        <label for="mcp-oauth-name" class="velion-settings-field">
+          <span class="velion-settings-label">Navn</span>
+          <span class="velion-settings-input-wrap">
+            <VelionInput
+              id="mcp-oauth-name"
+              value={oauthName()}
+              required
+              placeholder="f.eks. visma-net"
+              onInput={(event) => setOauthName(event.currentTarget.value)}
+              class="velion-settings-input"
+            />
+          </span>
+        </label>
+
+        <label for="mcp-oauth-url" class="velion-settings-field">
+          <span class="velion-settings-label">URL</span>
+          <span class="velion-settings-input-wrap">
+            <VelionInput
+              id="mcp-oauth-url"
+              value={oauthUrl()}
+              required
+              placeholder="https://mcp.finance.visma.net/mcp"
+              onInput={(event) => setOauthUrl(event.currentTarget.value)}
+              class="velion-settings-input"
+            />
+          </span>
+          <span class="velion-settings-help">
+            Må være en offentlig HTTPS-tjener som støtter OAuth 2.1 protected-resource-oppdagelse.
+          </span>
+        </label>
+
+        <label for="mcp-oauth-scope" class="velion-settings-field">
+          <span class="velion-settings-label">Synlighet</span>
+          <span class="velion-settings-input-wrap">
+            <select
+              id="mcp-oauth-scope"
+              value={oauthScope()}
+              onChange={(event) =>
+                setOauthScope(event.currentTarget.value === 'org' ? 'org' : 'user')
+              }
+              class="velion-settings-input velion-settings-select"
+            >
+              <option value="user">Privat (bare meg)</option>
+              <Show when={isAdmin()}>
+                <option value="org">Hele organisasjonen</option>
+              </Show>
+            </select>
+          </span>
+        </label>
+
+        <label for="mcp-oauth-allowlist" class="velion-settings-field">
+          <span class="velion-settings-label">Tillatte verktøy (valgfritt)</span>
+          <span class="velion-settings-input-wrap">
+            <VelionInput
+              id="mcp-oauth-allowlist"
+              value={oauthAllowlist()}
+              placeholder="kommaseparert, f.eks. get_skill, execute_query"
+              onInput={(event) => setOauthAllowlist(event.currentTarget.value)}
+              class="velion-settings-input"
+            />
+          </span>
+          <span class="velion-settings-help">
+            La stå tom for å tillate alle oppdagede verktøy.
+          </span>
+        </label>
+
+        <Show when={oauthError()}>
+          {(message) => (
+            <p class="velion-settings-status-message velion-settings-status-message--error" role="alert">
+              {message()}
+            </p>
+          )}
+        </Show>
+
+        <div>
+          <SettingsButton type="submit" variant="primary" settingsSize="sm" disabled={oauthSubmitting()}>
+            <Show
+              when={oauthSubmitting()}
+              fallback={<><KeyRound size={14} aria-hidden="true" /> Koble til med OAuth</>}
+            >
+              <Loader2 size={14} aria-hidden="true" /> Sender deg til innlogging…
             </Show>
           </SettingsButton>
         </div>

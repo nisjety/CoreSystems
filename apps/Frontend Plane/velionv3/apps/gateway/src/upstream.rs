@@ -856,7 +856,7 @@ fn conversation_target_is_configured_origin(target: &str, configured_base: &str)
     same_upstream_origin(target, configured_base)
 }
 
-fn same_upstream_origin(target: &str, configured_base: &str) -> bool {
+pub(crate) fn same_upstream_origin(target: &str, configured_base: &str) -> bool {
     let (Ok(target), Ok(base)) = (Url::parse(target), Url::parse(configured_base)) else {
         return false;
     };

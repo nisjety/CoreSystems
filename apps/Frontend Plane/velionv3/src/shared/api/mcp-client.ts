@@ -46,6 +46,30 @@ export function registerMcpServer(
   })
 }
 
+/**
+ * Begin connecting an MCP server that requires real OAuth 2.1 login (e.g.
+ * Visma Net) rather than a static token. Response carries the
+ * `authorization_url` to navigate the browser to next — the actual
+ * connection completes on the server's own OAuth consent screen and lands
+ * back on `/settings?mcp_oauth=connected|error`, not on any promise this
+ * call resolves.
+ */
+export function startMcpOAuth(
+  orgId: string,
+  body: {
+    name: string
+    url: string
+    tool_allowlist?: string[]
+    scope?: 'user' | 'org'
+  },
+): Promise<{ authorization_url: string }> {
+  return requestJson<{ authorization_url: string }>('/api/v1/mcp/servers/oauth/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: { 'x-velion-org-id': orgId },
+  })
+}
+
 export function deleteMcpServer(orgId: string, serverId: string): Promise<void> {
   return requestJson<void>(`/api/v1/mcp/servers/${encodeURIComponent(serverId)}`, {
     method: 'DELETE',

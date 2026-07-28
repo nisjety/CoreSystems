@@ -20,13 +20,13 @@
 //! path `server_id`.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
     Extension, Json, Router,
 };
-use reqwest::Method;
+use reqwest::{header::LOCATION, Method};
 use serde_json::Value;
 
 use crate::{
@@ -38,6 +38,7 @@ use crate::{
     envelope::error,
     middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
+    upstream::same_upstream_origin,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -48,6 +49,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/mcp/servers/:server_id", delete(delete_server))
         .route("/api/v1/mcp/servers/:server_id/share", post(share_server))
+        .route("/api/v1/mcp/servers/oauth/start", post(oauth_start))
+        .route("/api/v1/mcp/servers/oauth/callback", get(oauth_callback))
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -67,6 +70,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 async fn is_org_admin(state: &AppState, user: &AuthenticatedUser) -> bool {
     let _ = state;
     has_authorized_org_role(user, &["owner", "admin"])
+}
+
+/// `true` if the request wants an org-wide server (`scope == "org"`) but the
+/// caller isn't an org admin — the shared gate for both plain and
+/// OAuth-based server registration.
+async fn org_scope_forbidden(state: &AppState, user: &AuthenticatedUser, body: &Value) -> bool {
+    let wants_org_scope = body
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(|scope| scope.eq_ignore_ascii_case("org"))
+        .unwrap_or(false);
+    wants_org_scope && !is_org_admin(state, user).await
 }
 
 async fn list_servers(
@@ -110,12 +125,7 @@ async fn register_server(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let wants_org_scope = body
-        .get("scope")
-        .and_then(Value::as_str)
-        .map(|scope| scope.eq_ignore_ascii_case("org"))
-        .unwrap_or(false);
-    if wants_org_scope && !is_org_admin(&state, &user).await {
+    if org_scope_forbidden(&state, &user, &body).await {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
@@ -206,4 +216,106 @@ async fn delete_server(
     )
     .await;
     (status, body).into_response()
+}
+
+/// Begin connecting an MCP server that requires real OAuth 2.1 login (e.g.
+/// Visma Net) instead of a static token. Body (`name`, `url`,
+/// `tool_allowlist`, `scope`) is forwarded verbatim to model-gateway, which
+/// discovers the server's protected-resource + authorization-server
+/// metadata and dynamically registers a client (RFC 7591 — no pre-existing
+/// app needed). Response carries the `authorization_url` the browser
+/// should navigate to next. Same org-admin gate as `register_server` for
+/// `scope == "org"`.
+async fn oauth_start(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if org_scope_forbidden(&state, &user, &body).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "forbidden",
+                "Only organization admins can create org-wide MCP servers.",
+            )),
+        )
+            .into_response();
+    }
+
+    let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let url = format!("{}/v1/mcp/servers/oauth/start", state.model_gateway_url);
+    let (status, body) = proxy_model_json_with_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+/// Where the external authorization server redirects the browser back to
+/// after consent. A plain top-level navigation — no fetch, no bearer
+/// header of its own — so the caller's identity comes from the same
+/// session cookie every other route here relies on (`require_session`),
+/// never from the query string. Relays `code`/`state`/`error` to
+/// model-gateway verbatim and forwards only its `Location` redirect back to
+/// the browser: model-gateway never returns a body worth relaying here,
+/// always a redirect to the SPA's settings page, success or failure alike.
+/// Any local failure (missing capability token, network error, no
+/// `Location` in the response) redirects to the same settings page with
+/// `mcp_oauth=error` rather than surfacing raw JSON mid-navigation.
+async fn oauth_callback(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let fallback = format!(
+        "{}/settings?mcp_oauth=error",
+        state.velion_public_origin.trim_end_matches('/')
+    );
+    let token = model_token(&state, &user, &headers).await;
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(_) => return Redirect::to(&fallback).into_response(),
+    };
+
+    let mut url = format!("{}/v1/mcp/servers/oauth/callback", state.model_gateway_url);
+    if let Some(query) = query.filter(|value| !value.is_empty()) {
+        url.push('?');
+        url.push_str(&query);
+    }
+    if !same_upstream_origin(&url, &state.model_gateway_url) {
+        return Redirect::to(&fallback).into_response();
+    }
+
+    let mut request = state.client.get(&url);
+    if let Some(token) = token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+    request = request.header("x-capability-authorization", capability.as_str());
+
+    let Ok(upstream) = request.send().await else {
+        return Redirect::to(&fallback).into_response();
+    };
+    let Some(location) = upstream.headers().get(LOCATION).cloned() else {
+        return Redirect::to(&fallback).into_response();
+    };
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut response = match Response::builder().status(status).body(axum::body::Body::empty()) {
+        Ok(response) => response,
+        Err(_) => return Redirect::to(&fallback).into_response(),
+    };
+    response.headers_mut().insert(LOCATION, location);
+    response
 }
