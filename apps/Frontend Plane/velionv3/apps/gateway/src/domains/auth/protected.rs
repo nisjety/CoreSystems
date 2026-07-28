@@ -68,8 +68,14 @@ pub(super) async fn session_current(
 }
 
 /// Resolve an organization's display name from org-core. Returns an empty string
-/// on any failure so session bootstrap never breaks on a name lookup.
-async fn resolve_org_name(state: &AppState, user: &AuthenticatedUser, org_id: &str) -> String {
+/// on any failure so session bootstrap never breaks on a name lookup. Also reused
+/// by the chat path (see `domains::chat::shared`) to give the model verified
+/// org/user identity context — never trust a client-supplied name for that.
+pub(crate) async fn resolve_org_name(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> String {
     let (status, Json(body)) = proxy_json(
         state,
         Method::GET,

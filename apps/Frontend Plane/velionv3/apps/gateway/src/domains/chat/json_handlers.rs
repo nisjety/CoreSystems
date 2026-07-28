@@ -33,12 +33,19 @@ pub(super) async fn invoke_chat(
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error),
     };
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
     let url = format!("{}/v1/invoke", state.model_gateway_url);
+    let outbound_body = shared::with_identity_context(
+        shared::normalized_model_body(body, &headers),
+        &user.user_name,
+        &org_name,
+    );
     shared::proxy_model_json_with_data_plane(
         &state,
         Method::POST,
         &url,
-        Some(shared::normalized_model_body(body, &headers)),
+        Some(outbound_body),
         token.as_deref(),
         data_plane_token.as_deref(),
         Some(&inference_token),

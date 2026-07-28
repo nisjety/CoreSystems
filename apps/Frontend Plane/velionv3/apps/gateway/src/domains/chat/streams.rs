@@ -39,12 +39,18 @@ pub(super) async fn stream_chat(
         Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
     };
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
     let url = format!("{}/v1/invoke/stream", state.model_gateway_url);
+    let outbound_body = shared::with_identity_context(
+        shared::normalized_model_body(body, &headers),
+        &user.user_name,
+        &org_name,
+    );
     proxy_sse_stream_with_data_plane(
         &state,
         Method::POST,
         &url,
-        Some(shared::normalized_model_body(body, &headers)),
+        Some(outbound_body),
         token.as_deref(),
         data_plane_token.as_deref(),
         Some(&inference_token),

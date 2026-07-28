@@ -2,6 +2,9 @@ mod protected;
 mod public;
 mod shared;
 
+/// Reused by the chat path to give the model verified org identity context.
+pub(crate) use protected::resolve_org_name;
+
 use axum::{
     routing::{get, post},
     Router,

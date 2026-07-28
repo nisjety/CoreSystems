@@ -49,6 +49,32 @@ pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Val
     body
 }
 
+/// Stamps the verified org/user identity onto the outbound request so Model
+/// Gateway can tell the model who it's talking to (chat: "who are we" / "what
+/// do we offer" resolve to the signed-in org, "I"/"my" to the signed-in user).
+/// ALWAYS overwrites any client-supplied `org_name`/`user_name` — these are
+/// framing text only (never used for authorization or retrieval scoping, which
+/// stay keyed off the verified `org_id` claim), but a raw client has no way to
+/// know the real display name anyway, so trusting one would only ever be a
+/// spoofed persona, never a real value.
+pub(crate) fn with_identity_context(mut body: Value, user_name: &str, org_name: &str) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        if !user_name.trim().is_empty() {
+            object.insert(
+                "user_name".to_owned(),
+                Value::String(user_name.trim().to_owned()),
+            );
+        }
+        if !org_name.trim().is_empty() {
+            object.insert(
+                "org_name".to_owned(),
+                Value::String(org_name.trim().to_owned()),
+            );
+        }
+    }
+    body
+}
+
 pub(crate) fn data_plane_authorization_value(token: &str) -> Option<HeaderValue> {
     let token = token.trim();
     if token.is_empty() || token.chars().any(char::is_whitespace) {
