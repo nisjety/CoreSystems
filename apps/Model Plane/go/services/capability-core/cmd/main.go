@@ -89,6 +89,15 @@ func main() {
 		slog.Warn("MCP_TOKEN_ENCRYPTION_KEY unset; MCP OAuth token storage disabled")
 	}
 
+	// Model-Plane-local service secret for model-gateway's execution-core-
+	// triggered oauth-token resolve (no live per-user bearer exists on that
+	// path). Optional: unset simply leaves that one internal path disabled,
+	// same as today — the per-user JWT path is unaffected either way.
+	mcpServiceToken := os.Getenv("MCP_OAUTH_SERVICE_TOKEN")
+	if mcpServiceToken == "" {
+		slog.Warn("MCP_OAUTH_SERVICE_TOKEN unset; model-gateway cannot resolve OAuth-connected MCP tokens at tool-call time")
+	}
+
 	// --- registry sources ---------------------------------------------------
 	// Postgres-backed live source merged with static seed.
 	pgSource, err := registry.NewCapabilitiesSource(pool, "")
@@ -211,7 +220,7 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).Register(protectedMux)
+	api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken).Register(protectedMux)
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMemoryHandler(pool).Register(protectedMux)

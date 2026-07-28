@@ -4,6 +4,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -221,6 +223,15 @@ type MCPHandler struct {
 	// oauth-token(s) endpoints fail closed with 503 rather than silently
 	// storing or returning plaintext.
 	vault *crypto.Vault
+	// mcpServiceToken authenticates model-gateway's oauth-token GET when it
+	// has no live per-user bearer to forward (the execution-core-triggered
+	// tools/call path). Empty (unset) disables this path entirely — the
+	// endpoint then only accepts the normal per-user JWT principal. Proves
+	// "trusted internal caller" only, not a specific org: the caller-
+	// asserted org_id still has to match a real stored (server_id, org_id)
+	// row, so this cannot widen access beyond servers that genuinely belong
+	// to the org it asserts.
+	mcpServiceToken string
 }
 
 type mcpHostResolver interface {
@@ -282,6 +293,14 @@ func (h *MCPHandler) WithVault(vault *crypto.Vault) *MCPHandler {
 	return h
 }
 
+// WithMCPServiceToken enables the Model-Plane-local service-to-service path
+// on GET oauth-token (see mcpServiceToken doc comment). Passing an empty
+// string leaves the path disabled, same as never calling this at all.
+func (h *MCPHandler) WithMCPServiceToken(token string) *MCPHandler {
+	h.mcpServiceToken = token
+	return h
+}
+
 type mcpServerRow struct {
 	ID                  string    `json:"id"`
 	OrgID               string    `json:"org_id"`
@@ -337,6 +356,16 @@ func mcpVerifiedOrganization(request *http.Request, requireWrite bool) (string, 
 		return "", false
 	}
 	return principal.OrganizationID, true
+}
+
+// secureTokenEqual compares two shared-secret candidates in constant time.
+// Hashing first (mirroring auth-core's own secureEqual in
+// plane-service-principal.ts) means even the length comparison inside
+// subtle.ConstantTimeCompare never depends on the raw secret's length.
+func secureTokenEqual(expected, received string) bool {
+	expectedDigest := sha256.Sum256([]byte(expected))
+	receivedDigest := sha256.Sum256([]byte(received))
+	return subtle.ConstantTimeCompare(expectedDigest[:], receivedDigest[:]) == 1
 }
 
 func decodeMCPRegistration(w http.ResponseWriter, request *http.Request) (mcpServerRegistration, error) {
@@ -852,10 +881,29 @@ func (h *MCPHandler) oauthTokensUpsert(w http.ResponseWriter, r *http.Request, i
 // authorization server. Requires the same write-level trust as storing: this
 // is a live credential, not a public projection.
 func (h *MCPHandler) oauthTokenResolve(w http.ResponseWriter, r *http.Request, id string) {
-	orgID, ok := mcpVerifiedOrganization(r, true)
-	if !ok {
-		jsonErr(w, "capability write scope required", http.StatusForbidden)
-		return
+	var orgID string
+	// model-gateway's execution-core-triggered tools/call dispatch has no
+	// live per-user bearer to present (see mcpServiceToken doc comment) — a
+	// present X-Mcp-Service-Token switches to that path entirely rather than
+	// falling through to the JWT principal below, so a wrong/stale attempt
+	// fails closed instead of silently trying the other path.
+	if serviceToken := r.Header.Get("X-Mcp-Service-Token"); serviceToken != "" {
+		if h.mcpServiceToken == "" || !secureTokenEqual(h.mcpServiceToken, serviceToken) {
+			jsonErr(w, "invalid service token", http.StatusForbidden)
+			return
+		}
+		orgID = strings.TrimSpace(r.URL.Query().Get("org_id"))
+		if orgID == "" {
+			jsonErr(w, "org_id query parameter is required", http.StatusBadRequest)
+			return
+		}
+	} else {
+		var ok bool
+		orgID, ok = mcpVerifiedOrganization(r, true)
+		if !ok {
+			jsonErr(w, "capability write scope required", http.StatusForbidden)
+			return
+		}
 	}
 	if h.vault == nil {
 		jsonErr(w, "token encryption is not configured", http.StatusServiceUnavailable)
