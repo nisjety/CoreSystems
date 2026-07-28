@@ -38,6 +38,8 @@ reqwest = { workspace = true }
 redis = { workspace = true }
 base64 = "0.22"
 blake3 = { workspace = true }
+sha2 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 reqwest = { workspace = true }
@@ -46,4 +48,3 @@ serial_test = "3"
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
 rsa = { version = "0.9", features = ["pem"] }
-rand = "0.8"

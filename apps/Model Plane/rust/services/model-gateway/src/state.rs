@@ -127,6 +127,12 @@ pub struct AppState {
     /// Base URL of shipping-core's HTTP API (Ingestion Plane carrier aggregator),
     /// e.g. "<http://shipping-core:8080>". Used by the `shipping.get_quotes` tool.
     pub shipping_core_base_url: String,
+    /// Velion's own public origin (e.g. "<http://localhost:5173>"), as seen by
+    /// a user's browser through the gateway. Used only to build the OAuth
+    /// `redirect_uri` for MCP server connections — an external authorization
+    /// server must redirect back to a URL the browser can actually reach,
+    /// never model-gateway's internal address.
+    pub velion_public_origin: String,
     /// Shared reqwest client for HTTP proxy calls to capability-core.
     pub http_client: reqwest::Client,
     /// Phase 7 B5 — model price catalogue cache (cost-core `GET /api/v1/pricing`).
@@ -245,6 +251,7 @@ impl AppState {
             capability_client: CapabilityCoreClient::new(capability_channel),
             capability_core_base_url: "http://localhost:8085".to_owned(),
             shipping_core_base_url: "http://localhost:8080".to_owned(),
+            velion_public_origin: "http://localhost:5173".to_owned(),
             http_client: reqwest::Client::new(),
             // Pricing disabled by default (no cost-core URL); `from_env` wires it
             // from COST_CORE_URL. A disabled cache emits a null cost, never a fake.
@@ -408,6 +415,8 @@ impl AppState {
             .unwrap_or_else(|_| "http://localhost:8085".to_owned());
         let shipping_core_base_url = std::env::var("SHIPPING_CORE_URL")
             .unwrap_or_else(|_| "http://shipping-core:8080".to_owned());
+        let velion_public_origin = std::env::var("VELION_PUBLIC_ORIGIN")
+            .unwrap_or_else(|_| "http://localhost:5173".to_owned());
         let http_client = reqwest::Client::new();
         // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
         // Shared between both publisher branches below; cheap clone (Arc inner).
@@ -510,6 +519,7 @@ impl AppState {
             state.capability_client = capability_client;
             state.capability_core_base_url = capability_core_base_url.clone();
             state.shipping_core_base_url = shipping_core_base_url.clone();
+            state.velion_public_origin = velion_public_origin.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache.clone();
             state.retrieval_client = retrieval_client;
@@ -544,6 +554,7 @@ impl AppState {
             state.capability_client = capability_client;
             state.capability_core_base_url = capability_core_base_url.clone();
             state.shipping_core_base_url = shipping_core_base_url.clone();
+            state.velion_public_origin = velion_public_origin.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache;
             state.retrieval_client = retrieval_client;

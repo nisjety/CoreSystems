@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
     Extension, Json, Router,
 };
@@ -231,6 +231,11 @@ fn proxy_routes() -> Router<AppState> {
         .route("/v1/mcp/servers", get(mcp_list).post(mcp_register))
         .route("/v1/mcp/servers/:server_id", delete(mcp_delete))
         .route("/v1/mcp/servers/:server_id/share", post(mcp_share))
+        // OAuth 2.1 + Dynamic Client Registration for MCP servers that require
+        // real user auth (Visma Net, etc.) — connect with nothing but the
+        // server's URL, no pre-registered app.
+        .route("/v1/mcp/servers/oauth/start", post(mcp_oauth_start))
+        .route("/v1/mcp/servers/oauth/callback", get(mcp_oauth_callback))
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -2154,8 +2159,14 @@ async fn mcp_register(
             Json(json!({"error": "capability registry is unavailable"})),
         ));
     }
-    let payload =
-        crate::runtime_registries::mcp_capability_payload(&org_id, registered, &ownership);
+    let auth_kind = if registered.token.is_empty() {
+        "none"
+    } else {
+        "bearer"
+    };
+    let payload = crate::runtime_registries::mcp_capability_payload(
+        &org_id, registered, &ownership, auth_kind,
+    );
     let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
     let catalog_result = state
         .http_client
@@ -2320,6 +2331,279 @@ async fn mcp_share(
         "owner_user_id": updated.owner_user_id,
         "shared_with": updated.shared_with,
     } })))
+}
+
+#[derive(Debug, Deserialize)]
+struct McpOAuthStartBody {
+    name: String,
+    /// The MCP server's base URL — must be public HTTPS. Discovery reads its
+    /// `.well-known/oauth-protected-resource` document from here.
+    url: String,
+    #[serde(default)]
+    tool_allowlist: Vec<String>,
+    #[serde(default = "default_mcp_scope")]
+    scope: String,
+}
+
+/// `POST /v1/mcp/servers/oauth/start` — begin connecting an MCP server that
+/// requires real OAuth 2.1 login (Visma Net, etc). Discovers the server's
+/// protected-resource + authorization-server metadata, dynamically registers
+/// a client (RFC 7591 — no pre-existing app needed), and returns the
+/// `authorization_url` the browser should be redirected to next.
+async fn mcp_oauth_start(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(body): Json<McpOAuthStartBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
+    if body.name.trim().is_empty() || body.url.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name and url are required" })),
+        ));
+    }
+
+    let http = reqwest::Client::new();
+    let resource_metadata = crate::mcp_oauth::discover_protected_resource(&http, &body.url)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "mcp oauth: protected-resource discovery failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "could not discover the MCP server's authorization metadata" })),
+            )
+        })?;
+    let Some(authorization_server) = resource_metadata.authorization_servers.first() else {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "MCP server did not name an authorization server" })),
+        ));
+    };
+    let auth_server_metadata =
+        crate::mcp_oauth::discover_authorization_server(&http, authorization_server)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "mcp oauth: authorization-server discovery failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "could not discover the authorization server's metadata" })),
+                )
+            })?;
+    let Some(registration_endpoint) = auth_server_metadata.registration_endpoint.as_deref() else {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "authorization server does not support dynamic client registration" })),
+        ));
+    };
+    let redirect_uri = format!(
+        "{}/api/v1/mcp/servers/oauth/callback",
+        state.velion_public_origin.trim_end_matches('/')
+    );
+    let registration =
+        crate::mcp_oauth::register_client(&http, registration_endpoint, &redirect_uri)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "mcp oauth: dynamic client registration failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": "dynamic client registration was rejected" })),
+                )
+            })?;
+
+    let pkce = crate::mcp_oauth::generate_pkce();
+    let state_value = crate::mcp_oauth::generate_state();
+    let authorization_url = crate::mcp_oauth::build_authorization_url(
+        &auth_server_metadata.authorization_endpoint,
+        &registration.client_id,
+        &redirect_uri,
+        &state_value,
+        &pkce.challenge,
+        &resource_metadata.scopes_supported,
+    );
+
+    state.mcp.start_oauth(
+        state_value,
+        crate::runtime_registries::PendingMcpOAuth::new(
+            claims.org_id.clone(),
+            claims.user_id.clone(),
+            body.name,
+            body.url,
+            body.tool_allowlist,
+            body.scope,
+            pkce.verifier,
+            registration.client_id,
+            auth_server_metadata.token_endpoint,
+            redirect_uri,
+            resource_metadata.scopes_supported,
+        ),
+    );
+
+    Ok(Json(
+        json!({ "data": { "authorization_url": authorization_url } }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct McpOAuthCallbackQuery {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// `GET /v1/mcp/servers/oauth/callback` — the browser lands here after the
+/// user completes (or cancels) consent at the authorization server. Never
+/// renders anything itself: redirects back to the SPA's settings page with a
+/// `mcp_oauth=connected|error` query flag. Failure detail is logged
+/// server-side only — never echoed into the redirect URL.
+async fn mcp_oauth_callback(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    capability_bearer: VerifiedCapabilityBearer,
+    Query(query): Query<McpOAuthCallbackQuery>,
+) -> Response {
+    let settings_url = format!("{}/settings", state.velion_public_origin.trim_end_matches('/'));
+    let fail = |reason: &str| -> Response {
+        warn!(reason, "mcp oauth callback failed");
+        Redirect::to(&format!("{settings_url}?mcp_oauth=error")).into_response()
+    };
+
+    if let Some(error) = query.error.filter(|e| !e.is_empty()) {
+        return fail(&format!("authorization server returned error: {error}"));
+    }
+    let (Some(code), Some(state_param)) = (query.code, query.state) else {
+        return fail("missing code or state");
+    };
+    let Some(pending) = state.mcp.take_oauth(&state_param) else {
+        return fail("connection attempt expired or was already used");
+    };
+    if pending.org_id != claims.org_id {
+        return fail("organization mismatch between start and callback");
+    }
+
+    let http = reqwest::Client::new();
+    let tokens = match crate::mcp_oauth::exchange_code(
+        &http,
+        &pending.token_endpoint,
+        &pending.client_id,
+        &code,
+        &pending.redirect_uri,
+        &pending.code_verifier,
+    )
+    .await
+    {
+        Ok(tokens) => tokens,
+        Err(error) => return fail(&format!("token exchange failed: {error}")),
+    };
+
+    let ownership = match crate::ownership::Scope::from_wire(&pending.scope_wire) {
+        crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
+        crate::ownership::Scope::User => {
+            crate::ownership::Ownership::user(pending.user_id.clone())
+        }
+    };
+    let server = McpServer {
+        server_id: String::new(),
+        name: pending.server_name,
+        url: pending.server_url,
+        transport: "http".to_owned(),
+        token: String::new(),
+        tool_allowlist: pending.tool_allowlist,
+        enabled: true,
+    };
+    let resp = match crate::runtime_registries::handle_register_mcp_server(
+        &state.mcp,
+        RegisterMcpServerRequest {
+            request_id: new_ulid(),
+            org_id: pending.org_id.clone(),
+            server: Some(server),
+        },
+    ) {
+        Ok(resp) => resp,
+        Err(error) => return fail(&format!("server registration failed: {}", error.message())),
+    };
+    let Some(registered) = resp.server else {
+        return fail("server registration returned no server");
+    };
+    state.ownership.set(
+        &pending.org_id,
+        crate::ownership::KIND_MCP,
+        &registered.server_id,
+        ownership.clone(),
+    );
+
+    if state.capability_core_base_url.is_empty() {
+        state.mcp.remove(&pending.org_id, &registered.server_id);
+        state
+            .ownership
+            .remove(&pending.org_id, crate::ownership::KIND_MCP, &registered.server_id);
+        return fail("capability registry is unavailable");
+    }
+    let payload = crate::runtime_registries::mcp_capability_payload(
+        &pending.org_id,
+        &registered,
+        &ownership,
+        "oauth",
+    );
+    let catalog_url = format!("{}/api/v1/mcp", state.capability_core_base_url);
+    let catalog_result = state
+        .http_client
+        .post(&catalog_url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&payload)
+        .send()
+        .await;
+    let catalog_ok = catalog_result
+        .as_ref()
+        .is_ok_and(|response| response.status().is_success());
+    if !catalog_ok {
+        state.mcp.remove(&pending.org_id, &registered.server_id);
+        state
+            .ownership
+            .remove(&pending.org_id, crate::ownership::KIND_MCP, &registered.server_id);
+        return fail("capability registry rejected MCP registration");
+    }
+
+    // Tokens are stored separately from the server record, encrypted at rest
+    // by capability-core — never in the gateway's own (ephemeral, plaintext)
+    // in-memory cache.
+    let tokens_url = format!(
+        "{}/api/v1/mcp/{}/oauth-tokens",
+        state.capability_core_base_url, registered.server_id
+    );
+    let tokens_payload = json!({
+        "access_token": tokens.access_token,
+        "refresh_token": tokens.refresh_token.unwrap_or_default(),
+        "token_type": "Bearer",
+        "scope": tokens.scope.unwrap_or_default(),
+        "expires_in_seconds": tokens.expires_in,
+        "token_endpoint": pending.token_endpoint,
+        "client_id": pending.client_id,
+    });
+    let tokens_result = state
+        .http_client
+        .put(&tokens_url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&tokens_payload)
+        .send()
+        .await;
+    let tokens_ok = tokens_result
+        .as_ref()
+        .is_ok_and(|response| response.status().is_success());
+    if !tokens_ok {
+        // The server record itself is durably registered; only the tokens
+        // failed to save. Surface this distinctly so the user knows to
+        // reconnect rather than assume the connection is fully live.
+        return fail("connected, but token storage failed — reconnect to retry");
+    }
+
+    Redirect::to(&format!(
+        "{settings_url}?mcp_oauth=connected&server_id={}",
+        registered.server_id
+    ))
+    .into_response()
 }
 
 /// Active inference model catalogue.

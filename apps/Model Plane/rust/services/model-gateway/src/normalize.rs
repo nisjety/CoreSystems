@@ -161,6 +161,8 @@ mod tests {
             attachments: Vec::new(),
             generate_image: false,
             tools: Vec::new(),
+            org_name: None,
+            user_name: None,
         }
     }
 

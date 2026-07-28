@@ -23,6 +23,7 @@ pub mod langcache;
 pub mod lsp;
 mod managed_start_key;
 pub mod mcp_jsonrpc;
+pub mod mcp_oauth;
 pub mod moderation;
 pub mod nats_connection;
 pub mod nats_publisher;

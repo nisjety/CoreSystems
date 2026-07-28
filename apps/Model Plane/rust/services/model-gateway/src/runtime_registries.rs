@@ -73,13 +73,76 @@ fn now_unix() -> i64 {
 // Wave 10g — MCP server registry + tool proxy
 // ====================================================================
 
-#[derive(Clone, Default, Debug)]
+/// An in-flight OAuth 2.1 + DCR connection attempt, keyed by the CSRF
+/// `state` value. Lives only from `oauth/start` to `oauth/callback` (a few
+/// minutes at most) — ephemeral by nature, so this is in-memory only, unlike
+/// the tokens the flow produces (durably encrypted in capability-core).
+/// No `Debug`/`Default`: `created_at` is a bare `Instant` (no `Default`), and
+/// this struct carries a PKCE `code_verifier` that should not be casually
+/// printable via `{:?}`.
+#[derive(Clone)]
+pub struct PendingMcpOAuth {
+    pub org_id: String,
+    pub user_id: String,
+    pub server_name: String,
+    pub server_url: String,
+    pub tool_allowlist: Vec<String>,
+    pub scope_wire: String,
+    pub code_verifier: String,
+    pub client_id: String,
+    pub token_endpoint: String,
+    pub redirect_uri: String,
+    pub oauth_scopes: Vec<String>,
+    created_at: Instant,
+}
+
+impl PendingMcpOAuth {
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        org_id: String,
+        user_id: String,
+        server_name: String,
+        server_url: String,
+        tool_allowlist: Vec<String>,
+        scope_wire: String,
+        code_verifier: String,
+        client_id: String,
+        token_endpoint: String,
+        redirect_uri: String,
+        oauth_scopes: Vec<String>,
+    ) -> Self {
+        Self {
+            org_id,
+            user_id,
+            server_name,
+            server_url,
+            tool_allowlist,
+            scope_wire,
+            code_verifier,
+            client_id,
+            token_endpoint,
+            redirect_uri,
+            oauth_scopes,
+            created_at: Instant::now(),
+        }
+    }
+}
+
+/// Pending OAuth attempts older than this are refused at callback time —
+/// long enough for a real consent screen, short enough that a stale entry
+/// can't be replayed much later.
+const MCP_OAUTH_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Default)]
 pub struct McpRegistry {
     inner: Arc<DashMap<(String, String), McpServer>>, // (org, server_id)
     /// Discovered `tools/list` catalog per (org, `server_id`), with the instant
     /// it was fetched — reused for [`MCP_CATALOG_TTL`] so the chat hot-path
     /// doesn't re-discover on every turn.
     catalog: McpCatalog,
+    /// Pending OAuth connection attempts, keyed by the CSRF `state` value.
+    pending_oauth: Arc<DashMap<String, PendingMcpOAuth>>,
 }
 
 impl McpRegistry {
@@ -88,7 +151,24 @@ impl McpRegistry {
         Self {
             inner: Arc::new(DashMap::new()),
             catalog: Arc::new(DashMap::new()),
+            pending_oauth: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Record a fresh OAuth attempt under its `state` value.
+    pub fn start_oauth(&self, state: String, pending: PendingMcpOAuth) {
+        self.pending_oauth.insert(state, pending);
+    }
+
+    /// Consume (remove — single-use, like the state hash in
+    /// integration-corev2's OAuth sessions) the pending attempt for `state`,
+    /// rejecting it if missing or past [`MCP_OAUTH_SESSION_TTL`].
+    pub fn take_oauth(&self, state: &str) -> Option<PendingMcpOAuth> {
+        let (_, pending) = self.pending_oauth.remove(state)?;
+        if pending.created_at.elapsed() > MCP_OAUTH_SESSION_TTL {
+            return None;
+        }
+        Some(pending)
     }
 
     /// Drop a cached server by (org, `server_id`). Returns true if an entry was
@@ -504,12 +584,8 @@ pub fn mcp_capability_payload(
     org_id: &str,
     server: &McpServer,
     ownership: &crate::ownership::Ownership,
+    auth_kind: &str,
 ) -> serde_json::Value {
-    let auth_kind = if server.token.is_empty() {
-        "none"
-    } else {
-        "bearer"
-    };
     // Ownership (scope/owner/shares) rides in config_json so the durable catalog
     // record stays the system-of-record for who-can-see-what, not just the
     // ephemeral gateway sidecar. `scope` reflects the real owner/org scope.
@@ -550,7 +626,12 @@ mod mcp_writethrough_tests {
             tool_allowlist: vec!["read".into(), "list".into()],
             enabled: true,
         };
-        let p = mcp_capability_payload("org-7", &server, &crate::ownership::Ownership::org());
+        let p = mcp_capability_payload(
+            "org-7",
+            &server,
+            &crate::ownership::Ownership::org(),
+            "bearer",
+        );
         // Client-supplied id is honored → gateway cache and catalog stay aligned.
         assert_eq!(p["id"], "mcp_abc");
         assert_eq!(p["org_id"], "org-7");
@@ -580,7 +661,12 @@ mod mcp_writethrough_tests {
             tool_allowlist: vec![],
             enabled: false,
         };
-        let p = mcp_capability_payload("o", &server, &crate::ownership::Ownership::user("alice"));
+        let p = mcp_capability_payload(
+            "o",
+            &server,
+            &crate::ownership::Ownership::user("alice"),
+            "none",
+        );
         assert_eq!(p["auth_kind"], "none");
         assert_eq!(p["enabled"], false);
     }
