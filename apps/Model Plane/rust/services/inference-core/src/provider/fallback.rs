@@ -816,13 +816,24 @@ impl FallbackChain {
                 let _enter = span.enter();
 
                 match provider.infer_dyn(call_req.as_ref()).await {
-                    Ok(response) => {
+                    Ok(mut response) => {
                         info!(
                             provider = %name,
                             attempt = attempt,
-                            model_used = %response.model_used,
+                            model_used = %call_req.model,
+                            provider_reported_model = %response.model_used,
                             "infer succeeded"
                         );
+                        // Report the id we REQUESTED, not the id the provider
+                        // echoed. Azure answers with the versioned snapshot
+                        // (`gpt-4o-mini-2024-07-18`) — a response-namespace id
+                        // that is not a deployment name. Callers reuse
+                        // `model_used` in follow-up requests (the chat answer
+                        // inherits the tool phase's model), and feeding the
+                        // snapshot id back produced a guaranteed 404
+                        // DeploymentNotFound. The provider-reported id stays in
+                        // the log line above for traceability.
+                        call_req.model.clone_into(&mut response.model_used);
                         return Some(response);
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
@@ -849,14 +860,40 @@ impl FallbackChain {
         None
     }
 
+    /// Forward a provider's chunk stream with `model_used` rewritten to the id
+    /// this chain actually requested. See the unary normalization in
+    /// [`Self::infer_one_model`] for why the provider-reported id must not
+    /// escape: it is a response-namespace id (Azure's versioned snapshot) that
+    /// 404s when reused as a deployment name. Chunks with an empty `model_used`
+    /// pass through untouched so the "which chunks carry an id" signal is
+    /// preserved.
+    fn normalize_stream_model(
+        mut rx: mpsc::Receiver<InferChunk>,
+        requested_model: String,
+    ) -> mpsc::Receiver<InferChunk> {
+        let (tx, out_rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(mut chunk) = rx.recv().await {
+                if !chunk.model_used.is_empty() {
+                    requested_model.clone_into(&mut chunk.model_used);
+                }
+                if tx.send(chunk).await.is_err() {
+                    // Consumer hung up; dropping rx cancels the upstream too.
+                    break;
+                }
+            }
+        });
+        out_rx
+    }
+
     /// The request to send for `model` on `provider_name`.
     ///
     /// An unspecified model ("Velion Auto") becomes that provider's configured
     /// default so an unpinned request works against whatever is deployed; a
-    /// ladder rung replaces the model so the provider — and therefore
-    /// `model_used` — reports what actually served. Borrows the caller's request
-    /// unchanged whenever no substitution is needed, so the common path still
-    /// costs no clone.
+    /// ladder rung replaces the model, and `model_used` is then normalized to
+    /// this effective id on the way out (see [`Self::infer_one_model`]). Borrows
+    /// the caller's request unchanged whenever no substitution is needed, so the
+    /// common path still costs no clone.
     fn request_for<'a>(
         &self,
         req: &'a InferRequest,
@@ -985,7 +1022,12 @@ impl FallbackChain {
                             model_used = %call_req.model,
                             "infer_stream started"
                         );
-                        return Some(rx);
+                        // Same normalization as the unary path: chunks carry the
+                        // provider's response-namespace id (Azure's versioned
+                        // snapshot), which downstream must never reuse as a
+                        // request model. Rewrite in-flight, preserving WHICH
+                        // chunks carry an id — only the value is normalized.
+                        return Some(Self::normalize_stream_model(rx, call_req.model.clone()));
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
                         warn!(
@@ -1774,6 +1816,105 @@ mod resolution_tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// A provider that answers like Azure really does: the response's model id
+    /// is the versioned snapshot, not the deployment name it was asked for.
+    struct VersionEchoProvider;
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for VersionEchoProvider {
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: format!("{}-2024-07-18", req.model),
+                stop_reason: "stop".to_owned(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tool_calls: Vec::new(),
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            let (tx, rx) = mpsc::channel(4);
+            let versioned = format!("{}-2024-07-18", req.model);
+            let request_id = req.request_id.clone();
+            tokio::spawn(async move {
+                // A mid-stream delta with no model id, then the final chunk
+                // carrying the versioned id — the real Azure shape.
+                let _ = tx
+                    .send(InferChunk {
+                        request_id: request_id.clone(),
+                        delta: "hei".to_owned(),
+                        done: false,
+                        model_used: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    })
+                    .await;
+                let _ = tx
+                    .send(InferChunk {
+                        request_id,
+                        delta: String::new(),
+                        done: true,
+                        model_used: versioned,
+                        input_tokens: 3,
+                        output_tokens: 1,
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn version_echo_chain() -> FallbackChain {
+        let provider: BoxedProvider = Arc::new(VersionEchoProvider);
+        FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
+    }
+
+    #[tokio::test]
+    async fn model_used_is_the_requested_id_not_the_providers_versioned_snapshot() {
+        // The live failure this pins: the tool loop carried model_used
+        // ("gpt-4o-mini-2024-07-18") into the answer request's model slot, and
+        // Azure 404'd DeploymentNotFound because that is a response-namespace
+        // id, not a deployment name. model_used must therefore always be an id
+        // a caller can safely request again.
+        let response = version_echo_chain()
+            .infer(&InferRequest {
+                request_id: "norm-1".to_owned(),
+                model: "gpt-4o-mini".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .expect("provider serves");
+
+        assert_eq!(response.model_used, "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn streamed_chunks_carry_the_requested_id_and_keep_their_shape() {
+        let mut rx = version_echo_chain()
+            .infer_stream(&InferRequest {
+                request_id: "norm-2".to_owned(),
+                model: "gpt-4o-mini".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .expect("provider serves");
+
+        let first = rx.recv().await.expect("delta chunk");
+        let last = rx.recv().await.expect("final chunk");
+        assert_eq!(
+            first.model_used, "",
+            "chunks without an id must stay without one — only the value is normalized"
+        );
+        assert_eq!(last.model_used, "gpt-4o-mini");
+        assert_eq!(first.delta, "hei");
+        assert!(last.done);
     }
 
     #[tokio::test]
