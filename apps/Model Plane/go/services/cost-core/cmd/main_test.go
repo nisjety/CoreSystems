@@ -66,3 +66,32 @@ func TestUsageEnvelopeMustMatchAuthenticatedSubjectScope(t *testing.T) {
 		})
 	}
 }
+
+// The budget gate fix: inference-core forwards the caller's aud=inference-core
+// token, so COST_CORE_AUTH_AUDIENCE must parse as a CSV list. A single value
+// (the historical deployment) must keep working unchanged.
+func TestSplitAudiencesParsesSingleAndCSVValues(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "single value unchanged", raw: "cost-core", want: []string{"cost-core"}},
+		{name: "two values", raw: "cost-core,inference-core", want: []string{"cost-core", "inference-core"}},
+		{name: "whitespace trimmed", raw: " cost-core , inference-core ", want: []string{"cost-core", "inference-core"}},
+		{name: "empty entries dropped", raw: "cost-core,,inference-core,", want: []string{"cost-core", "inference-core"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := splitAudiences(test.raw)
+			if len(got) != len(test.want) {
+				t.Fatalf("got %v, want %v", got, test.want)
+			}
+			for i := range got {
+				if got[i] != test.want[i] {
+					t.Fatalf("got %v, want %v", got, test.want)
+				}
+			}
+		})
+	}
+}

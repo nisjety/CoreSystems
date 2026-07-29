@@ -100,8 +100,16 @@ func main() {
 	}
 	srv := server.NewServer(store)
 	srv.SetPricing(buildPricing(ctx))
+	// COST_CORE_AUTH_AUDIENCE is a comma-separated list (e.g.
+	// "cost-core,inference-core"). Budget checks are made by inference-core's
+	// intent layer forwarding the caller's own delegated `aud=inference-core`
+	// token, so that audience must verify here too. This does NOT widen
+	// writes: CostAuthorizer limits user principals to reads + POST
+	// /api/v1/budget/check, and handleBudgetCheck pins org/user to the
+	// token's claims — an accepted second audience still only ever acts as
+	// the token's own org and user.
 	verifier, err := authctx.NewVerifier(authctx.Config{
-		Audiences: []string{requiredEnv("COST_CORE_AUTH_AUDIENCE")},
+		Audiences: splitAudiences(requiredEnv("COST_CORE_AUTH_AUDIENCE")),
 		Issuer:    requiredEnv("AUTH_CORE_ISSUER"),
 		JWKSURL:   requiredEnv("AUTH_CORE_JWKS_URL"),
 	})
@@ -170,6 +178,20 @@ func requiredEnv(name string) string {
 		os.Exit(1)
 	}
 	return value
+}
+
+// splitAudiences parses a comma-separated audience list, trimming whitespace
+// and dropping empty entries, so "cost-core, inference-core" and "cost-core"
+// both configure the verifier correctly.
+func splitAudiences(raw string) []string {
+	parts := strings.Split(raw, ",")
+	audiences := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			audiences = append(audiences, trimmed)
+		}
+	}
+	return audiences
 }
 
 // buildLedgerFromConfig selects the durable Postgres ledger. Ephemeral storage

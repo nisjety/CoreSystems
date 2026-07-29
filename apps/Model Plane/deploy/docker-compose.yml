@@ -904,7 +904,11 @@ services:
       OTEL_SERVICE_NAME: cost-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
-      COST_CORE_AUTH_AUDIENCE: ${COST_CORE_AUTH_AUDIENCE:-cost-core}
+      # CSV. `inference-core` is accepted so the intent layer's budget check —
+      # which forwards the caller's own delegated aud=inference-core token —
+      # verifies here (see cost-core cmd/main.go for why this is read-only in
+      # effect: CostAuthorizer + handleBudgetCheck pin org/user to the token).
+      COST_CORE_AUTH_AUDIENCE: ${COST_CORE_AUTH_AUDIENCE:-cost-core,inference-core}
       # Durable cost ledger (the migration entrypoint applies 0001_cost_ledger +
       # 0002_model_pricing on boot). Shares the Model Plane Postgres / session_core DB.
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core

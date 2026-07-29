@@ -230,6 +230,8 @@ pub struct Decision {
 /// Resolve a Velion request to a concrete [`Decision`], or `None` when the
 /// model id is a pinned model (not a Velion mode). `budget` is best-effort:
 /// when absent, posture is `Unknown` and routing uses the `Healthy` ladder.
+/// `caller_bearer` is the caller's own verified token, forwarded to cost-core
+/// so the budget check authenticates as the caller; empty skips the check.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve(
     policy: &RoutingPolicy,
@@ -239,6 +241,7 @@ pub async fn resolve(
     tool_choice: &str,
     org_id: &str,
     user_id: &str,
+    caller_bearer: &str,
     budget: Option<&BudgetClient>,
 ) -> Option<Decision> {
     let mode = parse_mode(model)?;
@@ -249,6 +252,7 @@ pub async fn resolve(
                 .posture(
                     org_id,
                     user_id,
+                    caller_bearer,
                     policy.budget_cap_usd,
                     policy.constrained_fraction,
                 )
@@ -311,16 +315,29 @@ impl BudgetClient {
     }
 
     /// Query the org's budget posture against `cap_usd` (with `fraction` as the
-    /// Constrained boundary). `Unknown` when `org_id` is empty (no tenant scope)
-    /// or on any transport/parse failure.
+    /// Constrained boundary). `Unknown` when `org_id` is empty (no tenant
+    /// scope), when `bearer` is empty (no caller credential to forward — the
+    /// check would only 401), or on any transport/parse failure.
+    ///
+    /// `bearer` is the caller's own verified token (model-gateway's delegated
+    /// per-user JWT, `aud=inference-core`), forwarded verbatim: cost-core
+    /// wraps `/api/` in JWT auth and `handleBudgetCheck` pins org/user to the
+    /// token's claims, so the check must authenticate *as the caller* — a
+    /// static service secret could not serve arbitrary orgs.
     pub async fn posture(
         &self,
         org_id: &str,
         user_id: &str,
+        bearer: &str,
         cap_usd: f64,
         fraction: f64,
     ) -> BudgetPosture {
         if org_id.trim().is_empty() {
+            return BudgetPosture::Unknown;
+        }
+        let bearer = bearer.trim();
+        if bearer.is_empty() {
+            warn!("budget check skipped: no caller bearer to forward; posture Unknown");
             return BudgetPosture::Unknown;
         }
         let body = BudgetCheckRequest {
@@ -329,7 +346,14 @@ impl BudgetClient {
             max_cost_usd: cap_usd,
             max_tokens: 0,
         };
-        let resp = match self.http.post(&self.endpoint).json(&body).send().await {
+        let resp = match self
+            .http
+            .post(&self.endpoint)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(error) => {
                 warn!(%error, "budget check request failed; posture Unknown");
@@ -775,6 +799,7 @@ mod tests {
             "auto",
             "org1",
             "u1",
+            "bearer-1",
             None,
         )
         .await;
@@ -791,6 +816,7 @@ mod tests {
             "auto",
             "",
             "",
+            "",
             None,
         )
         .await
@@ -805,5 +831,63 @@ mod tests {
     fn budget_client_rejects_empty_url() {
         assert!(BudgetClient::new("   ").is_none());
         assert!(BudgetClient::new("http://cost-core:8089").is_some());
+    }
+
+    /// The root cause of the inert budget gate: the check posted with no auth
+    /// header, cost-core's JWT middleware 401'd it, and posture never left
+    /// `Unknown`. The forwarded caller bearer must arrive as `Authorization:
+    /// Bearer <token>` for cost-core to pin org/user to its claims.
+    #[tokio::test]
+    async fn posture_forwards_the_caller_bearer_as_authorization() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .and(header("authorization", "Bearer caller-jwt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": true,
+                "current_cost_usd": 1.0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = BudgetClient::new(&server.uri()).expect("client");
+        let posture = client
+            .posture("org1", "u1", "caller-jwt", 50.0, 0.8)
+            .await;
+        assert_eq!(posture, BudgetPosture::Healthy);
+        // Mock::expect(1) is verified on MockServer drop: a request without the
+        // exact Authorization header would not have matched.
+    }
+
+    /// No caller credential → no network call at all (the check could only
+    /// 401), and the fail-open contract holds: posture is `Unknown`.
+    #[tokio::test]
+    async fn posture_with_empty_bearer_short_circuits_to_unknown() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": false,
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = BudgetClient::new(&server.uri()).expect("client");
+        for bearer in ["", "   "] {
+            assert_eq!(
+                client.posture("org1", "u1", bearer, 50.0, 0.8).await,
+                BudgetPosture::Unknown,
+                "bearer {bearer:?} must skip the check"
+            );
+        }
+        // expect(0) is verified on MockServer drop: any request would fail it.
     }
 }

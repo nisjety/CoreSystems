@@ -1027,6 +1027,11 @@ fn to_internal_request(
         tool_choice: req.tool_choice.clone(),
         org_id: principal.org_id.clone(),
         user_id: principal.budget_user_id(),
+        // The verified caller's own token, forwarded so the intent layer's
+        // cost-core budget check authenticates as the caller (cost-core pins
+        // org/user to the token's claims). Never serialized into provider
+        // bodies — see the field's doc comment.
+        caller_bearer: principal.bearer().to_owned(),
     }
 }
 
@@ -1297,6 +1302,8 @@ mod tests {
         assert_eq!(internal.org_id, "org-signed");
         assert_eq!(internal.user_id, "user-signed");
         assert!(internal.zdr, "issuer-enforced ZDR cannot be downgraded");
+        // The caller's verified bearer is threaded for the budget check.
+        assert_eq!(internal.caller_bearer, "test-bearer");
     }
 
     #[test]

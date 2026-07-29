@@ -86,6 +86,15 @@ pub struct InferRequest {
     pub org_id: String,
     /// Acting user for the budget check (from gRPC metadata `x-user-id`).
     pub user_id: String,
+    /// The caller's own verified bearer token (the gRPC `authorization`
+    /// metadata already validated by `grpc::authorize`), forwarded to
+    /// cost-core so the intent layer's budget check authenticates as the
+    /// caller. **Auth material for the budget check ONLY** — it MUST never be
+    /// serialized into any provider request body (provider adapters build
+    /// their bodies from explicit fields, never from this struct wholesale).
+    /// Empty when there is no delegated caller (internal sub-calls, tests):
+    /// the budget check is then skipped and posture stays `Unknown`.
+    pub caller_bearer: String,
 }
 
 /// A function the model may call (chat-parity §2).
