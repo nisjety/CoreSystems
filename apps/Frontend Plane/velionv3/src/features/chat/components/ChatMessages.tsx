@@ -81,6 +81,7 @@ export function MessageBlock(props: {
   onFeedback: (rating: 'positive' | 'negative') => void
   onRegenerate: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  onViewSteps: () => void
 }) {
   return (
     <Show when={props.message.role === 'assistant'} fallback={<UserMessage {...props} />}>
@@ -97,6 +98,7 @@ export function AssistantMessage(props: {
   onFeedback: (rating: 'positive' | 'negative') => void
   onRegenerate: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  onViewSteps: () => void
 }) {
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
   const waiting = () => props.message.status === 'waiting'
@@ -153,7 +155,7 @@ export function AssistantMessage(props: {
         <ToolChips tools={props.message.tools} />
         <AttachmentChips attachments={props.message.attachments} tone="assistant" />
         <Show when={(props.message.toolCalls?.length ?? 0) > 0}>
-          <ToolCallList calls={props.message.toolCalls ?? []} />
+          <StepsPill calls={props.message.toolCalls ?? []} onViewSteps={props.onViewSteps} />
         </Show>
         <Show when={(props.message.pendingApprovals?.length ?? 0) > 0}>
           <ApprovalRequests
@@ -498,13 +500,31 @@ export function MetricRow(props: { label: string; value: string }) {
   )
 }
 
-export function ToolCallList(props: { calls: ChatToolCall[] }) {
+/**
+ * A single compact chip under the answer that summarizes tool activity and jumps
+ * to the Steps tab, instead of stacking one expandable card per tool call inline.
+ * A multi-step ERP turn otherwise buried the answer under a dozen
+ * `mcp__…__execute_query` cards; the full detail still lives in the Steps tab.
+ */
+export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => void }) {
+  const total = () => props.calls.length
+  const failed = () => props.calls.filter((call) => Boolean(call.error) || call.status === 'error').length
+  const running = () => props.calls.some((call) => !call.status || call.status === 'running')
+  const label = () => {
+    if (running()) return `Bruker verktøy … (${total()})`
+    const plural = total() === 1 ? 'steg' : 'steg'
+    return `${total()} ${plural}`
+  }
+
   return (
-    <div class="velion-chat-tool-list">
-      <For each={props.calls}>
-        {(call) => <ToolCallCard call={call} />}
-      </For>
-    </div>
+    <button type="button" class="velion-chat-steps-pill" onClick={props.onViewSteps}>
+      <Wrench size={13} />
+      <span>{label()}</span>
+      <Show when={failed() > 0}>
+        <em class="velion-chat-steps-pill__failed">{failed()} feilet</em>
+      </Show>
+      <ChevronRight size={13} />
+    </button>
   )
 }
 

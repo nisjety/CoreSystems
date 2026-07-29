@@ -22058,6 +22058,40 @@ textarea:focus-visible {
   margin-top: 10px;
 }
 
+/* Compact "N steg" chip under the answer — jumps to the Steps tab instead of
+   stacking a card per tool call inline. */
+.velion-chat-steps-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--velion-border);
+  border-radius: 999px;
+  background: var(--velion-j-surface, #fbfbfa);
+  color: var(--velion-j-text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.velion-chat-steps-pill:hover {
+  border-color: var(--velion-j-text-soft);
+  color: var(--velion-j-text);
+  background: var(--velion-j-surface-strong, #f4f4f2);
+}
+
+.velion-chat-steps-pill svg:last-child {
+  opacity: 0.55;
+}
+
+.velion-chat-steps-pill__failed {
+  color: #c2410c;
+  font-style: normal;
+}
+
 .velion-chat-tool-call {
   overflow: hidden;
   border: 1px solid var(--velion-border);
@@ -23273,6 +23307,110 @@ textarea:focus-visible {
   .velion-chat-reasoning-popover {
     margin-left: 0;
   }
+}
+
+/* ── Chat UI polish (sleeker, calmer — ChatGPT / t3.chat inspired) ──────────────
+   Additive layer: reused --velion-* tokens, scoped to chat surfaces so the shared
+   composer and home dashboard are untouched. Verified in light + dark + mobile. */
+
+/* 1 · Message rhythm & readability
+   ------------------------------------------------------------------------------ */
+/* More generous vertical rhythm between messages. */
+.velion-chat-thread {
+  gap: 34px;
+}
+
+/* Comfortable reading measure (~72ch) for assistant answers — a long answer now
+   wraps at a pleasant line length instead of spanning the full thread width. */
+.velion-chat-content,
+.velion-chat-markdown {
+  max-width: 46rem;
+}
+
+/* Softer, slightly more padded user bubble. */
+.velion-chat-bubble {
+  padding: 11px 16px;
+  border-radius: 20px;
+  border-top-right-radius: 8px;
+}
+
+/* 2 · Composer — modern centered chat input (scoped to chat contexts only)
+   ------------------------------------------------------------------------------ */
+.velion-chat-composer-dock .velion-composer-shell,
+.velion-chat-empty__composer .velion-composer-shell {
+  border-radius: 20px;
+  border-color: color-mix(in srgb, var(--velion-d-border) 82%, transparent);
+  box-shadow:
+    0 1px 2px rgb(23 23 23 / 4%),
+    0 12px 30px rgb(23 23 23 / 6%);
+  transition:
+    border-color 160ms ease,
+    box-shadow 200ms ease,
+    background-color 160ms ease;
+}
+
+.velion-chat-composer-dock .velion-composer-shell:focus-within,
+.velion-chat-empty__composer .velion-composer-shell:focus-within {
+  border-color: color-mix(in srgb, var(--velion-a-earth) 42%, var(--velion-d-border));
+  box-shadow:
+    0 1px 2px rgb(23 23 23 / 4%),
+    0 0 0 3px color-mix(in srgb, var(--velion-a-earth) 14%, transparent);
+}
+
+.dark .velion-chat-composer-dock .velion-composer-shell,
+.dark .velion-chat-empty__composer .velion-composer-shell {
+  border-color: rgb(255 255 255 / 10%);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 34%);
+}
+
+.dark .velion-chat-composer-dock .velion-composer-shell:focus-within,
+.dark .velion-chat-empty__composer .velion-composer-shell:focus-within {
+  border-color: color-mix(in srgb, var(--velion-accent) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--velion-accent) 22%, transparent);
+}
+
+/* 3 · Message action row — quiet by default, forward on hover (like ChatGPT).
+   Only the icon buttons fade; the model pill (reasoning popover) stays visible.
+   ------------------------------------------------------------------------------ */
+.velion-chat-message--assistant .velion-chat-action-button,
+.velion-chat-message--assistant .velion-chat-menu > button {
+  opacity: 0;
+  transition:
+    opacity 160ms ease,
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.velion-chat-message--assistant:hover .velion-chat-action-button,
+.velion-chat-message--assistant:hover .velion-chat-menu > button,
+.velion-chat-message-actions:focus-within .velion-chat-action-button,
+.velion-chat-message-actions:focus-within .velion-chat-menu > button {
+  opacity: 1;
+}
+
+/* 5 · General — subtle scrollbar for the message list (was the crude default). */
+.velion-chat-message-list {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--velion-e-subtle) 40%, transparent) transparent;
+}
+
+.velion-chat-message-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.velion-chat-message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.velion-chat-message-list::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-color: color-mix(in srgb, var(--velion-e-subtle) 32%, transparent);
+  background-clip: padding-box;
+}
+
+.velion-chat-message-list:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--velion-e-subtle) 55%, transparent);
 }
 
 .realtime-voice-modal {

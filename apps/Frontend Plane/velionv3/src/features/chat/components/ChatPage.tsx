@@ -135,6 +135,7 @@ export default function ChatPage() {
                         onApprovalDecision={(approvalId, decision) =>
                           void handleApprovalDecision(turn.id, approvalId, decision)
                         }
+                        onViewSteps={() => setActiveTab('steps')}
                       />
                     </>
                   )}
