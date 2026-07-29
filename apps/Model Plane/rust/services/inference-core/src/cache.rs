@@ -1,8 +1,9 @@
 //! In-memory prompt cache using `DashMap` with TTL expiry and
 //! least-recently-used eviction at capacity.
 //!
-//! Keyed by blake3 hash of (model + serialized messages). Only caches
-//! non-streaming responses. TTL defaults to 5 minutes.
+//! Keyed by blake3 hash of (tenant scope + model + serialized messages +
+//! response-shaping fields). Only caches non-streaming responses. TTL defaults
+//! to 5 minutes. ZDR requests neither read nor write this cache.
 
 use std::time::{Duration, Instant};
 
@@ -47,8 +48,28 @@ impl PromptCache {
     /// fields (`tools`, `tool_choice`, structured-output schema). Omitting the latter
     /// let an identical-message request *with* tools/schema collide with one
     /// *without* and be served the wrong (tool-less / unstructured) answer.
+    ///
+    /// The tenant scope (`org_id`, `user_id`) is part of the key, and is the FIRST
+    /// thing hashed. Without it this cache spans tenants: two orgs asking a
+    /// byte-identical question share one entry. The served text would be
+    /// legitimate — a prompt-identical completion — but the shared entry is a
+    /// cross-tenant **existence oracle**: a caller can probe a guessed prompt and
+    /// learn from the latency whether someone else already asked it, which leaks
+    /// another org's activity without leaking any content. `user_id` is included
+    /// for the same reason inside an org, where private-until-shared ownership
+    /// means one user's questions are not another's to discover. The hit rate
+    /// barely moves: the key already pins the entire message history under a
+    /// 5-minute TTL, so realistic hits are the same user regenerating or
+    /// double-submitting — which stays cached.
+    ///
+    /// Lengths are hashed with each identity field so `("ab", "c")` cannot
+    /// collide with `("a", "bc")`.
     fn cache_key(req: &InferRequest) -> String {
         let mut hasher = blake3::Hasher::new();
+        for scope in [req.org_id.as_str(), req.user_id.as_str()] {
+            hasher.update(&(scope.len() as u64).to_le_bytes());
+            hasher.update(scope.as_bytes());
+        }
         hasher.update(req.provider_hint.as_bytes());
         hasher.update(req.model.as_bytes());
         for msg in &req.messages {
@@ -303,5 +324,81 @@ mod tests {
 
         assert!(cache.get(&req1).is_some());
         assert!(cache.get(&req2).is_none());
+    }
+
+    /// A byte-identical prompt from a different org must MISS.
+    ///
+    /// Not because the completion would be wrong — it would be a legitimate
+    /// prompt-identical answer — but because a shared entry turns the cache into
+    /// a cross-tenant existence oracle: org B probes a guessed prompt and learns
+    /// from the hit whether org A already asked it.
+    #[test]
+    fn an_identical_prompt_from_another_org_does_not_hit() {
+        let cache = PromptCache::new(300);
+        let mut org_a = sample_request();
+        org_a.org_id = "org-a".to_owned();
+        let mut org_b = sample_request();
+        org_b.org_id = "org-b".to_owned();
+
+        cache.put(&org_a, &sample_response());
+
+        assert!(cache.get(&org_a).is_some(), "the owning org still hits");
+        assert!(
+            cache.get(&org_b).is_none(),
+            "cross-tenant cache hit: org B was served org A's cached entry"
+        );
+    }
+
+    /// Same reasoning one level down: private-until-shared ownership means a
+    /// colleague's questions are not mine to discover by probing.
+    #[test]
+    fn an_identical_prompt_from_another_user_in_the_same_org_does_not_hit() {
+        let cache = PromptCache::new(300);
+        let mut mine = sample_request();
+        mine.org_id = "org-a".to_owned();
+        mine.user_id = "user-1".to_owned();
+        let mut theirs = sample_request();
+        theirs.org_id = "org-a".to_owned();
+        theirs.user_id = "user-2".to_owned();
+
+        cache.put(&mine, &sample_response());
+
+        assert!(cache.get(&mine).is_some());
+        assert!(cache.get(&theirs).is_none());
+    }
+
+    /// The same caller re-asking must still hit — this is the cache's real
+    /// workload (regenerate / double-submit), so scoping must not disable it.
+    #[test]
+    fn the_same_caller_still_hits_so_scoping_keeps_the_cache_useful() {
+        let cache = PromptCache::new(300);
+        let mut req = sample_request();
+        req.org_id = "org-a".to_owned();
+        req.user_id = "user-1".to_owned();
+
+        cache.put(&req, &sample_response());
+
+        let mut retry = req.clone();
+        retry.request_id = "req-2".to_owned();
+        assert!(
+            cache.get(&retry).is_some(),
+            "a retry of the same prompt by the same caller must still be cached"
+        );
+    }
+
+    /// Identity fields are length-prefixed, so a boundary shift cannot collide.
+    #[test]
+    fn adjacent_identity_fields_cannot_collide_across_the_boundary() {
+        let cache = PromptCache::new(300);
+        let mut split_one = sample_request();
+        split_one.org_id = "ab".to_owned();
+        split_one.user_id = "c".to_owned();
+        let mut split_two = sample_request();
+        split_two.org_id = "a".to_owned();
+        split_two.user_id = "bc".to_owned();
+
+        cache.put(&split_one, &sample_response());
+
+        assert!(cache.get(&split_two).is_none());
     }
 }
