@@ -1016,6 +1016,11 @@ pub async fn invoke_stream_sse(
         // Starts as the requested id (possibly a `velion-*` mode); the tool phase
         // replaces it with the concrete model it resolved.
         let mut answer_model = model_clone.clone();
+        // A successful tool call this turn (Visma, web_search, …) is real
+        // evidence, so it grounds the confidence score just like a KB citation.
+        // Without this every tool-sourced answer scored the ungrounded baseline
+        // and was flagged "uncertain".
+        let mut tool_grounded = false;
 
         if tool_defs.iter().any(|tool| tool.name == "web_search") {
             if client_requested_web_search
@@ -1050,6 +1055,7 @@ pub async fn invoke_stream_sse(
                     cancels.finish(&req_id);
                     return;
                 };
+                tool_grounded = tool_grounded || forced.any_tool_succeeded;
                 messages = forced.messages;
             }
             // Withheld from the loop below whenever web search was advertised at
@@ -1092,6 +1098,7 @@ pub async fn invoke_stream_sse(
                 cancels.finish(&req_id);
                 return;
             };
+            tool_grounded = tool_grounded || rounds.any_tool_succeeded;
             messages = rounds.messages;
             // Answer with the model that did the work. Re-resolving here would
             // classify a tool-heavy turn as trivial — tools are withheld from the
@@ -1446,9 +1453,19 @@ pub async fn invoke_stream_sse(
                             i64::from(output_tokens),
                         )
                         .await;
-                    let grounded = grounding.as_ref().is_some_and(|g| !g.citations.is_empty());
-                    let confidence =
-                        crate::confidence::score(&assistant_output, output_tokens, 1024, grounded);
+                    // Grounded = backed by real evidence: either knowledge-base
+                    // citations OR a successful tool call this turn. `max_tokens`
+                    // is the real answer budget (was a stale 1024, which made the
+                    // truncation penalty mis-fire on any answer past 1024 tokens
+                    // now that the budget is larger).
+                    let grounded =
+                        tool_grounded || grounding.as_ref().is_some_and(|g| !g.citations.is_empty());
+                    let confidence = crate::confidence::score(
+                        &assistant_output,
+                        output_tokens,
+                        answer_token_budget().max(0) as u32,
+                        grounded,
+                    );
                     let usage_event = crate::sse_events::ChatEvent::Usage {
                         input_tokens,
                         output_tokens,
@@ -2618,7 +2635,13 @@ async fn run_infer_fallback(
                 )
                 .await;
             let grounded = grounding.is_some_and(|g| !g.citations.is_empty());
-            let confidence = crate::confidence::score(&resp.content, output_tokens, 1024, grounded);
+            // Real answer budget, not a stale 1024 — see the streaming site.
+            let confidence = crate::confidence::score(
+                &resp.content,
+                output_tokens,
+                answer_token_budget().max(0) as u32,
+                grounded,
+            );
             let usage_event = crate::sse_events::ChatEvent::Usage {
                 input_tokens,
                 output_tokens,

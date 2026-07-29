@@ -31,6 +31,18 @@ const LOW_CONFIDENCE_MARKERS: &[&str] = &[
     "cannot determine",
     "not enough information",
     "i'm sorry",
+    // Norwegian — the product's primary language; without these a hedging
+    // Norwegian answer scored the same as a confident one.
+    "jeg er usikker",
+    "jeg vet ikke",
+    "jeg kan ikke",
+    "har ikke tilgang",
+    "ikke nok informasjon",
+    "klarer ikke",
+    "finner ikke",
+    "beklager",
+    "kan ikke svare",
+    "vet ikke",
 ];
 
 const BASE: f64 = 0.72;
@@ -45,8 +57,11 @@ const CEIL: f64 = 0.98;
 /// nothing to score (so the caller emits a null confidence rather than a fake).
 ///
 /// `output_tokens` / `max_tokens` detect length truncation (the answer was cut
-/// off at the ceiling). `grounded` is true when the answer carried real
-/// retrieval citations.
+/// off at the ceiling). `grounded` is true when the answer was backed by real
+/// evidence — knowledge-base citations OR a successful tool call this turn
+/// (Visma, web_search, …). A tool-sourced answer is grounded: without counting
+/// it, every correct tool answer scored the ungrounded baseline (`BASE`, below
+/// the UI's low-confidence threshold) and was wrongly flagged "uncertain".
 #[must_use]
 pub fn score(answer: &str, output_tokens: u32, max_tokens: u32, grounded: bool) -> Option<f64> {
     let trimmed = answer.trim();
@@ -108,6 +123,23 @@ mod tests {
         .unwrap();
         assert!(s < BASE);
         assert!(s >= FLOOR);
+    }
+
+    #[test]
+    fn norwegian_hedging_lowers_the_score() {
+        // The product answers in Norwegian; a hedging Norwegian answer must be
+        // penalized like its English equivalent, not scored as confident.
+        let hedged = score("Jeg er usikker, men jeg vet ikke svaret.", 12, 4096, false).unwrap();
+        assert!(hedged < BASE);
+    }
+
+    #[test]
+    fn a_grounded_tool_answer_clears_the_ui_low_confidence_threshold() {
+        // The bug: a correct tool-sourced answer scored BASE (0.72) < the UI's
+        // 0.75 threshold and was flagged "uncertain" every time. With grounding
+        // counted, it lands at BASE + GROUNDED_BONUS = 0.87, comfortably clear.
+        let grounded = score("Lageret har 12 tomme varer.", 30, 4096, true).unwrap();
+        assert!(grounded >= 0.75, "grounded tool answer should not be flagged: {grounded}");
     }
 
     #[test]

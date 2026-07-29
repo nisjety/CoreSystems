@@ -1198,6 +1198,14 @@ pub struct ToolRounds {
     /// system has no access to it. Reusing the tool phase's model is what stops
     /// the answer contradicting the work.
     pub resolved_model: Option<String>,
+    /// Whether at least one tool call this turn returned a non-error result.
+    ///
+    /// An answer built from a successful tool call (Visma, web_search, …) is
+    /// evidence-backed, so it counts as grounded for the confidence score —
+    /// otherwise a correct, tool-sourced answer scores the ungrounded baseline
+    /// and gets flagged "uncertain" on every turn, which is exactly the false
+    /// "always 72%" caveat users complained about.
+    pub any_tool_succeeded: bool,
 }
 
 /// Where a tool event goes the moment it happens.
@@ -1298,6 +1306,7 @@ pub async fn run_forced_web_search(
         events.push(citation).await;
     }
 
+    let forced_search_succeeded = outcome.error.is_none();
     let mut messages = base_messages;
     messages.push(ChatMessage {
         role: "user".to_owned(),
@@ -1311,6 +1320,7 @@ pub async fn run_forced_web_search(
         // The forced search runs no tool-deciding inference of its own, so it has
         // no resolved model to hand on; the answer call resolves as usual.
         resolved_model: None,
+        any_tool_succeeded: forced_search_succeeded,
     })
 }
 
@@ -1379,6 +1389,7 @@ pub async fn run_tool_rounds(
 ) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
     let mut resolved_model: Option<String> = None;
+    let mut any_tool_succeeded = false;
     let mut events = match sink {
         Some(sink) => ToolEvents::Live(sink),
         None => ToolEvents::Buffered(Vec::new()),
@@ -1504,6 +1515,9 @@ pub async fn run_tool_rounds(
                     error: outcome.error.clone(),
                 })
                 .await;
+            if outcome.error.is_none() {
+                any_tool_succeeded = true;
+            }
             outcomes.push(outcome);
         }
 
@@ -1525,6 +1539,7 @@ pub async fn run_tool_rounds(
         messages,
         events: events.into_buffer(),
         resolved_model,
+        any_tool_succeeded,
     })
 }
 
@@ -1804,6 +1819,7 @@ mod tests {
             messages: vec![],
             events: vec![],
             resolved_model: Some("claude-sonnet-4-6".to_owned()),
+            any_tool_succeeded: true,
         };
         assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }
