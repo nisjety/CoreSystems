@@ -66,6 +66,46 @@ pub(crate) fn narrow_f64(value: f64) -> f32 {
     value as f32
 }
 
+/// A bearer token that refuses to print itself.
+///
+/// A newtype rather than a hand-written `Debug` on the containing struct: that
+/// alternative silently starts leaking the day someone adds a field and lets
+/// `#[derive(Debug)]` come back. This way every struct holding a bearer — now or
+/// later — is safe by construction. `auth::AuthenticatedPrincipal` already
+/// redacts its own bearer by hand; this is the same discipline made reusable.
+///
+/// Empty is distinguished from present so "was the token forwarded at all?"
+/// stays debuggable without exposing the value.
+#[derive(Clone, Default)]
+pub struct Bearer(String);
+
+impl Bearer {
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for Bearer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(if self.0.is_empty() {
+            "Bearer([empty])"
+        } else {
+            "Bearer([REDACTED])"
+        })
+    }
+}
+
 /// A unified inference request used internally across providers.
 #[derive(Debug, Clone, Default)]
 pub struct InferRequest {
@@ -94,7 +134,9 @@ pub struct InferRequest {
     /// their bodies from explicit fields, never from this struct wholesale).
     /// Empty when there is no delegated caller (internal sub-calls, tests):
     /// the budget check is then skipped and posture stays `Unknown`.
-    pub caller_bearer: String,
+    ///
+    /// Typed as [`Bearer`] so the struct's `#[derive(Debug)]` cannot print it.
+    pub caller_bearer: Bearer,
 }
 
 /// A function the model may call (chat-parity §2).
@@ -455,6 +497,38 @@ pub(crate) fn endpoint_region_is_non_eu(endpoint: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bearer_never_prints_its_value_even_inside_a_derived_debug() {
+        // The whole point of the newtype: an `InferRequest` carries a live
+        // per-user JWT, and the struct keeps `#[derive(Debug)]`. Any future
+        // `?req` log line, panic message, or `#[instrument]` must not leak it.
+        // A distinctive marker rather than a realistic JWT: the property under
+        // test is "this value never appears in the output", and a token-shaped
+        // literal would (rightly) trip the repo's secret scanner.
+        let marker = "MUST-NOT-APPEAR-IN-ANY-LOG";
+        let req = InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            caller_bearer: Bearer::new(marker),
+            ..Default::default()
+        };
+
+        let printed = format!("{req:?}");
+        assert!(
+            !printed.contains(marker),
+            "the bearer leaked through the derived Debug: {printed}"
+        );
+        assert!(printed.contains("[REDACTED]"));
+        // Non-secret fields must still be debuggable.
+        assert!(printed.contains("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn an_absent_bearer_is_distinguishable_from_a_present_one() {
+        // "Was the token forwarded at all?" stays answerable without exposing it.
+        assert_eq!(format!("{:?}", Bearer::default()), "Bearer([empty])");
+        assert_eq!(format!("{:?}", Bearer::new("x")), "Bearer([REDACTED])");
+    }
 
     #[test]
     fn default_capabilities_are_conservative_chat_only() {

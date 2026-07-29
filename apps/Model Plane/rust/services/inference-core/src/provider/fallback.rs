@@ -591,7 +591,7 @@ impl FallbackChain {
             &req.user_id,
             // The caller's own verified token — the budget check authenticates
             // as the caller (cost-core pins org/user to the token's claims).
-            &req.caller_bearer,
+            req.caller_bearer.as_str(),
             self.budget.as_deref(),
         )
         .await?;

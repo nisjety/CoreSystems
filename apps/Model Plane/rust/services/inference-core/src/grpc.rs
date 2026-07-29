@@ -1031,7 +1031,7 @@ fn to_internal_request(
         // cost-core budget check authenticates as the caller (cost-core pins
         // org/user to the token's claims). Never serialized into provider
         // bodies — see the field's doc comment.
-        caller_bearer: principal.bearer().to_owned(),
+        caller_bearer: crate::provider::Bearer::new(principal.bearer()),
     }
 }
 
@@ -1303,7 +1303,7 @@ mod tests {
         assert_eq!(internal.user_id, "user-signed");
         assert!(internal.zdr, "issuer-enforced ZDR cannot be downgraded");
         // The caller's verified bearer is threaded for the budget check.
-        assert_eq!(internal.caller_bearer, "test-bearer");
+        assert_eq!(internal.caller_bearer.as_str(), "test-bearer");
     }
 
     #[test]
