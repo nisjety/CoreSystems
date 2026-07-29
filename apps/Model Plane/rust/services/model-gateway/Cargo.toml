@@ -39,6 +39,7 @@ redis = { workspace = true }
 base64 = "0.22"
 blake3 = { workspace = true }
 sha2 = "0.10"
+hmac = "0.12"
 rand = "0.8"
 
 [dev-dependencies]

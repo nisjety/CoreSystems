@@ -4,8 +4,10 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -227,11 +229,15 @@ type MCPHandler struct {
 	// resolve and refresh-writeback when it has no live per-user bearer to
 	// forward (the execution-core-triggered tools/call path). Empty (unset)
 	// disables those paths entirely — the per-user JWT endpoints under
-	// /api/v1/mcp are unaffected either way. Proves
-	// "trusted internal caller" only, not a specific org: the caller-
-	// asserted org_id still has to match a real stored (server_id, org_id)
-	// row, so this cannot widen access beyond servers that genuinely belong
-	// to the org it asserts.
+	// /api/v1/mcp are unaffected either way.
+	//
+	// This is the ROOT secret and is never accepted on the wire: callers
+	// present HMAC-SHA256(root, org_id) instead, so a credential proves
+	// "trusted internal caller, for THIS org" — see
+	// expectedInternalServiceToken for the exact property that buys and what
+	// it does not. The caller-asserted org_id additionally has to match a
+	// real stored (server_id, org_id) row, so this cannot widen access beyond
+	// servers that genuinely belong to the org it asserts.
 	mcpServiceToken string
 }
 
@@ -371,20 +377,55 @@ func secureTokenEqual(expected, received string) bool {
 
 const mcpServiceTokenHeader = "X-Mcp-Service-Token"
 
+// expectedInternalServiceToken derives the value X-Mcp-Service-Token must carry
+// for a call targeting orgID:
+//
+//	presented = lowercase_hex( HMAC-SHA256( key = MCP_OAUTH_SERVICE_TOKEN,
+//	                                       message = org_id ) )
+//
+// Honest security property: this bounds the blast radius of an INTERCEPTED
+// credential. A header captured off one request — a proxy access log, a
+// tcpdump on the Model-Plane network, a leaked trace — is replayable only
+// against the single org it was minted for and is worthless for every other
+// tenant. It does NOT mitigate compromise of the root
+// MCP_OAUTH_SERVICE_TOKEN itself: whoever holds that value can derive the
+// token for any org at will, exactly as the raw shared secret allowed. The
+// root secret remains a tenant-wide credential and must be handled as one.
+//
+// orgID must be the SAME string this request is authorized against (the
+// TrimSpace'd query parameter internalTokenTarget returns), or the gate would
+// verify one org's token while the handler body reads another's row.
+// model-gateway's twin is derive_org_scoped_service_token in
+// rust/services/model-gateway/src/mcp_oauth.rs; the known-answer vector in
+// this package's tests is duplicated in that module's tests so any drift
+// between the two implementations fails a test instead of breaking auth in
+// production.
+func expectedInternalServiceToken(rootSecret, orgID string) string {
+	mac := hmac.New(sha256.New, []byte(rootSecret))
+	mac.Write([]byte(orgID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // authorizedInternalServiceCall is the sole gate on every RegisterInternal
 // route: those are mounted outside the per-user JWT middleware, so nothing
-// else stands between the network and the handler body.
-func (h *MCPHandler) authorizedInternalServiceCall(r *http.Request) bool {
+// else stands between the network and the handler body. Takes the already
+// parsed orgID because the credential is bound to it — see
+// expectedInternalServiceToken. An unconfigured root secret (or an empty
+// orgID, which internalTokenTarget already rejects) keeps the route closed
+// rather than degrading into "any caller is trusted".
+func (h *MCPHandler) authorizedInternalServiceCall(r *http.Request, orgID string) bool {
 	received := r.Header.Get(mcpServiceTokenHeader)
-	if received == "" || h.mcpServiceToken == "" {
+	if received == "" || h.mcpServiceToken == "" || orgID == "" {
 		return false
 	}
-	return secureTokenEqual(h.mcpServiceToken, received)
+	return secureTokenEqual(expectedInternalServiceToken(h.mcpServiceToken, orgID), received)
 }
 
 // internalTokenTarget reads the caller-asserted (server_id, org_id) pair the
-// internal routes are scoped by. Asserted, not proven — see the
-// mcpServiceToken doc comment for why that is still containing.
+// internal routes are scoped by, and must run BEFORE
+// authorizedInternalServiceCall — the presented credential is derived from
+// this exact trimmed org_id. Asserted, not proven — see the mcpServiceToken
+// doc comment for why that is still containing.
 func internalTokenTarget(r *http.Request) (id, orgID string, ok bool) {
 	id = strings.TrimSpace(r.URL.Query().Get("server_id"))
 	orgID = strings.TrimSpace(r.URL.Query().Get("org_id"))
@@ -803,10 +844,11 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 // service's blanket per-user JWT middleware (cmd/main.go wraps Register's
 // mux with verifier.HTTPMiddleware before anything in it runs) — the
 // execution-core-triggered tools/call dispatch path has no per-user bearer
-// to present, only the shared X-Mcp-Service-Token, which that middleware
-// doesn't understand and would reject before these handlers' own (sole)
-// gate ever ran. Callers must mount this directly on the UNWRAPPED mux
-// (main.go's publicMux), never on the one passed to Register.
+// to present, only the org-derived X-Mcp-Service-Token (see
+// expectedInternalServiceToken), which that middleware doesn't understand and
+// would reject before these handlers' own (sole) gate ever ran. Callers must
+// mount this directly on the UNWRAPPED mux (main.go's publicMux), never on
+// the one passed to Register.
 func (h *MCPHandler) RegisterInternal(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-token", h.oauthTokenResolveInternal)
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-tokens", h.oauthTokensUpsertInternal)
@@ -846,13 +888,15 @@ func (h *MCPHandler) oauthTokensUpsertInternal(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
-	if !h.authorizedInternalServiceCall(r) {
-		jsonErr(w, "invalid service token", http.StatusForbidden)
-		return
-	}
+	// Params first, then the gate: the service token is bound to the org this
+	// call targets, so the gate cannot be evaluated before org_id is known.
 	id, orgID, ok := internalTokenTarget(r)
 	if !ok {
 		jsonErr(w, "server_id and org_id query parameters are required", http.StatusBadRequest)
+		return
+	}
+	if !h.authorizedInternalServiceCall(r, orgID) {
+		jsonErr(w, "invalid service token", http.StatusForbidden)
 		return
 	}
 	h.writeEncryptedOAuthTokens(w, r, id, orgID)
@@ -968,13 +1012,14 @@ func (h *MCPHandler) oauthTokenResolveInternal(w http.ResponseWriter, r *http.Re
 		http.NotFound(w, r)
 		return
 	}
-	if !h.authorizedInternalServiceCall(r) {
-		jsonErr(w, "invalid service token", http.StatusForbidden)
-		return
-	}
+	// Params first, then the gate — see oauthTokensUpsertInternal.
 	id, orgID, ok := internalTokenTarget(r)
 	if !ok {
 		jsonErr(w, "server_id and org_id query parameters are required", http.StatusBadRequest)
+		return
+	}
+	if !h.authorizedInternalServiceCall(r, orgID) {
+		jsonErr(w, "invalid service token", http.StatusForbidden)
 		return
 	}
 	h.writeDecryptedOAuthToken(w, r, id, orgID)

@@ -2075,6 +2075,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "futures",
+ "hmac",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

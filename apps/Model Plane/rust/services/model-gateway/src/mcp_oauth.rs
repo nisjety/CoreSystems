@@ -20,6 +20,7 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -367,6 +368,51 @@ struct StoredOAuthToken {
     client_id: String,
 }
 
+/// Header carrying the per-org derived internal service token on both
+/// `/api/v1/internal/mcp/oauth-token(s)` calls.
+const MCP_SERVICE_TOKEN_HEADER: &str = "X-Mcp-Service-Token";
+
+/// Derive the per-org internal service token presented to capability-core's
+/// unauthenticated `/api/v1/internal/mcp/oauth-token(s)` routes:
+///
+/// ```text
+/// presented = lowercase_hex( HMAC-SHA256( key = MCP_OAUTH_SERVICE_TOKEN,
+///                                        message = org_id ) )
+/// ```
+///
+/// Honest security property: this bounds the blast radius of an *intercepted*
+/// credential. A header captured off one request — a proxy access log, a
+/// tcpdump on the Model-Plane network, a leaked trace — is replayable only
+/// against the single org it was minted for, and is worthless for every other
+/// tenant. It does NOT mitigate compromise of the root
+/// `MCP_OAUTH_SERVICE_TOKEN` itself: whoever holds that value can derive the
+/// token for any org at will, exactly as before. The root secret must still be
+/// treated as a tenant-wide credential.
+///
+/// `org_id` is trimmed before hashing because capability-core authorizes
+/// against the `TrimSpace`d query parameter and derives its expectation from
+/// that same trimmed value — the two sides must hash byte-identical input or
+/// every call 403s. capability-core's twin is `expectedInternalServiceToken`
+/// in `services/capability-core/internal/api/registry_apis.go`; the
+/// known-answer vector in this module's tests is duplicated in that package's
+/// tests so any drift between the two implementations fails a test instead of
+/// breaking auth in production.
+fn derive_org_scoped_service_token(root_secret: &str, org_id: &str) -> String {
+    // `new_from_slice` only errors for key sizes a given MAC rejects; HMAC
+    // accepts any length, so this cannot fail.
+    let mut mac = Hmac::<Sha256>::new_from_slice(root_secret.as_bytes())
+        .expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(org_id.trim().as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Lowercase, no separators — the wire format both sides agree on.
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble is < 16"));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("nibble is < 16"));
+    }
+    hex
+}
+
 /// Resolve a usable OAuth access token for (`org_id`, `server_id`) from
 /// capability-core's system-of-record, authenticating with a shared
 /// Model-Plane-local service secret rather than a per-user bearer. Refreshes
@@ -385,10 +431,13 @@ struct StoredOAuthToken {
 /// which is indistinguishable from never having connected it; `None` at least
 /// leaves the honest "not connected" path intact.
 ///
-/// Deliberately narrow-scoped: `service_token` proves only "this is a
-/// trusted internal caller," not a specific org — unlike the minted,
-/// per-user JWTs every other gateway->capability-core call uses. The
-/// (`server_id`, `org_id`) pair still has to match a real stored row (and
+/// Deliberately narrow-scoped: `service_token` is the ROOT secret, never sent
+/// on the wire. What is presented is
+/// `derive_org_scoped_service_token(service_token, org_id)`, so the credential
+/// crossing the network proves "trusted internal caller, for THIS org" rather
+/// than the unbounded "trusted internal caller" a raw shared secret proved —
+/// see that function for the exact property this buys and what it does not.
+/// The (`server_id`, `org_id`) pair still has to match a real stored row (and
 /// its AAD-bound ciphertext, see capability-core's vault) for anything to
 /// come back, so a caller can only ever resolve tokens for servers that
 /// genuinely belong to the org it asserts.
@@ -415,7 +464,10 @@ pub async fn resolve_stored_oauth_token(
         .append_pair("org_id", org_id);
     let response = client
         .get(url)
-        .header("X-Mcp-Service-Token", service_token)
+        .header(
+            MCP_SERVICE_TOKEN_HEADER,
+            derive_org_scoped_service_token(service_token, org_id),
+        )
         .send()
         .await
         .ok()?;
@@ -566,6 +618,11 @@ async fn refresh_stored_oauth_token(
 /// service-token twin of the per-user `PUT /api/v1/mcp/{id}/oauth-tokens` that
 /// the interactive connect flow uses, for the same reason the resolve above has
 /// one: no per-user bearer exists on this path.
+///
+/// `service_token` is the root secret; the header carries the per-org
+/// derivation, identically to the resolve path — see
+/// `derive_org_scoped_service_token`. Both routes must be derived the same way
+/// or a refresh write-back 403s while reads keep working.
 async fn persist_oauth_token(
     client: &reqwest::Client,
     capability_core_base_url: &str,
@@ -584,7 +641,10 @@ async fn persist_oauth_token(
         .append_pair("org_id", org_id);
     client
         .put(url)
-        .header("X-Mcp-Service-Token", service_token)
+        .header(
+            MCP_SERVICE_TOKEN_HEADER,
+            derive_org_scoped_service_token(service_token, org_id),
+        )
         .json(payload)
         .send()
         .await
@@ -663,6 +723,79 @@ mod tests {
         assert!(!url.contains("scope="));
     }
 
+    // ---- per-org internal service token derivation -------------------------
+    //
+    // CROSS-LANGUAGE KNOWN-ANSWER VECTOR. The identical (secret, org_id,
+    // expected hex) triple is asserted in capability-core's Go tests
+    // (services/capability-core/internal/api/mcp_oauth_internal_test.go,
+    // TestInternalServiceTokenDerivationMatchesTheGatewayKnownAnswerVector).
+    // If either side's algorithm, encoding, or message framing drifts, one of
+    // the two tests fails here rather than silently 403ing every MCP OAuth
+    // token resolve in production.
+    const VECTOR_SECRET: &str = "mcp-oauth-service-token-test-vector";
+    const VECTOR_ORG: &str = "org-a";
+    const VECTOR_EXPECTED: &str =
+        "9b70d49c9cecb4ae9d5c871372409886a492d8dde023674d24053f916f6dfd8b";
+
+    #[test]
+    fn derived_service_token_matches_the_cross_language_known_answer_vector() {
+        assert_eq!(
+            derive_org_scoped_service_token(VECTOR_SECRET, VECTOR_ORG),
+            VECTOR_EXPECTED
+        );
+    }
+
+    #[test]
+    fn derived_service_token_is_deterministic() {
+        assert_eq!(
+            derive_org_scoped_service_token(VECTOR_SECRET, VECTOR_ORG),
+            derive_org_scoped_service_token(VECTOR_SECRET, VECTOR_ORG)
+        );
+    }
+
+    #[test]
+    fn derived_service_token_is_lowercase_hex_of_a_full_sha256() {
+        let derived = derive_org_scoped_service_token(VECTOR_SECRET, VECTOR_ORG);
+        assert_eq!(derived.len(), 64, "32-byte digest, two hex chars per byte");
+        assert!(derived
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    }
+
+    // The whole point of the derivation: a token intercepted for one org is
+    // useless against another.
+    #[test]
+    fn different_orgs_derive_different_tokens_under_the_same_secret() {
+        let org_a = derive_org_scoped_service_token(VECTOR_SECRET, "org-a");
+        let org_b = derive_org_scoped_service_token(VECTOR_SECRET, "org-b");
+        assert_ne!(org_a, org_b);
+    }
+
+    #[test]
+    fn different_secrets_derive_different_tokens_for_the_same_org() {
+        assert_ne!(
+            derive_org_scoped_service_token("root-secret-one", VECTOR_ORG),
+            derive_org_scoped_service_token("root-secret-two", VECTOR_ORG)
+        );
+    }
+
+    #[test]
+    fn derived_service_token_never_leaks_the_root_secret() {
+        let derived = derive_org_scoped_service_token(VECTOR_SECRET, VECTOR_ORG);
+        assert_ne!(derived, VECTOR_SECRET);
+        assert!(!derived.contains(VECTOR_SECRET));
+    }
+
+    // capability-core derives from the TrimSpace'd query parameter, so this
+    // side must normalize identically or a padded org_id 403s.
+    #[test]
+    fn org_id_is_trimmed_before_hashing_like_capability_core_does() {
+        assert_eq!(
+            derive_org_scoped_service_token(VECTOR_SECRET, "  org-a\n"),
+            VECTOR_EXPECTED
+        );
+    }
+
     // resolve_stored_oauth_token must never attempt a network call when
     // unconfigured — these hit the early-return before any `.send()`, so
     // they stay fast/deterministic without a mock server.
@@ -686,6 +819,100 @@ mod tests {
         )
         .await;
         assert!(token.is_none());
+    }
+
+    // Stronger than the two short-circuit tests above, which pass even if the
+    // early return were removed (the host simply fails to resolve): a real
+    // listener that must receive ZERO requests proves the empty-secret path
+    // never touches the network.
+    #[tokio::test]
+    async fn empty_service_token_short_circuits_before_reaching_capability_core() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&capability_core)
+            .await;
+
+        let client = reqwest::Client::new();
+        let token =
+            resolve_stored_oauth_token(&client, &capability_core.uri(), "", "org-a", "srv-1").await;
+        assert!(token.is_none());
+        // MockServer verifies mounted expectations on drop.
+    }
+
+    // The wire assertion: what leaves the process is the per-org derivation,
+    // never the root secret.
+    #[tokio::test]
+    async fn resolve_presents_the_org_derived_token_and_never_the_root_secret() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/internal/mcp/oauth-token"))
+            .and(query_param("server_id", "srv-1"))
+            .and(query_param("org_id", VECTOR_ORG))
+            .and(header(MCP_SERVICE_TOKEN_HEADER, VECTOR_EXPECTED))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "live-access",
+                "refresh_token": "",
+                "token_type": "Bearer",
+                "scope": "",
+                "token_endpoint": "",
+                "client_id": ""
+            })))
+            .expect(1)
+            .mount(&capability_core)
+            .await;
+
+        let client = reqwest::Client::new();
+        let token = resolve_stored_oauth_token(
+            &client,
+            &capability_core.uri(),
+            VECTOR_SECRET,
+            VECTOR_ORG,
+            "srv-1",
+        )
+        .await;
+        assert_eq!(token.as_deref(), Some("live-access"));
+    }
+
+    // A token minted for another org must not be what we present — this mock
+    // only answers the org-a derivation, so presenting org-b's would 404 and
+    // resolve to None.
+    #[tokio::test]
+    async fn resolve_for_another_org_presents_a_different_token() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/internal/mcp/oauth-token"))
+            .and(header(MCP_SERVICE_TOKEN_HEADER, VECTOR_EXPECTED))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "org-a-only"
+            })))
+            .expect(0)
+            .mount(&capability_core)
+            .await;
+
+        let client = reqwest::Client::new();
+        let token = resolve_stored_oauth_token(
+            &client,
+            &capability_core.uri(),
+            VECTOR_SECRET,
+            "org-b",
+            "srv-1",
+        )
+        .await;
+        assert!(
+            token.is_none(),
+            "org-b must not be able to present org-a's derived token"
+        );
     }
 
     fn expiry_now() -> DateTime<Utc> {
