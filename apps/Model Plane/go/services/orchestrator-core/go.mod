@@ -4,13 +4,16 @@ go 1.25.1
 
 require (
 	github.com/google/uuid v1.6.0
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/nats-io/nats.go v1.37.0
 	github.com/stretchr/testify v1.11.1
 	github.com/triodelab/model-plane/gen/go v0.0.0
+	github.com/triodelab/model-plane/pkg/authctx v0.0.0
 	github.com/triodelab/model-plane/pkg/envelope v0.0.0
 	github.com/triodelab/model-plane/pkg/natsx v0.0.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
+	go.temporal.io/api v1.62.9
 	go.temporal.io/sdk v1.42.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -23,9 +26,13 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/golang/mock v1.7.0-rc.1 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/nats-io/nkeys v0.4.7 // indirect
@@ -38,7 +45,6 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
-	go.temporal.io/api v1.62.9 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
@@ -52,6 +58,7 @@ require (
 
 replace (
 	github.com/triodelab/model-plane/gen/go => ../../gen
+	github.com/triodelab/model-plane/pkg/authctx => ../../pkg/authctx
 	github.com/triodelab/model-plane/pkg/envelope => ../../pkg/envelope
 	github.com/triodelab/model-plane/pkg/natsx => ../../pkg/natsx
 )

@@ -1,44 +1,74 @@
 package activities
 
-import "testing"
+import (
+	"context"
+	"testing"
 
-func TestFeedbackStore_CandidatesThresholdAndSamples(t *testing.T) {
-	s := NewFeedbackStore()
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
+)
 
-	// High score, enough samples → candidate.
-	for i := 0; i < 9; i++ {
-		s.Record("skill.good", "agent", "workspace", "good")
+// The rating counters themselves are tested in internal/feedback (including the
+// thumbs-up-must-not-lower-the-score inversion). What matters here is that the
+// activity reads the durable store and preserves the tenant on the way to the
+// promotion workflow.
+func TestAggregateFeedbackActivity_ReadsDurableStore(t *testing.T) {
+	ctx := context.Background()
+	store := feedback.NewMemoryStore()
+	for i, user := range []string{"u1", "u2", "u3", "u4", "u5"} {
+		r := feedback.Rating{
+			OrgID:     "org-1",
+			UserID:    user,
+			RunID:     "run-" + user,
+			SkillID:   "cap.skill.summarize",
+			FromScope: "agent",
+			ToScope:   "workspace",
+			Rating:    feedback.RatingGood,
+		}
+		if i == 4 {
+			r.Rating = feedback.RatingPoor // 4/5 = 0.8
+		}
+		if err := store.Record(ctx, r); err != nil {
+			t.Fatalf("record: %v", err)
+		}
 	}
-	s.Record("skill.good", "agent", "workspace", "poor") // 9/10 = 0.9
 
-	// Enough samples but below threshold → excluded.
-	for i := 0; i < 5; i++ {
-		s.Record("skill.meh", "agent", "workspace", "good")
-	}
-	for i := 0; i < 5; i++ {
-		s.Record("skill.meh", "agent", "workspace", "poor") // 5/10 = 0.5
-	}
+	a := NewActivities(nil, nil)
+	a.SetFeedbackStore(store)
 
-	// High score but too few samples → excluded.
-	s.Record("skill.new", "agent", "workspace", "good") // 1/1
-
-	got := s.Candidates(5, 0.8)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 candidate, got %d: %+v", len(got), got)
+	out, err := a.AggregateFeedbackActivity(ctx, FeedbackAggregateInput{MinSamples: 5, PromoteThreshold: 0.8})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
 	}
-	if got[0].SkillID != "skill.good" {
-		t.Fatalf("expected skill.good, got %s", got[0].SkillID)
+	if len(out.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %+v", out.Candidates)
 	}
-	if got[0].Total != 10 || got[0].Good != 9 {
-		t.Fatalf("unexpected counts: good=%d total=%d", got[0].Good, got[0].Total)
+	got := out.Candidates[0]
+	if got.SkillID != "cap.skill.summarize" || got.Good != 4 || got.Total != 5 {
+		t.Fatalf("unexpected candidate: %+v", got)
+	}
+	if got.OrgID != "org-1" {
+		t.Fatalf("candidate lost its tenant: %+v", got)
 	}
 }
 
-func TestFeedbackStore_EmptyRatingAndSkillIgnored(t *testing.T) {
-	s := NewFeedbackStore()
-	s.Record("", "agent", "workspace", "good") // empty skill ignored
-	if c := s.Candidates(1, 0.0); len(c) != 0 {
-		t.Fatalf("empty skill should not be recorded, got %d", len(c))
+// No store configured must be an empty sweep, never a panic.
+func TestAggregateFeedbackActivity_WithoutStoreIsEmpty(t *testing.T) {
+	a := NewActivities(nil, nil)
+	out, err := a.AggregateFeedbackActivity(context.Background(), FeedbackAggregateInput{})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if len(out.Candidates) != 0 {
+		t.Fatalf("expected no candidates, got %+v", out.Candidates)
+	}
+}
+
+func TestRecordFeedback_WithoutStoreIsAnError(t *testing.T) {
+	a := NewActivities(nil, nil)
+	if err := a.RecordFeedback(context.Background(), feedback.Rating{
+		OrgID: "org-1", RunID: "run-1", Rating: feedback.RatingGood,
+	}); err == nil {
+		t.Fatal("a missing store must surface, not silently drop the rating")
 	}
 }
 

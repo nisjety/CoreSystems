@@ -35,6 +35,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 const natsInboxPrefix = "_INBOX.CAPABILITY_CORE_RUNTIME"
@@ -185,6 +186,12 @@ func main() {
 			// (sessionreview.HandleRunCompleted); this wiring is e2e-verified
 			// only against the running stack.
 			startLearningConsumer(ctx, nc, sessionClient, inferenceClient)
+
+			// Task lifecycle closer: a task the executor started stays in
+			// `running` until its run reaches a terminal state. Without this the
+			// workflow dispatcher would strand every cron-fired task exactly the
+			// way the publish-only dispatcher did.
+			startTaskCompletionConsumer(ctx, nc, pool)
 		}
 	}
 
@@ -242,13 +249,22 @@ func main() {
 	}
 
 	// Task executor: claims `created` tasks (single-flight), marks them running,
-	// and dispatches each to a runner via NATS (mp.v1.capability.task.dispatched).
-	// Default OFF: until a Model-Plane runner consumes the dispatch event and
-	// completes the task, enabling this would strand tasks in `running`. Turn on
-	// with TASK_EXECUTOR_ENABLED=true once that runner exists.
-	if os.Getenv("TASK_EXECUTOR_ENABLED") == "true" {
-		go taskexec.NewExecutor(pool, taskexec.NewNatsDispatcher(recPub)).Start(ctx)
-		slog.Info("task executor started")
+	// and turns each into a durable Temporal run via orchestrator-core's
+	// StartWorkflow RPC — the hand-off that closes the cron → run loop.
+	//
+	// This shipped disabled because the only dispatcher published an event
+	// nothing consumed, so every claimed task stranded in `running`. With the
+	// workflow dispatcher the hand-off is synchronous: a failure to start is
+	// recorded as a task failure with a reason instead of a silent stall, so the
+	// executor now defaults ON whenever that dispatcher is available.
+	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub)
+	if taskExecutorEnabled(workflowBacked) {
+		go taskexec.NewExecutor(pool, dispatcher).Start(ctx)
+		slog.Info("task executor started", "workflow_backed", workflowBacked)
+	} else {
+		slog.Info("task executor not started",
+			"workflow_backed", workflowBacked,
+			"reason", "TASK_EXECUTOR_ENABLED=false, or no orchestrator-core workflow dispatcher configured")
 	}
 	// /models delegates to inference-core ListModels, /compact to session-core
 	// CompactNow (nil-safe: unwired → honest "unavailable").
@@ -326,6 +342,90 @@ func authConfigFromEnv() (authctx.Config, error) {
 	return authctx.Config{Audiences: []string{audience}, Issuer: issuer, JWKSURL: jwksURL}, nil
 }
 
+// startTaskCompletionConsumer closes a task when the run it started finishes.
+//
+// It is the other half of the executor's safety story: buildTaskDispatcher makes
+// the hand-off synchronous so a failure to START is recorded, and this makes the
+// hand-off finite so a started run's task cannot sit in `running` forever.
+func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Pool) {
+	consumer, err := taskexec.NewRunCompletionConsumer(pool)
+	if err != nil {
+		slog.Error("task completion consumer unavailable; started tasks will stay in `running`", "error", err)
+		return
+	}
+	go func() {
+		if rerr := consumer.Run(ctx, nc); rerr != nil {
+			slog.Warn("task completion consumer stopped", "error", rerr)
+		}
+	}()
+}
+
+// buildTaskDispatcher returns the task dispatcher plus whether it can actually
+// complete a hand-off.
+//
+// The workflow-backed dispatcher needs ORCHESTRATOR_WORKFLOW_ADDR (where
+// orchestrator-core's OrchestratorWorkflowService listens) and
+// ORCHESTRATOR_INTERNAL_SERVICE_TOKEN (the Model-Plane-local credential that
+// side accepts, org-bound there by ORCHESTRATOR_INTERNAL_SERVICE_ORGS). Missing
+// either, we fall back to the publish-only NatsDispatcher and report false, and
+// the caller leaves the executor OFF — the honest outcome, since a publish that
+// nobody consumes would leave every task in `running`.
+func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (taskexec.Dispatcher, bool) {
+	fallback := taskexec.NewNatsDispatcher(pub)
+
+	addr := strings.TrimSpace(os.Getenv("ORCHESTRATOR_WORKFLOW_ADDR"))
+	token := strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_TOKEN"))
+	if addr == "" || token == "" {
+		slog.Warn("task workflow dispatch disabled; cron-fired tasks cannot become runs",
+			"orchestrator_workflow_addr_set", addr != "",
+			"internal_service_token_set", token != "")
+		return fallback, false
+	}
+
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		slog.Error("dial orchestrator-core workflow service failed", "addr", addr, "error", err)
+		return fallback, false
+	}
+	dispatcher, err := taskexec.NewWorkflowDispatcher(
+		pool,
+		mpv1.NewOrchestratorWorkflowServiceClient(conn),
+		token,
+		pub,
+		os.Getenv("TASK_DEFAULT_WORKFLOW_TYPE"),
+	)
+	if err != nil {
+		slog.Error("task workflow dispatcher unavailable", "error", err)
+		_ = conn.Close()
+		return fallback, false
+	}
+	slog.Info("task workflow dispatch enabled", "orchestrator_workflow_addr", addr)
+	return dispatcher, true
+}
+
+// taskExecutorEnabled resolves the executor's on/off decision.
+//
+// Unset defaults to the safe answer: on only when the dispatcher can complete a
+// hand-off. "false" always wins. An explicit "true" is honoured even without the
+// workflow dispatcher, because a deployment may run its own consumer of
+// mp.v1.capability.task.dispatched — but it is warned that this repository does
+// not ship one.
+func taskExecutorEnabled(workflowBacked bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TASK_EXECUTOR_ENABLED"))) {
+	case "false":
+		return false
+	case "true":
+		if !workflowBacked {
+			slog.Warn("TASK_EXECUTOR_ENABLED=true without a workflow dispatcher: " +
+				"claimed tasks will stay in `running` unless this deployment runs its own " +
+				"mp.v1.capability.task.dispatched consumer")
+		}
+		return true
+	default:
+		return workflowBacked
+	}
+}
+
 // startLearningConsumer wires the G7 learning-review trigger on the shared
 // session-core + inference-core clients: spawn the RUN_COMPLETED consumer
 // (sessionreview). No-op when the clients are nil (backends unset) so the
@@ -357,16 +457,58 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 		return nil, nil
 	}
 	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
-	sessConn, err := grpc.NewClient(sessAddr, creds)
+
+	// Both cores authenticate every RPC. Without a credential the learning
+	// consumer reaches session-core and gets
+	// "Unauthenticated: verified caller credential required" on its very first
+	// transcript read, so the review never runs no matter how many RUN_COMPLETED
+	// events arrive. These tokens are the only way this service can present one.
+	sessConn, err := grpc.NewClient(sessAddr, creds,
+		bearerInterceptor("session-core", "SESSION_CORE_SERVICE_TOKEN"))
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
 		return nil, nil
 	}
-	infConn, err := grpc.NewClient(infAddr, creds)
+	infConn, err := grpc.NewClient(infAddr, creds,
+		bearerInterceptor("inference-core", "INFERENCE_CORE_SERVICE_TOKEN"))
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
 		return nil, nil
 	}
 	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn)
+}
+
+// bearerInterceptor attaches the service credential named by tokenEnv to every
+// outbound unary RPC on a connection.
+//
+// The token is an Auth Core service JWT for that backend's audience — both
+// `session-core` and `inference-core` are existing mintable plane audiences, so
+// this needs only a service-principal registry entry, no Control Plane code.
+// Required scopes: session:read + session:skills:write for session-core (the
+// learning review's transcript read and skill upsert), inference:invoke for
+// inference-core.
+//
+// Read per call rather than captured at dial time so a rotated token takes
+// effect on the next RPC instead of at the next restart. An unset token is left
+// as-is: the call then fails with an explicit Unauthenticated from the backend,
+// which is the honest outcome — far better than a silent no-op.
+func bearerInterceptor(backend, tokenEnv string) grpc.DialOption {
+	if strings.TrimSpace(os.Getenv(tokenEnv)) == "" {
+		slog.Warn("backend service credential unset; its RPCs will be rejected as unauthenticated",
+			"backend", backend, "env", tokenEnv)
+	}
+	return grpc.WithChainUnaryInterceptor(func(
+		ctx context.Context,
+		method string,
+		req, reply any,
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
+			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+		}
+		return invoker(ctx, method, req, reply, cc, opts...)
+	})
 }

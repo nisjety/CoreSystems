@@ -3,18 +3,31 @@
 // hands each to a Dispatcher that performs the actual work. Claiming uses
 // FOR UPDATE SKIP LOCKED so multiple replicas never grab the same task.
 //
-// Scope boundary: this layer owns the CLAIM + LIFECYCLE + hand-off. The default
-// NatsDispatcher publishes a task-dispatch event; a Model-Plane runner consumes
-// it, executes the agent work (which needs a system run context), and completes
-// the task. That runner-consumer is a separate layer — until it exists, keep the
-// executor disabled (TASK_EXECUTOR_ENABLED) so tasks are not stranded in running.
+// Scope boundary: this layer owns the CLAIM + LIFECYCLE + hand-off. The
+// Dispatcher owns execution.
+//
+// Two dispatchers exist and the difference matters:
+//
+//   - WorkflowDispatcher (production) starts a durable Temporal run through
+//     orchestrator-core's StartWorkflow RPC and returns synchronously, so a
+//     failure is a failure the executor can record. This is what makes the
+//     executor safe to enable.
+//   - NatsDispatcher only publishes mp.v1.capability.task.dispatched and calls
+//     that success. If nothing consumes the subject the task stays in `running`
+//     forever, which is precisely why the executor shipped disabled. It remains
+//     for deployments that run their own consumer of that subject.
+//
+// Consequently the executor's default is gated on having a dispatcher that can
+// actually complete the hand-off — see cmd/main.go.
 package taskexec
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/model-plane/pkg/publisher"
@@ -36,7 +49,12 @@ type Dispatcher interface {
 }
 
 // NatsDispatcher publishes a task-dispatch event (mp.v1.capability.task.dispatched)
-// for a downstream Model-Plane runner to execute and complete. Decoupled hand-off.
+// for a downstream Model-Plane runner to execute and complete.
+//
+// WARNING: a successful publish is NOT a successful dispatch. Nothing in the
+// Model Plane consumes this subject as a work request, so on its own this
+// dispatcher leaves every claimed task in `running` indefinitely. Use
+// WorkflowDispatcher unless the deployment supplies its own consumer.
 type NatsDispatcher struct{ pub publisher.EventPublisher }
 
 // NewNatsDispatcher wraps a publisher.
@@ -153,15 +171,59 @@ func (e *Executor) RunOnce(ctx context.Context) (int, error) {
 	committed = true
 
 	// Dispatch outside the claim tx. A dispatch failure flips the task to failed
-	// so it is not stranded in running; success leaves it running for the runner
-	// to complete.
+	// so it is not stranded in running; success leaves it running for the started
+	// run to complete.
 	for _, t := range claimed {
 		if err := e.dispatcher.Dispatch(ctx, t); err != nil {
 			slog.Warn("task dispatch failed", "task", t.ID, "error", err)
-			_, _ = e.pool.Exec(ctx,
-				`UPDATE tasks SET status='failed', completed_at=$1, updated_at=$1 WHERE id=$2 AND status='running'`,
-				time.Now().UTC(), t.ID)
+			e.failTask(ctx, t, err)
 		}
 	}
 	return len(claimed), nil
+}
+
+// failTask moves an undispatchable task to `failed` WITH a recorded reason.
+//
+// Both writes go in one transaction: a task must never end up marked failed with
+// no explanation of why, which is all an operator has to work from once the
+// process log has rotated away.
+func (e *Executor) failTask(ctx context.Context, task TaskRef, cause error) {
+	now := time.Now().UTC()
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		slog.Error("task failure not recorded", "task", task.ID, "error", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE tasks SET status='failed', completed_at=$1, updated_at=$1 WHERE id=$2 AND status='running'`,
+		now, task.ID)
+	if err != nil {
+		slog.Error("task failure not recorded", "task", task.ID, "error", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		// Another actor already moved it out of `running`; leave their state
+		// alone rather than overwriting it with a failure.
+		return
+	}
+
+	payload, merr := json.Marshal(map[string]string{
+		"reason": cause.Error(),
+		"stage":  "dispatch",
+	})
+	if merr != nil {
+		payload = []byte(`{"reason":"dispatch failed","stage":"dispatch"}`)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO task_events (id, task_id, event_type, actor, payload, ts)
+		VALUES ($1, $2, 'failed', $3, $4, $5)
+	`, "taskevt_"+uuid.NewString(), task.ID, dispatchActor, payload, now); err != nil {
+		slog.Error("task failure reason not recorded", "task", task.ID, "error", err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("task failure not committed", "task", task.ID, "error", err)
+	}
 }

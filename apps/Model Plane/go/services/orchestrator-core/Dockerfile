@@ -40,10 +40,16 @@ ARG SOURCE_REVISION=unverified
 ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
       org.opencontainers.image.created=$BUILD_DATE
+# postgresql-client is for the entrypoint's migration step (durable feedback
+# ratings), matching the cost-core / capability-core pattern.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add ca-certificates \
+    apk add ca-certificates postgresql-client \
     && addgroup -S -g 10001 modelplane \
     && adduser -S -D -H -u 10001 -G modelplane modelplane
 COPY --from=builder /service /usr/local/bin/service
+COPY services/orchestrator-core/migrations /app/migrations
+COPY services/orchestrator-core/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER modelplane
-ENTRYPOINT ["service"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["service"]

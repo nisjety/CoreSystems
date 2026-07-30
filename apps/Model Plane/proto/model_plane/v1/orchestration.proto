@@ -86,6 +86,32 @@ service OrchestrationCoreService {
   rpc RecordOrchestrationEvent(RecordOrchestrationEventRequest) returns (RecordOrchestrationEventResponse);
 }
 
+// OrchestratorWorkflowService — the production entry point into the durable
+// Temporal orchestration tier, served by orchestrator-core on the same gRPC
+// listener as its OrchestrationCoreService proxy.
+//
+// It is a separate service, not another method on OrchestrationCoreService,
+// because that service's authority lives in session-core (Rust) which
+// implements every one of its methods; adding a Temporal-start method there
+// would force an unrelated service to implement work it does not own. Durable
+// workflow starts belong to orchestrator-core alone.
+service OrchestratorWorkflowService {
+  // Start one durable Temporal workflow on the orchestrator task queue.
+  //
+  // Before this RPC existed, every workflow the worker registers had zero
+  // production callers. It is deliberately narrow:
+  //   * `workflow_type` is matched against a server-side ALLOWLIST of the
+  //     names the worker actually registers. An unknown name is rejected by
+  //     name; a caller string is never handed to Temporal as a workflow type.
+  //   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+  //     verified caller and overwrite whatever `input` carries, so a caller
+  //     cannot start work in another organization.
+  //   * the workflow id is derived deterministically from
+  //     (workflow_type, org_id, run_id | idempotency_key), so a retried call
+  //     attaches to the existing execution instead of double-starting a run.
+  rpc StartWorkflow(StartWorkflowRequest) returns (StartWorkflowResponse);
+}
+
 // --- Enums ---
 
 // Lifecycle state of a plan.
@@ -934,4 +960,51 @@ message RecordOrchestrationEventRequest {
 message RecordOrchestrationEventResponse {
   // Server-assigned monotonic id of the published event (ULID).
   string event_id = 1;
+}
+
+// --- StartWorkflow ---
+
+// Request to start one allowlisted durable workflow for a tenant-contained run.
+message StartWorkflowRequest {
+  // Canonical workflow type name. Must appear in the server-side allowlist of
+  // worker-registered workflows (e.g. "InteractiveRunSupervision"). Anything
+  // else is rejected without reaching Temporal.
+  string workflow_type = 1;
+
+  // Tenant that owns the run. It must either be empty or match the verified
+  // caller's organization exactly; a conflict is denied rather than coerced.
+  string org_id = 2;
+
+  // Acting viewer. Same containment rule as `org_id` for user principals.
+  // Service principals may leave it empty (system-initiated work).
+  string user_id = 3;
+
+  // Run identifier this workflow supervises. It anchors the deterministic
+  // workflow id and, for run-scoped workflows, is stamped onto the input.
+  // Must be a single NATS subject token (no '.', ' ', '*' or '>') so the
+  // run's lifecycle events land on mp.v1.run.<run_id>.event where the
+  // downstream `mp.v1.run.*.event` consumers can see them.
+  string run_id = 4;
+
+  // Workflow-type-specific input. Server-authoritative tenancy fields are
+  // overwritten after decoding, so supplying them here has no effect.
+  google.protobuf.Struct input = 5;
+
+  // Optional caller-chosen dedup anchor. When set it replaces `run_id` in the
+  // deterministic workflow id, letting a caller retry a start whose run id is
+  // assigned by the workflow itself.
+  string idempotency_key = 6;
+}
+
+// Identity of the workflow execution that was started or re-attached to.
+message StartWorkflowResponse {
+  // Deterministic Temporal workflow id that was started or re-attached to.
+  string workflow_id = 1;
+
+  // Temporal execution (run) id of the started or existing execution. This is
+  // Temporal's own identifier and is NOT the Model Plane run_id.
+  string temporal_run_id = 2;
+
+  // Canonical workflow type that was started, echoed from the allowlist.
+  string workflow_type = 3;
 }

@@ -184,6 +184,47 @@ func TestCompleteRunActivity_PublishesRunCompletedEnvelope(t *testing.T) {
 	assert.Equal(t, "done", payload["summary"])
 }
 
+// TestCompleteRunActivity_SystemRunStillPublishes is a regression test for a
+// fault that silently disabled the entire learning loop: a system-initiated run
+// (cron-fired task, maintenance sweep) has no acting viewer, envelope.Validate()
+// requires user_id, and a validation failure means nothing is published at all.
+// So every RUN_COMPLETED from a run with no user was dropped before it reached
+// NATS, and capability-core's RUN_COMPLETED consumer could never fire.
+func TestCompleteRunActivity_SystemRunStillPublishes(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	err := a.CompleteRunActivity(context.Background(), activities.CompletionInput{
+		RunID:   "task_abc",
+		OrgID:   "o1",
+		UserID:  "", // org-scoped workload run: no human behind it
+		Summary: "done",
+	})
+	require.NoError(t, err)
+
+	events := stub.Events()
+	require.Len(t, events, 1, "a system run must still emit RUN_COMPLETED")
+	assert.Equal(t, natsx.RunEventSubject("task_abc"), events[0].subject)
+	env := decodeEnvelope(t, events[0].data)
+	assert.Equal(t, "RUN_COMPLETED", env.EventType)
+	assert.Equal(t, activities.SystemActorID, env.UserID)
+	require.NoError(t, env.Validate(), "the published envelope must be valid")
+}
+
+func TestFailRunActivity_SystemRunStillPublishes(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	require.NoError(t, a.FailRunActivity(context.Background(), activities.FailureInput{
+		RunID: "task_abc", OrgID: "o1", Reason: "boom",
+	}))
+	events := stub.Events()
+	require.Len(t, events, 1, "a system run must still emit RUN_FAILED")
+	assert.Equal(t, activities.SystemActorID, decodeEnvelope(t, events[0].data).UserID)
+}
+
 // ── FailRunActivity ─────────────────────────────────────────────────────────
 
 func TestFailRunActivity_PublishesRunFailedEnvelope(t *testing.T) {

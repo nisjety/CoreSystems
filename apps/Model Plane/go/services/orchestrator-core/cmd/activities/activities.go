@@ -4,6 +4,7 @@ package activities
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -14,6 +15,7 @@ import (
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/envelope"
 	"github.com/triodelab/model-plane/pkg/natsx"
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/grpcclient"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -101,10 +103,10 @@ type RegistryUpdateInput struct{ SkillID, FromScope, NewScope string }
 // ── Struct + constructor ─────────────────────────────────────────────────────
 
 type Activities struct {
-	logger    *slog.Logger
-	clients   *grpcclient.Clients
-	publisher *natsx.Publisher
-	feedback  *FeedbackStore
+	logger        *slog.Logger
+	clients       *grpcclient.Clients
+	publisher     *natsx.Publisher
+	feedbackStore feedback.Store
 }
 
 func NewActivities(logger *slog.Logger, clients *grpcclient.Clients) *Activities {
@@ -114,9 +116,31 @@ func NewActivities(logger *slog.Logger, clients *grpcclient.Clients) *Activities
 // SetPublisher wires a NATS publisher for emitting run lifecycle envelopes.
 func (a *Activities) SetPublisher(p *natsx.Publisher) { a.publisher = p }
 
-// SetFeedbackStore wires the operator-rating accumulator that backs the
+// SetFeedbackStore wires the durable operator-rating store that backs the
 // feedback → skill-promotion loop.
-func (a *Activities) SetFeedbackStore(f *FeedbackStore) { a.feedback = f }
+func (a *Activities) SetFeedbackStore(f feedback.Store) { a.feedbackStore = f }
+
+// RecordFeedback persists one operator rating. Called by the
+// `mp.v1.feedback.rated` subscriber, not by Temporal — the rating must land
+// durably whether or not any workflow is running.
+func (a *Activities) RecordFeedback(ctx context.Context, r feedback.Rating) error {
+	if a.feedbackStore == nil {
+		return errors.New("feedback store not configured")
+	}
+	return a.feedbackStore.Record(ctx, r)
+}
+
+// SystemActorID is the reserved actor stamped on a lifecycle envelope for a run
+// that has no human behind it — a cron-fired task, a maintenance sweep.
+//
+// envelope.Validate() requires user_id, and Encode is never reached when it
+// fails, so before this constant existed EVERY system-initiated run silently
+// dropped its RUN_COMPLETED / RUN_FAILED envelope: the publish failed
+// validation and the only trace was a log line. capability-core's learning
+// consumer, which subscribes to exactly those events, could therefore never see
+// one. The colon makes the value unmistakably non-human: Auth Core actor ids are
+// base62, so this can never collide with a real user.
+const SystemActorID = "system:orchestrator-core"
 
 func (a *Activities) publishRunEvent(runID, orgID, userID, eventType, idemSuffix string, payload any) {
 	if a.publisher == nil {
@@ -126,6 +150,12 @@ func (a *Activities) publishRunEvent(runID, orgID, userID, eventType, idemSuffix
 	if err != nil {
 		a.logger.Error("marshal run event payload", "err", err, "event", eventType)
 		return
+	}
+	// System-initiated runs have no acting viewer. Stamp the reserved actor
+	// rather than let envelope validation reject — and therefore discard — the
+	// run's whole lifecycle event.
+	if strings.TrimSpace(userID) == "" {
+		userID = SystemActorID
 	}
 	env := &envelope.Envelope{
 		EventID:        uuid.NewString(),
@@ -445,11 +475,11 @@ type FeedbackAggregateOutput struct {
 	Candidates []SkillPromotionCandidate
 }
 
-// AggregateFeedbackActivity reads the operator-rating accumulator and returns
+// AggregateFeedbackActivity reads the durable operator-rating store and returns
 // the skills whose feedback has earned a promotion. The FeedbackPromotionWorkflow
 // runs this, then launches SkillPromotionWorkflow for each candidate.
-func (a *Activities) AggregateFeedbackActivity(_ context.Context, input FeedbackAggregateInput) (FeedbackAggregateOutput, error) {
-	if a.feedback == nil {
+func (a *Activities) AggregateFeedbackActivity(ctx context.Context, input FeedbackAggregateInput) (FeedbackAggregateOutput, error) {
+	if a.feedbackStore == nil {
 		return FeedbackAggregateOutput{}, nil
 	}
 	minSamples := input.MinSamples
@@ -460,5 +490,9 @@ func (a *Activities) AggregateFeedbackActivity(_ context.Context, input Feedback
 	if threshold <= 0 {
 		threshold = 0.8
 	}
-	return FeedbackAggregateOutput{Candidates: a.feedback.Candidates(minSamples, threshold)}, nil
+	candidates, err := a.feedbackStore.Candidates(ctx, minSamples, threshold)
+	if err != nil {
+		return FeedbackAggregateOutput{}, err
+	}
+	return FeedbackAggregateOutput{Candidates: promotionCandidates(candidates)}, nil
 }

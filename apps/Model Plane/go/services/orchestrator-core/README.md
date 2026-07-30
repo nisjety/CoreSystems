@@ -94,6 +94,69 @@ The following activity surfaces are not present in `activities.go` and are defer
 
 ---
 
+## Starting a workflow (`OrchestratorWorkflowService.StartWorkflow`)
+
+The gRPC listener (`ORCHESTRATOR_GRPC_ADDR`, default `:9080`) serves two services:
+
+| Service | Role |
+|---|---|
+| `OrchestrationCoreService` | Read/transition proxy to session-core. Forwards the caller's credential upstream; session-core is the authority. |
+| `OrchestratorWorkflowService` | `StartWorkflow` — the production entry point into the durable Temporal tier. Authenticated and authorized **locally**. |
+
+`StartWorkflow` is a separate service rather than another method on
+`OrchestrationCoreService` because session-core (Rust) implements every method of
+that service; adding one there would force it to implement a Temporal start it
+does not own.
+
+### Allowlist
+
+`workflow_type` must appear in `internal/orchestration/workflowreg.go`'s
+allowlist, which `cmd/workflow_parity_test.go` asserts is exactly the set
+`registeredWorkflows()` registers on the worker. Temporal always receives the
+allowlist's canonical constant, never the client's string.
+
+`AutoresearchWorkflow` is deliberately in neither list: its `budget_usd` guard
+multiplies a hardcoded $0.10 by the step count because `ExecuteStepResponse`
+carries no usage data, so exposing it would advertise a spending cap that is not
+enforced.
+
+### Authorization
+
+Two credentials are accepted; with neither configured the RPC is not even
+registered and answers `Unimplemented`.
+
+1. **Auth Core JWT** (`ORCHESTRATOR_CORE_AUTH_AUDIENCES`, `AUTH_CORE_ISSUER`,
+   `AUTH_CORE_JWKS_URL`). Tenancy comes from the verified principal and
+   overwrites whatever `input` carries; a conflicting `org_id` is denied.
+   User principals may start run-scoped workflows; service principals need
+   `orchestration:workflow:start`, plus `orchestration:workflow:start:global`
+   for registry-wide ones. `user_id` from a service principal is refused — a
+   workload run is org-scoped, never viewer-scoped.
+2. **Model-Plane-local internal secret**
+   (`ORCHESTRATOR_INTERNAL_SERVICE_TOKEN` +
+   `ORCHESTRATOR_INTERNAL_SERVICE_ORGS`), presented in the
+   `x-model-plane-internal-token` metadata header. For hops with no live
+   per-user bearer — capability-core's cron task dispatcher. Both variables are
+   required: there is no wildcard org, so a leaked secret cannot reach another
+   tenant. It can never start registry-wide workflows.
+
+### Workflow id
+
+`mp-wf/<Type>/<sha256(org_id)[:32]>/<anchor>` where the anchor is `run_id`, or
+`idempotency_key` when supplied. Started with
+`WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING`, so a retried or redelivered start
+re-attaches to the existing execution instead of double-starting a run. The org
+is hashed (not interpolated) because org ids come from a JWT claim: hashing keeps
+the id bounded and separator-safe while still guaranteeing two organizations can
+never collide.
+
+`run_id` must be a single NATS subject token. Run lifecycle events publish to
+`mp.v1.run.<run_id>.event` and consumers subscribe to `mp.v1.run.*.event`, where
+`*` matches exactly one token — a dotted run id would publish RUN_COMPLETED where
+nothing is listening.
+
+---
+
 ## Proto generation
 
 Generated files live in the `gen` module:
@@ -180,6 +243,10 @@ Key environment variables (defaults in `internal/config/config.go`):
 | `SANDBOX_MANAGER_ADDR` | `localhost:50054` | sandbox-manager gRPC endpoint |
 | `BROWSER_BROKER_ADDR` | `localhost:50055` | browser-broker gRPC endpoint |
 | `LETTA_BRIDGE_ADDR` | `localhost:50056` | letta-bridge gRPC endpoint |
+| `ORCHESTRATOR_GRPC_ADDR` | `:9080` | gRPC listener for both served services |
+| `ORCHESTRATOR_CORE_AUTH_AUDIENCES` | `orchestrator-core` | Comma-separated token audiences `StartWorkflow` accepts |
+| `ORCHESTRATOR_INTERNAL_SERVICE_TOKEN` | — | Model-Plane-local secret for `StartWorkflow`; requires the org list below |
+| `ORCHESTRATOR_INTERNAL_SERVICE_ORGS` | — | Comma-separated orgs that secret may start work for; no wildcard |
 
 ---
 

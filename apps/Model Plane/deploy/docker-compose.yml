@@ -295,6 +295,38 @@ services:
       # host-published port staying bound to 127.0.0.1).
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
       QUARRY_EDGE_TIMEOUT_SECS: ${QUARRY_EDGE_TIMEOUT_SECS:-30}
+      # Deep research (composer "Dyp research" → `deepResearch: true` on
+      # /v1/invoke/stream). Runs plan → concurrent search → concurrent read →
+      # synthesize inside the gateway (see rust/services/model-gateway/src/
+      # deep_research.rs) and emits a cited `document` artifact. It rides the
+      # SAME quarry-edge above — with QUARRY_EDGE_URL unset the pipeline reports
+      # that research could not run instead of answering as if it had.
+      #
+      # Every var below is a SPEND LIMIT, not a tuning knob: the pipeline fans
+      # out over the network and then pays for a large-context inference, so an
+      # unbounded phase is an unbounded bill. Each is clamped in code to a hard
+      # ceiling, so a typo cannot turn one chat turn into an unbounded spend —
+      # the values here are the documented defaults, not the enforcement.
+      #   sub-queries planned+searched  (ceiling 10)
+      DEEP_RESEARCH_MAX_SUB_QUERIES: ${DEEP_RESEARCH_MAX_SUB_QUERIES:-6}
+      #   pages fetched and read        (ceiling 16)
+      DEEP_RESEARCH_MAX_PAGES: ${DEEP_RESEARCH_MAX_PAGES:-8}
+      #   characters kept per page      (ceiling 20000; also bounded upstream by
+      #   tool_loop's own 4000-char fetch_url truncation)
+      DEEP_RESEARCH_PAGE_CHARS: ${DEEP_RESEARCH_PAGE_CHARS:-4000}
+      #   total evidence admitted into the synthesis prompt (ceiling 120000) —
+      #   the number that actually bounds the inference cost
+      DEEP_RESEARCH_CORPUS_CHARS: ${DEEP_RESEARCH_CORPUS_CHARS:-40000}
+      #   wall clock for the whole pipeline (ceiling 600). On expiry it
+      #   synthesizes from what it holds and says the budget ran out.
+      DEEP_RESEARCH_TIMEOUT_SECS: ${DEEP_RESEARCH_TIMEOUT_SECS:-120}
+      #   output tokens for the report itself (ceiling 16384)
+      DEEP_RESEARCH_REPORT_TOKENS: ${DEEP_RESEARCH_REPORT_TOKENS:-4096}
+      #   model tier for the cheap sub-query decomposition. Splitting a question
+      #   into search phrases is a rewrite task the user never reads, so it uses
+      #   the intent layer's cheapest mode; the REPORT is written by the turn's
+      #   own model, never this one.
+      DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-velion-budget}
       # Local semantic-response cache (Dragonfly exact-match). Default ON,
       # pointing at the Model Plane Dragonfly; set empty to disable. If the
       # managed Redis LangCache (LANGCACHE_URL/_CACHE_ID/_API_KEY) is configured
@@ -698,7 +730,8 @@ services:
       dockerfile: services/orchestrator-core/Dockerfile
       args: *build-metadata
     ports:
-      - "127.0.0.1:8084:8084"
+      - "127.0.0.1:8084:8084"   # HTTP health
+      - "127.0.0.1:9080:9080"   # gRPC (OrchestrationCoreService + OrchestratorWorkflowService)
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       NATS_URL: nats://nats:4222
@@ -718,6 +751,27 @@ services:
       # logs a WARN: ratings survive only until the next restart, so a skill can
       # never accumulate enough samples to be promoted.
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      # --- StartWorkflow (OrchestratorWorkflowService) -----------------------
+      # The production entry point into the durable Temporal tier. It is the ONLY
+      # locally-authenticated RPC here; the OrchestrationCoreService methods stay
+      # session-core proxies that forward the caller's credential.
+      #
+      # Audience of the Auth Core JWTs StartWorkflow accepts. NOTE: `orchestrator-core`
+      # is not yet a mintable audience in auth-core's PlaneAudience union, so no
+      # such token can be issued today — the JWT path is code-complete but
+      # unusable until Control Plane adds it. Until then the internal credential
+      # below is the working path.
+      ORCHESTRATOR_CORE_AUTH_AUDIENCES: ${ORCHESTRATOR_CORE_AUTH_AUDIENCES:-orchestrator-core}
+      # Model-Plane-local shared secret for hops with no live per-user bearer
+      # (capability-core's cron task dispatcher). Same pattern as
+      # MCP_OAUTH_SERVICE_TOKEN. Must match capability-core's value below.
+      # BOTH this and the org list must be set or the path stays disabled: a
+      # secret with no org allowlist would be an unbounded credential.
+      ORCHESTRATOR_INTERNAL_SERVICE_TOKEN: ${ORCHESTRATOR_INTERNAL_SERVICE_TOKEN:-}
+      # Comma-separated organizations the internal credential may start work
+      # for. There is no wildcard, so a leaked secret still cannot reach another
+      # tenant.
+      ORCHESTRATOR_INTERNAL_SERVICE_ORGS: ${ORCHESTRATOR_INTERNAL_SERVICE_ORGS:-}
     depends_on:
       temporal:
         condition: service_healthy
@@ -773,6 +827,48 @@ services:
       # MCP_OAUTH_SERVICE_TOKEN above. Empty disables that one path; the
       # per-user JWT path is unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # Backends for the /commands delegation AND — the reason they are now set
+      # — the G7 learning-review consumer. startLearningConsumer is a no-op when
+      # either address is empty, so with these unset the RUN_COMPLETED consumer
+      # never even subscribed: it logged "learning-review consumer disabled" once
+      # at boot and was silent forever after, which reads exactly like a healthy
+      # consumer that has had nothing to do.
+      SESSION_CORE_ADDR: ${SESSION_CORE_ADDR:-session-core:9091}
+      INFERENCE_CORE_ADDR: ${INFERENCE_CORE_ADDR:-inference-core:9092}
+      # Auth Core service JWTs for those two backends. Both cores authenticate
+      # every RPC, so without these the learning review dies on its first
+      # transcript read with "verified caller credential required" — the events
+      # arrive, the review never runs. `session-core` and `inference-core` are
+      # already mintable plane audiences, so this needs only a service-principal
+      # registry entry in Auth Core (PLANE_SERVICE_PRINCIPALS_JSON), no code.
+      # Required scopes: session:read + session:skills:write (session-core),
+      # inference:invoke (inference-core).
+      SESSION_CORE_SERVICE_TOKEN: ${CAPABILITY_CORE_SESSION_CORE_SERVICE_TOKEN:-}
+      INFERENCE_CORE_SERVICE_TOKEN: ${CAPABILITY_CORE_INFERENCE_CORE_SERVICE_TOKEN:-}
+      # --- cron -> durable run hand-off --------------------------------------
+      # The cron sweeper fires due schedules into `tasks`; the task executor
+      # claims them and turns each into a durable Temporal run through
+      # orchestrator-core's StartWorkflow RPC. That RPC is what closes the loop:
+      # the run's CompleteRunActivity emits RUN_COMPLETED, which is what the
+      # learning-review consumer in this service has always been waiting for.
+      ORCHESTRATOR_WORKFLOW_ADDR: ${ORCHESTRATOR_WORKFLOW_ADDR:-orchestrator-core:9080}
+      # Must equal orchestrator-core's ORCHESTRATOR_INTERNAL_SERVICE_TOKEN, and
+      # that side must list this deployment's org(s) in
+      # ORCHESTRATOR_INTERNAL_SERVICE_ORGS. Unset ⇒ no workflow dispatch ⇒ the
+      # task executor stays OFF (see below) rather than stranding tasks.
+      ORCHESTRATOR_INTERNAL_SERVICE_TOKEN: ${ORCHESTRATOR_INTERNAL_SERVICE_TOKEN:-}
+      # Workflow a fired task runs when its cron template names none.
+      TASK_DEFAULT_WORKFLOW_TYPE: ${TASK_DEFAULT_WORKFLOW_TYPE:-InteractiveRunSupervision}
+      # Tri-state, deliberately left unset by default:
+      #   unset  -> ON when the workflow dispatcher above is configured, OFF
+      #             otherwise. This is the safe default: the executor runs only
+      #             when it can actually complete the hand-off.
+      #   "false" -> always OFF.
+      #   "true"  -> always ON, even publish-only. Only for a deployment that
+      #             runs its own mp.v1.capability.task.dispatched consumer; this
+      #             repository does not ship one, and without it claimed tasks
+      #             stay in `running`.
+      TASK_EXECUTOR_ENABLED: ${TASK_EXECUTOR_ENABLED:-}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
     depends_on:
@@ -780,6 +876,8 @@ services:
         condition: service_healthy
       dragonfly:
         condition: service_healthy
+      orchestrator-core:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/healthz"]
       interval: 10s

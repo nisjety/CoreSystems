@@ -1,7 +1,10 @@
 // Package config provides environment-based configuration for orchestrator-core.
 package config
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // Config holds all configuration values read from the environment.
 type Config struct {
@@ -19,6 +22,27 @@ type Config struct {
 	// OrchestratorGRPCAddr is the listen address for the orchestrator-core
 	// gRPC server (mpv1.OrchestrationCoreService).
 	OrchestratorGRPCAddr string
+
+	// --- StartWorkflow authentication -------------------------------------
+	// These configure the ONLY locally-authenticated RPC on this server. The
+	// read proxies keep forwarding the caller's credential to session-core and
+	// are unaffected.
+
+	// AuthIssuer / AuthJWKSURL are the Auth Core trust boundary. Absent, the
+	// JWT path is unavailable (StartWorkflow refuses rather than opening up).
+	AuthIssuer  string
+	AuthJWKSURL string
+	// AuthAudiences is the comma-separated list of accepted token audiences.
+	AuthAudiences []string
+
+	// InternalServiceToken is the Model-Plane-local shared secret accepted on
+	// StartWorkflow for hops that have no live per-user bearer (the cron task
+	// dispatcher). Mirrors MCP_OAUTH_SERVICE_TOKEN. Empty disables the path.
+	InternalServiceToken string
+	// InternalServiceOrgs bounds that secret to an explicit set of
+	// organizations. There is no wildcard; an empty list disables the path even
+	// when a token is set, so the credential can never be unbounded.
+	InternalServiceOrgs []string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -36,6 +60,13 @@ func Load() Config {
 		TaskQueue:          envOrDefault("TEMPORAL_TASK_QUEUE", "model-plane-orchestrator"),
 
 		OrchestratorGRPCAddr: envOrDefault("ORCHESTRATOR_GRPC_ADDR", ":9080"),
+
+		AuthIssuer:    strings.TrimSpace(os.Getenv("AUTH_CORE_ISSUER")),
+		AuthJWKSURL:   strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL")),
+		AuthAudiences: splitList(envOrDefault("ORCHESTRATOR_CORE_AUTH_AUDIENCES", "orchestrator-core")),
+
+		InternalServiceToken: strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_TOKEN")),
+		InternalServiceOrgs:  splitList(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_ORGS")),
 	}
 }
 
@@ -44,4 +75,17 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitList parses a comma-separated env value, dropping blanks so a trailing
+// comma or an all-whitespace value reads as "not configured".
+func splitList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
