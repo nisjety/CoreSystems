@@ -14,8 +14,13 @@ import {
   Sparkles,
   Sun,
 } from 'lucide-solid'
-import { createEffect, createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
 import { CoreNavbarPanel, type CoreNavbarPanelKind } from '@/features/core/components/CoreNavbarPanels'
+import {
+  readChatThreadHistory,
+  selectChatThread,
+  type ChatThreadHistoryItem,
+} from '@/features/chat/lib/chat-thread-history'
 import { getNavbarLabels, type VelionRoute, type WorkspaceIdentity } from '@/features/core/lib/shell-data'
 import { signOut } from '@/shared/api/auth-client'
 import {
@@ -323,6 +328,26 @@ function GlobalSearchDialog(props: {
   const [query, setQuery] = createSignal('')
   const [results, setResults] = createSignal<NavbarSearchResult[]>([])
 
+  /**
+   * The user's own chat history, searched client-side (it already lives in
+   * local storage — see chat-thread-history.ts) by title/preview text. A
+   * DISTINCT result group alongside the knowledge search below, never a
+   * replacement for it: this memo and `results()` are independent, and the
+   * "no matches" fallback only shows when BOTH are empty.
+   */
+  const chatMatches = createMemo<ChatThreadHistoryItem[]>(() => {
+    const trimmed = query().trim().toLowerCase()
+    if (trimmed.length < 2) return []
+    return readChatThreadHistory()
+      .filter((item) => item.title.toLowerCase().includes(trimmed) || item.preview.toLowerCase().includes(trimmed))
+      .slice(0, 5)
+  })
+
+  const openChatMatch = (threadId: string) => {
+    selectChatThread(threadId)
+    props.onNavigate('/chat')
+  }
+
   createEffect(() => {
     const trimmed = query().trim()
     window.clearTimeout(searchTimer)
@@ -392,9 +417,27 @@ function GlobalSearchDialog(props: {
             >
               <Show when={!error()} fallback={<EmptySearchPanel text={error() ?? i18n.tr('Søk feilet.', 'Search failed.')} />}>
                 <Show
-                  when={results().length > 0}
+                  when={results().length > 0 || chatMatches().length > 0}
                   fallback={<EmptySearchPanel text={i18n.tr('Ingen matchende kunnskapsoppføringer.', 'No matching knowledge records.')} />}
                 >
+                  <Show when={chatMatches().length > 0}>
+                    <div class="core-search-overlay__group-label">{i18n.tr('Dine samtaler', 'Your chats')}</div>
+                    <For each={chatMatches()}>
+                      {(item) => (
+                        <button
+                          type="button"
+                          class="core-search-result"
+                          onClick={() => openChatMatch(item.threadId)}
+                        >
+                          <span>
+                            <strong>{item.title}</strong>
+                            <small>{item.preview}</small>
+                          </span>
+                          <em>{i18n.tr('Chat', 'Chat')}</em>
+                        </button>
+                      )}
+                    </For>
+                  </Show>
                   <For each={results()}>
                     {(result) => (
                       <button

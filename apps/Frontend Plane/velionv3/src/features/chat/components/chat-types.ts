@@ -28,12 +28,31 @@ export type ChatTab = 'chat' | 'sources' | 'artifacts' | 'steps'
 export type TaskStepStatus = 'done' | 'active' | 'waiting' | 'error' | 'stopped'
 export type IconComponent = (props: LucideProps) => JSX.Element
 
+/** One revision of an artifact, as emitted by a single `artifact` SSE event. */
+export type ChatArtifactVersion = {
+  content: string
+  title: string
+  version: number
+}
+
 export type ChatArtifact = {
   id: string
   kind: string
   content: string
   title: string
   version: number
+  /**
+   * Every revision received for this `id`, oldest → newest. The backend can
+   * re-emit the same `id` with a higher `version` when the model rewrites the
+   * artifact (canvas iteration); the top-level `content`/`title`/`version`
+   * always mirror the NEWEST revision so existing readers need no change, and
+   * this list is what the panel's `‹ v2/3 ›` stepper walks.
+   *
+   * Optional because artifacts restored from a thread snapshot written before
+   * versioning existed carry none — `artifactVersions()` in chat-artifacts.ts
+   * then treats the current fields as a single revision.
+   */
+  history?: ChatArtifactVersion[]
 }
 
 export type ChatToolCall = {
@@ -170,6 +189,13 @@ export type ChatTurn = {
   runId?: string
   /** Pending human-approval requests gating this agentic run's next tool. */
   pendingApprovals?: Approval[]
+  /**
+   * AI-generated follow-up question suggestions (composer chips), from the
+   * `follow_ups` SSE event. Session-only by design — not persisted into the
+   * thread transcript/history, so a reloaded thread simply shows none rather
+   * than stale suggestions for an answer the user has moved past.
+   */
+  followUps?: string[]
 }
 
 export type AgentTaskStep = {
@@ -226,17 +252,36 @@ export type SendOptions = {
   generateImage?: boolean
   appendUser?: boolean
   tools?: ComposerToolId[]
+  /**
+   * Temporary chat (Zero Data Retention): the request opts the whole turn
+   * out of persistence server-side, and the thread this turn belongs to is
+   * marked temporary client-side too (see `isTemporaryThread` in
+   * use-chat-controller.ts) — no history entry, no transcript cache, no
+   * server snapshot, no title/follow-up generation.
+   */
+  zdr?: boolean
 }
 
 export type EvidenceSource = (Citation & { kind: 'web' }) | ChatGroundingSource
+
+export type MarkdownListItem = {
+  /** Nesting level derived from leading indentation (0 = top level). */
+  depth: number
+  /** Marker family of this item; nested items may differ from the block's. */
+  ordered: boolean
+  text: string
+}
+
+export type MarkdownTableAlign = 'center' | 'left' | 'right' | null
 
 export type MarkdownBlock =
   | { kind: 'code'; lang: string; text: string }
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'hr' }
-  | { kind: 'list'; ordered: boolean; items: string[] }
+  | { kind: 'list'; ordered: boolean; items: MarkdownListItem[] }
   | { kind: 'paragraph'; text: string }
   | { kind: 'quote'; text: string }
+  | { kind: 'table'; align: MarkdownTableAlign[]; header: string[]; rows: string[][] }
 
 // ── Prompt chips ──────────────────────────────────────────────────────────────
 

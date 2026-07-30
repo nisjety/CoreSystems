@@ -8,6 +8,10 @@ import {
   type JSX,
 } from 'solid-js'
 import {
+  imageArtifactSrc,
+  looksLikeImageContent,
+} from './chat-artifacts'
+import {
   createId,
 } from './chat-normalizers'
 import {
@@ -25,6 +29,8 @@ import {
   type GeneratedFile,
   type GeneratedImagePreview,
   type MarkdownBlock,
+  type MarkdownListItem,
+  type MarkdownTableAlign,
   PROSE_ARTIFACT_KINDS,
   type TaskStepStatus,
 } from './chat-types'
@@ -50,10 +56,14 @@ export function collectArtifacts(turns: ChatTurn[]): ChatArtifact[] {
 }
 
 export function selectGeneratedFileForArtifact(artifact: ChatArtifact, turn: ChatTurn): GeneratedFile | undefined {
+  // An exact id/url match pairs ANY generated file with its artifact, not just
+  // images: a `spreadsheet`/`file` artifact and its `attachment` event share the
+  // id, and the attachment is the only place the real filename, MIME type, and
+  // byte size are reported.
+  const exactAny = (turn.files ?? []).find((file) => file.id === artifact.id || file.url === artifact.content)
+  if (exactAny) return exactAny
   const imageFiles = (turn.files ?? []).filter(isGeneratedImageFile)
   if (imageFiles.length === 0) return undefined
-  const exact = imageFiles.find((file) => file.id === artifact.id || file.url === artifact.content)
-  if (exact) return exact
   if (!isImageArtifact(artifact)) return undefined
   const imageArtifacts = (turn.artifacts ?? []).filter(isImageArtifact)
   const imageIndex = imageArtifacts.findIndex((item) => item.id === artifact.id)
@@ -109,7 +119,13 @@ export function collectLatestGrounding(turns: ChatTurn[]): ChatKnowledgeGroundin
 }
 
 export function selectLatestImageArtifact(turns: ChatTurn[]): ChatArtifact | null {
-  const images = collectArtifacts(turns).filter((artifact) => artifact.kind.toLowerCase() === 'image')
+  // A content-less image artifact is an announced-but-never-delivered payload
+  // (see normalizeArtifact); rendering it as the live agent screen would show a
+  // broken image, so only artifacts with real bytes qualify. The Artefakter
+  // panel is where the failure is reported.
+  const images = collectArtifacts(turns).filter((artifact) => (
+    artifact.kind.toLowerCase() === 'image' && artifact.content.trim().length > 0
+  ))
   return images.at(-1) ?? null
 }
 
@@ -140,7 +156,9 @@ export function buildGeneratedImagePreviews(
     .map((preview) => preview.artifactId)
     .filter((id): id is string => Boolean(id))
   const artifactPreviews = imageArtifacts
-    .filter((artifact) => !pairedArtifactIds.includes(artifact.id))
+    // Skip announced-but-empty artifacts: `imageArtifactSrc('')` would yield a
+    // header-only data URI and render as a broken image in the message.
+    .filter((artifact) => !pairedArtifactIds.includes(artifact.id) && artifact.content.trim().length > 0)
     .map((artifact) => {
       const src = imageArtifactSrc(artifact.content)
       const title = generatedImageTitle(artifact.title, content)
@@ -398,19 +416,13 @@ export function normalizeTaskStatus(status?: string): TaskStepStatus {
 }
 
 export function inferArtifactKind(content: string) {
-  if (content.startsWith('data:image') || /^https?:\/\/\S+\.(?:png|jpe?g|gif|webp|svg)/i.test(content)) return 'image'
-  return 'text'
+  return looksLikeImageContent(content) ? 'image' : 'text'
 }
 
 export function artifactTitle(kind: string) {
   if (kind === 'image') return 'Generated image'
   if (PROSE_ARTIFACT_KINDS.has(kind)) return 'Generated document'
   return 'Artifact'
-}
-
-export function imageArtifactSrc(content: string) {
-  if (/^(data:|blob:|https?:\/\/)/i.test(content)) return content
-  return `data:image/png;base64,${content}`
 }
 
 export function isValidUrl(url: string): boolean {
@@ -490,6 +502,29 @@ export function formatTime(value: string) {
 export function formatLatency(ms: number) {
   if (ms < 1000) return `${Math.round(ms)} ms`
   return `${(ms / 1000).toFixed(1)} s`
+}
+
+/**
+ * Formats a per-turn USD cost for the quiet metrics badge (see
+ * `MessageMetricsBadge` in ChatMessages.tsx), mirroring the precision
+ * convention already used by the cost dashboard's local `fmtUsd`
+ * (CostDashboardPage.tsx): more decimals for sub-cent amounts so a
+ * genuinely nonzero cost is never rounded down to "$0". Trailing zeros are
+ * trimmed so a clean value like 0.0031 renders as "$0.0031", not
+ * "$0.003100", keeping the badge to a handful of significant digits.
+ */
+export function formatUsd(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  if (value === 0) return '$0.00'
+  if (value >= 1) return `$${value.toFixed(2)}`
+  let decimals = value < 0.01 ? 6 : 4
+  let fixed = value.toFixed(decimals)
+  while (Number(fixed) === 0 && decimals < 12) {
+    decimals += 2
+    fixed = value.toFixed(decimals)
+  }
+  const trimmed = fixed.replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')
+  return `$${trimmed}`
 }
 
 export function prettyModel(model: string) {
@@ -601,8 +636,15 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue
     }
 
+    const table = parseTable(lines, index)
+    if (table) {
+      blocks.push(table.block)
+      index = table.next
+      continue
+    }
+
     const paragraph: string[] = []
-    while (index < lines.length && lines[index]?.trim() && !isMarkdownBlockStart(lines[index] ?? '')) {
+    while (index < lines.length && lines[index]?.trim() && !isMarkdownBlockStart(lines[index] ?? '', lines[index + 1])) {
       paragraph.push(lines[index] ?? '')
       index += 1
     }
@@ -612,27 +654,128 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   return blocks
 }
 
+const LIST_ITEM_PATTERN = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/
+
 export function parseList(lines: string[], start: number): { block: Extract<MarkdownBlock, { kind: 'list' }>; next: number } | null {
-  const first = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(lines[start] ?? '')
+  const first = LIST_ITEM_PATTERN.exec(lines[start] ?? '')
   if (!first) return null
-  const ordered = /\d+[.)]/.test(first[2] ?? '')
-  const items: string[] = []
+  const ordered = isOrderedListMarker(first[2] ?? '')
+  const items: MarkdownListItem[] = []
   let index = start
   while (index < lines.length) {
-    const match = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(lines[index] ?? '')
-    if (!match || /\d+[.)]/.test(match[2] ?? '') !== ordered) break
-    items.push(match[3] ?? '')
+    const match = LIST_ITEM_PATTERN.exec(lines[index] ?? '')
+    if (!match) break
+    const depth = listIndentDepth(match[1] ?? '')
+    const itemOrdered = isOrderedListMarker(match[2] ?? '')
+    // Switching marker family at the top level starts a new list; nested items
+    // may freely mix bullets and numbers under either parent.
+    if (depth === 0 && itemOrdered !== ordered) break
+    items.push({ depth, ordered: itemOrdered, text: match[3] ?? '' })
     index += 1
   }
   return { block: { kind: 'list', ordered, items }, next: index }
 }
 
-export function isMarkdownBlockStart(line: string) {
+function isOrderedListMarker(marker: string): boolean {
+  return /^\d+[.)]$/.test(marker)
+}
+
+function listIndentDepth(indent: string): number {
+  const width = indent.replace(/\t/g, '  ').length
+  return Math.min(6, Math.floor(width / 2))
+}
+
+/**
+ * GFM pipe table: a header row followed by a delimiter row (`|---|:--:|`),
+ * then body rows. The delimiter row is the confirmation — a line that merely
+ * contains a pipe never starts a table. Ragged body rows are normalized to
+ * the header width (missing cells padded, excess cells dropped) per GFM.
+ */
+export function parseTable(lines: string[], start: number): { block: Extract<MarkdownBlock, { kind: 'table' }>; next: number } | null {
+  const header = splitTableRow(lines[start] ?? '')
+  if (!header) return null
+  const align = parseTableDelimiterRow(lines[start + 1] ?? '')
+  if (!align || align.length !== header.length) return null
+  const rows: string[][] = []
+  let index = start + 2
+  while (index < lines.length) {
+    const cells = splitTableRow(lines[index] ?? '')
+    if (!cells) break
+    rows.push(normalizeTableRow(cells, header.length))
+    index += 1
+  }
+  return { block: { kind: 'table', align, header, rows }, next: index }
+}
+
+/**
+ * Splits one table row into trimmed cells. Returns null when the line cannot
+ * be a table row (blank, or no unescaped pipe). Leading/trailing pipes are
+ * optional; `\|` escapes a literal pipe inside a cell.
+ */
+export function splitTableRow(line: string): string[] | null {
+  const trimmed = line.trim()
+  if (!trimmed || !trimmed.includes('|')) return null
+  const raw: string[] = []
+  let current = ''
+  let index = 0
+  while (index < trimmed.length) {
+    const char = trimmed[index]
+    if (char === '\\' && trimmed[index + 1] === '|') {
+      current += '|'
+      index += 2
+      continue
+    }
+    if (char === '|') {
+      raw.push(current)
+      current = ''
+      index += 1
+      continue
+    }
+    current += char
+    index += 1
+  }
+  raw.push(current)
+  const startAt = trimmed.startsWith('|') ? 1 : 0
+  const endAt = raw.length > startAt && trimmed.endsWith('|') && !trimmed.endsWith('\\|') ? raw.length - 1 : raw.length
+  const cells = raw.slice(startAt, endAt).map((cell) => cell.trim())
+  return cells.length > 0 ? cells : null
+}
+
+/** Parses `|---|:--:|--:|` into per-column alignment; null when not a delimiter row. */
+export function parseTableDelimiterRow(line: string): MarkdownTableAlign[] | null {
+  const cells = splitTableRow(line)
+  if (!cells) return null
+  const align: MarkdownTableAlign[] = []
+  for (const cell of cells) {
+    const match = /^(:?)-+(:?)$/.exec(cell)
+    if (!match) return null
+    const left = match[1] === ':'
+    const right = match[2] === ':'
+    align.push(left && right ? 'center' : right ? 'right' : left ? 'left' : null)
+  }
+  return align
+}
+
+export function isTableStart(line: string, nextLine?: string): boolean {
+  const header = splitTableRow(line)
+  if (!header) return false
+  const align = parseTableDelimiterRow(nextLine ?? '')
+  return align != null && align.length === header.length
+}
+
+function normalizeTableRow(cells: string[], width: number): string[] {
+  if (cells.length === width) return cells
+  if (cells.length > width) return cells.slice(0, width)
+  return [...cells, ...Array.from({ length: width - cells.length }, () => '')]
+}
+
+export function isMarkdownBlockStart(line: string, nextLine?: string) {
   return /^\s*```/.test(line)
     || /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
     || /^#{1,6}\s+/.test(line)
     || /^\s*>\s?/.test(line)
     || /^(\s*)([-*+]|\d+[.)])\s+/.test(line)
+    || isTableStart(line, nextLine)
 }
 
 export function parseInline(text: string): Array<string | JSX.Element> {

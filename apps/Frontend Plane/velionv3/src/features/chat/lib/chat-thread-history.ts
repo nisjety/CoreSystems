@@ -21,18 +21,33 @@ const maxPreviewLength = 180
 const maxTranscriptContentLength = 32_000
 const maxTranscriptDetailLength = 32_000
 
+/**
+ * How a history item's title was produced.
+ * - `generated`: AI summary from the model-gateway `title` SSE event — locked:
+ *   a later `preview` write must not clobber it.
+ * - `preview`: truncated first user message (the fallback).
+ * Absent on legacy stored items; treated as `preview`.
+ */
+export type ChatThreadTitleKind = 'generated' | 'preview'
+
 export type ChatThreadHistoryItem = {
   preview: string
   threadId: string
   title: string
+  titleKind?: ChatThreadTitleKind
   updatedAt: string
+  /** User-pinned to the top of the sidebar (see `togglePinnedChatThread`). Local-only — never synced from the server. */
+  pinned?: boolean
 }
 
 export type ChatThreadHistoryInput = {
   preview?: string
   threadId: string
   title?: string
+  titleKind?: ChatThreadTitleKind
   updatedAt?: string
+  /** Omit to leave the stored pin state untouched (see `withPinnedCarry`). */
+  pinned?: boolean
 }
 
 export type ChatThreadTranscriptTurn = {
@@ -116,26 +131,61 @@ export function upsertChatThreadHistory(input: ChatThreadHistoryInput): ChatThre
   const item = normalizeHistoryInput(input)
   if (!item) return readChatThreadHistory()
 
-  const next = [
-    item,
-    ...readChatThreadHistory().filter((candidate) => candidate.threadId !== item.threadId),
-  ].slice(0, maxThreadHistoryItems)
+  const existing = readChatThreadHistory()
+  const current = existing.find((candidate) => candidate.threadId === item.threadId)
+  const resolved = withPinnedCarry(withTitleLock(item, current), current)
+
+  // Replace in place, then order by activity. Position derives from
+  // `updatedAt`, never from write order — selecting an old thread rewrites its
+  // entry (self-heal) without hoisting it to the top.
+  const merged = current
+    ? existing.map((candidate) => (candidate.threadId === resolved.threadId ? resolved : candidate))
+    : [resolved, ...existing]
+  const next = sortByUpdatedAtDesc(merged).slice(0, maxThreadHistoryItems)
 
   writeClientJson(CHAT_THREAD_HISTORY_KEY, next)
   dispatchClientEvent(CHAT_THREAD_HISTORY_CHANGED_EVENT, { sessions: next })
   return next
 }
 
+/**
+ * Toggle whether a thread is pinned to the top of the sidebar. A no-op when
+ * the thread has no history entry (nothing to pin). Goes through
+ * {@link upsertChatThreadHistory} so the title lock, sort, and
+ * change-event dispatch all stay in the one place that already owns them.
+ */
+export function togglePinnedChatThread(threadId: string): ChatThreadHistoryItem[] {
+  const normalized = normalizeId(threadId)
+  if (!normalized) return readChatThreadHistory()
+  const current = readChatThreadHistory().find((item) => item.threadId === normalized)
+  if (!current) return readChatThreadHistory()
+  return upsertChatThreadHistory({
+    threadId: current.threadId,
+    title: current.title,
+    titleKind: current.titleKind,
+    preview: current.preview,
+    updatedAt: current.updatedAt,
+    pinned: !current.pinned,
+  })
+}
+
 export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): ChatThreadHistoryItem[] {
+  const stored = readChatThreadHistory()
   const seen = new Set<string>()
-  const next: ChatThreadHistoryItem[] = []
+  const collected: ChatThreadHistoryItem[] = []
   for (const input of inputs) {
     const item = normalizeHistoryInput(input)
     if (!item || seen.has(item.threadId)) continue
     seen.add(item.threadId)
-    next.push(item)
-    if (next.length >= maxThreadHistoryItems) break
+    // Server session lists carry no titleKind or pin state (pinning is
+    // local-only); without these locks a sidebar refresh racing the debounced
+    // server snapshot would clobber a freshly generated title, and a full
+    // server-session resync would silently unpin every pinned thread.
+    const matchingStored = stored.find((candidate) => candidate.threadId === item.threadId)
+    collected.push(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored))
+    if (collected.length >= maxThreadHistoryItems) break
   }
+  const next = sortByUpdatedAtDesc(collected)
 
   writeClientJson(CHAT_THREAD_HISTORY_KEY, next)
   dispatchClientEvent(CHAT_THREAD_HISTORY_CHANGED_EVENT, { sessions: next })
@@ -199,12 +249,75 @@ function normalizeHistoryInput(input: ChatThreadHistoryInput): ChatThreadHistory
   const threadId = normalizeId(input.threadId)
   if (!threadId) return null
 
+  const titleKind = normalizeTitleKind(input.titleKind)
   return {
     threadId,
     title: normalizeDisplayText(input.title, 'Velion Chat', maxTitleLength),
+    ...(titleKind ? { titleKind } : {}),
     preview: normalizeDisplayText(input.preview, 'Open live session', maxPreviewLength),
     updatedAt: normalizeTimestamp(input.updatedAt),
+    // Only present when the caller explicitly passed a boolean — absent
+    // (undefined) means "unspecified", which `withPinnedCarry` resolves
+    // against whatever is already stored rather than treating it as unpin.
+    ...(typeof input.pinned === 'boolean' ? { pinned: input.pinned } : {}),
   }
+}
+
+function normalizeTitleKind(value: ChatThreadTitleKind | undefined): ChatThreadTitleKind | undefined {
+  return value === 'generated' || value === 'preview' ? value : undefined
+}
+
+/**
+ * Title lock: an AI-generated title survives every write whose own title is
+ * merely a preview (periodic snapshots, server session syncs, legacy callers).
+ * Only a newer `generated` title may replace it.
+ */
+function withTitleLock(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (current?.titleKind === 'generated' && item.titleKind !== 'generated') {
+    return { ...item, title: current.title, titleKind: 'generated' }
+  }
+  return item
+}
+
+/**
+ * Pin carry, mirroring {@link withTitleLock}: the vast majority of writes
+ * (periodic snapshots, server-session resyncs) never mention `pinned` at
+ * all, and must not silently unpin an item the user pinned earlier. Only an
+ * input that explicitly set `pinned` (`togglePinnedChatThread`, or a caller
+ * that legitimately knows the pin state) may change it — a `false` there
+ * still drops the key entirely so an unpinned item's stored shape is
+ * identical to one that was never pinned.
+ */
+function withPinnedCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (item.pinned !== undefined) {
+    if (item.pinned) return item
+    const unpinned: ChatThreadHistoryItem = { ...item }
+    delete unpinned.pinned
+    return unpinned
+  }
+  return current?.pinned ? { ...item, pinned: true } : item
+}
+
+/**
+ * Order history by pin state, then by activity (`updatedAt` descending)
+ * within each tier: pinned items first, unpinned after. Stable within each
+ * tier: equal timestamps keep their relative order, so a rewrite that
+ * preserves the timestamp also preserves position — selection never reads as
+ * activity. With no pinned items this is exactly the original single-tier
+ * sort, so every caller that never pins anything is unaffected.
+ */
+function sortByUpdatedAtDesc(items: ChatThreadHistoryItem[]): ChatThreadHistoryItem[] {
+  const byUpdatedAtDesc = (left: ChatThreadHistoryItem, right: ChatThreadHistoryItem) =>
+    Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
+  const pinned = items.filter((item) => item.pinned).sort(byUpdatedAtDesc)
+  const unpinned = items.filter((item) => !item.pinned).sort(byUpdatedAtDesc)
+  return [...pinned, ...unpinned]
 }
 
 function normalizeId(value: string | null | undefined): string | null {
@@ -365,9 +478,12 @@ function isChatThreadHistoryItem(value: unknown): value is ChatThreadHistoryItem
     Boolean(record.threadId.trim()) &&
     typeof record.title === 'string' &&
     Boolean(record.title.trim()) &&
+    // Optional so items stored before titleKind/pinned existed keep validating.
+    (record.titleKind === undefined || record.titleKind === 'generated' || record.titleKind === 'preview') &&
     typeof record.preview === 'string' &&
     typeof record.updatedAt === 'string' &&
-    !Number.isNaN(Date.parse(record.updatedAt))
+    !Number.isNaN(Date.parse(record.updatedAt)) &&
+    (record.pinned === undefined || typeof record.pinned === 'boolean')
   )
 }
 

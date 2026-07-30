@@ -17,20 +17,18 @@ import {
   type JSX,
 } from 'solid-js'
 import {
-  ChatMarkdown,
   TaskStep,
 } from './ChatMessages'
 import {
-  buildArtifactImageSpecs,
+  imageArtifactSrc,
+} from './chat-artifacts'
+import {
   formatTime,
-  generatedImageTitle,
   groupTaskSteps,
   hostname,
-  imageArtifactSrc,
 } from './chat-media-markdown'
 import {
   type AgentTaskStep,
-  type ArtifactPanelItem,
   type ChatArtifact,
   type ChatGroundingGraph,
   type ChatGroundingSource,
@@ -39,7 +37,6 @@ import {
   type Citation,
   type EvidenceSource,
   type IconComponent,
-  PROSE_ARTIFACT_KINDS,
 } from './chat-types'
 
 export function ChatHeader(props: {
@@ -226,90 +223,6 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
       <h2>{props.source.title || props.source.url}</h2>
       <Show when={props.source.snippet}><p>{props.source.snippet}</p></Show>
     </a>
-  )
-}
-
-export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
-  return (
-    <Show
-      when={props.items.length > 0}
-      fallback={(
-        <EmptyPanel
-          icon={<FileCode2 size={20} />}
-          title="Ingen artefakter ennå"
-          subtitle="Dokumenter, kode, bilder og andre artefakter Velion lager dukker opp her."
-        />
-      )}
-    >
-      <div class="velion-chat-panel">
-        <div class="velion-chat-panel__inner velion-chat-panel__inner--wide">
-          <For each={props.items}>
-            {(item) => <ArtifactCard item={item} />}
-          </For>
-        </div>
-      </div>
-    </Show>
-  )
-}
-
-export function ArtifactCard(props: { item: ArtifactPanelItem }) {
-  const [open, setOpen] = createSignal(true)
-  const [dimensions, setDimensions] = createSignal<string | null>(null)
-  const artifact = () => props.item.artifact
-  const file = () => props.item.file
-  const turn = () => props.item.turn
-  const kind = () => artifact().kind.toLowerCase()
-  const isImage = () => kind() === 'image'
-  const isProse = () => PROSE_ARTIFACT_KINDS.has(kind())
-  const imageSrc = () => imageArtifactSrc(artifact().content)
-  const title = () => isImage()
-    ? generatedImageTitle(artifact().title, turn().content, file()?.name)
-    : artifact().title || artifact().kind
-  const imageSpecs = () => buildArtifactImageSpecs(props.item, dimensions())
-
-  return (
-    <article class="velion-chat-artifact-card">
-      <button type="button" aria-expanded={open()} onClick={() => setOpen((value) => !value)}>
-        <FileCode2 size={16} />
-        <span>{title()}</span>
-        <em>{artifact().kind}</em>
-        <Show when={artifact().version > 0}>
-          <small>v{artifact().version}</small>
-        </Show>
-        <ChevronRight size={16} classList={{ 'velion-chat-rotate': open() }} />
-      </button>
-      <Show when={open()}>
-        <div class="velion-chat-artifact-card__body">
-          <Show
-            when={isImage()}
-            fallback={isProse()
-              ? <ChatMarkdown content={artifact().content} />
-              : <pre>{artifact().content}</pre>}
-          >
-            <div class="velion-chat-artifact-image">
-              <img
-                src={imageSrc()}
-                alt={title()}
-                onLoad={(event) => {
-                  const image = event.currentTarget
-                  setDimensions(`${image.naturalWidth} x ${image.naturalHeight}px`)
-                }}
-              />
-              <div class="velion-chat-artifact-specs" aria-label="Image specifications">
-                <For each={imageSpecs()}>
-                  {(spec) => (
-                    <div>
-                      <span>{spec.label}</span>
-                      <strong>{spec.value}</strong>
-                    </div>
-                  )}
-                </For>
-              </div>
-            </div>
-          </Show>
-        </div>
-      </Show>
-    </article>
   )
 }
 

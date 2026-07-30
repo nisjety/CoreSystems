@@ -1,4 +1,4 @@
-import { requestJson } from './http'
+import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 
@@ -79,6 +79,19 @@ export type ChatUsageEvent = {
   latencyMs?: number
   confidence?: number
 }
+/**
+ * AI-generated thread title, emitted once by model-gateway after a thread's
+ * FIRST exchange completes (before the terminal `done`). Already sanitized
+ * server-side: single line, no quotes/emoji, ≤64 chars.
+ */
+export type ChatTitleEvent = { title: string; requestId?: string }
+/**
+ * AI-generated follow-up question suggestions, emitted by model-gateway after
+ * (almost) every non-ZDR exchange completes (before the terminal `done`).
+ * Already sanitized server-side: 0-3 short questions, no quotes/emoji/
+ * numbering. Never emitted for a ZDR turn.
+ */
+export type ChatFollowUpsEvent = { suggestions: string[]; requestId?: string }
 
 export type ChatStreamHandlers = {
   onConnected?: (event: ChatConnectedEvent) => void
@@ -94,6 +107,8 @@ export type ChatStreamHandlers = {
   onToolResult?: (event: ChatToolResultEvent) => void
   onAttachment?: (event: ChatAttachmentEvent) => void
   onUsage?: (event: ChatUsageEvent) => void
+  onTitle?: (event: ChatTitleEvent) => void
+  onFollowUps?: (event: ChatFollowUpsEvent) => void
 }
 
 export type ChatMessage = {
@@ -274,6 +289,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     session_key: request.sessionKey?.trim() || threadId,
     browse_web: request.browseWeb ?? false,
     generate_image: request.generateImage ?? false,
+    // Sent as a real field, not just as the `agentic` feature above: the
+    // gateway needs it to mark the run itself (in-memory plan-mode store +
+    // session-core's durable `run.mode`). Without this the toggle only widened
+    // the feature set and nothing server-side could tell a planning run from an
+    // executing one.
+    plan_mode: request.planMode ?? false,
     attachments: request.attachments ?? [],
     features: [...features],
     tools,
@@ -392,6 +413,20 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         confidence: num(payload.confidence),
       })
       break
+    case 'title': {
+      const title = str(payload.title)?.trim()
+      if (title) handlers.onTitle?.({ title, requestId: str(payload.request_id) })
+      break
+    }
+    case 'follow_ups': {
+      const suggestions = Array.isArray(payload.suggestions)
+        ? payload.suggestions.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : []
+      if (suggestions.length > 0) {
+        handlers.onFollowUps?.({ suggestions, requestId: str(payload.request_id) })
+      }
+      break
+    }
     // STREAM_* envelopes are emitted by some upstreams and ignored gracefully.
   }
 }
@@ -750,13 +785,57 @@ export function groupChatModels(models: readonly ModelInfo[]): ModelGroup[] {
   return ordered
 }
 
+export type ChatFeedbackRating = 'positive' | 'negative'
+
+/**
+ * Rate one chat turn.
+ *
+ * Wire contract: `{requestId, rating, note}` → gateway → model-gateway
+ * `/v1/feedback`. `requestId` is the SSE turn id; model-gateway resolves it
+ * server-side to the durable run id and to the skill ids it injected into that
+ * turn. The client deliberately does NOT send skill ids — it does not reliably
+ * know them, and a client-asserted skill id would let a rating be aimed at any
+ * skill in the org.
+ *
+ * Rejects with {@link ApiError} on failure. Callers must surface that: a
+ * swallowed rejection is what made the UI light the thumb up while nothing was
+ * recorded.
+ */
 export async function submitFeedback(
   requestId: string,
-  rating: 'positive' | 'negative',
-  note?: string,
+  rating: ChatFeedbackRating,
+  options: { note?: string; runId?: string } = {},
 ): Promise<void> {
   await requestJson('/api/v1/chat/feedback', {
     method: 'POST',
-    body: JSON.stringify({ requestId, rating, note }),
+    body: JSON.stringify({
+      requestId,
+      rating,
+      note: options.note,
+      // Only agentic turns learn their durable run id (the `connected` event
+      // carries it). Sending it lets the rating still land as a run-only rating
+      // if the gateway no longer holds the turn record. It is not a trust
+      // shortcut: model-gateway still verifies run ownership server-side.
+      run_id: options.runId,
+    }),
   })
+}
+
+/**
+ * User-facing reason a rating did not stick. Keeps the wording in one place so
+ * the chat surface only has to decide *where* to show it.
+ */
+export function describeFeedbackFailure(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.code === 'turn_not_rateable') {
+      return 'Denne meldingen kan ikke vurderes lenger. Vurderingen ble ikke lagret.'
+    }
+    if (error.status === 401 || error.status === 403) {
+      return 'Du har ikke tilgang til å vurdere denne meldingen. Vurderingen ble ikke lagret.'
+    }
+    if (error.status === 412) {
+      return 'Vurderinger lagres ikke når Zero Data Retention er aktivt.'
+    }
+  }
+  return 'Kunne ikke lagre vurderingen. Prøv igjen.'
 }

@@ -13,6 +13,7 @@ export const workspaceSettingsSectionIds = [
   'skills',
   'plugins',
   'cron',
+  'memory',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -124,6 +125,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Planlagte kjøringer',
     description: 'Tidsstyrte oppgaver agenten kjører automatisk via cron-uttrykk. Sweeperen fyrer forfalte planer og beregner neste kjøring.',
     saveLabel: 'Lagre planer',
+  },
+  {
+    id: 'memory',
+    label: 'Minne',
+    title: 'Minne',
+    description: 'Se hva Velion har lagret om deg på tvers av alle samtaler, og slett det du ikke vil at agenten skal huske.',
+    saveLabel: 'Lagre',
   },
 ]
 

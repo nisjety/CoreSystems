@@ -6,14 +6,12 @@ import {
 } from 'solid-js'
 import {
   ArrowDown,
+  EyeOff,
   Square,
 } from 'lucide-solid'
 import {
   DashboardComposer,
 } from '@/features/dashboard/home/DashboardComposer'
-import {
-  submitFeedback,
-} from '@/shared/api/chat-client'
 import {
   DateDivider,
   EmptyChatState,
@@ -21,6 +19,8 @@ import {
 } from './ChatMessages'
 import {
   ArtifactsPanel,
+} from './ChatArtifactPanel'
+import {
   ChatHeader,
   ChatTabs,
   SourcesPanel,
@@ -30,6 +30,7 @@ import {
   shouldShowDateDivider,
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
+import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
 
 export default function ChatPage() {
   const {
@@ -47,6 +48,9 @@ export default function ChatPage() {
     handleComposerSubmit,
     handleStop,
     copyTurn,
+    submitTurnFeedback,
+    feedbackNotice,
+    dismissFeedbackNotice,
     regenerateLatest,
     editAndResubmit,
     branchAt,
@@ -63,10 +67,16 @@ export default function ChatPage() {
     setPlanMode,
     browseWeb,
     setBrowseWeb,
+    temporaryChat,
+    setTemporaryChat,
+    isActiveThreadTemporary,
+    temporaryChatLocked,
     input,
     setInput,
     setMessageListRef,
   } = useChatController()
+
+  useChatShortcuts({ startNewChat })
 
   const composer = () => (
     <DashboardComposer
@@ -79,9 +89,12 @@ export default function ChatPage() {
       onPlanModeChange={setPlanMode}
       onStop={handleStop}
       onSubmit={handleComposerSubmit}
+      onTemporaryChatChange={setTemporaryChat}
       planMode={planMode()}
       showTurnReceipt={false}
       submitting={isStreaming()}
+      temporaryChat={temporaryChat()}
+      temporaryChatLocked={temporaryChatLocked()}
     />
   )
 
@@ -115,6 +128,12 @@ export default function ChatPage() {
           </Match>
           <Match when={activeTab() === 'chat'}>
             <div ref={setMessageListRef} class="velion-chat-message-list" onScroll={handleScroll}>
+              <Show when={isActiveThreadTemporary()}>
+                <div class="velion-chat-temporary-banner" role="status">
+                  <EyeOff size={13} />
+                  <span>Midlertidig samtale – lagres ikke i historikk eller minne.</span>
+                </div>
+              </Show>
               <div class="velion-chat-thread">
                 <For each={state.turns}>
                   {(turn, index) => (
@@ -129,12 +148,11 @@ export default function ChatPage() {
                         onCopy={() => void copyTurn(turn)}
                         onEdit={(text) => void editAndResubmit(turn.id, text)}
                         onRegenerate={regenerateLatest}
-                        onFeedback={(rating) => {
-                          if (turn.requestId) void submitFeedback(turn.requestId, rating).catch(() => undefined)
-                        }}
+                        onFeedback={(rating) => submitTurnFeedback(turn.id, rating)}
                         onApprovalDecision={(approvalId, decision) =>
                           void handleApprovalDecision(turn.id, approvalId, decision)
                         }
+                        onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
                       />
                     </>
@@ -142,6 +160,23 @@ export default function ChatPage() {
                 </For>
                 <Show when={state.error && state.status === 'error'}>
                   <div class="velion-chat-error" role="alert">{state.error}</div>
+                </Show>
+                {/*
+                  A rating that did not persist must say so. Deliberately its own
+                  notice rather than `state.error`: the answer is fine, only the
+                  rating failed. `role="status"` keeps it quiet (polite, not an
+                  interruption) and clicking it dismisses.
+                */}
+                <Show when={feedbackNotice()}>
+                  {(message) => (
+                    <div
+                      class="velion-chat-error"
+                      role="status"
+                      onClick={dismissFeedbackNotice}
+                    >
+                      {message()}
+                    </div>
+                  )}
                 </Show>
               </div>
             </div>

@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CirclePlus,
   Clock3,
+  EyeOff,
   FileText,
   FolderPlus,
   Globe2,
@@ -169,6 +170,8 @@ export type DashboardComposerSubmitPayload = {
   model?: string
   text: string
   tools: Array<'image' | 'reason' | 'research' | 'search'>
+  /** Temporary chat (Zero Data Retention) toggle state at send time. */
+  zdr?: boolean
 }
 
 type PanelPosition = {
@@ -324,6 +327,11 @@ export function DashboardComposer(props: {
   onSubmit?: (payload: DashboardComposerSubmitPayload) => Promise<void> | void
   showTurnReceipt?: boolean
   submitting?: boolean
+  /** "Midlertidig samtale" (ChatGPT's Temporary Chat) — maps to the request's ZDR flag. */
+  temporaryChat?: boolean
+  onTemporaryChatChange?: (value: boolean) => void
+  /** Once a message has been sent in a temporary thread, the toggle can no longer be turned off mid-conversation. */
+  temporaryChatLocked?: boolean
 }) {
   const i18n = useI18n()
   const navigate = useNavigate()
@@ -400,6 +408,11 @@ export function DashboardComposer(props: {
   const hasContent = createMemo(() => props.message.trim().length > 0 || files().length > 0)
   const imageMode = createMemo(() => props.imageMode ?? false)
   const planMode = createMemo(() => props.planMode ?? false)
+  // Locked-true once the parent says the active thread is temporary — a
+  // disabled control could theoretically still be flipped by, e.g., a
+  // synthetic click, so the memo itself also refuses to report anything but
+  // `true` while locked rather than relying on `disabled` alone.
+  const temporaryChat = createMemo(() => props.temporaryChatLocked || (props.temporaryChat ?? false))
   const hasEntityOverlay = createMemo(() => entities().length > 0)
   const [textareaExpanded, setTextareaExpanded] = createSignal(false)
   const [hasOverflow, setHasOverflow] = createSignal(false)
@@ -1003,6 +1016,7 @@ export function DashboardComposer(props: {
       responseMode: responseMode(),
       text: snapshot.submittedText,
       trimmedMessage: snapshot.body,
+      zdr: temporaryChat(),
     })
 
     setTurns((current) => [
@@ -1205,6 +1219,20 @@ export function DashboardComposer(props: {
               variant="chip"
             >
               <WandSparkles class="size-3.5" />
+            </ComposerIconButton>
+          </Show>
+          <Show when={props.onTemporaryChatChange}>
+            <ComposerIconButton
+              active={temporaryChat()}
+              disabled={props.temporaryChatLocked}
+              label={i18n.tr(
+                'Midlertidig samtale – ingen historikk, ingen minne',
+                'Temporary chat – no history, no memory',
+              )}
+              onClick={() => props.onTemporaryChatChange?.(!temporaryChat())}
+              variant="chip"
+            >
+              <EyeOff class="size-3.5" />
             </ComposerIconButton>
           </Show>
           <span ref={(element) => { historyTriggerRef = element }}>
@@ -1535,6 +1563,7 @@ function createComposerSubmitPayload(input: {
   responseMode: ResponseMode
   text: string
   trimmedMessage: string
+  zdr: boolean
 }): DashboardComposerSubmitPayload {
   return {
     actions: input.actions,
@@ -1554,6 +1583,7 @@ function createComposerSubmitPayload(input: {
       message: input.trimmedMessage,
       responseMode: input.responseMode,
     }),
+    zdr: input.zdr || undefined,
   }
 }
 
@@ -2308,6 +2338,7 @@ type ComposerIconButtonVariant = 'chip' | 'toolbar'
 function ComposerIconButton(props: {
   active?: boolean
   children: JSX.Element
+  disabled?: boolean
   label: string
   onClick: () => void
   variant: ComposerIconButtonVariant
@@ -2319,8 +2350,9 @@ function ComposerIconButton(props: {
       type="button"
       aria-label={props.label}
       aria-pressed={props.active}
+      disabled={props.disabled}
       title={props.label}
-      onClick={() => props.onClick()}
+      onClick={() => { if (!props.disabled) props.onClick() }}
       class={cn(baseClass(), props.active ? `${baseClass()}--active` : '')}
     >
       {props.children}

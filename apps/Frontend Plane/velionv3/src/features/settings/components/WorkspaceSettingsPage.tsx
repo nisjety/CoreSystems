@@ -7,6 +7,7 @@ import { McpServersSection } from '@/features/settings/components/McpServersSect
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
+import { MemorySection } from '@/features/settings/components/MemorySection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
@@ -202,6 +203,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   plugins: [],
   // Cron schedules render their own live list + form, so no shared status grid.
   cron: [],
+  // Memory renders its own live list, so it carries no shared status grid.
+  memory: [],
 }
 
 function getBusinessHourRows(i18n: ReturnType<typeof useI18n>) {
@@ -446,6 +449,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'cron'}>
         <CronSchedulesSection />
+      </Match>
+      <Match when={props.section === 'memory'}>
+        <MemorySection />
       </Match>
     </Switch>
   )

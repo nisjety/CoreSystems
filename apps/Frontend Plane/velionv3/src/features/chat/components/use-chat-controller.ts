@@ -12,6 +12,7 @@ import {
   CHAT_ACTIVE_THREAD_CHANGED_EVENT,
   clearActiveChatThreadId,
   readActiveChatThreadId,
+  readChatThreadHistory,
   readChatThreadTranscript,
   removeChatThreadHistoryItem,
   removeChatThreadTranscript,
@@ -19,6 +20,7 @@ import {
   upsertChatThreadHistory,
   upsertChatThreadTranscript,
   type ChatThreadHistoryInput,
+  type ChatThreadTitleKind,
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
@@ -41,16 +43,23 @@ import {
   cancelInvocation,
   cheapDefaultModelId,
   deleteChatThread,
+  describeFeedbackFailure,
   getChatThreadTranscript,
   getThreadMessages,
   listModels,
+  resumeStream,
   saveChatThreadSnapshot,
   streamChat,
+  submitFeedback,
   VELION_BALANCE_MODE_ID,
+  type ChatFeedbackRating,
 } from '@/shared/api/chat-client'
 import {
   ApiError,
 } from '@/shared/api/http'
+import {
+  findArtifactById,
+} from './chat-artifacts'
 import {
   collectArtifactItems,
   collectEvidenceSources,
@@ -131,7 +140,26 @@ export function useChatController() {
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanMode] = createSignal(false)
   const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
+  // Temporary chat (ChatGPT's "Temporary Chat" = Velion's already-enforced
+  // Zero Data Retention mode): `temporaryChat` is the composer TOGGLE state
+  // for the NEXT send. `temporaryThreadIds` is the set of thread ids THIS
+  // session has actually sent a ZDR turn in — read at send time, not
+  // recomputed from the toggle later, so a toggle flipped after sending
+  // cannot retroactively change what a thread already committed to. A
+  // temporary thread must never be persisted (history/transcript/server
+  // snapshot/title/follow-ups) — see `isTemporaryThread` and the guard at the
+  // top of `writeThreadSnapshot`.
+  const [temporaryChat, setTemporaryChat] = createSignal(false)
+  const [temporaryThreadIds, setTemporaryThreadIds] = createSignal<ReadonlySet<string>>(new Set())
   const [input, setInput] = createSignal('')
+  /**
+   * Quiet, non-blocking notice for a rating that did NOT persist.
+   *
+   * Kept out of `state.error` on purpose: that field renders the *answer* as
+   * failed, and a rejected thumbs-up says nothing about the answer.
+   */
+  const [feedbackNotice, setFeedbackNotice] = createSignal<string | null>(null)
+  let feedbackNoticeTimer: number | undefined
   let abortController: AbortController | undefined
   let messageListRef: HTMLDivElement | undefined
   const setMessageListRef = (el: HTMLDivElement) => {
@@ -190,6 +218,25 @@ export function useChatController() {
     if (serverSnapshotTimer !== undefined) window.clearTimeout(serverSnapshotTimer)
   })
 
+  /** True once this thread has actually sent a ZDR (temporary chat) turn. */
+  const isTemporaryThread = (threadId: string | null | undefined): boolean =>
+    Boolean(threadId) && temporaryThreadIds().has(threadId as string)
+
+  const markThreadTemporary = (threadId: string) => {
+    setTemporaryThreadIds((prev) => (prev.has(threadId) ? prev : new Set(prev).add(threadId)))
+  }
+
+  /** The provisional client-generated thread id is replaced by the server's real one; carry the temporary marking across that rename so the lock survives it. */
+  const renameTemporaryThread = (fromId: string, toId: string) => {
+    setTemporaryThreadIds((prev) => {
+      if (!prev.has(fromId)) return prev
+      const next = new Set(prev)
+      next.delete(fromId)
+      next.add(toId)
+      return next
+    })
+  }
+
   const writeThreadSnapshot = (
     threadId: string,
     turns: ChatTurn[],
@@ -197,16 +244,45 @@ export function useChatController() {
     taskSteps: AgentTaskStep[] = state.taskSteps,
     options: { persistServer?: boolean } = {},
   ) => {
+    // Temporary (ZDR) chat: never persisted, full stop. This is the single
+    // funnel every persistence call site in this file goes through
+    // (history + transcript + server snapshot below), so gating here covers
+    // all three without touching chat-thread-history.ts's storage functions.
+    // Defensive: the backend already never emits a `title`/`follow_ups` event
+    // for a ZDR turn, but a caller (e.g. `onTitle`) reaching here anyway must
+    // still not write.
+    if (isTemporaryThread(threadId)) return
     const firstUserTurn = turns.find((turn) => turn.role === 'user')
     const lastTurn = turns.at(-1)
-    const title = overrides.title ?? (firstUserTurn ? createPreview(firstUserTurn.content, 48) : createChatTitle(turns))
+    const stored = readChatThreadHistory().find((item) => item.threadId === threadId)
+    // Title lock: once a thread carries an AI-generated title (from the
+    // gateway's `title` SSE event), every later snapshot keeps it — the
+    // periodic writes must not clobber it with the truncated first message.
+    // Resolving it HERE (not only in the upsert) matters because the server
+    // snapshot below persists this exact title.
+    const generatedTitle =
+      overrides.titleKind === 'generated' && overrides.title
+        ? overrides.title
+        : stored?.titleKind === 'generated'
+          ? stored.title
+          : undefined
+    const title =
+      generatedTitle ??
+      overrides.title ??
+      (firstUserTurn ? createPreview(firstUserTurn.content, 48) : createChatTitle(turns))
+    const titleKind: ChatThreadTitleKind = generatedTitle ? 'generated' : 'preview'
     const preview = overrides.preview ?? lastTurn?.content
-    const updatedAt = overrides.updatedAt ?? lastTurn?.createdAt
+    // Activity timestamp, never write timestamp: when this snapshot carries no
+    // usable message time (e.g. a selection self-heal over timestamp-less
+    // server messages), keep the stored `updatedAt` instead of letting
+    // normalizeTimestamp stamp "now" — a click must not re-date the thread.
+    const updatedAt = overrides.updatedAt ?? (lastTurn?.createdAt || undefined) ?? stored?.updatedAt
     const transcriptTurns = turnsToTranscript(turns)
     const transcriptTaskSteps = taskStepsToTranscript(taskSteps)
     upsertChatThreadHistory({
       threadId,
       title,
+      titleKind,
       preview,
       updatedAt,
     })
@@ -228,10 +304,53 @@ export function useChatController() {
     }
   }
 
+  /**
+   * Server messages can arrive without timestamps (session-core stores none),
+   * and `messageToTurn` keeps those EMPTY so a fetch never fabricates "now"
+   * (which made every selection look like fresh activity). The cached-metadata
+   * merge restores the real send time where a cached twin exists; this fills
+   * whatever remains from the thread's genuine last-activity records, and only
+   * a thread this device has never seen gets the current time (it really is
+   * new here).
+   */
+  const fillMissingTurnTimestamps = (
+    turns: ChatTurn[],
+    threadId: string,
+    cachedUpdatedAt?: string,
+  ): ChatTurn[] => {
+    if (turns.every((turn) => turn.createdAt)) return turns
+    const fallback =
+      cachedUpdatedAt ??
+      readChatThreadHistory().find((item) => item.threadId === threadId)?.updatedAt ??
+      new Date().toISOString()
+    return turns.map((turn) => (turn.createdAt ? turn : { ...turn, createdAt: fallback }))
+  }
+
+  /**
+   * Guards for thread switching.
+   *
+   * `hydratingThreadId`: from the moment a thread is selected until its own
+   * turns are in state, `state.threadId` points at the NEW thread while
+   * `state.turns` still holds the PREVIOUS thread's messages. The snapshot
+   * effect below fires on that intermediate pair, so without this guard every
+   * click in the history menu stamped the previous chat's content and title
+   * onto the newly selected chat — after a few clicks the whole menu showed
+   * one identical conversation.
+   *
+   * `threadLoadSequence`: selecting B then quickly C must not let B's slower
+   * fetch land last and clobber C's view; each load only applies its results
+   * if it is still the newest.
+   */
+  let hydratingThreadId: string | null = null
+  let threadLoadSequence = 0
+
   const loadThread = async (threadId: string) => {
+    const seq = ++threadLoadSequence
+    hydratingThreadId = threadId
     setState('threadId', threadId)
     const localCached = readChatThreadTranscript(threadId)
     const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
+    if (seq !== threadLoadSequence) return
     const cached = serverCached
       ? {
           threadId: serverCached.threadId,
@@ -244,15 +363,24 @@ export function useChatController() {
     const cachedTaskSteps = cached?.taskSteps?.map(transcriptStepToTaskStep) ?? []
     try {
       const history = await getThreadMessages(threadId)
+      if (seq !== threadLoadSequence) return
       const serverTurns = dedupeChatTurns(history.map(messageToTurn))
-      const turns = serverTurns.length > 0
+      const mergedTurns = serverTurns.length > 0
         ? mergeServerTurnsWithCachedMetadata(serverTurns, cachedTurns)
         : cachedTurns
+      const turns = fillMissingTurnTimestamps(mergedTurns, threadId, cached?.updatedAt)
+      // Clear the guard BEFORE the turns land: setState runs the snapshot
+      // effect synchronously, and that very run is the one that must persist
+      // this thread's real content (it also self-heals entries the old bug
+      // already overwrote).
+      hydratingThreadId = null
       setState({ turns, taskSteps: cachedTaskSteps })
       if (turns.length > 0) {
         writeThreadSnapshot(threadId, turns, {}, cachedTaskSteps, { persistServer: false })
       }
+      maybeResumeStream(threadId, turns)
     } catch (error) {
+      if (seq !== threadLoadSequence) return
       // A 404 (thread_not_found) means session-core no longer has this thread
       // — it was deleted, or the id is stale (e.g. carried over from another
       // device). model-gateway now returns 404 for that case rather than a 502
@@ -261,6 +389,7 @@ export function useChatController() {
       // refetching it on every mount. Any other failure (502/timeout/offline)
       // is treated as transient: keep rendering the cached transcript.
       if (error instanceof ApiError && error.status === 404) {
+        hydratingThreadId = null
         removeChatThreadHistoryItem(threadId)
         if (readActiveChatThreadId() === threadId) {
           // Clears the stored active id and resets the chat view via the
@@ -272,15 +401,117 @@ export function useChatController() {
         return
       }
       const fallbackTurns = cachedTurns
+      hydratingThreadId = null
       setState({ turns: fallbackTurns, taskSteps: cachedTaskSteps })
       if (fallbackTurns.length > 0) {
         writeThreadSnapshot(threadId, fallbackTurns, {}, cachedTaskSteps, { persistServer: false })
       }
+      maybeResumeStream(threadId, fallbackTurns)
+    }
+  }
+
+  /**
+   * Resumable streams (chat-parity §3b): if the last assistant turn survived
+   * into the persisted transcript still `status: 'waiting'`, the tab
+   * closed/reloaded mid-answer — `ChatMessages` renders ANY turn with that
+   * status as actively streaming, so left alone this is a permanently
+   * "thinking" bubble that will never complete. Reattach to the still-
+   * buffered SSE run instead.
+   */
+  const maybeResumeStream = (threadId: string, turns: ChatTurn[]) => {
+    const lastTurn = turns.at(-1)
+    if (lastTurn && lastTurn.role === 'assistant' && lastTurn.status === 'waiting') {
+      void attemptResumeStream(threadId, lastTurn)
+    }
+  }
+
+  /**
+   * The resume endpoint (`model-gateway`'s `stream_buffer.rs`) replays
+   * buffered content deltas from the run's start — this client never tracked
+   * a `Last-Event-Id` cursor, so `resumeStream` is called without one — plus
+   * the final `done` chunk if the run already finished. Nothing else: no
+   * tool/citation/usage/title/follow-up replay, the buffer only ever held
+   * plain text. The turn's content is reset to empty first so the full
+   * replay does not duplicate onto whatever partial text was already cached.
+   *
+   * Best-effort: a 404 (`stream not resumable` — the run genuinely finished
+   * outside the buffer's TTL, or never existed) or any other resume failure
+   * settles the turn as `stopped`, same as a normal failed/finished stream —
+   * never a stuck spinner. Guards against a thread switch landing mid-resume:
+   * every mutation checks `state.threadId === threadId` first.
+   */
+  const attemptResumeStream = async (threadId: string, turn: ChatTurn) => {
+    if (!turn.requestId || state.status === 'streaming' || isTemporaryThread(threadId)) return
+    const assistantId = turn.id
+    const isActiveThread = () => state.threadId === threadId
+    const turnIndex = state.turns.findIndex((candidate) => candidate.id === assistantId)
+    const precedingUser = turnIndex > 0 ? state.turns[turnIndex - 1] : undefined
+    const turnTitle = createPreview(
+      precedingUser?.role === 'user' ? precedingUser.content : turn.content,
+      58,
+    )
+
+    setState('turns', (t) => t.id === assistantId, { content: '', streaming: true, status: 'waiting' })
+
+    const controller = new AbortController()
+    abortController = controller
+    setState('status', 'streaming')
+
+    let settled = false
+    const stopStreaming = (status?: ChatTurn['status']) => {
+      if (!isActiveThread()) return
+      setState('turns', (t) => t.id === assistantId, 'streaming', false)
+      setState('turns', (t) => t.id === assistantId, 'status', status)
+    }
+
+    await resumeStream(
+      turn.requestId,
+      {
+        onMessage: ({ content: delta }) => {
+          if (!isActiveThread()) return
+          upsertTaskStep(createTurnStep(assistantId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
+          setState('turns', (t) => t.id === assistantId, 'content', (prev) => prev + delta)
+        },
+        onDone: ({ modelUsed, outputTokens }) => {
+          settled = true
+          if (!isActiveThread()) return
+          if (modelUsed) setState('turns', (t) => t.id === assistantId, 'modelUsed', modelUsed)
+          if (outputTokens != null) setState('turns', (t) => t.id === assistantId, 'outputTokens', outputTokens)
+          stopStreaming(undefined)
+          markOpenSteps('done', 'Completed.', assistantId)
+          setState('status', 'idle')
+          writeThreadSnapshot(threadId, state.turns)
+        },
+        onError: () => {
+          settled = true
+          if (!isActiveThread()) return
+          stopStreaming('stopped')
+          markOpenSteps('stopped', 'The connection was lost before this answer finished.', assistantId)
+          setState('status', 'idle')
+          writeThreadSnapshot(threadId, state.turns)
+        },
+      },
+      controller.signal,
+    )
+
+    if (!settled && isActiveThread()) {
+      // The stream closed with no terminal event at all (e.g. the buffer was
+      // already empty and nothing else arrived) — do not leave the bubble
+      // spinning forever.
+      stopStreaming('stopped')
+      markOpenSteps('stopped', 'Connection closed before this answer finished.', assistantId)
+      setState('status', 'idle')
+      writeThreadSnapshot(threadId, state.turns)
     }
   }
 
   createEffect(() => {
     if (!state.threadId || state.turns.length === 0) return
+    // While a thread switch is hydrating, `state.turns` still belongs to the
+    // PREVIOUS thread — persisting that pair is the overwrite bug loadThread's
+    // guard exists for. Live streaming is unaffected: hydratingThreadId is only
+    // non-null inside loadThread.
+    if (state.threadId === hydratingThreadId) return
     writeThreadSnapshot(state.threadId, state.turns, {}, state.taskSteps, { persistServer: false })
   })
 
@@ -298,6 +529,9 @@ export function useChatController() {
     })
     setInput('')
     setActiveTab('chat')
+    // Each fresh chat starts with Temporary Chat off — a user re-enables it
+    // deliberately per conversation rather than it silently staying on.
+    setTemporaryChat(false)
   }
 
   onMount(() => {
@@ -426,9 +660,18 @@ export function useChatController() {
     if (!content || state.status === 'streaming') return
 
     let activeThreadId = state.threadId ?? createId('thread')
-    if (!state.threadId) {
+    // Temporary chat locks in at the first send of a thread: once ANY
+    // message has gone out under this thread id it is marked temporary for
+    // the rest of the session (see `isTemporaryThread`), independent of
+    // whatever the composer toggle does afterward.
+    const isNewThread = !state.threadId
+    if (isNewThread) {
       setState('threadId', activeThreadId)
-      setActiveChatThreadId(activeThreadId)
+      if (options.zdr) markThreadTemporary(activeThreadId)
+      // A temporary thread's id must never become the persisted "active
+      // thread" pointer — that pointer is itself a form of persistence
+      // (survives reload), which a no-history/no-memory session must not.
+      if (!options.zdr) setActiveChatThreadId(activeThreadId)
     }
 
     const submittedAt = options.createdAt ?? new Date().toISOString()
@@ -507,6 +750,7 @@ export function useChatController() {
           attachments: options.attachments,
           actions: options.actions,
           planMode: planMode(),
+          zdr: options.zdr,
         },
         {
           onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel }) => {
@@ -517,10 +761,18 @@ export function useChatController() {
                 removeChatThreadHistoryItem(provisionalThreadId)
                 removeChatThreadTranscript(provisionalThreadId)
                 void deleteChatThread(provisionalThreadId).catch(() => undefined)
+                // The provisional id may have been the one just marked
+                // temporary above — carry that marking to the server's real
+                // id so the lock and the persistence guard both survive the
+                // swap. (In practice a ZDR turn's `connected` event never
+                // carries a `thread_id` at all — ZDR creates no session/
+                // thread server-side — so this is defensive, not the normal
+                // path.)
+                renameTemporaryThread(provisionalThreadId, serverThreadId)
               }
               activeThreadId = serverThreadId
               setState('threadId', serverThreadId)
-              setActiveChatThreadId(serverThreadId)
+              if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
               writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
             }
             if (connectedModel) {
@@ -539,7 +791,14 @@ export function useChatController() {
           onArtifact: (event) => {
             const artifact = normalizeArtifact(event)
             if (!artifact) return
-            setState('turns', (turn) => turn.id === assistantId, 'artifacts', (prev) => upsertArtifact(prev ?? [], artifact))
+            // The same artifact id can come back many turns later (the model
+            // rewrites a document it produced earlier). Hand the earlier
+            // carrier's revisions along so the version history survives the
+            // move to this turn instead of restarting at one entry.
+            const carried = findArtifactById(state.turns.map((turn) => turn.artifacts), artifact.id)
+            setState('turns', (turn) => turn.id === assistantId, 'artifacts', (prev) => (
+              upsertArtifact(prev ?? [], artifact, carried)
+            ))
           },
           onAttachment: (event) => {
             const file = normalizeGeneratedFile(event)
@@ -620,6 +879,24 @@ export function useChatController() {
             })
             upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
           },
+          onTitle: ({ title }) => {
+            // AI-generated thread title (first exchange only, server-side).
+            // Persisting with titleKind 'generated' locks it: later periodic
+            // snapshots resolve against the stored item and keep this title
+            // instead of reverting to the truncated first message.
+            if (!title.trim()) return
+            writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns, {
+              title,
+              titleKind: 'generated',
+            })
+          },
+          onFollowUps: ({ suggestions }) => {
+            // The backend never emits this for a ZDR turn, but the guard is
+            // defensive here too — a temporary chat must never RECEIVE
+            // follow-up chips either, not just never persist them.
+            if (suggestions.length === 0 || isTemporaryThread(state.threadId ?? activeThreadId)) return
+            setState('turns', (turn) => turn.id === assistantId, 'followUps', suggestions.slice(0, 3))
+          },
           onDone: ({ requestId, modelUsed, outputTokens }) => {
             settled = true
             captureRequestId(requestId)
@@ -696,6 +973,7 @@ export function useChatController() {
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
       actions,
+      zdr: payload.zdr,
     })
   }
 
@@ -739,17 +1017,16 @@ export function useChatController() {
   const addAnswerVerificationStep = (turnId: string, turnTitle: string, searchRequested: boolean) => {
     if (!searchRequested) return
     const citations = state.turns.find((turn) => turn.id === turnId)?.citations ?? []
+    // Search being available no longer means a search must have run: the
+    // backend searches only when the query needs fresh data. Add the
+    // verification step only when web sources actually grounded the answer.
+    if (citations.length === 0) return
     upsertTaskStep({
       id: `${turnId}:verification`,
       title: 'Answer verification',
-      detail: citations.length > 0
-        ? `Checked against ${citations.length} web source${citations.length === 1 ? '' : 's'} shown in Kilder.`
-        : 'Could not verify: no web source event was received for this answer.',
-      expandedDetail: citations.length > 0
-        ? undefined
-        : 'Search was active for this answer, but the stream did not include a web_search tool result or citation event. The answer may still contain the model response, but it should be treated as unverified until the backend emits searchable source evidence.',
+      detail: `Checked against ${citations.length} web source${citations.length === 1 ? '' : 's'} shown in Kilder.`,
       evidence: citations.map(citationEvidence),
-      status: citations.length > 0 ? 'done' : 'stopped',
+      status: 'done',
       createdAt: new Date().toISOString(),
       turnId,
       turnTitle,
@@ -791,6 +1068,55 @@ export function useChatController() {
     window.setTimeout(() => setCopiedTurnId(null), 1200)
   }
 
+  const dismissFeedbackNotice = () => {
+    if (feedbackNoticeTimer !== undefined) window.clearTimeout(feedbackNoticeTimer)
+    feedbackNoticeTimer = undefined
+    setFeedbackNotice(null)
+  }
+
+  const showFeedbackNotice = (message: string) => {
+    if (feedbackNoticeTimer !== undefined) window.clearTimeout(feedbackNoticeTimer)
+    setFeedbackNotice(message)
+    feedbackNoticeTimer = window.setTimeout(() => {
+      feedbackNoticeTimer = undefined
+      setFeedbackNotice(null)
+    }, 6000)
+  }
+
+  onCleanup(() => {
+    if (feedbackNoticeTimer !== undefined) window.clearTimeout(feedbackNoticeTimer)
+  })
+
+  /**
+   * Rate one turn. The failure path is the point of this function: the POST used
+   * to be fired with `.catch(() => undefined)`, so a rejected rating (every
+   * rating, until the contract was fixed) left the thumb lit while nothing was
+   * recorded. A rating that does not persist must say so.
+   *
+   * Resolves `true` only when the rating actually persisted, so the caller can
+   * roll back its optimistic highlight. Deliberately reports rather than
+   * rethrows: the notice belongs here, in one place, and a caller that ignores
+   * the result still gets the message.
+   */
+  const submitTurnFeedback = async (
+    turnId: string,
+    rating: ChatFeedbackRating,
+  ): Promise<boolean> => {
+    const turn = state.turns.find((candidate) => candidate.id === turnId)
+    if (!turn?.requestId) {
+      showFeedbackNotice('Denne meldingen mangler en referanse å vurdere. Vurderingen ble ikke lagret.')
+      return false
+    }
+    dismissFeedbackNotice()
+    try {
+      await submitFeedback(turn.requestId, rating, { runId: turn.runId })
+      return true
+    } catch (error: unknown) {
+      showFeedbackNotice(describeFeedbackFailure(error))
+      return false
+    }
+  }
+
   const regenerateLatest = () => {
     if (isStreaming()) return
     const lastUser = [...state.turns].reverse().find((turn) => turn.role === 'user')
@@ -802,6 +1128,10 @@ export function useChatController() {
       displayAttachments: lastUser.attachments,
       generateImage: lastUser.tools.includes('image'),
       tools: lastUser.tools,
+      // Regenerating within an already-temporary thread must keep sending
+      // ZDR — the thread-level lock, not the (possibly since-toggled)
+      // composer state, decides.
+      zdr: isTemporaryThread(state.threadId),
     })
   }
 
@@ -820,6 +1150,8 @@ export function useChatController() {
       displayAttachments: original.attachments,
       generateImage: original.tools.includes('image'),
       tools: original.tools,
+      // Same thread-level ZDR lock as `regenerateLatest`.
+      zdr: isTemporaryThread(state.threadId),
     })
   }
 
@@ -827,6 +1159,7 @@ export function useChatController() {
     const index = state.turns.findIndex((turn) => turn.id === turnId)
     if (index < 0) return
     abortController?.abort()
+    const sourceWasTemporary = isTemporaryThread(state.threadId)
     const nextThreadId = createId('thread')
     const branchTurns = state.turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
     setState('turns', branchTurns)
@@ -835,8 +1168,16 @@ export function useChatController() {
     setState('requestId', null)
     setState('branchCount', 0)
     setState('taskSteps', [])
-    writeThreadSnapshot(nextThreadId, branchTurns)
-    setActiveChatThreadId(nextThreadId)
+    if (sourceWasTemporary) {
+      // The branch copies a temporary thread's own content into a new thread
+      // id — it must inherit the ZDR marking, or the calls below would
+      // persist exactly the content Temporary Chat exists to keep out of
+      // storage (history, transcript, AND the active-thread pointer).
+      markThreadTemporary(nextThreadId)
+    } else {
+      writeThreadSnapshot(nextThreadId, branchTurns)
+      setActiveChatThreadId(nextThreadId)
+    }
     setActiveTab('chat')
   }
 
@@ -886,6 +1227,9 @@ export function useChatController() {
     handleComposerSubmit,
     handleStop,
     copyTurn,
+    submitTurnFeedback,
+    feedbackNotice,
+    dismissFeedbackNotice,
     regenerateLatest,
     editAndResubmit,
     branchAt,
@@ -902,6 +1246,10 @@ export function useChatController() {
     setPlanMode,
     browseWeb,
     setBrowseWeb,
+    temporaryChat,
+    setTemporaryChat,
+    isActiveThreadTemporary: () => isTemporaryThread(state.threadId),
+    temporaryChatLocked: () => isTemporaryThread(state.threadId),
     input,
     setInput,
     setMessageListRef,

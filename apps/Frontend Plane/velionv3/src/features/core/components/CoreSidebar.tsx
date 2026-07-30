@@ -6,6 +6,8 @@ import {
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
+  Pin,
+  PinOff,
   Trash2,
 } from 'lucide-solid'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js'
@@ -22,6 +24,7 @@ import {
   readChatThreadHistory,
   replaceChatThreadHistory,
   selectChatThread,
+  togglePinnedChatThread,
   type ChatThreadHistoryItem,
 } from '@/features/chat/lib/chat-thread-history'
 import { AgentsExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAgentsPanel'
@@ -371,7 +374,58 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
     setError(null)
   }
 
-  const sessionCount = () => sessions().length
+  /**
+   * Presentation-level dedupe: the stored history should hold one entry per
+   * thread, but if it ever contains repeats (e.g. a server + local merge, or
+   * a corrupted snapshot that self-heals on click) the menu must still render
+   * each threadId exactly once — first occurrence wins (list is newest-first).
+   */
+  const visibleSessions = createMemo(() => {
+    const seen = new Set<string>()
+    return sessions().filter((item) => {
+      if (seen.has(item.threadId)) return false
+      seen.add(item.threadId)
+      return true
+    })
+  })
+
+  const sessionCount = () => visibleSessions().length
+  // Storage already orders pinned-first (see `sortByUpdatedAtDesc` in
+  // chat-thread-history.ts); filtering preserves that relative order, so no
+  // re-sort is needed here.
+  const pinnedSessions = createMemo(() => visibleSessions().filter((item) => item.pinned))
+  const unpinnedSessions = createMemo(() => visibleSessions().filter((item) => !item.pinned))
+  const togglePin = (event: MouseEvent, threadId: string) => {
+    event.stopPropagation()
+    setSessions(togglePinnedChatThread(threadId))
+  }
+
+  const sessionRow = (item: ChatThreadHistoryItem) => (
+    <div class="core-chat-session-row">
+      <button
+        type="button"
+        class="core-chat-session"
+        classList={{ 'core-chat-session--active': item.threadId === activeThreadId() }}
+        onClick={() => openThread(item.threadId)}
+        aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
+      >
+        <span class="velion-sidebar-row-strong" title={item.title}>{item.title}</span>
+        <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
+      </button>
+      <button
+        type="button"
+        class="core-chat-session__pin"
+        classList={{ 'core-chat-session__pin--active': Boolean(item.pinned) }}
+        aria-label={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
+        title={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
+        onClick={(event) => togglePin(event, item.threadId)}
+      >
+        <Show when={item.pinned} fallback={<Pin class="size-3.5" />}>
+          <PinOff class="size-3.5" />
+        </Show>
+      </button>
+    </div>
+  )
 
   return (
     <div class="core-chat-sidebar">
@@ -388,20 +442,11 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
             when={sessionCount() > 0}
             fallback={<div class="core-sidebar-empty velion-sidebar-row-normal">{error() ?? i18n.tr('Åpne chat for å laste ekte samtalehistorikk.', 'Open chat to load real conversation history.')}</div>}
           >
-            <For each={sessions()}>
-              {(item) => (
-                <button
-                  type="button"
-                  class="core-chat-session"
-                  classList={{ 'core-chat-session--active': item.threadId === activeThreadId() }}
-                  onClick={() => openThread(item.threadId)}
-                  aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
-                >
-                  <span class="velion-sidebar-row-strong" title={item.title}>{item.title}</span>
-                  <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
-                </button>
-              )}
-            </For>
+            <Show when={pinnedSessions().length > 0}>
+              <span class="velion-sidebar-group-title">{i18n.tr('Pinnet', 'Pinned')}</span>
+              <For each={pinnedSessions()}>{sessionRow}</For>
+            </Show>
+            <For each={unpinnedSessions()}>{sessionRow}</For>
           </Show>
         </Show>
       </nav>

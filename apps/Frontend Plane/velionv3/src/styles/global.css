@@ -1814,6 +1814,15 @@ textarea:focus-visible {
   padding: 8px;
 }
 
+.core-search-overlay__group-label {
+  padding: 8px 12px 4px;
+  color: var(--subtle);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .core-search-result {
   display: flex;
   width: 100%;
@@ -2294,6 +2303,11 @@ textarea:focus-visible {
 .core-chat-sidebar {
   display: flex;
   min-height: 0;
+
+  /* Without this the panel's min-width floors at the longest nowrap session
+     title (flex min-width: auto), pushing the list to 2x the sidebar width and
+     clipping titles at the sidebar edge instead of ellipsizing them. */
+  min-width: 0;
   flex: 1;
   flex-direction: column;
 }
@@ -2329,25 +2343,32 @@ textarea:focus-visible {
 .core-chat-sidebar__sessions {
   display: flex;
   min-height: 0;
+  min-width: 0;
   flex: 1;
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .core-chat-session {
   display: block;
   width: 100%;
   min-width: 0;
+
+  /* The sessions nav is a column flex container: without this, every row is
+     squeezed to fit the viewport and the list collapses into overlapping
+     single lines of clipped text. Rows keep their height; the nav scrolls. */
+  flex-shrink: 0;
   box-sizing: border-box;
   overflow: hidden;
   border: 0;
-  border-radius: 0;
+  border-radius: 8px;
   background: transparent;
   color: inherit;
   cursor: pointer;
   font: inherit;
-  padding: 7px 12px;
+  padding: 7px 10px;
   text-align: left;
   text-decoration: none;
   transition: background-color 160ms ease;
@@ -2361,6 +2382,8 @@ textarea:focus-visible {
   background: rgb(237 237 237 / 86%);
 }
 
+/* Title and timestamp are single-line ellipsized — a long title must never
+   wrap, push the layout, or force horizontal overflow. */
 .core-chat-session span,
 .core-chat-session em {
   display: block;
@@ -2377,10 +2400,14 @@ textarea:focus-visible {
   line-height: 18px;
 }
 
+.core-chat-session--active span {
+  font-weight: 600;
+}
+
 .core-chat-session em {
-  margin-top: 1px;
+  margin-top: 2px;
   color: var(--sidebar-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-style: normal;
   font-weight: 500;
   line-height: 14px;
@@ -2400,6 +2427,61 @@ textarea:focus-visible {
 
 .dark .core-chat-session em {
   color: var(--velion-text-subtle);
+}
+
+/* Row wrapper: the session button plus a pin toggle as a sibling, never
+   nested — a <button> inside a <button> is invalid HTML. */
+.core-chat-session-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.core-chat-session-row .core-chat-session {
+  flex: 1;
+  min-width: 0;
+}
+
+.core-chat-session__pin {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--sidebar-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 140ms ease,
+    color 140ms ease,
+    background-color 140ms ease;
+}
+
+.core-chat-session-row:hover .core-chat-session__pin,
+.core-chat-session__pin--active {
+  opacity: 1;
+}
+
+.core-chat-session__pin:hover {
+  background: rgb(238 238 238 / 54%);
+  color: var(--velion-dark-surface);
+}
+
+.core-chat-session__pin--active {
+  color: var(--velion-dark-surface);
+}
+
+.dark .core-chat-session__pin:hover {
+  background: rgb(255 255 255 / 8%);
+  color: var(--panel);
+}
+
+.dark .core-chat-session__pin--active {
+  color: var(--panel);
 }
 
 .core-chat-sidebar__clear {
@@ -6999,6 +7081,13 @@ textarea:focus-visible {
   background: var(--velion-surface);
   color: var(--velion-text);
   box-shadow: var(--shadow-sm);
+}
+
+/* Locked toggles (e.g. Temporary Chat once a message has been sent) stay
+   visibly "on" via `--active` but are no longer interactive. */
+.dashboard-composer-icon-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.85;
 }
 
 /* Toolbar icons: flat/borderless, highlight on hover & active (matches v2 ToolbarIcon) */
@@ -21432,6 +21521,29 @@ textarea:focus-visible {
   color: var(--velion-accent-soft);
 }
 
+/* Temporary chat (Zero Data Retention) banner — quiet, ChatGPT "Temporary
+   Chat"-style notice, not a warning/error tone. No `.dark` override: sits on
+   the transcript surface, which stays light in dark mode (see the note
+   near "Markdown transcript — dark theme" above). */
+.velion-chat-temporary-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  border: 1px solid var(--velion-border);
+  border-radius: 10px;
+  background: var(--velion-i-surface);
+  padding: 8px 14px;
+  color: var(--velion-j-text-soft);
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.velion-chat-temporary-banner svg {
+  flex-shrink: 0;
+  color: var(--velion-text-muted);
+}
+
 /* ── Launch motion ─────────────────────────────────────────────────────────── */
 
 .velion-chat-launch-wash {
@@ -21744,84 +21856,124 @@ textarea:focus-visible {
 }
 
 .velion-chat-markdown :where(p, ul, ol, blockquote, pre) {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
+}
+
+.velion-chat-markdown :where(p, li, blockquote) {
+  overflow-wrap: break-word;
 }
 
 .velion-chat-markdown :where(p:last-child, ul:last-child, ol:last-child, blockquote:last-child, pre:last-child) {
   margin-bottom: 0;
 }
 
+/* Heading scale inside an answer: quieter than page headings (an h1 inside a
+   chat reply must not shout), but with a clear step between levels so the
+   model's ##/### structure reads as structure. Sized relative to the 15px
+   body (h1 ~19px, h2 ~17px, h3 = body-size run-in heading, ChatGPT-style). */
 .velion-chat-markdown h1,
 .velion-chat-markdown h2,
 .velion-chat-markdown h3 {
   color: var(--velion-j-text);
   font-family: var(--chat-font-body);
-  font-weight: 600;
-  line-height: 1.25;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
 }
 
 .velion-chat-markdown h1 {
-  margin: 20px 0 10px;
-  font-size: 19px;
+  margin: 24px 0 10px;
+  font-size: 1.25em;
 }
 
 .velion-chat-markdown h2 {
-  margin: 18px 0 8px;
-  font-size: 17px;
+  margin: 22px 0 8px;
+  font-size: 1.125em;
 }
 
 .velion-chat-markdown h3 {
-  margin: 16px 0 8px;
-  font-size: 15px;
+  margin: 18px 0 6px;
+  font-size: 1em;
+}
+
+.velion-chat-markdown :where(h1, h2, h3):first-child {
+  margin-top: 0;
 }
 
 .velion-chat-markdown a {
   color: var(--velion-a-earth);
   font-weight: 650;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
 .velion-chat-markdown a:hover {
   text-decoration: underline;
 }
 
+/* Inline code: a quiet tint, not a bordered chip that reads as a button.
+   `anywhere` lets long document IDs wrap instead of forcing the chat column
+   to scroll sideways. */
 .velion-chat-markdown code {
-  border: 1px solid var(--velion-border);
-  border-radius: 6px;
-  background: var(--velion-surface-soft);
-  padding: 1px 6px;
-  color: var(--velion-j-text-soft);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--velion-e-subtle) 14%, transparent);
+  padding: 2px 5px;
+  color: var(--velion-j-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
+  font-size: 0.867em;
+  overflow-wrap: anywhere;
 }
 
 .velion-chat-markdown pre {
   overflow-x: auto;
   border: 1px solid var(--velion-border);
   border-radius: 12px;
-  background: #fafaf9;
-  padding: 14px;
+  background: var(--velion-surface-soft);
+  padding: 12px 14px;
   color: var(--velion-j-text-soft);
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
 }
 
 .velion-chat-markdown pre code {
   border: 0;
+  border-radius: 0;
   background: transparent;
   padding: 0;
+  font-size: inherit;
+  overflow-wrap: normal;
 }
 
 .velion-chat-markdown ul,
 .velion-chat-markdown ol {
-  padding-left: 22px;
+  padding-left: 24px;
 }
 
 .velion-chat-markdown li {
-  margin: 4px 0;
+  margin: 5px 0;
+}
+
+.velion-chat-markdown li::marker {
+  color: var(--velion-e-subtle);
+}
+
+.velion-chat-markdown ol > li::marker {
+  color: var(--velion-e-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Nested lists: tighter follow-on spacing and a slightly smaller indent than
+   the top level, so deep bullets step in without marching off the page. */
+.velion-chat-markdown li > ul,
+.velion-chat-markdown li > ol {
+  margin: 5px 0 0;
+  padding-left: 20px;
 }
 
 .velion-chat-markdown blockquote {
   border-left: 2px solid var(--velion-d-border);
-  padding-left: 14px;
+  padding: 2px 0 2px 14px;
   color: var(--velion-e-muted);
 }
 
@@ -21829,6 +21981,83 @@ textarea:focus-visible {
   border: 0;
   border-top: 1px solid var(--velion-border);
   margin: 18px 0;
+}
+
+/* ── Markdown code blocks (fenced, with language label) ────────────────────── */
+
+.velion-chat-codeblock {
+  overflow: hidden;
+  border: 1px solid var(--velion-border);
+  border-radius: 12px;
+  margin: 4px 0 14px;
+  background: var(--velion-surface-soft);
+}
+
+.velion-chat-codeblock:last-child {
+  margin-bottom: 0;
+}
+
+.velion-chat-codeblock__label {
+  border-bottom: 1px solid var(--velion-border);
+  padding: 6px 14px;
+  color: var(--velion-e-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.velion-chat-codeblock pre {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+  background: transparent;
+}
+
+/* ── Markdown tables (GFM pipe tables) ─────────────────────────────────────── */
+
+/* Wide tables scroll inside this container — the chat column itself never
+   scrolls horizontally. */
+.velion-chat-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--velion-border);
+  border-radius: 10px;
+  margin: 4px 0 14px;
+  background: var(--velion-i-surface);
+}
+
+.velion-chat-table-wrap:last-child {
+  margin-bottom: 0;
+}
+
+.velion-chat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.velion-chat-table th {
+  border-bottom: 1px solid var(--velion-border);
+  background: color-mix(in srgb, var(--velion-surface-soft) 65%, transparent);
+  padding: 8px 14px;
+  color: var(--velion-e-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.velion-chat-table td {
+  padding: 8px 14px;
+  color: var(--velion-j-text-soft);
+  vertical-align: top;
+  overflow-wrap: break-word;
+}
+
+/* Hairline row separation — no vertical grid lines, no zebra. */
+.velion-chat-table tbody tr + tr td {
+  border-top: 1px solid var(--velion-border-soft);
 }
 
 .velion-chat-reasoning {
@@ -21946,7 +22175,7 @@ textarea:focus-visible {
 }
 
 .velion-chat-artifact-chips span,
-.velion-chat-generated-files a {
+.velion-chat-generated-file a {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -21960,8 +22189,31 @@ textarea:focus-visible {
   text-decoration: none;
 }
 
-.velion-chat-generated-files span {
+/* Generated non-image file: a working `<a download>` chip (a data: URI cannot be
+   opened as a top-level navigation) with an optional open-in-tab affordance for
+   real http(s) URLs. */
+.velion-chat-generated-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.velion-chat-generated-file a:hover {
+  border-color: color-mix(in srgb, var(--velion-a-earth) 40%, var(--velion-border));
+  color: var(--velion-a-earth);
+}
+
+.velion-chat-generated-file em {
+  color: var(--velion-e-subtle);
+  font-style: normal;
+}
+
+.velion-chat-generated-file a > span {
   color: var(--velion-text-subtle);
+}
+
+.velion-chat-generated-file__open {
+  padding: 4px 6px;
 }
 
 .velion-chat-image-previews {
@@ -22456,6 +22708,35 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* Quiet per-turn cost/token badge — sits in the message-actions row next to
+   Copy/thumbs/regenerate, fading in on hover via the shared
+   `.velion-chat-action-button` opacity rule so it stays unobtrusive by
+   default. Token colors intentionally match `.velion-chat-reasoning-popover`
+   (no `.dark` overrides): the transcript surface stays light in dark mode
+   (see the "Markdown transcript — dark theme" note above), so these tokens
+   are already the correct, legible choice in both themes. */
+.velion-chat-metrics-badge {
+  position: relative;
+}
+
+.velion-chat-metrics-badge__panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 90;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 40px));
+  border: 1px solid var(--velion-border);
+  border-radius: 10px;
+  background: var(--velion-i-surface);
+  padding: 7px 10px;
+  color: var(--velion-j-text-soft);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  box-shadow: 0 18px 44px rgb(20 21 24 / 12%);
+}
+
 .velion-chat-status-chip {
   display: inline-flex;
   align-items: center;
@@ -22483,6 +22764,41 @@ textarea:focus-visible {
 
 .velion-chat-low-confidence-notice svg {
   flex-shrink: 0;
+}
+
+/* Follow-up suggestion chips (ChatGPT-style "what to ask next"), rendered
+   below a completed answer. Reuses the same token set as
+   `.velion-chat-metrics-badge__panel` (no `.dark` overrides — the transcript
+   surface stays light in dark mode, see the note above). */
+.velion-chat-followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.velion-chat-followup-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--velion-border);
+  border-radius: 999px;
+  background: var(--velion-i-surface);
+  padding: 6px 12px;
+  color: var(--velion-j-text-soft);
+  font-size: 12px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease,
+    transform 140ms ease;
+}
+
+.velion-chat-followup-chip:hover {
+  color: var(--velion-text-muted);
+  border-color: var(--velion-bg-apricot);
+  transform: translateY(-1px);
 }
 
 .velion-chat-error-notice {
@@ -22585,10 +22901,6 @@ textarea:focus-visible {
   margin: 0 auto;
 }
 
-.velion-chat-panel__inner--wide {
-  max-width: 820px;
-}
-
 .velion-chat-empty-panel {
   display: grid;
   min-height: 0;
@@ -22627,7 +22939,7 @@ textarea:focus-visible {
 
 .velion-chat-source-summary,
 .velion-chat-source-card,
-.velion-chat-artifact-card {
+.velion-chat-artifact-view {
   border: 1px solid var(--velion-border);
   border-radius: 14px;
   background: var(--velion-i-surface);
@@ -22820,38 +23132,96 @@ textarea:focus-visible {
   text-decoration: none;
 }
 
-.velion-chat-artifact-card {
-  overflow: hidden;
+/* ── Artefakter panel (artifact / canvas renderer) ─────────────────────────── */
+
+/* Artifact list beside the viewer. Stacks into a horizontally scrolling strip
+   on narrow viewports; the panel body itself never scrolls sideways. */
+.velion-chat-artifact-workspace {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  padding: 20px 16px;
 }
 
-.velion-chat-artifact-card > button {
+@media (min-width: 1024px) {
+  .velion-chat-artifact-workspace {
+    grid-template-columns: 252px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    padding: 24px 32px;
+  }
+}
+
+.velion-chat-artifact-list {
   display: flex;
-  width: 100%;
-  align-items: center;
+  overflow-x: auto;
   gap: 8px;
-  border: 0;
-  background: transparent;
-  padding: 11px 14px;
-  color: var(--velion-j-text);
+  padding-bottom: 4px;
+}
+
+@media (min-width: 1024px) {
+  .velion-chat-artifact-list {
+    overflow-x: hidden;
+    overflow-y: auto;
+    flex-direction: column;
+    padding-bottom: 0;
+  }
+}
+
+.velion-chat-artifact-list__item {
+  display: flex;
+  min-width: 200px;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--velion-border);
+  border-radius: 12px;
+  background: var(--velion-i-surface);
+  padding: 10px 12px;
   text-align: left;
   cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
 }
 
-.velion-chat-artifact-card > button > svg:first-child {
+.velion-chat-artifact-list__item:hover {
+  border-color: color-mix(in srgb, var(--velion-a-earth) 34%, var(--velion-border));
+}
+
+.velion-chat-artifact-list__item--active {
+  border-color: color-mix(in srgb, var(--velion-a-earth) 58%, var(--velion-border));
+  background: var(--velion-bg-apricot);
+}
+
+.velion-chat-artifact-list__icon {
+  display: inline-flex;
+  align-items: center;
+  padding-top: 1px;
   color: var(--velion-a-earth);
 }
 
-.velion-chat-artifact-card > button span {
+.velion-chat-artifact-list__copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.velion-chat-artifact-list__copy strong {
   overflow: hidden;
-  flex: 1;
-  font-size: 13px;
+  color: var(--velion-j-text);
+  font-size: 12.5px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.velion-chat-artifact-card > button em,
-.velion-chat-artifact-card > button small {
+.velion-chat-artifact-list__copy > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.velion-chat-artifact-list__copy em,
+.velion-chat-artifact-list__copy small {
   border-radius: 999px;
   background: var(--velion-surface-soft);
   padding: 2px 7px;
@@ -22861,8 +23231,152 @@ textarea:focus-visible {
   font-weight: 550;
 }
 
-.velion-chat-artifact-card__body {
-  border-top: 1px solid var(--velion-border);
+.velion-chat-artifact-view {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.velion-chat-artifact-view__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--velion-border);
+  padding: 12px 14px;
+}
+
+.velion-chat-artifact-view__title {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.velion-chat-artifact-view__icon {
+  display: inline-flex;
+  align-items: center;
+  padding-top: 2px;
+  color: var(--velion-a-earth);
+}
+
+.velion-chat-artifact-view__title h2 {
+  overflow: hidden;
+  color: var(--velion-j-text);
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.velion-chat-artifact-view__title p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.velion-chat-artifact-view__title em,
+.velion-chat-artifact-view__title p > span {
+  border-radius: 999px;
+  background: var(--velion-surface-soft);
+  padding: 2px 7px;
+  color: var(--velion-e-subtle);
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 550;
+}
+
+.velion-chat-artifact-view__title em {
+  background: var(--velion-bg-apricot);
+  color: var(--velion-a-earth);
+  font-weight: 650;
+}
+
+.velion-chat-artifact-view__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.velion-chat-artifact-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--velion-border);
+  border-radius: 999px;
+  background: var(--velion-i-surface);
+  padding: 5px 11px;
+  color: var(--velion-e-muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.velion-chat-artifact-action:hover {
+  border-color: color-mix(in srgb, var(--velion-a-earth) 40%, var(--velion-border));
+  color: var(--velion-a-earth);
+}
+
+.velion-chat-artifact-action--primary {
+  border-color: color-mix(in srgb, var(--velion-a-earth) 52%, var(--velion-border));
+  background: var(--velion-bg-apricot);
+  color: var(--velion-a-earth);
+}
+
+/* Clipboard write was refused (no permission / insecure context) — the control
+   reports the failure instead of claiming a copy that never happened. */
+.velion-chat-artifact-action--failed,
+.velion-chat-artifact-action--failed:hover {
+  border-color: color-mix(in srgb, #a2483b 34%, var(--velion-border));
+  background: #fcf4f2;
+  color: #a2483b;
+}
+
+.velion-chat-artifact-versions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--velion-border);
+  border-radius: 999px;
+  background: var(--velion-i-surface);
+  padding: 2px 4px;
+}
+
+.velion-chat-artifact-versions button {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding: 3px;
+  color: var(--velion-e-muted);
+  cursor: pointer;
+}
+
+.velion-chat-artifact-versions button:disabled {
+  color: var(--velion-text-subtle);
+  cursor: default;
+  opacity: 0.45;
+}
+
+.velion-chat-artifact-versions span {
+  padding: 0 4px;
+  color: var(--velion-j-text-soft);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.velion-chat-artifact-view__body {
+  min-height: 0;
+  overflow: auto;
   padding: 14px;
 }
 
@@ -22871,7 +23385,7 @@ textarea:focus-visible {
   gap: 14px;
 }
 
-.velion-chat-artifact-card__body img {
+.velion-chat-artifact-image img {
   display: block;
   width: auto;
   max-width: 100%;
@@ -22917,15 +23431,183 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.velion-chat-artifact-card__body pre {
-  overflow-x: auto;
+/* Code viewer: a line-number gutter plus token classes emitted by
+   chat-code-highlight.ts. Wide lines scroll inside this box only. */
+.velion-chat-artifact-code {
+  overflow: auto;
+  border: 1px solid var(--velion-border);
   border-radius: 10px;
   background: #fafaf9;
-  padding: 12px;
+}
+
+.velion-chat-artifact-code pre {
+  border: 0;
+  margin: 0;
+  background: transparent;
+  padding: 12px 0;
+}
+
+.velion-chat-artifact-code code {
+  display: block;
   color: var(--velion-j-text-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12.5px;
-  line-height: 1.55;
+  line-height: 1.6;
+}
+
+.velion-chat-artifact-code--plain pre {
+  padding: 12px 14px;
+}
+
+.velion-chat-artifact-code--plain code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.velion-chat-artifact-code__line {
+  display: flex;
+  gap: 14px;
+}
+
+.velion-chat-artifact-code__gutter {
+  flex: 0 0 auto;
+  min-width: 44px;
+  padding-right: 2px;
+  color: var(--velion-text-subtle);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+.velion-chat-artifact-code__text {
+  flex: 1;
+  padding-right: 14px;
+  white-space: pre;
+}
+
+.velion-code-comment {
+  color: #7c8b7a;
+  font-style: italic;
+}
+
+.velion-code-keyword {
+  color: #9a4a2f;
+  font-weight: 600;
+}
+
+.velion-code-number {
+  color: #2f6f7c;
+}
+
+.velion-code-punctuation {
+  color: #8b8b86;
+}
+
+.velion-code-string {
+  color: #3f7a4c;
+}
+
+.velion-code-tag {
+  color: #6a4f9c;
+}
+
+/* Markdown documents reuse the chat Markdown renderer, so only the wrapper
+   width/rhythm is set here. */
+.velion-chat-artifact-document {
+  max-width: 68ch;
+}
+
+/* Sandboxed preview of untrusted model-generated HTML (see ArtifactHtmlPreview
+   — the iframe carries `sandbox="allow-scripts"` and no `allow-same-origin`). */
+.velion-chat-artifact-frame {
+  overflow: hidden;
+  border: 1px solid var(--velion-border);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.velion-chat-artifact-frame iframe {
+  display: block;
+  width: 100%;
+  height: min(70vh, 620px);
+  border: 0;
+}
+
+.velion-chat-artifact-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--velion-border);
+  border-radius: 12px;
+  background: var(--velion-i-surface);
+  padding: 14px;
+}
+
+.velion-chat-artifact-file__icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--velion-bg-apricot);
+  color: var(--velion-a-earth);
+}
+
+.velion-chat-artifact-file__meta {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.velion-chat-artifact-file__meta strong {
+  overflow: hidden;
+  color: var(--velion-j-text);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.velion-chat-artifact-file__meta span {
+  color: var(--velion-e-muted);
+  font-size: 12px;
+}
+
+.velion-chat-artifact-file__meta small {
+  overflow: hidden;
+  color: var(--velion-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Honest failure state for an artifact the backend announced but never
+   delivered content for. */
+.velion-chat-artifact-failure {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, #a2483b 30%, var(--velion-border));
+  border-radius: 12px;
+  background: #fcf4f2;
+  padding: 14px;
+  color: #a2483b;
+}
+
+.velion-chat-artifact-failure strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.velion-chat-artifact-failure p {
+  margin-top: 3px;
+  color: var(--velion-e-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 .velion-chat-steps-header {
@@ -23412,6 +24094,13 @@ textarea:focus-visible {
 .velion-chat-message-list:hover::-webkit-scrollbar-thumb {
   background-color: color-mix(in srgb, var(--velion-e-subtle) 55%, transparent);
 }
+
+/* 6 · Markdown transcript — dark theme. Deliberately no ink overrides: in this
+   app's dark mode the shell (sidebar / navbar / composer) darkens while the
+   transcript surface itself stays light (.velion-chat-page keeps
+   --velion-i-surface), so the light-theme markdown palette is the correct,
+   legible one in BOTH themes. If the transcript surface ever goes dark,
+   markdown ink must be revisited alongside it. */
 
 .realtime-voice-modal {
   position: fixed;

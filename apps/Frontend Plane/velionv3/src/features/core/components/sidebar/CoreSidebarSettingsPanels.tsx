@@ -1,5 +1,6 @@
 import { A, useLocation } from '@solidjs/router'
 import {
+  Brain,
   Building2,
   CalendarClock,
   CheckCircle2,
@@ -53,6 +54,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
   { id: 'plugins', label: 'Plugin-pakker', icon: Package, href: '/settings/plugins' },
   { id: 'cron', label: 'Planlagte kjøringer', icon: CalendarClock, href: '/settings/cron' },
+  { id: 'memory', label: 'Minne', icon: Brain, href: '/settings/memory' },
 ]
 const defaultAccountSectionId = accountSidebarSections[0]!.id
 const defaultSettingsSectionId = settingsSidebarSections[0]!.id
@@ -272,6 +274,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Plugin-pakker', 'Plugins')
     case 'cron':
       return i18n.tr('Planlagte kjøringer', 'Scheduled runs')
+    case 'memory':
+      return i18n.tr('Minne', 'Memory')
     default:
       return fallback
   }

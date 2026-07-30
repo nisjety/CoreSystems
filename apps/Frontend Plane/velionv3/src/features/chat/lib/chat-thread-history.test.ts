@@ -13,6 +13,7 @@ import {
   replaceChatThreadHistory,
   selectChatThread,
   setActiveChatThreadId,
+  togglePinnedChatThread,
   upsertChatThreadHistory,
   upsertChatThreadTranscript,
 } from '@/features/chat/lib/chat-thread-history'
@@ -92,6 +93,174 @@ describe('chat thread history', () => {
         preview: 'Second answer',
         updatedAt: '2026-06-17T10:05:00.000Z',
       },
+    ])
+  })
+
+  it('keeps an AI-generated title when a preview snapshot upserts over it', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Visma fakturastatus',
+      titleKind: 'generated',
+      preview: 'Answer',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Kan du sjekke i Visma om faktura 1234...',
+      titleKind: 'preview',
+      preview: 'Newer answer',
+      updatedAt: '2026-06-17T10:05:00.000Z',
+    })
+
+    const item = readChatThreadHistory().find((candidate) => candidate.threadId === 'thread-1')
+    expect(item?.title).toBe('Visma fakturastatus')
+    expect(item?.titleKind).toBe('generated')
+    // Everything except the locked title still updates.
+    expect(item?.preview).toBe('Newer answer')
+    expect(item?.updatedAt).toBe('2026-06-17T10:05:00.000Z')
+  })
+
+  it('keeps an AI-generated title against a legacy upsert without titleKind', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Visma fakturastatus',
+      titleKind: 'generated',
+      preview: 'Answer',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Kan du sjekke i Visma...',
+      preview: 'Newer answer',
+      updatedAt: '2026-06-17T10:05:00.000Z',
+    })
+
+    const item = readChatThreadHistory().find((candidate) => candidate.threadId === 'thread-1')
+    expect(item?.title).toBe('Visma fakturastatus')
+    expect(item?.titleKind).toBe('generated')
+  })
+
+  it('replaces an AI-generated title with a newer generated one', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Visma fakturastatus',
+      titleKind: 'generated',
+      preview: 'Answer',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Fakturaoppfølging mot Visma',
+      titleKind: 'generated',
+      preview: 'Answer',
+      updatedAt: '2026-06-17T10:05:00.000Z',
+    })
+
+    const item = readChatThreadHistory().find((candidate) => candidate.threadId === 'thread-1')
+    expect(item?.title).toBe('Fakturaoppfølging mot Visma')
+    expect(item?.titleKind).toBe('generated')
+  })
+
+  it('still validates stored legacy items without titleKind', () => {
+    window.localStorage.setItem(
+      CHAT_THREAD_HISTORY_KEY,
+      JSON.stringify([
+        {
+          threadId: 'thread-legacy',
+          title: 'Old chat',
+          preview: 'Saved before titleKind existed',
+          updatedAt: '2026-06-17T09:00:00.000Z',
+        },
+      ]),
+    )
+
+    expect(readChatThreadHistory()).toEqual([
+      {
+        threadId: 'thread-legacy',
+        title: 'Old chat',
+        preview: 'Saved before titleKind existed',
+        updatedAt: '2026-06-17T09:00:00.000Z',
+      },
+    ])
+  })
+
+  it('does not move a thread above newer ones when upserted with an older updatedAt', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-old',
+      title: 'Older chat',
+      preview: 'Old answer',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-new',
+      title: 'Newer chat',
+      preview: 'New answer',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+
+    // Selection-shaped rewrite of the OLD thread: same timestamp, no new turn.
+    upsertChatThreadHistory({
+      threadId: 'thread-old',
+      title: 'Older chat',
+      preview: 'Old answer',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+
+    expect(readChatThreadHistory().map((item) => item.threadId)).toEqual([
+      'thread-new',
+      'thread-old',
+    ])
+  })
+
+  it('leaves order and timestamp identical on a click-shaped upsert', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-2',
+      title: 'Second chat',
+      preview: 'Answer two',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+    const before = readChatThreadHistory()
+
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+
+    expect(readChatThreadHistory()).toEqual(before)
+  })
+
+  it('moves a thread to the top when its updatedAt is genuinely newer', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-2',
+      title: 'Second chat',
+      preview: 'Answer two',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'A brand new message',
+      updatedAt: '2026-06-17T11:00:00.000Z',
+    })
+
+    expect(readChatThreadHistory().map((item) => item.threadId)).toEqual([
+      'thread-1',
+      'thread-2',
     ])
   })
 
@@ -272,6 +441,131 @@ describe('chat thread history', () => {
 
     expect(readActiveChatThreadId()).toBe('thread-1')
     expect(readChatThreadHistory()).toEqual(before)
+  })
+
+  it('pins a thread to the top ahead of newer unpinned activity', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-2',
+      title: 'Second chat',
+      preview: 'Answer two',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+
+    togglePinnedChatThread('thread-1')
+
+    expect(readChatThreadHistory().map((item) => item.threadId)).toEqual([
+      'thread-1',
+      'thread-2',
+    ])
+    expect(readChatThreadHistory()[0]).toMatchObject({ threadId: 'thread-1', pinned: true })
+  })
+
+  it('sorts multiple pinned items by their own updatedAt, ahead of all unpinned', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-a',
+      title: 'A',
+      preview: 'a',
+      updatedAt: '2026-06-17T08:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-b',
+      title: 'B',
+      preview: 'b',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-newest-unpinned',
+      title: 'Newest unpinned',
+      preview: 'c',
+      updatedAt: '2026-06-17T12:00:00.000Z',
+    })
+
+    togglePinnedChatThread('thread-a')
+    togglePinnedChatThread('thread-b')
+
+    // Both pinned items sort ahead of the unpinned one despite it being the
+    // most recently active thread; within the pinned tier, B (newer) leads A.
+    expect(readChatThreadHistory().map((item) => item.threadId)).toEqual([
+      'thread-b',
+      'thread-a',
+      'thread-newest-unpinned',
+    ])
+  })
+
+  it('unpins on a second toggle without disturbing the activity sort', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-2',
+      title: 'Second chat',
+      preview: 'Answer two',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+
+    togglePinnedChatThread('thread-1')
+    togglePinnedChatThread('thread-1')
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')?.pinned).toBeUndefined()
+    expect(readChatThreadHistory().map((item) => item.threadId)).toEqual([
+      'thread-2',
+      'thread-1',
+    ])
+  })
+
+  it('does not silently unpin a thread on a routine snapshot upsert that omits `pinned`', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePinnedChatThread('thread-1')
+
+    // A routine periodic-snapshot-shaped write, exactly like
+    // `writeThreadSnapshot` performs — it never mentions `pinned`.
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'A later answer',
+      updatedAt: '2026-06-17T09:05:00.000Z',
+    })
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')).toMatchObject({
+      pinned: true,
+      preview: 'A later answer',
+    })
+  })
+
+  it('carries pin state across a server-session resync via replaceChatThreadHistory', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePinnedChatThread('thread-1')
+
+    replaceChatThreadHistory([
+      { threadId: 'thread-1', title: 'First chat', preview: 'Server-synced answer', updatedAt: '2026-06-17T09:10:00.000Z' },
+      { threadId: 'thread-2', title: 'Second chat', preview: 'b', updatedAt: '2026-06-17T09:20:00.000Z' },
+    ])
+
+    expect(readChatThreadHistory().map((item) => item.threadId)).toEqual(['thread-1', 'thread-2'])
+    expect(readChatThreadHistory()[0]).toMatchObject({ pinned: true, preview: 'Server-synced answer' })
+  })
+
+  it('is a no-op when toggling a thread with no history entry', () => {
+    expect(togglePinnedChatThread('does-not-exist')).toEqual([])
   })
 
   it('clears transcript storage with history', () => {

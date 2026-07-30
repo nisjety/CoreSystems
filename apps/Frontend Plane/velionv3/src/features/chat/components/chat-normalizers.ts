@@ -18,6 +18,10 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import {
+  isChatArtifactVersion,
+  mergeArtifactVersion,
+} from './chat-artifacts'
+import {
   artifactTitle,
   capitalize,
   createPreview,
@@ -52,7 +56,13 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     id: msg.id,
     role: msg.role,
     content: msg.content,
-    createdAt: msg.createdAt || new Date().toISOString(),
+    // Keep an absent server timestamp EMPTY instead of fabricating "now":
+    // session-core messages carry no timestamps, so stamping the fetch time
+    // here made every thread selection look like fresh activity (the history
+    // list re-ordered and re-dated on a mere click). The cached-metadata merge
+    // backfills the real time; loadThread fills any remainder from the stored
+    // history entry before the turns reach the UI.
+    createdAt: msg.createdAt || '',
     streaming: false,
     model: msg.model,
     tools: [],
@@ -150,7 +160,11 @@ export function dedupeChatTurns(turns: ChatTurn[]): ChatTurn[] {
       previous &&
       previous.role === turn.role &&
       previous.content === turn.content &&
-      timestampsAreClose(previous.createdAt, turn.createdAt)
+      // Two timestamp-less turns (session-core sends none) are the case the
+      // dedupe existed for back when both were stamped "now" — keep treating
+      // them as close.
+      (timestampsAreClose(previous.createdAt, turn.createdAt) ||
+        (!previous.createdAt && !turn.createdAt))
     ) {
       return next
     }
@@ -178,6 +192,9 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
     usedCachedIds.add(cachedTurn.id)
     return {
       ...serverTurn,
+      // The cached transcript recorded the REAL send time during streaming;
+      // a server turn without a timestamp takes it instead of staying empty.
+      createdAt: serverTurn.createdAt || cachedTurn.createdAt,
       model: serverTurn.model ?? cachedTurn.model,
       modelUsed: serverTurn.modelUsed ?? cachedTurn.modelUsed,
       requestId: serverTurn.requestId ?? cachedTurn.requestId,
@@ -279,7 +296,11 @@ export function isChatArtifact(value: unknown): value is ChatArtifact {
     typeof record.kind === 'string' &&
     typeof record.content === 'string' &&
     typeof record.title === 'string' &&
-    typeof record.version === 'number'
+    typeof record.version === 'number' &&
+    // `history` rides along in the thread snapshot as untyped JSON; a snapshot
+    // written by an older build simply has none.
+    (record.history === undefined ||
+      (Array.isArray(record.history) && record.history.every(isChatArtifactVersion)))
   )
 }
 
@@ -365,7 +386,7 @@ export function buildTaskSteps(
       id: `${turnId}:tool-${tool}`,
       title: TOOL_LABELS[tool],
       detail: tool === 'search'
-        ? 'The web_search tool will be sent for this answer.'
+        ? 'Web search is available; it runs only if the answer needs fresh data.'
         : `${TOOL_LABELS[tool]} is enabled for this answer.`,
       status: 'waiting' as const,
       createdAt: now,
@@ -405,13 +426,18 @@ export function createTurnStep(
 }
 
 export function normalizeArtifact(event: { id?: string; kind?: string; title?: string; content?: string; version?: number }): ChatArtifact | null {
-  if (!event.content) return null
-  const kind = event.kind ?? inferArtifactKind(event.content)
+  const content = event.content ?? ''
+  // An artifact with no content AND no id carries nothing to show or update —
+  // drop it. One WITH an id was genuinely announced by the backend, so it is
+  // kept: the panel then renders an explicit "kunne ikke lastes" state instead
+  // of silently losing an artifact the user was told about.
+  if (!content && !event.id) return null
+  const kind = event.kind ?? inferArtifactKind(content)
   return {
     id: event.id ?? createId('artifact'),
     kind,
     title: event.title ?? artifactTitle(kind),
-    content: event.content,
+    content,
     version: event.version ?? 0,
   }
 }
@@ -690,11 +716,24 @@ export function upsertToolCall(calls: ChatToolCall[], call: ChatToolCall): ChatT
   return calls.map((item, itemIndex) => itemIndex === index ? { ...item, ...call } : item)
 }
 
-export function upsertArtifact(artifacts: ChatArtifact[], artifact: ChatArtifact): ChatArtifact[] {
+/**
+ * Adds or UPDATES an artifact in a turn's list.
+ *
+ * A repeated `id` never duplicates the entry: the incoming revision is folded
+ * into the existing one by `mergeArtifactVersion`, which keeps the full version
+ * history and leaves the top-level fields on the newest revision. `carried` is
+ * an artifact with the same id found on an EARLIER turn — the model can rewrite
+ * a document several turns later, and its earlier revisions must not be lost.
+ */
+export function upsertArtifact(
+  artifacts: ChatArtifact[],
+  artifact: ChatArtifact,
+  carried?: ChatArtifact,
+): ChatArtifact[] {
   const index = artifacts.findIndex((item) => item.id === artifact.id)
-  if (index < 0) return [...artifacts, artifact]
+  if (index < 0) return [...artifacts, mergeArtifactVersion(carried, artifact)]
   return artifacts.map((item, itemIndex) => (
-    itemIndex === index && artifact.version >= item.version ? artifact : item
+    itemIndex === index ? mergeArtifactVersion(item, artifact) : item
   ))
 }
 
@@ -725,16 +764,23 @@ export function citationEvidence(citation: Citation): AgentTaskStepEvidence {
 
 export function missingSearchResultStep(step: AgentTaskStep, status: TaskStepStatus): AgentTaskStep | null {
   if (status !== 'done' || !step.id.endsWith(':tool-search') || step.status !== 'waiting') return null
+  // With web search available by default and used per-query (staleness
+  // heuristic + model judgment), a turn that completes without searching is
+  // the normal outcome for timeless questions — not a failure. Stay honest
+  // (the answer is not web-verified) without alarming the user.
   return {
     ...step,
-    detail: 'No web_search tool event was received before the answer completed. This answer is not web-verified.',
-    expandedDetail: 'Search was requested by the composer, but the stream completed without a web_search tool_call/tool_result event. This usually means the backend did not execute the search path or did not emit the tool event family for this turn.',
-    status: 'stopped',
+    detail: 'No web search needed — answered from existing knowledge or other tools.',
+    expandedDetail: 'Web search was available for this turn, but the query did not require fresh web data, so no search ran. Time-sensitive claims in this answer are not web-verified.',
+    status: 'done',
   }
 }
 
 export function readBrowseWebPreference(): boolean {
-  return readClientValue(CHAT_BROWSE_WEB_KEY) === '1'
+  // Default ON: web search is meant to be available on every turn, with the
+  // backend deciding per-query whether it is actually used (staleness
+  // heuristic + model judgment). Only an explicit opt-out ('0') disables it.
+  return readClientValue(CHAT_BROWSE_WEB_KEY) !== '0'
 }
 
 export function writeBrowseWebPreference(enabled: boolean): void {

@@ -198,8 +198,14 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
-          cpus: "1.0"
+          # Vite's dev server + TS transform over this codebase steadily reaches
+          # ~760M, so a 768M ceiling put it in a restart loop (17 restarts in
+          # one session) that blanked the page mid-answer. Headroom measured
+          # against Docker's 7.7G VM, where the next-largest container is
+          # ~274M. Dev only — the built image is served by nginx and needs a
+          # fraction of this.
+          memory: 2G
+          cpus: "2.0"
 
 volumes:
   velion-nats-data:
