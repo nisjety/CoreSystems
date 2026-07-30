@@ -1276,7 +1276,12 @@ pub async fn dispatch_tool(
             if url.trim().is_empty() {
                 return err_outcome(call, "fetch_url requires a 'url' argument");
             }
-            match state.quarry.scrape(&url, org_id, None, false, zdr).await {
+            // `scrape_readable`, not `scrape`: it resolves Quarry's
+            // artifact-referenced page text and escalates once to the
+            // browser driver when a plain fetch yields nothing. Deep
+            // research's page-read phase dispatches `fetch_url` through
+            // this same arm, so both surfaces get the behaviour.
+            match state.quarry.scrape_readable(&url, org_id, zdr).await {
                 Ok(r) => {
                     let body = if r.markdown.trim().is_empty() {
                         r.text
@@ -1712,6 +1717,52 @@ async fn dispatch_audited_tool(
         .await
         .map_err(|_| "tool audit finalization failed")?;
     Ok(outcome)
+}
+
+/// Audited dispatch for a WEB tool the gateway itself orchestrates rather than
+/// the model — today only [`crate::deep_research`], which issues its own
+/// `web_search` / `fetch_url` calls across a multi-phase pipeline.
+///
+/// Exists so an orchestration path cannot quietly skip the audit ledger by
+/// calling the Quarry client directly: a gateway-issued fetch is exactly as
+/// auditable an action as a model-issued one, and going through
+/// [`dispatch_audited_tool`] is what keeps the reserve→run→finalize record
+/// intact. Web tools need none of the plane bearers, so this narrows the
+/// 13-argument private entry point to the nine that actually apply instead of
+/// making it public.
+///
+/// # Errors
+///
+/// Returns `Err` only when the action could not be durably audited; a failed
+/// tool CALL comes back as a [`ToolOutcome`] carrying `error`.
+#[allow(clippy::too_many_arguments)] // request context, already narrowed from dispatch_audited_tool's 13
+pub(crate) async fn dispatch_web_tool_audited(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    session_bearer: &str,
+    zdr: bool,
+    call: &ToolCall,
+) -> Result<ToolOutcome, &'static str> {
+    dispatch_audited_tool(
+        state,
+        request_id,
+        run_id,
+        org_id,
+        user_id,
+        thread_id,
+        None,
+        None,
+        "",
+        session_bearer,
+        zdr,
+        call,
+        None,
+    )
+    .await
 }
 
 /// Built-in tool specs the gateway always advertises when function-calling is

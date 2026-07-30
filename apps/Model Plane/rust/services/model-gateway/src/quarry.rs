@@ -19,6 +19,11 @@ use crate::quarry_auth::TokenProvider;
 const SCRAPE_SCOPES: &[&str] = &["scrape:read"];
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 
+/// How long the browser driver may wait for client-rendered markup to
+/// settle on the one escalated retry. Comfortably inside the 30s scrape
+/// timeout so the wait can never be what times the call out.
+const RENDER_SETTLE_MS: u32 = 2_500;
+
 /// Typed Quarry error envelope (HTTP 4xx / 5xx with structured body).
 #[derive(Debug, Error)]
 pub enum QuarryError {
@@ -65,8 +70,103 @@ impl RenderHints {
     /// by `Client::scrape` to decide whether to include the `render`
     /// field at all (Quarry tolerates empty objects but we keep wire
     /// shape minimal).
+    ///
+    /// Both fields count. Testing only `wait_for_selector` silently
+    /// dropped timeout-only hints, so a caller that asked for "settle
+    /// for 2s" got no wait at all.
     fn has_any(&self) -> bool {
-        self.wait_for_selector.is_some()
+        self.wait_for_selector.is_some() || self.wait_for_timeout_ms.is_some()
+    }
+}
+
+/// Quarry's driver-selection signals — the field that actually decides
+/// static vs TLS vs browser. `render` does NOT influence that choice:
+/// `quarry-edge` calls `plan_from_signals(req.signals.unwrap_or_default())`
+/// and only *then* hands `render` to the chosen driver, so render hints
+/// on a default-signalled request are applied by a driver that never
+/// executes JavaScript.
+///
+/// Mirrors `quarry_runtime::driver_plan::DriverSignals`. That struct
+/// derives `Deserialize` **without** `#[serde(default)]` on the struct
+/// or its fields, so once `signals` is present on the wire every field
+/// is mandatory — omitting one makes the edge reject the whole request.
+/// Every field is therefore always serialised.
+#[derive(Debug, Clone, Serialize)]
+pub struct DriverSignals {
+    /// Browser actions to perform. Non-empty forces the browser driver.
+    pub actions: Vec<String>,
+    pub screenshot: bool,
+    pub pdf: bool,
+    /// Prior blocking signals for this origin. `>= 2` selects the
+    /// browser driver, `== 1` selects the TLS-profile driver.
+    pub prior_block_signals: u8,
+    pub profile_required: bool,
+    /// Serialised form of Quarry's `UrlType` enum (externally tagged
+    /// unit variants → a bare string). `"Default"` is its `#[default]`.
+    pub url_type: &'static str,
+}
+
+impl Default for DriverSignals {
+    fn default() -> Self {
+        Self {
+            actions: Vec::new(),
+            screenshot: false,
+            pdf: false,
+            prior_block_signals: 0,
+            profile_required: false,
+            url_type: "Default",
+        }
+    }
+}
+
+impl DriverSignals {
+    /// Signals that make Quarry's planner pick the **browser** driver.
+    ///
+    /// Uses `prior_block_signals = 2`, the documented escalation
+    /// threshold in `quarry-runtime/src/driver_plan.rs`: a static fetch
+    /// that yields no readable text is exactly the soft block that
+    /// threshold exists for. Deliberately does not set `screenshot` /
+    /// `pdf` / `actions`, which would also force a browser but bill an
+    /// artifact we do not want.
+    #[must_use]
+    pub fn browser() -> Self {
+        Self {
+            prior_block_signals: 2,
+            ..Self::default()
+        }
+    }
+}
+
+/// Per-call scrape knobs. Added as a struct rather than more positional
+/// parameters so new Quarry request fields don't churn every call site.
+#[derive(Debug, Clone, Default)]
+pub struct ScrapeOptions {
+    pub render: Option<RenderHints>,
+    pub signals: Option<DriverSignals>,
+    pub prefer_http3: bool,
+    pub zdr: bool,
+}
+
+impl ScrapeOptions {
+    /// The one retry [`Client::scrape_readable`] makes when a plain
+    /// fetch came back with no readable text: browser driver plus a
+    /// render wait so client-rendered markup exists before extraction.
+    ///
+    /// `wait_for_selector` is required — [`RenderHints::has_any`] drops
+    /// a hint that only carries a timeout, and `body` is present on
+    /// every HTML document, so it costs nothing on pages that are
+    /// already settled.
+    #[must_use]
+    pub fn browser_escalation(zdr: bool) -> Self {
+        Self {
+            render: Some(RenderHints {
+                wait_for_selector: Some("body".to_owned()),
+                wait_for_timeout_ms: Some(RENDER_SETTLE_MS),
+            }),
+            signals: Some(DriverSignals::browser()),
+            prefer_http3: false,
+            zdr,
+        }
     }
 }
 
@@ -245,11 +345,108 @@ impl Client {
         prefer_http3: bool,
         zdr: bool,
     ) -> Result<ScrapeResult, QuarryError> {
+        self.scrape_with_options(
+            url,
+            org_id,
+            &ScrapeOptions {
+                render: render.cloned(),
+                signals: None,
+                prefer_http3,
+                zdr,
+            },
+        )
+        .await
+    }
+
+    /// Fetch a page and return its readable text, escalating to a
+    /// rendered fetch **once** when the plain fetch yields nothing.
+    ///
+    /// This is the entry point every page-read caller should use. The
+    /// fast path stays one static fetch: the browser is only paid for
+    /// when the cheap path demonstrably produced no text.
+    ///
+    /// Escalation happens **only** for an empty body — never for an
+    /// error (a 403/timeout is not fixed by rendering, and retrying it
+    /// would double the cost of every genuinely broken URL) and never
+    /// more than once. If the rendered retry is also empty (or itself
+    /// fails) the first result is returned unchanged, so the caller
+    /// still reports the page as unread rather than inventing content.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first fetch's [`QuarryError`]. A failure of the
+    /// escalated retry is swallowed in favour of the first result.
+    pub async fn scrape_readable(
+        &self,
+        url: &str,
+        org_id: &str,
+        zdr: bool,
+    ) -> Result<ScrapeResult, QuarryError> {
+        let first = self
+            .scrape_with_options(
+                url,
+                org_id,
+                &ScrapeOptions {
+                    zdr,
+                    ..ScrapeOptions::default()
+                },
+            )
+            .await?;
+        if !first.text.trim().is_empty() {
+            return Ok(first);
+        }
+
+        tracing::debug!(
+            %url,
+            status = first.status,
+            "quarry scrape returned no readable text; escalating once to the browser driver"
+        );
+        match self
+            .scrape_with_options(url, org_id, &ScrapeOptions::browser_escalation(zdr))
+            .await
+        {
+            Ok(rendered) if !rendered.text.trim().is_empty() => {
+                tracing::debug!(
+                    %url,
+                    chars = rendered.text.chars().count(),
+                    "rendered retry recovered readable text"
+                );
+                Ok(rendered)
+            }
+            Ok(_) => {
+                tracing::debug!(%url, "rendered retry also returned no readable text");
+                Ok(first)
+            }
+            Err(error) => {
+                tracing::debug!(%url, %error, "rendered retry failed; keeping the empty result");
+                Ok(first)
+            }
+        }
+    }
+
+    /// POST `/v1/scrape` with explicit [`ScrapeOptions`] and project the
+    /// response, resolving any artifact-referenced text.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] if the edge is unavailable, the URL is empty,
+    /// the upstream returns a non-2xx status, or the response cannot be decoded.
+    pub async fn scrape_with_options(
+        &self,
+        url: &str,
+        org_id: &str,
+        options: &ScrapeOptions,
+    ) -> Result<ScrapeResult, QuarryError> {
         #[derive(Serialize)]
         struct Body<'a> {
             url: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             render: Option<&'a RenderHints>,
+            /// Omitted unless the caller wants a non-default driver, so
+            /// an ordinary fetch keeps the exact wire shape it had
+            /// before signals existed.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            signals: Option<&'a DriverSignals>,
             #[serde(skip_serializing_if = "is_false", rename = "prefer_http3")]
             prefer_http3: bool,
             zdr: bool,
@@ -273,9 +470,10 @@ impl Client {
 
         let body = Body {
             url,
-            render: render.filter(|r| r.has_any()),
-            prefer_http3,
-            zdr,
+            render: options.render.as_ref().filter(|r| r.has_any()),
+            signals: options.signals.as_ref(),
+            prefer_http3: options.prefer_http3,
+            zdr: options.zdr,
         };
 
         let endpoint = format!("{}/v1/scrape", self.base_url);
@@ -330,7 +528,99 @@ impl Client {
             .and_then(Value::as_object)
             .ok_or(QuarryError::EmptyEnvelope)?;
 
-        Ok(project(url, &Value::Object(data.clone())))
+        let data = Value::Object(data.clone());
+        let mut result = project(url, &data);
+
+        // Quarry does not inline page text. `OutputFormats.markdown` /
+        // `.html` are `Option<FormatRef>` — `{artifact_id, bytes}` — and
+        // there is no `text` field at all, so `project`'s string reads
+        // are empty for every real page. Resolve the reference to get
+        // the bytes the fetch already produced.
+        //
+        // Skipped under ZDR: on a zero-retention turn Quarry emits no
+        // formats to begin with, and pulling persisted bytes back would
+        // defeat the guarantee even if it did.
+        if result.text.trim().is_empty() && !options.zdr {
+            if let Some(text) = self.referenced_markdown(url, org_id, &data).await {
+                result.markdown = text.clone();
+                result.text = text;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Resolve `formats.markdown`'s artifact reference into text, or
+    /// `None` when there is no reference, it is empty, or the read is
+    /// refused. A refusal is logged rather than raised: the page is then
+    /// reported unread, which is honest, instead of looking like a page
+    /// that genuinely had no words in it.
+    async fn referenced_markdown(&self, url: &str, org_id: &str, data: &Value) -> Option<String> {
+        let reference = artifact_ref(data, "markdown")?;
+        match self.artifact_text(&reference.artifact_id, org_id).await {
+            Ok(text) if !text.trim().is_empty() => Some(text),
+            Ok(_) => {
+                tracing::debug!(
+                    %url,
+                    artifact_id = %reference.artifact_id,
+                    "quarry markdown artifact resolved to an empty body"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %url,
+                    artifact_id = %reference.artifact_id,
+                    bytes = reference.bytes,
+                    %error,
+                    "quarry returned page text as an artifact reference that could not be \
+                     resolved; the page will be reported as unread"
+                );
+                None
+            }
+        }
+    }
+
+    /// GET `/v1/artifacts/{id}` and return the body as UTF-8 text.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] when the edge is unavailable, rejects the
+    /// read, or the artifact is not valid UTF-8.
+    async fn artifact_text(&self, artifact_id: &str, org_id: &str) -> Result<String, QuarryError> {
+        if !self.available() {
+            return Err(QuarryError::Unavailable);
+        }
+        let endpoint = format!("{}/v1/artifacts/{artifact_id}", self.base_url);
+        let mut retried_unauthorized = false;
+        let resp = loop {
+            let token = self.token(org_id, SCRAPE_SCOPES).await?;
+            let mut req = self.http.get(&endpoint);
+            if !token.is_empty() {
+                req = req.bearer_auth(&token);
+            }
+            if !org_id.is_empty() {
+                req = req.header("X-Quarry-Org", org_id);
+            }
+            let resp = req.send().await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, SCRAPE_SCOPES, &token)
+                    .await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            break resp;
+        };
+        let status = resp.status().as_u16();
+        let raw = resp.text().await?;
+        if status >= 400 {
+            return Err(QuarryError::Typed {
+                code: format!("HTTP_{status}"),
+                message: truncate(&raw, 200),
+                status,
+            });
+        }
+        Ok(raw)
     }
 
     /// Call `/v1/search` and return the projected results. The edge's
@@ -521,6 +811,29 @@ fn project(requested: &str, data: &Value) -> ScrapeResult {
     }
 }
 
+/// One of Quarry's `FormatRef`s: page bytes held in the artifact store
+/// rather than inlined in the scrape response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRef {
+    pub artifact_id: String,
+    pub bytes: u64,
+}
+
+/// Read `data.formats[key]` as a `FormatRef`. Returns `None` when the
+/// key is absent or is an inline string (tolerated so the projection
+/// keeps working if Quarry ever starts inlining small documents).
+fn artifact_ref(data: &Value, key: &str) -> Option<ArtifactRef> {
+    let entry = data.get("formats")?.as_object()?.get(key)?.as_object()?;
+    let artifact_id = entry.get("artifact_id")?.as_str()?.to_owned();
+    if artifact_id.is_empty() {
+        return None;
+    }
+    Some(ArtifactRef {
+        artifact_id,
+        bytes: entry.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+    })
+}
+
 fn string_field(obj: &serde_json::Map<String, Value>, key: &str) -> String {
     obj.get(key)
         .and_then(Value::as_str)
@@ -692,6 +1005,307 @@ mod tests {
             wait_for_timeout_ms: None,
         }
         .has_any());
+    }
+
+    #[test]
+    fn render_hints_has_any_accepts_a_timeout_only_hint() {
+        // A timeout-only hint used to be dropped on the floor, so
+        // "settle for 2s" silently became "no wait at all".
+        assert!(RenderHints {
+            wait_for_selector: None,
+            wait_for_timeout_ms: Some(2_000),
+        }
+        .has_any());
+    }
+
+    /// Quarry's `DriverSignals` has no `#[serde(default)]`, so every
+    /// field must be on the wire or the edge rejects the request. This
+    /// pins the exact field names and the browser-selecting values.
+    #[test]
+    fn browser_signals_serialize_to_quarrys_field_names() {
+        let json = serde_json::to_value(DriverSignals::browser()).expect("signals serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "actions": [],
+                "screenshot": false,
+                "pdf": false,
+                "prior_block_signals": 2,
+                "profile_required": false,
+                "url_type": "Default",
+            })
+        );
+    }
+
+    #[test]
+    fn default_signals_would_not_select_the_browser() {
+        // Mirrors `plan_from_signals`: these values produce
+        // `static_fetch("no signals")`, which is why the escalation has
+        // to raise `prior_block_signals` rather than only send `render`.
+        let json = serde_json::to_value(DriverSignals::default()).expect("signals serialize");
+        assert_eq!(json["prior_block_signals"], 0);
+        assert_eq!(json["actions"], serde_json::json!([]));
+        assert_eq!(json["profile_required"], false);
+    }
+
+    fn ok_body(markdown_ref: Option<(&str, u64)>) -> serde_json::Value {
+        match markdown_ref {
+            Some((id, bytes)) => serde_json::json!({
+                "data": {"status": 200, "formats": {"markdown": {"artifact_id": id, "bytes": bytes}}}
+            }),
+            None => serde_json::json!({"data": {"status": 200}}),
+        }
+    }
+
+    fn test_client(base_url: String) -> Client {
+        Client::new(Config {
+            base_url,
+            token: "test-token".to_owned(),
+            timeout: Duration::from_secs(5),
+        })
+    }
+
+    /// The fast path: a page that yields text on the first fetch must
+    /// cost exactly one static request and never pay for a browser.
+    #[tokio::test]
+    async fn readable_scrape_does_not_escalate_when_text_is_present() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_json(
+                serde_json::json!({"url": "https://example.com", "zdr": false}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "formats": {"markdown": "# real content"}}
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://example.com", "org-a", false)
+            .await
+            .expect("scrape succeeds");
+        assert_eq!(result.text, "# real content");
+    }
+
+    /// An empty body escalates ONCE, and the retry carries both the
+    /// browser signals and the render hints.
+    #[tokio::test]
+    async fn readable_scrape_escalates_once_on_empty_text() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_json(
+                serde_json::json!({"url": "https://ssb.no", "zdr": false}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(None)))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_json(serde_json::json!({
+                "url": "https://ssb.no",
+                "render": {"waitForSelector": "body", "waitForTimeoutMs": 2_500},
+                "signals": {
+                    "actions": [],
+                    "screenshot": false,
+                    "pdf": false,
+                    "prior_block_signals": 2,
+                    "profile_required": false,
+                    "url_type": "Default",
+                },
+                "zdr": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "formats": {"markdown": "# rendered content"}}
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://ssb.no", "org-a", false)
+            .await
+            .expect("scrape succeeds");
+        assert_eq!(result.text, "# rendered content");
+    }
+
+    /// Both attempts empty: exactly two requests (never a third), and
+    /// the honest empty result is preserved for the caller to report.
+    #[tokio::test]
+    async fn readable_scrape_never_escalates_twice() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(None)))
+            .expect(2)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://ssb.no", "org-a", false)
+            .await
+            .expect("scrape succeeds");
+        assert!(result.text.is_empty(), "empty must stay empty, not invented");
+    }
+
+    /// An error is not an empty page: rendering cannot fix a 403, so it
+    /// must surface immediately instead of costing a browser fetch.
+    #[tokio::test]
+    async fn readable_scrape_does_not_escalate_an_error() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {"code": "FORBIDDEN", "message": "blocked"}
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let error = test_client(quarry.uri())
+            .scrape_readable("https://blocked.example", "org-a", false)
+            .await
+            .expect_err("error must propagate");
+        assert!(matches!(error, QuarryError::Typed { status: 403, .. }));
+    }
+
+    /// If the escalated retry itself fails, the first (empty) result is
+    /// returned — the caller reports "unread", not a hard error.
+    #[tokio::test]
+    async fn readable_scrape_keeps_first_result_when_the_retry_fails() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_json(
+                serde_json::json!({"url": "https://ssb.no", "zdr": false}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(None)))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .and(body_json(serde_json::json!({
+                "url": "https://ssb.no",
+                "render": {"waitForSelector": "body", "waitForTimeoutMs": 2_500},
+                "signals": {
+                    "actions": [],
+                    "screenshot": false,
+                    "pdf": false,
+                    "prior_block_signals": 2,
+                    "profile_required": false,
+                    "url_type": "Default",
+                },
+                "zdr": false,
+            })))
+            .respond_with(ResponseTemplate::new(504))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://ssb.no", "org-a", false)
+            .await
+            .expect("first result is kept");
+        assert!(result.text.is_empty());
+    }
+
+    /// The real defect: Quarry returns page text as a `FormatRef`, so
+    /// the client has to resolve the artifact to see any content.
+    #[tokio::test]
+    async fn artifact_referenced_markdown_is_resolved_into_text() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(ok_body(Some(("art_01ABC", 42)))),
+            )
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/artifacts/art_01ABC"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("# Oslo\n\nBefolkning"))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://www.ssb.no/kommunefakta/oslo", "org-a", false)
+            .await
+            .expect("scrape succeeds");
+        assert_eq!(result.text, "# Oslo\n\nBefolkning");
+        assert_eq!(result.markdown, "# Oslo\n\nBefolkning");
+    }
+
+    /// An unresolvable reference must not become fabricated content, and
+    /// must not stop the escalation from being attempted.
+    #[tokio::test]
+    async fn unresolvable_artifact_reference_leaves_the_page_unread() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(ok_body(Some(("art_01DENIED", 99)))),
+            )
+            .expect(2)
+            .mount(&quarry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/artifacts/art_01DENIED"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(2)
+            .mount(&quarry)
+            .await;
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://ssb.no", "org-a", false)
+            .await
+            .expect("scrape still succeeds");
+        assert!(result.text.is_empty());
+    }
+
+    /// Zero-retention turns must never pull persisted bytes back out of
+    /// the artifact store.
+    #[tokio::test]
+    async fn zdr_scrape_does_not_resolve_artifacts() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(ok_body(Some(("art_01ZDR", 10)))),
+            )
+            .mount(&quarry)
+            .await;
+        // No /v1/artifacts mock: any GET would fail the test as an
+        // unmatched request.
+
+        let result = test_client(quarry.uri())
+            .scrape_readable("https://ssb.no", "org-a", true)
+            .await
+            .expect("scrape succeeds");
+        assert!(result.text.is_empty());
+    }
+
+    #[test]
+    fn artifact_ref_reads_the_format_ref_shape() {
+        let data = serde_json::json!({
+            "formats": {"markdown": {"artifact_id": "art_01X", "bytes": 11_837}}
+        });
+        assert_eq!(
+            artifact_ref(&data, "markdown"),
+            Some(ArtifactRef {
+                artifact_id: "art_01X".to_owned(),
+                bytes: 11_837
+            })
+        );
+        // An inline string is not a reference (tolerated, not resolved).
+        let inline = serde_json::json!({"formats": {"markdown": "# hi"}});
+        assert_eq!(artifact_ref(&inline, "markdown"), None);
+        assert_eq!(artifact_ref(&data, "html"), None);
     }
 
     #[test]

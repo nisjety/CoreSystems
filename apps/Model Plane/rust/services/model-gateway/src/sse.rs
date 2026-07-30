@@ -282,6 +282,13 @@ pub async fn invoke_stream_sse(
     if effective_zdr {
         if !req.attachments.is_empty()
             || req.generate_image
+            // Deep research runs every search and page read through the AUDITED
+            // tool path (session-core reserve → run → finalize), and this branch
+            // has no run to audit against. Rejecting is the honest outcome:
+            // degrading would answer a "Dyp research" request with a plain
+            // ungrounded completion and no indication the research never ran,
+            // which is precisely the lie `crate::deep_research` exists to stop.
+            || req.deep_research
             || features.iter().any(|feature| feature == "agentic")
         {
             return error_stream(
@@ -926,7 +933,13 @@ pub async fn invoke_stream_sse(
     // search), is what makes it real: an obviously time-sensitive query now
     // gets web_search offered even with the toggle off.
     let web_search_signal = crate::tool_loop::should_force_web_search(&req.content);
-    let web_search_available = client_requested_web_search || web_search_signal;
+    // Deep research IS a web turn by definition, so it makes web_search
+    // available regardless of the Search toggle: the pipeline runs its own
+    // searches, and the loop afterwards must be able to close a named gap the
+    // report could not fill.
+    let deep_research_requested = req.deep_research;
+    let web_search_available =
+        client_requested_web_search || web_search_signal || deep_research_requested;
     let mut tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
         let mut defs: Vec<ToolDefinition> = req
             .tools
@@ -1091,6 +1104,81 @@ pub async fn invoke_stream_sse(
         // collapsed every grounded turn to one flat bonus (the "always 87%").
         let mut turn_evidence = crate::confidence::Evidence::default();
 
+        // Deep research (composer "Dyp research"). A full plan → search → read
+        // → synthesize pipeline that emits a cited `document` artifact; see
+        // `crate::deep_research`. It SUPERSEDES the forced single search below
+        // — running both would search the same question twice — and every
+        // failure inside it degrades into a stated fact in the context rather
+        // than failing the turn.
+        let mut deep_research_ran = false;
+        if deep_research_requested {
+            let research = crate::deep_research::run_deep_research(
+                &session_state,
+                &req_id,
+                &session_run_for_terminal.run_id,
+                &org_clone,
+                &user_clone,
+                &thread_scope,
+                inference_bearer.as_str(),
+                session_bearer.as_str(),
+                effective_zdr,
+                &model_clone,
+                messages,
+                &tool_phase_query,
+                cancel_flag.as_ref(),
+                Some(&sink),
+            )
+            .await;
+            let Ok(research) = research else {
+                emit_prepared_failure(
+                    &tx,
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                    &req_id,
+                    "audit_persistence_failed",
+                    "Tool action could not be durably audited",
+                    true,
+                )
+                .await;
+                cancels.finish(&req_id);
+                return;
+            };
+            // A research run observes Stop mid-pipeline; honor it here rather
+            // than answering from evidence the user already declined to wait
+            // for. Same terminal shape as the streaming loop's cancel branch.
+            if research.cancelled {
+                let stopped = crate::sse_events::ChatEvent::Stopped {
+                    reason: "client cancelled".to_owned(),
+                };
+                let _ = tx.send(Ok(stopped.to_sse(&req_id))).await;
+                if let Err(error) =
+                    crate::session_flow::cancel_direct_inference_run_authenticated(
+                        &session_state,
+                        &session_run_for_terminal,
+                        &session_bearer,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel deep-research run after client stop");
+                }
+                cancels.finish(&req_id);
+                return;
+            }
+            deep_research_ran = true;
+            tool_grounded = tool_grounded || research.any_tool_succeeded;
+            turn_evidence.tool_successes += research.tool_successes;
+            turn_evidence.tool_failures += research.tool_failures;
+            turn_evidence.web_citations += research.web_citations;
+            messages = research.messages;
+            // Answer with the model that wrote the report, for the same reason
+            // the tool loop reuses its resolved model: re-resolving would send a
+            // research turn to the cheapest tier to summarize work it never saw.
+            if let Some(research_model) = research.resolved_model {
+                answer_model = research_model;
+            }
+        }
+
         // Availability ≠ usage. The Search toggle (or a client tool spec) makes
         // web_search AVAILABLE; only the staleness heuristic FORCES a search.
         // This block used to force a pre-loop search whenever web_search was
@@ -1100,7 +1188,10 @@ pub async fn invoke_stream_sse(
         // (population, prices, news, recent years) gets a guaranteed up-front
         // search; every other query keeps web_search in the loop's tool set
         // and the model decides whether the answer needs fresh data.
-        if web_search_signal && tool_defs.iter().any(|tool| tool.name == "web_search") {
+        if web_search_signal
+            && !deep_research_ran
+            && tool_defs.iter().any(|tool| tool.name == "web_search")
+        {
             let forced = crate::tool_loop::run_forced_web_search(
                 &session_state,
                 &req_id,

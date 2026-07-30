@@ -5309,6 +5309,20 @@ pub struct InvokeRequest {
     /// toggle cannot be lost by tool normalization or client/BFF drift.
     #[serde(default)]
     pub browse_web: bool,
+    /// Deep-research intent from the composer's "Dyp research" button.
+    ///
+    /// The button has existed since the chat surface shipped, but the client
+    /// folded it into `browseWeb` (`tools.includes('research') → browseWeb:
+    /// true`), so "deep research" was one `web_search` call with a different
+    /// icon — exactly the `planMode` failure mode one field above: a control
+    /// with no field behind it. With this field set the turn runs
+    /// `crate::deep_research`'s plan → search → read → synthesize pipeline and
+    /// produces a cited report artifact instead.
+    ///
+    /// Implies web availability: a research turn always gets `web_search` in
+    /// its tool set, whether or not the Search toggle is also on.
+    #[serde(default, alias = "deepResearch")]
+    pub deep_research: bool,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
     #[serde(default)]

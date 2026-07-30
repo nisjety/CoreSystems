@@ -152,6 +152,7 @@ mod tests {
             structured_output_schema: None,
             zdr: false,
             browse_web: false,
+            deep_research: false,
             max_cost_usd: None,
             max_tokens: None,
             profile: None,
