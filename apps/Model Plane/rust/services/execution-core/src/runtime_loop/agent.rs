@@ -1033,6 +1033,20 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "Fetch and read a specific web page; returns its cleaned text content.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"}},"required":["url"]}"#.to_owned(),
         },
+        // Sandboxed code execution. Offered for the same reason as delegation
+        // below — the purpose-lock rejects any tool absent from this list, so
+        // without a definition here a `code_interpreter` call could never be
+        // dispatched. `shell` stays deliberately UNOFFERED: arbitrary host
+        // commands are not something an agent run should reach for, while this
+        // tool is hermetic (own workspace, no network, timeout, scrubbed output).
+        // The description states the real constraints because a model that
+        // assumes network access or a persistent filesystem writes code that
+        // cannot work here.
+        pb::ToolDefinition {
+            name: "code_interpreter".to_owned(),
+            description: "Run REAL Python (or POSIX sh) in an isolated sandbox to compute, analyse data, or PRODUCE FILES — spreadsheets (openpyxl, XlsxWriter, pandas), Word documents (python-docx), PowerPoint (python-pptx), PDFs (reportlab, pypdf), charts/images (matplotlib headless, Pillow), plus numpy/pandas for data work. The working directory starts EMPTY and is deleted after the call, so write output with plain relative paths (e.g. open('report.xlsx','wb')) and they are returned to you as files with name, mime type and base64 content; nothing persists between calls. There is NO NETWORK: you cannot download anything, call an API, or pip install — use only the libraries listed. Pass input data via files_in (bare filenames, base64 content); the program reads them from the working directory. Print anything you want to read yourself to stdout. Long-running programs are killed at the timeout (30s by default), and a non-zero exit returns its traceback so you can fix the code and retry.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Defaults to python"},"code":{"type":"string","description":"The complete program to run"},"files_in":{"type":"array","description":"Optional input files written into the working directory before the program runs","items":{"type":"object","properties":{"name":{"type":"string","description":"Bare filename, no directories or '..'"},"content_b64":{"type":"string","description":"Base64-encoded file content"}},"required":["name","content_b64"]}}},"required":["code"]}"#.to_owned(),
+        },
         // Delegation. Offered so the capability is actually reachable: the
         // purpose-lock rejects any tool absent from this list, so without a
         // definition here a `subagent.*` call could never be dispatched at all.

@@ -77,6 +77,17 @@ pub enum ChatEvent {
         latency_ms: u64,
         confidence: Option<f64>,
     },
+    /// AI-generated thread title, produced once after the thread's FIRST
+    /// exchange completes (sidebar summary, ChatGPT-style). Control event —
+    /// never feature-gated: when a title was generated it must reach the
+    /// client, and a client that predates it ignores the unknown event.
+    Title { title: String },
+    /// AI-generated follow-up question suggestions, produced after (almost)
+    /// every non-ZDR exchange completes (composer chips, ChatGPT-style).
+    /// Control event — never feature-gated, same reasoning as `Title`: when
+    /// suggestions were generated they must reach the client, and an older
+    /// client ignores the unknown event name.
+    FollowUps { suggestions: Vec<String> },
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
     /// Terminal control: a structured error (chat-parity §20). `code` is a
@@ -100,8 +111,14 @@ impl ChatEvent {
             ChatEvent::Citation { .. } | ChatEvent::Grounding { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. } => Some("usage"),
-            // terminal control events — always allowed
-            ChatEvent::Stopped { .. } | ChatEvent::Error { .. } => None,
+            // control events — always allowed (Title/FollowUps only exist when
+            // the gateway actually generated them; gating on a feature family
+            // would silently drop them for the plain `chat` profile, which is
+            // exactly the surface the sidebar title / composer chips are for)
+            ChatEvent::Title { .. }
+            | ChatEvent::FollowUps { .. }
+            | ChatEvent::Stopped { .. }
+            | ChatEvent::Error { .. } => None,
         }
     }
 
@@ -130,6 +147,8 @@ impl ChatEvent {
             ChatEvent::Artifact { .. } => "artifact",
             ChatEvent::Attachment { .. } => "attachment",
             ChatEvent::Usage { .. } => "usage",
+            ChatEvent::Title { .. } => "title",
+            ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::Stopped { .. } => "stopped",
             ChatEvent::Error { .. } => "error",
         }
@@ -203,6 +222,10 @@ impl ChatEvent {
                 "latency_ms": latency_ms,
                 "confidence": confidence,
             }),
+            ChatEvent::Title { title } => json!({ "title": title, "request_id": request_id }),
+            ChatEvent::FollowUps { suggestions } => {
+                json!({ "suggestions": suggestions, "request_id": request_id })
+            }
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
                 code,
@@ -289,6 +312,27 @@ mod tests {
             reason: "user".into()
         }
         .should_emit(&no_features));
+        // Title is a control event: a generated title must reach the plain
+        // `chat` profile — the sidebar is exactly that surface.
+        let title = ChatEvent::Title {
+            title: "Visma fakturastatus".into(),
+        };
+        assert!(title.should_emit(&no_features));
+        assert_eq!(title.name(), "title");
+        assert_eq!(title.payload("req-9")["title"], "Visma fakturastatus");
+        assert_eq!(title.payload("req-9")["request_id"], "req-9");
+        // FollowUps is a control event too — same reasoning as Title: the
+        // composer chips are a plain-chat surface, not an opt-in feature.
+        let follow_ups = ChatEvent::FollowUps {
+            suggestions: vec!["Hva med frakt til Bergen?".into()],
+        };
+        assert!(follow_ups.should_emit(&no_features));
+        assert_eq!(follow_ups.name(), "follow_ups");
+        assert_eq!(
+            follow_ups.payload("req-9")["suggestions"][0],
+            "Hva med frakt til Bergen?"
+        );
+        assert_eq!(follow_ups.payload("req-9")["request_id"], "req-9");
         // Error is a control event too — it must reach the plain path so a
         // profile:"chat" client still learns the stream failed (chat-parity §20).
         let err = ChatEvent::Error {

@@ -110,6 +110,13 @@ pub fn build_router_with_readiness(
         // chat-parity §1: reload a thread's conversation (cross-device resume).
         .route("/v1/threads", get(list_threads))
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
+        // Memory management ("what do you remember about me") — user-scoped,
+        // backed by session-core's MemoryService.ListMemory/DeleteMemory.
+        // Named `/v1/memories` (plural) to avoid colliding with the unrelated
+        // `/v1/memory` capability-core proxy registered in proxy_routes()
+        // below.
+        .route("/v1/memories", get(list_memories))
+        .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
         // chat-parity §2: upload a document into Data Plane (→ retrievable via RAG).
@@ -4793,6 +4800,39 @@ fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     }
 }
 
+/// Map a session-core gRPC error from the memory-management surfaces
+/// (`list_memory`, `delete_memory`) to an HTTP error. Mirrors
+/// `session_thread_error`'s reasoning: `NotFound` is an ordinary "no such
+/// memory" state (already deleted, or a stale id), not an upstream outage.
+fn session_memory_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "memory_not_found",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        tonic::Code::PermissionDenied => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": {
+                    "code": "forbidden",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        _ => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": format!("{context}: {}", error.message()),
+            })),
+        ),
+    }
+}
+
 /// Serialize a `RunDetail` for the runs-history UI. `Snake_case` wire keys match
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
@@ -4978,19 +5018,83 @@ impl EnumName for SubagentRole {
     }
 }
 
+/// The ONE place the feedback rating vocabulary is normalised.
+///
+/// Two vocabularies exist and both must keep working:
+///   - chat clients send a **polarity** (`positive` | `negative`) — a thumb;
+///   - operator/agent surfaces send a **grade** (`good` | `acceptable` |
+///     `poor`) — the canonical vocabulary carried on `mp.v1.feedback.rated`
+///     and counted by orchestrator-core.
+///
+/// Everything downstream sees only the canonical grade, so no consumer has to
+/// know about thumbs. Mapping a thumbs-**up** to anything other than `good` is
+/// the bug this type exists to make impossible: `positive` previously reached
+/// orchestrator-core verbatim, incremented the sample total, matched no
+/// `rating == "good"` branch, and therefore *lowered* the skill's score.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedbackRating {
+    Good,
+    Acceptable,
+    Poor,
+}
+
+impl FeedbackRating {
+    /// Accepted wire tokens → canonical grade. Case- and whitespace-insensitive.
+    /// Unknown tokens are rejected rather than coerced: silently grading an
+    /// unrecognised value is how a rating turns into the wrong signal.
+    fn from_wire(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            // Chat polarity.
+            "positive" | "up" | "good" => Some(Self::Good),
+            "negative" | "down" | "poor" => Some(Self::Poor),
+            // Operator grade with no polarity equivalent.
+            "acceptable" | "neutral" => Some(Self::Acceptable),
+            _ => None,
+        }
+    }
+
+    /// Canonical grade token published on the envelope.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Good => "good",
+            Self::Acceptable => "acceptable",
+            Self::Poor => "poor",
+        }
+    }
+}
+
 /// Operator feedback published as `mp.v1.feedback.rated`, consumed by
-/// orchestrator-core's `FeedbackPromotionWorkflow` (`HARNESS_PHASE1` §6).
+/// orchestrator-core's durable feedback store (`AGENT_QUALITY_PLAN_2026-07-29`
+/// §1.2).
+///
+/// Accepts both callers of this endpoint:
+///   - **chat** (`velionv3` `chat-client.ts`): `{requestId, rating, note}` — the
+///     turn is resolved server-side to its durable run id and injected skills;
+///   - **operator/agent surfaces**: `{run_id, skill_id?, from_scope?, to_scope?,
+///     rating}` — unchanged.
 #[derive(Debug, Deserialize)]
 struct FeedbackBody {
-    run_id: String,
-    /// Skill (or agent acting as a skill) the rating applies to.
-    skill_id: String,
-    #[serde(default = "default_from_scope")]
+    /// Durable Session Core run id. Supplied directly by operator surfaces.
+    #[serde(default, alias = "runId")]
+    run_id: Option<String>,
+    /// Client-visible chat turn id (the SSE `request_id`). Resolved server-side
+    /// — see [`resolve_feedback_target`].
+    #[serde(default, alias = "requestId")]
+    request_id: Option<String>,
+    /// Skill (or agent acting as a skill) the rating applies to. Optional: a
+    /// chat turn has no client-known skill, and skills are resolved server-side.
+    #[serde(default, alias = "skillId")]
+    skill_id: Option<String>,
+    #[serde(default = "default_from_scope", alias = "fromScope")]
     from_scope: String,
-    #[serde(default = "default_to_scope")]
+    #[serde(default = "default_to_scope", alias = "toScope")]
     to_scope: String,
-    /// "good" | "acceptable" | "poor".
+    /// `positive` | `negative` (chat) or `good` | `acceptable` | `poor`
+    /// (operator). Normalised by [`FeedbackRating::from_wire`].
     rating: String,
+    /// Optional free-text comment from the rating UI.
+    #[serde(default)]
+    note: Option<String>,
 }
 
 fn default_from_scope() -> String {
@@ -5000,8 +5104,122 @@ fn default_to_scope() -> String {
     "workspace".to_owned()
 }
 
-/// Publish an operator rating as a feedback envelope. Best-effort: the durable
-/// rating already lives in the rating store; this is the promotion signal.
+/// Hand-written so an in-code default matches what serde produces for an absent
+/// field — a derived `Default` would give empty scopes and silently diverge from
+/// the wire defaults.
+impl Default for FeedbackBody {
+    fn default() -> Self {
+        Self {
+            run_id: None,
+            request_id: None,
+            skill_id: None,
+            from_scope: default_from_scope(),
+            to_scope: default_to_scope(),
+            rating: String::new(),
+            note: None,
+        }
+    }
+}
+
+/// Notes are caller-authored free text persisted downstream. Bound it.
+const MAX_FEEDBACK_NOTE_BYTES: usize = 1_000;
+
+/// What a rating actually attaches to, after server-side resolution.
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedFeedbackTarget {
+    /// The durable run whose ownership is verified and which the rating scores.
+    run_id: String,
+    /// Skills injected into that turn, resolved server-side. Empty is normal
+    /// (no skill matched, or the turn predates this gateway process) and must
+    /// degrade to a run-only rating rather than an error.
+    skill_ids: Vec<String>,
+}
+
+fn feedback_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// Resolve `{run_id | requestId}` into the durable run the rating scores, plus
+/// the skill ids that steered it.
+///
+/// Trust rules, in order:
+///   - An explicit `run_id` names a run. That is safe because
+///     [`require_durable_run_owner`] still verifies ownership against Session
+///     Core before anything is published — naming a run you do not own fails.
+///   - Skill ids are **never** taken from the request body when a chat
+///     `requestId` resolved: the gateway's own record of what it injected wins,
+///     because nothing can verify a client's claim about which skill steered an
+///     answer.
+///   - An unresolvable `requestId` fails closed. We cannot map it to a durable
+///     run, so we cannot authorize it — and accepting it unverified would let
+///     any caller write ratings against another tenant's turn.
+fn resolve_feedback_target(
+    registry: &crate::chat_turn_registry::ChatTurnRegistry,
+    claims: &Claims,
+    body: &FeedbackBody,
+) -> Result<ResolvedFeedbackTarget, HttpJsonError> {
+    let explicit_run = body
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let chat_turn = body
+        .request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(request_id) = chat_turn {
+        if let Some(turn) = registry.lookup(request_id) {
+            // Defence in depth. The authoritative gate is Session Core's owner
+            // lookup below; this rejects a cross-tenant id before we even ask.
+            if turn.org_id != claims.org_id || turn.user_id != claims.user_id {
+                return Err(feedback_error(
+                    StatusCode::FORBIDDEN,
+                    "turn_not_owned",
+                    "This chat turn belongs to another user.",
+                ));
+            }
+            return Ok(ResolvedFeedbackTarget {
+                run_id: turn.run_id,
+                skill_ids: turn.skill_ids,
+            });
+        }
+        if explicit_run.is_none() {
+            return Err(feedback_error(
+                StatusCode::CONFLICT,
+                "turn_not_rateable",
+                "This turn can no longer be rated (the gateway no longer holds its run reference).",
+            ));
+        }
+    }
+
+    let Some(run_id) = explicit_run else {
+        return Err(feedback_error(
+            StatusCode::BAD_REQUEST,
+            "run_reference_required",
+            "Either requestId (a chat turn) or run_id (a durable run) is required.",
+        ));
+    };
+    // Operator path: only an explicitly named skill applies.
+    let skill_ids = body
+        .skill_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| vec![value.to_owned()])
+        .unwrap_or_default();
+    Ok(ResolvedFeedbackTarget {
+        run_id: run_id.to_owned(),
+        skill_ids,
+    })
+}
+
+/// Publish an operator rating as a feedback envelope, which orchestrator-core
+/// folds into its durable feedback store.
 async fn ingest_feedback(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -5012,25 +5230,50 @@ async fn ingest_feedback(
     // before the ownership lookup or publisher so neither downstream can retain
     // request-derived state.
     require_non_zdr_durable_mutation(&claims)?;
-    require_durable_run_owner(&state, &claims, &body.run_id, &session_bearer).await?;
+    let rating = FeedbackRating::from_wire(&body.rating).ok_or_else(|| {
+        feedback_error(
+            StatusCode::BAD_REQUEST,
+            "unknown_rating",
+            "rating must be positive|negative or good|acceptable|poor.",
+        )
+    })?;
+    let target = resolve_feedback_target(crate::chat_turn_registry::global(), &claims, &body)?;
+    require_durable_run_owner(&state, &claims, &target.run_id, &session_bearer).await?;
+    let note = body
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let mut end = value.len().min(MAX_FEEDBACK_NOTE_BYTES);
+            while end > 0 && !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value[..end].to_owned()
+        });
     let envelope = Envelope {
         event_id: new_ulid(),
         event_type: "FEEDBACK_RATED".to_owned(),
         schema_version: 1,
         ts: Utc::now(),
         producer: "model-gateway".to_owned(),
-        correlation_id: body.run_id.clone(),
+        correlation_id: target.run_id.clone(),
         causation_id: String::new(),
-        idempotency_key: format!("feedback_{}", body.run_id),
+        // A re-rating of the same turn by the same user must REPLACE, not
+        // accumulate — otherwise a user who clicks up then down counts twice.
+        idempotency_key: format!("feedback_{}_{}", target.run_id, claims.user_id),
         org_id: claims.org_id.clone(),
         user_id: claims.user_id.clone(),
-        resource_ref: format!("run/{}", body.run_id),
+        resource_ref: format!("run/{}", target.run_id),
         payload: json!({
-            "run_id": body.run_id,
-            "skill_id": body.skill_id,
+            "run_id": target.run_id,
+            // Back-compat single-skill field for any existing consumer.
+            "skill_id": target.skill_ids.first().cloned().unwrap_or_default(),
+            "skill_ids": target.skill_ids,
             "from_scope": body.from_scope,
             "to_scope": body.to_scope,
-            "rating": body.rating,
+            "rating": rating.as_str(),
+            "note": note,
         }),
         zdr: claims.effective_zdr(false),
     };
@@ -5044,7 +5287,11 @@ async fn ingest_feedback(
                 Json(json!({ "error": e.to_string() })),
             )
         })?;
-    Ok(Json(json!({ "accepted": true })))
+    Ok(Json(json!({
+        "accepted": true,
+        "rating": rating.as_str(),
+        "skill_ids": target.skill_ids,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -5094,6 +5341,17 @@ pub struct InvokeRequest {
     /// an `artifact` event (deterministic trigger — no intent guessing).
     #[serde(default)]
     pub generate_image: bool,
+    /// Plan-mode intent from the composer's Planmodus toggle.
+    ///
+    /// This field's ABSENCE was a live bug: the frontend has always sent
+    /// `planMode`, but with no matching field here serde discarded it silently
+    /// (no `deny_unknown_fields` anywhere in this service), so the toggle
+    /// changed the button's colour and nothing else. Meanwhile
+    /// `coordinator::handle_enter_plan_mode` and session-core's durable
+    /// `SetRunMode` both existed with zero callers on the HTTP path. Accepting
+    /// it here is what connects the switch to the machinery.
+    #[serde(default, alias = "planMode")]
+    pub plan_mode: bool,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -5419,6 +5677,122 @@ async fn list_thread_messages(
     Ok(Json(ListThreadMessagesResponse {
         thread_id: trimmed.to_owned(),
         messages,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMemoriesQuery {
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct MemorySummaryResponse {
+    memory_id: String,
+    topic: String,
+    content: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListMemoriesResponse {
+    memories: Vec<MemorySummaryResponse>,
+    degraded: bool,
+    degradation_reason: String,
+}
+
+/// "What do you remember about me" — lists durable memory entries owned by
+/// the signed-in user, across every thread. Never thread-scoped: session-core's
+/// `ListMemory` is deliberately user-scoped, so this reads the same regardless
+/// of which conversation the caller opens it from. Note: this is distinct from
+/// the `/v1/memory` route above, which proxies capability-core's unrelated
+/// agent-tool memory resource.
+async fn list_memories(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<ListMemoriesQuery>,
+) -> Result<Json<ListMemoriesResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListMemoryRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .list_memory(authenticated_session_request(
+            ListMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: query.limit.unwrap_or(100),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_memory_error("session-core list_memory failed", &e))?
+        .into_inner();
+
+    let memories = response
+        .entries
+        .into_iter()
+        .map(|entry| MemorySummaryResponse {
+            memory_id: entry.memory_id,
+            topic: entry.topic,
+            content: entry.content,
+            updated_at: timestamp_to_rfc3339(entry.updated_at),
+        })
+        .collect();
+
+    Ok(Json(ListMemoriesResponse {
+        memories,
+        degraded: response.degraded,
+        degradation_reason: response.degradation_reason,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteMemoryHttpResponse {
+    deleted: bool,
+    degraded: bool,
+    degradation_reason: String,
+}
+
+/// Deletes a single memory entry by id, scoped to the signed-in user by
+/// session-core's own `DeleteMemory` RPC (never trusts a client-selected
+/// user). Destructive and non-recoverable — the frontend must confirm before
+/// calling this.
+async fn delete_memory_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(memory_id): Path<String>,
+) -> Result<Json<DeleteMemoryHttpResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteMemoryRequest;
+
+    let trimmed = memory_id.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "memory_id is required"})),
+        ));
+    }
+
+    let response = state
+        .memory_client
+        .clone()
+        .delete_memory(authenticated_session_request(
+            DeleteMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                memory_id: trimmed.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_memory_error("session-core delete_memory failed", &e))?
+        .into_inner();
+
+    Ok(Json(DeleteMemoryHttpResponse {
+        deleted: response.deleted,
+        degraded: response.degraded,
+        degradation_reason: response.degradation_reason,
     }))
 }
 
@@ -6397,12 +6771,268 @@ mod run_owner_publish_tests {
 
     fn feedback(run_id: &str) -> FeedbackBody {
         FeedbackBody {
-            run_id: run_id.to_owned(),
-            skill_id: "skill-test".to_owned(),
+            run_id: Some(run_id.to_owned()),
+            request_id: None,
+            skill_id: Some("skill-test".to_owned()),
             from_scope: "agent".to_owned(),
             to_scope: "workspace".to_owned(),
             rating: "good".to_owned(),
+            note: None,
         }
+    }
+
+    /// A thumbs-UP must map to the canonical grade that *raises* a score, and a
+    /// thumbs-DOWN to one that does not. This is the subtlest of the four
+    /// feedback-wire breaks: `positive` used to reach orchestrator-core verbatim,
+    /// increment the sample total, match no `good` branch, and so make a
+    /// thumbs-up *lower* the skill's promotion score.
+    #[test]
+    fn thumbs_up_never_maps_to_a_non_good_grade() {
+        assert_eq!(
+            FeedbackRating::from_wire("positive"),
+            Some(FeedbackRating::Good)
+        );
+        assert_eq!(FeedbackRating::from_wire("positive").map(|r| r.as_str()), Some("good"));
+        assert_ne!(
+            FeedbackRating::from_wire("positive"),
+            Some(FeedbackRating::Poor)
+        );
+        assert_ne!(
+            FeedbackRating::from_wire("positive"),
+            Some(FeedbackRating::Acceptable)
+        );
+        assert_eq!(
+            FeedbackRating::from_wire("negative"),
+            Some(FeedbackRating::Poor)
+        );
+        assert_ne!(
+            FeedbackRating::from_wire("negative"),
+            Some(FeedbackRating::Good)
+        );
+    }
+
+    /// Pins the vocabulary map in both directions: every accepted wire token
+    /// grades as expected, and every canonical grade is itself an accepted wire
+    /// token that round-trips to the same variant.
+    #[test]
+    fn rating_vocabulary_maps_in_both_directions() {
+        for (wire, expected) in [
+            ("positive", FeedbackRating::Good),
+            ("up", FeedbackRating::Good),
+            ("good", FeedbackRating::Good),
+            ("GOOD", FeedbackRating::Good),
+            ("  Positive  ", FeedbackRating::Good),
+            ("negative", FeedbackRating::Poor),
+            ("down", FeedbackRating::Poor),
+            ("poor", FeedbackRating::Poor),
+            ("acceptable", FeedbackRating::Acceptable),
+            ("neutral", FeedbackRating::Acceptable),
+        ] {
+            assert_eq!(
+                FeedbackRating::from_wire(wire),
+                Some(expected),
+                "wire token {wire:?} graded wrong"
+            );
+        }
+        for grade in [
+            FeedbackRating::Good,
+            FeedbackRating::Acceptable,
+            FeedbackRating::Poor,
+        ] {
+            assert_eq!(
+                FeedbackRating::from_wire(grade.as_str()),
+                Some(grade),
+                "canonical grade {:?} must round-trip",
+                grade.as_str()
+            );
+        }
+        // Unknown tokens are refused, never coerced into a grade.
+        for unknown in ["", "  ", "great", "1", "thumbs_up", "bad"] {
+            assert_eq!(
+                FeedbackRating::from_wire(unknown),
+                None,
+                "unknown token {unknown:?} must not be graded"
+            );
+        }
+    }
+
+    fn chat_feedback(request_id: &str, rating: &str) -> FeedbackBody {
+        FeedbackBody {
+            request_id: Some(request_id.to_owned()),
+            rating: rating.to_owned(),
+            ..FeedbackBody::default()
+        }
+    }
+
+    /// The chat wire shape (`{requestId, rating, note}`) must deserialize — it
+    /// used to 422 on the missing `run_id` / `skill_id` before any logic ran.
+    #[test]
+    fn chat_wire_body_deserializes_without_run_id_or_skill_id() {
+        let body: FeedbackBody = serde_json::from_str(
+            r#"{"requestId":"req-1","rating":"positive","note":"nyttig svar"}"#,
+        )
+        .expect("the chat client's body must be accepted");
+        assert_eq!(body.request_id.as_deref(), Some("req-1"));
+        assert_eq!(body.run_id, None);
+        assert_eq!(body.skill_id, None);
+        assert_eq!(body.note.as_deref(), Some("nyttig svar"));
+        // Scope defaults still apply so downstream keys stay stable.
+        assert_eq!(body.from_scope, "agent");
+        assert_eq!(body.to_scope, "workspace");
+    }
+
+    #[test]
+    fn chat_turn_resolves_to_its_durable_run_and_injected_skills() {
+        let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
+        registry.record(
+            "req-1",
+            "org-owner",
+            "user-owner",
+            "run-owned",
+            vec!["skill.a".to_owned(), "skill.b".to_owned()],
+        );
+        let resolved = resolve_feedback_target(
+            &registry,
+            &claims("org-owner", "user-owner"),
+            &chat_feedback("req-1", "negative"),
+        )
+        .expect("the turn's owner may rate it");
+        assert_eq!(resolved.run_id, "run-owned");
+        assert_eq!(resolved.skill_ids, vec!["skill.a", "skill.b"]);
+    }
+
+    #[test]
+    fn client_supplied_skill_ids_never_override_what_the_gateway_injected() {
+        let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
+        registry.record(
+            "req-1",
+            "org-owner",
+            "user-owner",
+            "run-owned",
+            vec!["skill.actually-injected".to_owned()],
+        );
+        let mut body = chat_feedback("req-1", "negative");
+        body.skill_id = Some("skill.someone-elses".to_owned());
+        let resolved =
+            resolve_feedback_target(&registry, &claims("org-owner", "user-owner"), &body)
+                .expect("resolves");
+        assert_eq!(
+            resolved.skill_ids,
+            vec!["skill.actually-injected"],
+            "a client must not be able to aim a rating at a skill it names"
+        );
+    }
+
+    #[test]
+    fn another_users_chat_turn_is_refused_before_the_owner_lookup() {
+        let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
+        registry.record("req-1", "org-owner", "user-owner", "run-owned", Vec::new());
+        let foreign_user = resolve_feedback_target(
+            &registry,
+            &claims("org-owner", "user-other"),
+            &chat_feedback("req-1", "positive"),
+        )
+        .expect_err("another user in the org must not rate this turn");
+        assert_eq!(foreign_user.0, StatusCode::FORBIDDEN);
+        let foreign_org = resolve_feedback_target(
+            &registry,
+            &claims("org-other", "user-owner"),
+            &chat_feedback("req-1", "positive"),
+        )
+        .expect_err("another tenant must not rate this turn");
+        assert_eq!(foreign_org.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn unresolvable_chat_turn_fails_closed_instead_of_trusting_the_client() {
+        let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
+        let error = resolve_feedback_target(
+            &registry,
+            &claims("org-owner", "user-owner"),
+            &chat_feedback("req-evicted", "positive"),
+        )
+        .expect_err("an unknown turn cannot be authorized");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn missing_run_reference_is_a_client_error_not_a_silent_accept() {
+        let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
+        let mut body = FeedbackBody::default();
+        body.rating = "positive".to_owned();
+        let error =
+            resolve_feedback_target(&registry, &claims("org-owner", "user-owner"), &body)
+                .expect_err("neither requestId nor run_id supplied");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// A gateway restart loses the turn map. When the caller still supplies a
+    /// durable run id the rating must degrade to run-only, not error.
+    #[test]
+    fn lost_turn_record_degrades_to_a_run_only_rating() {
+        let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
+        let mut body = chat_feedback("req-evicted", "negative");
+        body.run_id = Some("run-owned".to_owned());
+        let resolved =
+            resolve_feedback_target(&registry, &claims("org-owner", "user-owner"), &body)
+                .expect("a durable run id still authorizes a run-only rating");
+        assert_eq!(resolved.run_id, "run-owned");
+        assert!(
+            resolved.skill_ids.is_empty(),
+            "no skill attribution survives the restart, and that is not an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn thumbs_up_from_chat_publishes_the_canonical_good_grade() {
+        let (state, publisher) = test_state().await;
+        crate::chat_turn_registry::global().record(
+            "req-canonical-good",
+            "org-owner",
+            "user-owner",
+            "run-owned",
+            vec!["skill.injected".to_owned()],
+        );
+        let mut body = chat_feedback("req-canonical-good", "positive");
+        body.note = Some("bra".to_owned());
+        // The response body is not the assertion here -- what matters is the
+        // envelope that actually reaches the promotion scorer, checked below.
+        let _accepted = ingest_feedback(
+            State(state),
+            Extension(claims("org-owner", "user-owner")),
+            VerifiedSessionBearer::for_test("test-session-bearer"),
+            Json(body),
+        )
+        .await
+        .expect("the turn owner may rate it");
+
+        let events = publisher.drain();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].1.payload;
+        assert_eq!(payload["rating"], "good", "a thumbs-up must publish `good`");
+        assert_eq!(payload["run_id"], "run-owned");
+        assert_eq!(payload["skill_id"], "skill.injected");
+        assert_eq!(payload["skill_ids"][0], "skill.injected");
+        assert_eq!(payload["note"], "bra");
+    }
+
+    #[tokio::test]
+    async fn unknown_rating_is_rejected_before_the_owner_lookup_or_publish() {
+        let (state, publisher) = test_state().await;
+        let error = ingest_feedback(
+            State(state),
+            Extension(claims("org-owner", "user-owner")),
+            // A bad downstream credential proves the vocabulary check runs first.
+            VerifiedSessionBearer::for_test("must-not-be-used"),
+            Json(chat_feedback("req-1", "wonderful")),
+        )
+        .await
+        .expect_err("an ungradeable rating must be refused");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(
+            publisher.drain().is_empty(),
+            "an ungradeable rating published an event"
+        );
     }
 
     #[tokio::test]
@@ -6557,6 +7187,59 @@ mod session_thread_error_tests {
             assert_eq!(
                 body["error"],
                 "session-core list_threads failed: boom",
+                "code {code:?} keeps the contextual string body",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_memory_error_tests {
+    use super::*;
+
+    #[test]
+    fn not_found_maps_to_404_memory_not_found() {
+        let (status, Json(body)) = session_memory_error(
+            "session-core delete_memory failed",
+            &tonic::Status::not_found("memory not found"),
+        );
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "memory_not_found");
+        assert_eq!(body["error"]["message"], "memory not found");
+    }
+
+    #[test]
+    fn permission_denied_maps_to_403_forbidden() {
+        let (status, Json(body)) = session_memory_error(
+            "session-core list_memory failed",
+            &tonic::Status::permission_denied("user access denied"),
+        );
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+        assert_eq!(body["error"]["message"], "user access denied");
+    }
+
+    #[test]
+    fn transport_and_unknown_errors_stay_502() {
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::Internal,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Unknown,
+            tonic::Code::InvalidArgument,
+            tonic::Code::Unauthenticated,
+        ] {
+            let (status, Json(body)) = session_memory_error(
+                "session-core list_memory failed",
+                &tonic::Status::new(code, "boom"),
+            );
+
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "code {code:?} -> 502");
+            assert_eq!(
+                body["error"],
+                "session-core list_memory failed: boom",
                 "code {code:?} keeps the contextual string body",
             );
         }

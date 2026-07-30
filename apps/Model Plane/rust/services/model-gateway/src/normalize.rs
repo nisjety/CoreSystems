@@ -160,6 +160,7 @@ mod tests {
             idempotency_key: None,
             attachments: Vec::new(),
             generate_image: false,
+            plan_mode: false,
             tools: Vec::new(),
             org_name: None,
             user_name: None,

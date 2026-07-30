@@ -1,12 +1,14 @@
 //! model-gateway library crate — exposes modules for integration tests.
 
 pub mod approvals;
+pub mod artifacts;
 pub mod audit;
 pub mod auth;
 pub mod browser_run;
 pub mod budget;
 pub mod cancel_registry;
 pub mod capability_consumer;
+pub mod chat_turn_registry;
 pub mod compaction;
 pub mod confidence;
 pub mod coordinator;
@@ -49,5 +51,6 @@ pub mod stream_buffer;
 pub mod tool_loop;
 pub mod tools;
 pub mod trajectory;
+pub mod velion_actions;
 pub mod verbosity;
 pub mod vision;

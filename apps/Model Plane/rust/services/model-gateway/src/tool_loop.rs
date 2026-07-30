@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
     ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
@@ -21,7 +22,10 @@ use mp_contracts::model_plane::v1::{
 use serde_json::Value;
 
 use crate::{
-    auth::{VerifiedDataPlaneBearer as VerifiedBearer, VerifiedIngestionBearer},
+    auth::{
+        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
+        VerifiedIngestionBearer,
+    },
     sse_events::ChatEvent,
     state::AppState,
 };
@@ -103,6 +107,280 @@ pub struct ToolOutcome {
     pub name: String,
     pub output: String,
     pub error: Option<String>,
+}
+
+/// Internal envelope key. The canvas tools and the code interpreter return
+/// their payload through `ToolOutcome.output`, which is ALSO what gets appended
+/// to the conversation as tool context. That is fine for a search result and
+/// disastrous for a 4 MB base64 spreadsheet or a 200 k-character document, so
+/// the loop rewrites these outcomes into a compact summary after harvesting the
+/// events (see [`tool_artifact_events`]). This key marks an output that must be
+/// rewritten rather than shown to the model verbatim.
+const ARTIFACT_ENVELOPE_KEY: &str = "__velion_artifact";
+
+fn arg_value(args_json: &str, key: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(args_json)
+        .ok()
+        .and_then(|value| value.get(key).cloned())
+}
+
+/// Validates a model-authored artifact, returning the normalized parts.
+fn validate_authored_artifact(
+    id: &str,
+    kind: &str,
+    title: &str,
+    content: &str,
+) -> Result<(String, crate::artifacts::ArtifactKind, String), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("create_artifact requires a non-empty 'id'".to_owned());
+    }
+    let Some(kind) = crate::artifacts::ArtifactKind::parse(kind) else {
+        return Err(format!(
+            "unknown artifact kind '{kind}' — use 'document', 'code', or 'html'"
+        ));
+    };
+    if !kind.is_text_authored() {
+        return Err(format!(
+            "kind '{}' cannot be authored directly; generate the file with code_interpreter instead",
+            kind.as_str()
+        ));
+    }
+    if content.trim().is_empty() {
+        return Err("create_artifact requires non-empty 'content'".to_owned());
+    }
+    if content.chars().count() > crate::artifacts::MAX_TEXT_ARTIFACT_CHARS {
+        return Err(format!(
+            "artifact content exceeds the {} character limit",
+            crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
+        ));
+    }
+    let title = title.trim();
+    // A missing title would render as an unlabelled panel entry; fall back to
+    // the id, which the model chose to be descriptive.
+    let title = if title.is_empty() { id } else { title };
+    Ok((id.to_owned(), kind, title.to_owned()))
+}
+
+fn authored_artifact_payload(
+    id: &str,
+    kind: crate::artifacts::ArtifactKind,
+    title: &str,
+    content: &str,
+    version: u32,
+) -> String {
+    serde_json::json!({
+        ARTIFACT_ENVELOPE_KEY: {
+            "id": id,
+            "kind": kind.as_str(),
+            "title": title,
+            "content": content,
+            "version": version,
+            "created": version == 1,
+        }
+    })
+    .to_string()
+}
+
+fn updated_artifact_payload(id: &str, title: &str, content: &str, version: u32) -> String {
+    let title = title.trim();
+    serde_json::json!({
+        ARTIFACT_ENVELOPE_KEY: {
+            "id": id,
+            // Kind is resolved by the client from the artifact's existing
+            // history; an update never changes it.
+            "kind": Value::Null,
+            "title": title,
+            "content": content,
+            "version": version,
+            "created": false,
+        }
+    })
+    .to_string()
+}
+
+/// The artifact id an outcome refers to, for looking up a remembered kind.
+fn artifact_id_of(outcome: &ToolOutcome) -> Option<String> {
+    if !matches!(outcome.name.as_str(), "create_artifact" | "update_artifact") {
+        return None;
+    }
+    serde_json::from_str::<Value>(&outcome.output)
+        .ok()
+        .and_then(|value| value.get(ARTIFACT_ENVELOPE_KEY).cloned())
+        .and_then(|envelope| {
+            envelope
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+}
+
+/// Harvests `artifact`/`attachment` events from a tool outcome and returns a
+/// compact, model-facing replacement for its output.
+///
+/// Returns `(events, replacement_output)`. `replacement_output` is `None` when
+/// the outcome needs no rewriting, so ordinary tools are untouched.
+#[must_use]
+pub(crate) fn tool_artifact_events(
+    outcome: &ToolOutcome,
+    known_kind: Option<crate::artifacts::ArtifactKind>,
+) -> (Vec<ChatEvent>, Option<String>) {
+    if outcome.error.is_some() {
+        return (Vec::new(), None);
+    }
+    match outcome.name.as_str() {
+        "create_artifact" | "update_artifact" => authored_artifact_events(outcome, known_kind),
+        "code_interpreter" => code_interpreter_events(outcome),
+        _ => (Vec::new(), None),
+    }
+}
+
+fn authored_artifact_events(
+    outcome: &ToolOutcome,
+    known_kind: Option<crate::artifacts::ArtifactKind>,
+) -> (Vec<ChatEvent>, Option<String>) {
+    let Some(envelope) = serde_json::from_str::<Value>(&outcome.output)
+        .ok()
+        .and_then(|value| value.get(ARTIFACT_ENVELOPE_KEY).cloned())
+    else {
+        return (Vec::new(), None);
+    };
+    let id = envelope
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let content = envelope
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let title = envelope
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or(id.as_str())
+        .to_owned();
+    let version = u32::try_from(envelope.get("version").and_then(Value::as_u64).unwrap_or(1))
+        .unwrap_or(1);
+    let created = envelope
+        .get("created")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    // On an update the tool deliberately sends `kind: null`; the caller supplies
+    // the kind it recorded when the artifact was created.
+    let kind = envelope
+        .get("kind")
+        .and_then(Value::as_str)
+        .and_then(crate::artifacts::ArtifactKind::parse)
+        .or(known_kind)
+        .unwrap_or(crate::artifacts::ArtifactKind::Document);
+
+    let chars = content.chars().count();
+    let summary = format!(
+        "{} artifact '{}' ({}, v{}, {} characters). It is now visible to the user in the side panel — do not repeat its full contents in your reply.",
+        if created { "Created" } else { "Updated" },
+        title,
+        kind.as_str(),
+        version,
+        chars
+    );
+    (
+        vec![crate::artifacts::artifact_event(
+            &id, kind, &title, &content, version,
+        )],
+        Some(summary),
+    )
+}
+
+fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<String>) {
+    let Ok(payload) = serde_json::from_str::<Value>(&outcome.output) else {
+        return (Vec::new(), None);
+    };
+    let files = payload
+        .get("files")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if files.is_empty() {
+        // Pure computation: stdout is small and IS the answer, so leave the
+        // outcome alone.
+        return (Vec::new(), None);
+    }
+
+    let mut events = Vec::new();
+    let mut listed = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let name = file
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("output")
+            .to_owned();
+        let mime = file
+            .get("mime")
+            .and_then(Value::as_str)
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let bytes = file.get("bytes").and_then(Value::as_i64).unwrap_or(0);
+        let content_b64 = file
+            .get("content_b64")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let truncated = file
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if content_b64.is_empty() {
+            // Too large to ship inline — say so, so the model tells the user
+            // instead of claiming a file it never delivered.
+            listed.push(format!(
+                "{name} ({bytes} bytes) — TOO LARGE to deliver{}",
+                if truncated { "" } else { " (empty)" }
+            ));
+            continue;
+        }
+        // A `data:` URI is the established way this gateway hands generated
+        // bytes to the browser (the image-generation path does exactly this),
+        // so a generated document needs no new storage or route.
+        let data_uri = format!("data:{mime};base64,{content_b64}");
+        let artifact_id = format!("{}-file-{}", outcome.call_id, index + 1);
+        let kind = crate::artifacts::kind_for_generated_file(&mime, &name);
+        events.push(crate::artifacts::artifact_event(
+            &artifact_id,
+            kind,
+            &name,
+            &data_uri,
+            1,
+        ));
+        events.push(crate::artifacts::attachment_event(
+            &artifact_id,
+            &name,
+            &mime,
+            &data_uri,
+            bytes,
+        ));
+        listed.push(format!("{name} ({mime}, {bytes} bytes)"));
+    }
+
+    let stdout = payload
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr = payload
+        .get("stderr")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let exit_code = payload.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
+    let mut summary = serde_json::json!({
+        "stdout": truncate_chars(stdout, MAX_TOOL_OUTPUT_CHARS),
+        "stderr": truncate_chars(stderr, MAX_TOOL_OUTPUT_CHARS),
+        "exit_code": exit_code,
+        "files_delivered": listed,
+    })
+    .to_string();
+    summary.push_str(
+        "\nThese files were delivered to the user as downloadable artifacts. Tell them what you produced; do not paste the file contents.",
+    );
+    (events, Some(summary))
 }
 
 fn inline_tool_action_id(run_id: &str, call_id: &str) -> String {
@@ -255,44 +533,124 @@ pub fn asks_about_conversation_state(query: &str) -> bool {
         || lower.contains("this conversation")
 }
 
+/// Longest message still treated as a searchable question by
+/// [`should_force_web_search`]. Roughly a long paragraph — comfortably above
+/// any real lookup ("what is the exchange rate for USD to NOK today") and
+/// below a pasted document.
+const MAX_FORCED_SEARCH_QUERY_CHARS: usize = 400;
+
+/// Inflectional endings a token may pick up and still be the same word:
+/// Norwegian definite/plural forms ("pris" → "prisen"/"priser"/"prisene",
+/// "befolkning" → "befolkningen") and English plurals ("price" → "prices",
+/// "election" → "elections").
+///
+/// This list is what separates inflection from COMPOUNDING, and that
+/// distinction is the whole point: plain substring matching made
+/// "newsletter" a news query, "dagligvarehandelen" a today query, and
+/// "Stockholm" a stock query. Requiring the remainder to be one of these
+/// short endings — not any arbitrary continuation — keeps "prisene" while
+/// rejecting "news" + "letter".
+const INFLECTION_SUFFIXES: &[&str] = &[
+    "", "s", "es", "e", "a", "n", "en", "et", "er", "ene", "ens", "ers", "ane",
+];
+
+/// Whether `token` occurs in `haystack` as a WORD, not as an arbitrary
+/// substring: it must start at a word boundary and end at one, allowing only
+/// an [`INFLECTION_SUFFIXES`] ending in between.
+///
+/// Substring matching (the previous behaviour) made this heuristic fire on
+/// most ordinary developer and business questions: "type conversion"
+/// contained "version", "underscore" contained "score", "model selection"
+/// contained "election", "enterprise-arkitektur" contained "pris", and
+/// "i dagligvarehandelen" contained "i dag". A probe of 21 such queries
+/// forced a web search on 19 of them — every one a wasted Quarry round-trip
+/// and a stale-data warning on an answer that needed neither.
+///
+/// Both sides are checked against `char::is_alphanumeric`, so Norwegian æøå
+/// count as word characters and hyphens/punctuation count as boundaries.
+fn contains_word(haystack: &str, token: &str) -> bool {
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(token) {
+        let start = from + offset;
+        let end = start + token.len();
+        let starts_word = !haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        if starts_word && ends_word_after_inflection(&haystack[end..]) {
+            return true;
+        }
+        // Advance a whole char (never a byte) so a multi-byte rest can't panic.
+        from = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// Whether `rest` (everything after the matched token) is an allowed
+/// inflectional ending followed by a word boundary.
+fn ends_word_after_inflection(rest: &str) -> bool {
+    INFLECTION_SUFFIXES.iter().any(|suffix| {
+        rest.strip_prefix(suffix).is_some_and(|tail| {
+            !tail.chars().next().is_some_and(char::is_alphanumeric)
+        })
+    })
+}
+
 /// Tokens that signal the query wants CURRENT or external information the
 /// model cannot answer from its own knowledge. Matched as case-insensitive
-/// substrings, so multi-word phrases ("right now", "as of") are fine.
+/// WORDS (see [`contains_word`]), so multi-word phrases ("right now", "as
+/// of") work and compounds ("newsletter", "Stockholm") do not false-match.
+///
+/// Membership here means "force a search up front", which is a strong claim:
+/// the query is stale-prone beyond reasonable doubt. Merely *plausible*
+/// signals are deliberately absent — "current", "recent", "breaking",
+/// "schedule", "version", "stock", "score", "how much does", "cost of" all
+/// read as ordinary code/business vocabulary far more often than as requests
+/// for live data ("the current state of the loop", "a breaking change",
+/// "schedule a cron job", "how much stock do we have"). Those cases are not
+/// lost: `web_search` stays in the tool loop, so the model still reaches for
+/// it when the question genuinely needs the web. Forcing is the exception;
+/// model judgment is the default.
 const TIME_SENSITIVE_TOKENS: &[&str] = &[
     // English — recency / "now" signals
     "latest",
     "today",
     "tonight",
-    "current",
-    "currently",
     "right now",
     "as of",
     "this week",
     "this month",
     "this year",
-    "recent",
-    "recently",
-    "breaking",
     "news",
     "headline",
     "just announced",
     "up to date",
     "up-to-date",
-    // External live data the model can't know
-    "weather",
-    "forecast",
-    "temperature",
+    // External live data the model can't know. Weather/forecast/temperature
+    // are deliberately absent: `get_weather` (see builtin_tool_defs) is an
+    // unconditional builtin backed by information-core's real Yr connector,
+    // so forcing `web_search` availability for those queries just duplicates
+    // a call the dedicated tool already answers correctly.
     "price",
     "pricing",
-    "cost of",
-    "stock",
     "share price",
+    "stock price",
     "exchange rate",
-    "score",
-    "schedule",
     "release date",
     "who won",
     "election",
+    // Statistics that drift over time — a remembered figure ages the moment
+    // it's stated as current fact (the Oslo-population case: "how many
+    // inhabitants" answered from training data, unqualified, when the real
+    // count had moved on).
+    "population",
+    "inhabitants",
+    "how many people live",
+    "how many people are there",
+    "unemployment rate",
+    "inflation rate",
+    "gdp",
+    "latest version",
     // Norwegian — recency / "now" signals
     "i dag",
     "i kveld",
@@ -307,18 +665,46 @@ const TIME_SENSITIVE_TOKENS: &[&str] = &[
     "i år",
     "i aar",
     "nyheter",
-    "værmelding",
-    "vaermelding",
-    "været",
-    "vaeret",
+    // Norwegian weather words are deliberately absent for the same reason as
+    // their English counterparts above — `get_weather` covers this natively.
     "pris",
-    "kurs",
+    "aksjekurs",
+    "valutakurs",
     "aksje",
+    // Norwegian — statistics that drift over time
+    "innbyggere",
+    "innbyggertall",
+    "befolkning",
+    "folketall",
+    "hvor mange mennesker",
+    "arbeidsledighet",
+    "inflasjon",
+    "nyeste versjon",
 ];
 
-/// Detect a standalone 4-digit year >= 2024 anywhere in the query (e.g. asking
-/// about events in a recent/future year the model may not have full data for).
+/// Detect a standalone 4-digit year that is last-year-or-later anywhere in the
+/// query (e.g. asking about events in a recent/future year the model's
+/// training data may not fully cover).
+///
+/// The floor used to be a literal `2024`. That was already three years stale
+/// by the time anyone noticed (this runs in 2026): the check quietly rotted
+/// with every year that passed, and nothing about a hardcoded year makes that
+/// visible until a real question exposes it (see `year_floor_tracks_the_real_
+/// current_year_not_a_fixed_constant`). Deriving the floor from the real clock
+/// makes the window self-correcting instead of a maintenance trap.
 fn mentions_recent_year(query: &str) -> bool {
+    mentions_year_at_or_after(query, year_floor())
+}
+
+/// The floor year: last year through any future year counts as "recent". Kept
+/// as its own function so the boundary is one obvious place, not a magic
+/// number buried in the scan loop.
+fn year_floor() -> u32 {
+    let current_year = u32::try_from(Utc::now().year()).unwrap_or(0);
+    current_year.saturating_sub(1)
+}
+
+fn mentions_year_at_or_after(query: &str, floor: u32) -> bool {
     let bytes = query.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -331,7 +717,7 @@ fn mentions_recent_year(query: &str) -> bool {
         if is_four_digits && left_ok && right_ok {
             // Safe: the slice is exactly 4 ASCII digits.
             if let Ok(year) = query[i..i + 4].parse::<u32>() {
-                if year >= 2024 {
+                if year >= floor {
                     return true;
                 }
             }
@@ -357,10 +743,20 @@ pub fn should_force_web_search(query: &str) -> bool {
     if asks_about_conversation_state(query) {
         return false;
     }
+    // A forced search sends the message text itself to Quarry as the query, so
+    // forcing only makes sense while the message still reads as one. Past this
+    // length it is a pasted document or a multi-part instruction, and the
+    // whole blob would go out as the search string — a guaranteed-poor query
+    // built from a large payload. The tool stays in the loop either way, so
+    // the model just writes a targeted query instead, which is what a long
+    // input needed anyway.
+    if query.chars().count() > MAX_FORCED_SEARCH_QUERY_CHARS {
+        return false;
+    }
     let lower = query.to_lowercase();
     if TIME_SENSITIVE_TOKENS
         .iter()
-        .any(|token| lower.contains(token))
+        .any(|token| contains_word(&lower, token))
     {
         return true;
     }
@@ -599,6 +995,25 @@ async fn dispatch_shipping_quotes_tool(
     }
 }
 
+/// Frame a [`crate::velion_actions`] read as a [`ToolOutcome`].
+///
+/// The summariser already row-caps and text-truncates, but the truncation here
+/// is still load-bearing: it is the single ceiling that holds no matter what an
+/// upstream returns, and every round re-sends the whole accumulated history.
+/// `Err` becomes an honest `err_outcome` naming the cause — never an empty
+/// success the model would read as "the organization has no data".
+fn velion_read_outcome(call: &ToolCall, result: Result<String, String>) -> ToolOutcome {
+    match result {
+        Ok(output) => ToolOutcome {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            output: truncate_chars(&output, MAX_TOOL_OUTPUT_CHARS),
+            error: None,
+        },
+        Err(message) => err_outcome(call, message),
+    }
+}
+
 /// Execute a single model-requested tool call against the gateway's tool
 /// handlers. Unknown tools / bad args return an error outcome (the model is
 /// told, so it can recover). New tools plug in here (MCP proxy, etc.).
@@ -672,10 +1087,13 @@ fn normalize_tool_query(query: &str) -> String {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn dispatch_tool(
     state: &AppState,
+    run_id: &str,
     org_id: &str,
     user_id: &str,
     thread_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
+    inference_bearer: &str,
     session_bearer: &str,
     zdr: bool,
     call: &ToolCall,
@@ -689,6 +1107,110 @@ pub async fn dispatch_tool(
     }
 
     match call.name.as_str() {
+        "code_interpreter" => {
+            // All four credentials are required, because execution-core
+            // authenticates the data-plane and inference bearers on EVERY
+            // execute_step regardless of tool.
+            let (Some(execution_bearer), Some(data_plane_bearer)) =
+                (execution_bearer, data_plane_bearer)
+            else {
+                return err_outcome(
+                    call,
+                    "code_interpreter is unavailable this turn (missing a verified Execution Core or Data Plane credential)",
+                );
+            };
+            let language = arg_str(&call.arguments_json, "language");
+            let code = arg_str(&call.arguments_json, "code");
+            let files_in = arg_value(&call.arguments_json, "files_in");
+            match crate::tools::handle_code_interpreter(
+                state,
+                execution_bearer,
+                data_plane_bearer,
+                inference_bearer,
+                session_bearer,
+                run_id,
+                org_id,
+                user_id,
+                zdr,
+                &language,
+                &code,
+                files_in.as_ref(),
+            )
+            .await
+            {
+                Ok(output) => ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output,
+                    error: None,
+                },
+                Err(e) => err_outcome(call, e),
+            }
+        }
+        // The canvas tools do no I/O: they validate, then hand the content back
+        // for the loop to turn into an `artifact` event. Keeping them in
+        // `dispatch_tool` (rather than special-casing them in the loop) means
+        // they inherit the same audit reserve/finalize as every other tool.
+        "create_artifact" => {
+            let id = arg_str(&call.arguments_json, "id");
+            let kind = arg_str(&call.arguments_json, "kind");
+            let title = arg_str(&call.arguments_json, "title");
+            let content = arg_str(&call.arguments_json, "content");
+            match validate_authored_artifact(&id, &kind, &title, &content) {
+                Ok((id, kind, title)) => {
+                    let version = state.artifact_versions.next_version(thread_id, &id);
+                    ToolOutcome {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        output: authored_artifact_payload(&id, kind, &title, &content, version),
+                        error: None,
+                    }
+                }
+                Err(message) => err_outcome(call, message),
+            }
+        }
+        "update_artifact" => {
+            let id = arg_str(&call.arguments_json, "id");
+            let content = arg_str(&call.arguments_json, "content");
+            let id = id.trim();
+            if id.is_empty() {
+                return err_outcome(call, "update_artifact requires the 'id' of an existing artifact");
+            }
+            // An unknown id means the model is revising something the user has
+            // never seen. Creating it silently would produce a "v1" the user
+            // cannot relate to anything, so refuse and name the fix.
+            if state.artifact_versions.current_version(thread_id, id).is_none() {
+                return err_outcome(
+                    call,
+                    format!(
+                        "no artifact '{id}' exists in this conversation — use create_artifact for a new one"
+                    ),
+                );
+            }
+            if content.trim().is_empty() {
+                return err_outcome(call, "update_artifact requires non-empty 'content'");
+            }
+            if content.chars().count() > crate::artifacts::MAX_TEXT_ARTIFACT_CHARS {
+                return err_outcome(
+                    call,
+                    format!(
+                        "artifact content exceeds the {} character limit",
+                        crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
+                    ),
+                );
+            }
+            // Kind is intentionally NOT re-supplied on update: an artifact that
+            // changed kind mid-history would break the client's renderer
+            // selection for older versions.
+            let title = arg_str(&call.arguments_json, "title");
+            let version = state.artifact_versions.next_version(thread_id, id);
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                output: updated_artifact_payload(id, &title, &content, version),
+                error: None,
+            }
+        }
         "web_search" => {
             let query = arg_str(&call.arguments_json, "query");
             if query.trim().is_empty() {
@@ -729,6 +1251,24 @@ pub async fn dispatch_tool(
                 Err(e) => err_outcome(call, format!("web_search failed: {}", e.message())),
             }
         }
+        // Structured, real weather data (information-core → Yr/met.no) for a
+        // named Norwegian city. Unconditionally advertised in
+        // `builtin_tool_defs` (unlike `web_search`, which stays behind the
+        // Search toggle/heuristic) — see that function's doc comment. No
+        // `org_id`/`zdr` threading here: weather is public, non-personal data,
+        // not a caller query whose text could be sensitive.
+        "get_weather" => {
+            let location = arg_str(&call.arguments_json, "location");
+            match crate::tools::handle_get_weather(state, &location).await {
+                Ok(summary) => ToolOutcome {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: summary,
+                    error: None,
+                },
+                Err(e) => err_outcome(call, format!("get_weather failed: {e}")),
+            }
+        }
         // Read a specific web page (reuses Quarry scrape — the canonical web
         // fetch owner). Returns title + final URL + (truncated) page content.
         "fetch_url" => {
@@ -743,6 +1283,27 @@ pub async fn dispatch_tool(
                     } else {
                         r.markdown
                     };
+                    // A fetch that extracted nothing is a FAILURE, however
+                    // cleanly it came back. Reporting it as success (with
+                    // `content: ""`) left the model to infer that for itself,
+                    // and it reliably guessed wrong: on live turns it fetched
+                    // ssb.no, got empty text, and moved on to another
+                    // JavaScript-rendered page for the same empty result —
+                    // two wasted round-trips before hedging. Naming the cause
+                    // turns that into one useful signal.
+                    if body.trim().is_empty() {
+                        return err_outcome(
+                            call,
+                            format!(
+                                "fetch_url got no readable text from {} (the page is most likely \
+                                 rendered by JavaScript, so its numbers are not in the HTML). Do \
+                                 not retry this URL or fetch a similar page — answer from the \
+                                 web_search snippets, or run web_search with a more specific \
+                                 query that puts the figure in the snippet itself.",
+                                r.final_url
+                            ),
+                        );
+                    }
                     let out = serde_json::json!({
                         "final_url": r.final_url,
                         "title": r.title,
@@ -894,6 +1455,11 @@ pub async fn dispatch_tool(
                         topic,
                         content,
                         org_id: org_id.to_owned(),
+                        // Empty means "assign a fresh id" -- this call site never
+                        // has an existing memory to update, per
+                        // letta_adapter.rs's documented contract for this field.
+                        memory_id: String::new(),
+                        user_id: user_id.to_owned(),
                     },
                     session_bearer,
                 ))
@@ -977,6 +1543,59 @@ pub async fn dispatch_tool(
         "shipping_get_quotes" | "shipping.get_quotes" => {
             dispatch_shipping_quotes_tool(state, ingestion_bearer, call).await
         }
+        // ---- Velion READ actions (see velion_actions.rs) ----------------
+        // Every arm passes `org_id` — the VERIFIED request org — and no arm
+        // reads an org from `call.arguments_json`, so the model cannot express
+        // a cross-tenant read. Underscore names are what we advertise (Anthropic
+        // rejects '.' in tool names); the dotted forms are accepted so the Agent
+        // Console's explicit action ids resolve to the same handler.
+        "insights_overview" | "insights.overview" => {
+            velion_read_outcome(call, crate::velion_actions::insights_overview(state, org_id).await)
+        }
+        "social_list_accounts" | "social.list_accounts" => velion_read_outcome(
+            call,
+            crate::velion_actions::social_list_accounts(state, org_id).await,
+        ),
+        "social_list_posts" | "social.list_posts" => velion_read_outcome(
+            call,
+            crate::velion_actions::social_list_posts(
+                state,
+                org_id,
+                &arg_str(&call.arguments_json, "status"),
+                &arg_str(&call.arguments_json, "platform"),
+                arg_i64(&call.arguments_json, "limit"),
+            )
+            .await,
+        ),
+        "social_list_campaigns" | "social.list_campaigns" => velion_read_outcome(
+            call,
+            crate::velion_actions::social_list_campaigns(
+                state,
+                org_id,
+                &arg_str(&call.arguments_json, "status"),
+                arg_i64(&call.arguments_json, "limit"),
+            )
+            .await,
+        ),
+        "knowledge_list_documents" | "knowledge.list_documents" => {
+            let Some(bearer) = data_plane_bearer else {
+                return err_outcome(
+                    call,
+                    "knowledge.list_documents requires a verified user bearer",
+                );
+            };
+            velion_read_outcome(
+                call,
+                crate::velion_actions::knowledge_list_documents(
+                    state,
+                    org_id,
+                    bearer,
+                    &arg_str(&call.arguments_json, "type"),
+                    arg_i64(&call.arguments_json, "limit"),
+                )
+                .await,
+            )
+        }
         // The org's own connected MCP servers (see runtime_registries::mcp_tool_defs,
         // which advertises these under the same mcp__<server_id>__<tool> names).
         // Calls the same handler execution-core's governed ProxyMcpTool RPC uses —
@@ -1036,6 +1655,8 @@ async fn dispatch_audited_tool(
     user_id: &str,
     thread_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
+    inference_bearer: &str,
     session_bearer: &str,
     zdr: bool,
     call: &ToolCall,
@@ -1062,10 +1683,13 @@ async fn dispatch_audited_tool(
 
     let outcome = dispatch_tool(
         state,
+        run_id,
         org_id,
         user_id,
         thread_id,
         data_plane_bearer,
+        execution_bearer,
+        inference_bearer,
         session_bearer,
         zdr,
         call,
@@ -1098,8 +1722,28 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "web_search".to_owned(),
-            description: "Search the public web for current information. Returns ranked results with title, url, and snippet.".to_owned(),
+            description: "Search the public web for current information. Returns ranked results with title, url, and snippet. Use this when the answer depends on facts that may have changed since your training (statistics, prices, news, versions, current office-holders). Do NOT use it for timeless questions (math, definitions, how-to, code), for weather (use get_weather), or for the organization's own data (use knowledge_search).".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"limit":{"type":"integer","description":"Max results 1-50"}},"required":["query"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "get_weather".to_owned(),
+            description: "Get current weather conditions and a short forecast for a major Norwegian city. Prefer this over web_search for weather questions — it returns real, structured, live data (temperature, wind, precipitation, humidity, and a multi-day forecast) instead of scraped web pages. Coverage is limited to Oslo, Bergen, Trondheim, Stavanger, Tromsø, Kristiansand, Drammen, Fredrikstad, Sandnes and Sarpsborg; for any other place use web_search instead.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"location":{"type":"string","description":"Norwegian city name, one of: Oslo, Bergen, Trondheim, Stavanger, Tromsø, Kristiansand, Drammen, Fredrikstad, Sandnes, Sarpsborg. Omit for Oslo. Any other value is rejected rather than silently answered with another city."}}}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "code_interpreter".to_owned(),
+            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl, .docx via python-docx, .pdf via reportlab, charts via matplotlib (headless), plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts; do not base64 them yourself. Available libraries: openpyxl, python-docx, reportlab, matplotlib, pandas, numpy. The sandbox has NO network access and a hard ~30s timeout, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Runtime; defaults to python"},"code":{"type":"string","description":"Source to execute. print() what you want to read back; write files to the working directory to hand them to the user."},"files_in":{"type":"array","description":"Optional input files to place in the working directory before running.","items":{"type":"object","properties":{"name":{"type":"string","description":"Flat filename, no directories"},"content_b64":{"type":"string","description":"Base64 file contents"}},"required":["name","content_b64"]}}},"required":["code"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "create_artifact".to_owned(),
+            description: "Create a substantial, self-contained piece of work product the user will keep, edit, or reuse — a written document, a code file, or an HTML page — and show it in a side panel instead of burying it in chat prose. Use it when the content is longer than a few paragraphs, is meant to be saved or downloaded, or is something the user will iterate on (a report, a policy, a contract draft, a script, a landing page). Do NOT use it for short answers, explanations, or conversational replies — those belong in your message. Give the artifact a stable, descriptive id you can reuse with update_artifact when the user asks for changes.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"id":{"type":"string","description":"Stable slug identifying this artifact within the conversation, e.g. 'q3-rapport'. Reuse it with update_artifact."},"kind":{"type":"string","enum":["document","code","html"],"description":"document = Markdown prose; code = source code; html = a complete HTML page previewed live"},"title":{"type":"string","description":"Human-readable title; for code, the filename e.g. 'analyse.py'"},"content":{"type":"string","description":"The full content. For document, Markdown. For html, a complete document."}},"required":["id","kind","title","content"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "update_artifact".to_owned(),
+            description: "Replace the content of an artifact you created earlier with create_artifact, producing a new version the user can step back through. Use this whenever the user asks to change, extend, shorten, translate, or fix an existing artifact — never create a second artifact for a revision of the same thing. Always send the COMPLETE new content, not a diff or a fragment.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"id":{"type":"string","description":"The id you used with create_artifact"},"content":{"type":"string","description":"The complete replacement content"},"title":{"type":"string","description":"Optional new title; omit to keep the current one"}},"required":["id","content"]}"#.to_owned(),
         },
         ToolDefinition {
             name: "fetch_url".to_owned(),
@@ -1115,6 +1759,38 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "shipping_get_quotes".to_owned(),
             description: "Compare live shipping quotes across the connected carrier fleet (Bring, DHL, UPS, FedEx) for a given origin, destination, and package. Returns cheapest-first pricing and transit days.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"from":{"type":"object","description":"Origin address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","description":"Destination address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"package":{"type":"object","properties":{"weight_kg":{"type":"number"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"}},"required":["weight_kg","length_cm","width_cm","height_cm"]},"segment":{"type":"string","enum":["b2b","b2c"],"description":"Required by shipping-core; use b2b unless the recipient is a private individual"}},"required":["from","to","package","segment"]}"#.to_owned(),
+        },
+        // --- Velion workspace READ tools ------------------------------------
+        // These make the signed-in user's OWN Velion data answerable in chat.
+        // None takes an org/tenant argument: the organization is taken from the
+        // verified request context, so there is nothing for the model to supply
+        // (and nothing it can spoof). All are read-only — the matching write
+        // actions are deliberately NOT advertised here, because the inline loop
+        // has no approval gate.
+        ToolDefinition {
+            name: "knowledge_list_documents".to_owned(),
+            description: "List WHICH documents exist in the organization's knowledge base, with each document's title, source, type, status, and the org-wide total. Use this for inventory questions — 'how many documents do we have', 'what sources are in our knowledge base', 'have we ingested the X report yet', 'list our documents'. Do NOT use it to answer questions about what a document SAYS: it deliberately returns no document content, so use knowledge_search for anything about the substance of the material. Do NOT use it for public-web questions (use web_search).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"type":{"type":"string","description":"Optional document-type filter as stored by Data Plane (e.g. 'pdf', 'web_page'). Omit to list all types."},"limit":{"type":"integer","description":"Max documents to return, 1-100 (default 25). The org-wide total is always reported regardless of this cap."}}}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "insights_overview".to_owned(),
+            description: "Get the organization's own Insights dashboard numbers: headline scorecards (label, metric, value, unit), per-surface event rollups with the last-event timestamp, connector lag, and the catalogue of supported connectors with their wiring status. Use this for 'how are we doing', 'what do our metrics say', 'which numbers changed', or when the user refers to the Insights page. Note that the connector list is the SUPPORTED-connector catalogue with status (native / planned / requires_token_lease / disabled) — it is NOT a list of live connections, so never report a 'planned' connector as something the org has connected. Do NOT use this for social-account or post data (use social_list_accounts / social_list_posts), and do NOT use it for public benchmarks or market figures (use web_search).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "social_list_accounts".to_owned(),
+            description: "List the social accounts the organization has actually connected, with provider, display name, handle, connection status, granted capabilities, and whether each access token is still healthy. Use this to answer 'which social accounts do we have connected', 'can we post to LinkedIn', or 'is our Instagram token still valid'. Do NOT use it to list posts or drafts (use social_list_posts), and do NOT use it to look up a public company's social presence (use web_search) — it only ever returns the org's own connected accounts.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "social_list_posts".to_owned(),
+            description: "List the organization's own social posts — drafts, scheduled, published, and failed — with title, body excerpt, status, target platforms, approval state, and scheduled time. Use this for 'what social posts are queued', 'do we have any drafts', 'what is scheduled this week', or 'did that post go out'. Filter with status/platform rather than listing everything and sifting. Do NOT use it for connected accounts (use social_list_accounts) or campaign-level setup (use social_list_campaigns), and do NOT use it to find other companies' posts (use web_search) — it only returns the org's own posts. This tool is read-only: it cannot create, schedule, or publish a post — those require the approval-gated agentic path, so if the user asks you to publish something, say it needs approval instead of calling a tool.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"status":{"type":"string","enum":["draft","pending_approval","scheduled","publishing","published","failed"],"description":"Optional status filter. Omit for all statuses."},"platform":{"type":"string","description":"Optional platform filter, e.g. 'linkedin', 'instagram', 'facebook'. Omit for all platforms."},"limit":{"type":"integer","description":"Max posts to return, 1-100 (default 25)"}}}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "social_list_campaigns".to_owned(),
+            description: "List the organization's own social campaigns with name, goal, status, target platforms, and start/end dates. Use this for 'what campaigns are running', 'what was our Q3 campaign', or when the user asks how a named campaign is set up. Do NOT use it for the individual posts inside a campaign (use social_list_posts) or for connected accounts (use social_list_accounts). Read-only: creating or changing a campaign requires the approval-gated agentic path.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"status":{"type":"string","enum":["draft","active","completed","archived"],"description":"Optional status filter. Omit for all statuses."},"limit":{"type":"integer","description":"Max campaigns to return, 1-100 (default 25)"}}}"#.to_owned(),
         },
     ]
 }
@@ -1136,7 +1812,7 @@ pub fn format_tool_context(outcomes: &[ToolOutcome]) -> String {
 #[must_use]
 pub fn format_forced_tool_context(user_request: &str, outcomes: &[ToolOutcome]) -> String {
     let mut s = String::from(
-        "Tool results for the user's current request. Use these results together with the prior conversation context to answer the current request; do not ask for information already present in the conversation. For Search-enabled answers, verify current factual claims from successful web_search results and citations. Treat missing results, empty snippets, 404s, and fetch errors as inconclusive; do not claim that a product, model, event, or deployment does not exist unless successful sources directly support that conclusion. If the available sources do not verify a claim, say that it could not be verified.\n",
+        "Tool results for the user's current request. Use these results together with the prior conversation context to answer the current request; do not ask for information already present in the conversation. For Search-enabled answers, verify current factual claims from successful web_search results and citations. Treat missing results, empty snippets, 404s, and fetch errors as inconclusive; do not claim that a product, model, event, or deployment does not exist unless successful sources directly support that conclusion. If the available sources do not verify a claim, say that it could not be verified. If these results do not actually contain the figure or fact asked for, call web_search again with a DIFFERENT, more specific query (add the year, the source's name, or the exact statistic) rather than answering from memory or giving up — but never repeat a query you have already tried verbatim.\n",
     );
     let request = user_request.trim();
     if !request.is_empty() {
@@ -1206,6 +1882,15 @@ pub struct ToolRounds {
     /// and gets flagged "uncertain" on every turn, which is exactly the false
     /// "always 72%" caveat users complained about.
     pub any_tool_succeeded: bool,
+    /// Evidence counters for the graduated confidence score. The boolean above
+    /// collapsed every grounded turn to the same flat bonus (the "always 87%"
+    /// sequel to "always 72%"); these let the score vary with how much evidence
+    /// the turn actually gathered and how much of the tool work failed.
+    pub tool_successes: u32,
+    /// Tool calls that returned an error this turn (see `tool_successes`).
+    pub tool_failures: u32,
+    /// Web citations emitted this turn (Sources-tab entries from `web_search`).
+    pub web_citations: u32,
 }
 
 /// Where a tool event goes the moment it happens.
@@ -1273,6 +1958,8 @@ pub async fn run_forced_web_search(
         user_id,
         thread_id,
         None,
+        None,
+        "",
         session_bearer,
         zdr,
         &call,
@@ -1302,7 +1989,9 @@ pub async fn run_forced_web_search(
             error: outcome.error.clone(),
         })
         .await;
-    for citation in web_search_citations(&outcome) {
+    let citations = web_search_citations(&outcome);
+    let web_citations = u32::try_from(citations.len()).unwrap_or(u32::MAX);
+    for citation in citations {
         events.push(citation).await;
     }
 
@@ -1321,6 +2010,9 @@ pub async fn run_forced_web_search(
         // no resolved model to hand on; the answer call resolves as usual.
         resolved_model: None,
         any_tool_succeeded: forced_search_succeeded,
+        tool_successes: u32::from(forced_search_succeeded),
+        tool_failures: u32::from(!forced_search_succeeded),
+        web_citations,
     })
 }
 
@@ -1377,6 +2069,7 @@ pub async fn run_tool_rounds(
     user_id: &str,
     thread_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
     session_bearer: &str,
     zdr: bool,
@@ -1390,6 +2083,9 @@ pub async fn run_tool_rounds(
     let mut messages = base_messages;
     let mut resolved_model: Option<String> = None;
     let mut any_tool_succeeded = false;
+    let mut tool_successes: u32 = 0;
+    let mut tool_failures: u32 = 0;
+    let mut web_citations: u32 = 0;
     let mut events = match sink {
         Some(sink) => ToolEvents::Live(sink),
         None => ToolEvents::Buffered(Vec::new()),
@@ -1397,6 +2093,16 @@ pub async fn run_tool_rounds(
     // Persists across rounds: an exact repeat later in the same turn is still
     // suppressed, not just within one round.
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
+    // Artifact id → kind, for artifacts authored during THIS turn. An
+    // `update_artifact` does not resupply the kind (changing it mid-history
+    // would break the client's renderer for older versions), so the kind has to
+    // be carried forward. Cross-turn updates fall back to `document`, which is
+    // the honest limit of a per-turn map; see `artifacts.rs` on why versioning
+    // state is process-local.
+    let mut authored_artifact_kinds: std::collections::HashMap<
+        String,
+        crate::artifacts::ArtifactKind,
+    > = std::collections::HashMap::new();
 
     for _round in 0..max_tool_rounds() {
         // Every round re-sends the whole accumulated history, so a long
@@ -1464,12 +2170,18 @@ pub async fn run_tool_rounds(
             break; // model is ready to answer
         }
 
-        let mut outcomes = Vec::with_capacity(resp.tool_calls.len());
+        // The calls in one round execute CONCURRENTLY. Each dispatch is fully
+        // self-contained (audit reserve → run → audit finalize, per action id),
+        // so a round of independent lookups pays for its slowest call instead
+        // of the sum — sequential dispatch made a 3-tool round take 3× the
+        // wall-clock for no correctness gain. Event order stays deterministic:
+        // every tool_call event is emitted up front (so the user watches all of
+        // them start), and results are emitted in the model's original call
+        // order once the round completes.
+        let mut prepared = Vec::with_capacity(resp.tool_calls.len());
         for call in &resp.tool_calls {
             let args = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
                 .unwrap_or_else(|_| serde_json::json!({}));
-            // Emitted BEFORE dispatch so the user sees which tool is running
-            // while it runs, not after the whole phase finishes.
             events
                 .push(ChatEvent::ToolCall {
                     id: call.id.clone(),
@@ -1477,17 +2189,24 @@ pub async fn run_tool_rounds(
                     args,
                 })
                 .await;
+            // Duplicate detection stays sequential over the round so two
+            // identical calls in the SAME round dedupe exactly like repeats
+            // across rounds.
             let is_duplicate = duplicate_call_signature(call)
                 .is_some_and(|signature| !attempted_calls.insert(signature));
-            let outcome = if is_duplicate {
-                err_outcome(
-                    call,
-                    format!(
-                        "duplicate {} call suppressed (identical arguments already tried this turn); use materially different arguments if you still need this",
-                        call.name
-                    ),
-                )
-            } else {
+            prepared.push((call, is_duplicate));
+        }
+        let dispatched = futures::future::join_all(prepared.into_iter().map(
+            |(call, is_duplicate)| async move {
+                if is_duplicate {
+                    return Ok(err_outcome(
+                        call,
+                        format!(
+                            "duplicate {} call suppressed (identical arguments already tried this turn); use materially different arguments if you still need this",
+                            call.name
+                        ),
+                    ));
+                }
                 dispatch_audited_tool(
                     state,
                     request_id,
@@ -1496,13 +2215,45 @@ pub async fn run_tool_rounds(
                     user_id,
                     thread_id,
                     data_plane_bearer,
+                    execution_bearer,
+                    inference_bearer,
                     session_bearer,
                     zdr,
                     call,
                     ingestion_bearer,
                 )
-                .await?
-            };
+                .await
+            },
+        ))
+        .await;
+        let mut outcomes = Vec::with_capacity(dispatched.len());
+        for result in dispatched {
+            let mut outcome = result?;
+            // Artifact-producing tools return their payload through `output`,
+            // which would otherwise be appended to the conversation verbatim —
+            // a generated .xlsx or a long document would consume the entire
+            // context budget. Harvest the events, then replace the output with
+            // a compact summary before it reaches `format_tool_context`.
+            let artifact_kind_hint = artifact_id_of(&outcome).and_then(|id| {
+                authored_artifact_kinds
+                    .get(&id)
+                    .copied()
+            });
+            let (artifact_events, rewritten) =
+                tool_artifact_events(&outcome, artifact_kind_hint);
+            if let Some(rewritten) = rewritten {
+                outcome.output = rewritten;
+            }
+            for event in &artifact_events {
+                // Remember each artifact's kind so a later `update_artifact`
+                // (which deliberately does not resupply it) renders as the same
+                // kind rather than defaulting to a document.
+                if let ChatEvent::Artifact { id, kind, .. } = event {
+                    if let Some(parsed) = crate::artifacts::ArtifactKind::parse(kind) {
+                        authored_artifact_kinds.insert(id.clone(), parsed);
+                    }
+                }
+            }
             events
                 .push(ChatEvent::ToolResult {
                     id: outcome.call_id.clone(),
@@ -1515,8 +2266,23 @@ pub async fn run_tool_rounds(
                     error: outcome.error.clone(),
                 })
                 .await;
+            // A model-chosen web_search must populate the Sources tab exactly
+            // like the forced pre-loop path does — the citations are what let
+            // the user (and the verification step) see what grounded the answer.
+            for citation in web_search_citations(&outcome) {
+                events.push(citation).await;
+                web_citations = web_citations.saturating_add(1);
+            }
+            // Emitted AFTER the tool_result so the client has the step context
+            // before the artifact it produced.
+            for event in artifact_events {
+                events.push(event).await;
+            }
             if outcome.error.is_none() {
                 any_tool_succeeded = true;
+                tool_successes = tool_successes.saturating_add(1);
+            } else {
+                tool_failures = tool_failures.saturating_add(1);
             }
             outcomes.push(outcome);
         }
@@ -1540,6 +2306,9 @@ pub async fn run_tool_rounds(
         events: events.into_buffer(),
         resolved_model,
         any_tool_succeeded,
+        tool_successes,
+        tool_failures,
+        web_citations,
     })
 }
 
@@ -1642,6 +2411,224 @@ mod tests {
         assert!(inline_tool_allowed("knowledge_search"));
     }
 
+    /// THE guard for this whole surface: `dispatch_tool`'s final arm is
+    /// `other => err_outcome(call, "unknown tool '{other}'")`, so advertising a
+    /// tool in `builtin_tool_defs()` without adding a matching dispatch arm
+    /// produces a tool the model will confidently call and that can only ever
+    /// fail. Nothing else in the codebase couples the two lists, so this test is
+    /// the coupling.
+    ///
+    /// Every builtin short-circuits on a missing credential or a missing
+    /// required argument BEFORE doing I/O, which is what makes driving the real
+    /// dispatcher here fast and deterministic rather than a network test.
+    #[tokio::test]
+    async fn every_advertised_builtin_tool_has_a_dispatch_arm() {
+        let state = crate::state::AppState::new();
+        for def in builtin_tool_defs() {
+            let call = tool_call(&def.name, "{}");
+            let outcome = dispatch_tool(
+                &state,
+                "run_test",
+                // A non-empty verified org, so org-scoped reads get past their
+                // org check and prove the ARM exists rather than bailing early.
+                "org_test",
+                "user_test",
+                "thread_test",
+                None,
+                None,
+                "",
+                "",
+                true,
+                &call,
+                None,
+            )
+            .await;
+
+            let error = outcome.error.unwrap_or_default();
+            assert!(
+                !error.contains("unknown tool"),
+                "advertised tool '{}' has no dispatch arm in dispatch_tool — it would fail on \
+                 every call with \"unknown tool\". Add an arm (see velion_read_outcome for the \
+                 read-tool pattern). Got: {error}",
+                def.name
+            );
+            assert!(
+                !error.contains("side-effecting tools require governed agentic execution"),
+                "advertised tool '{}' is blocked by inline_tool_allowed — a tool must never be \
+                 advertised inline and then refused inline",
+                def.name
+            );
+        }
+    }
+
+    /// The advertised set must stay READ-only. The inline loop has no
+    /// human-approval gate, so a write tool here would execute an irreversible
+    /// action (publishing a post, toggling a policy) with no one confirming it —
+    /// the governed agentic path (`mode: "ask"`) exists for exactly that.
+    #[test]
+    fn no_write_class_velion_action_is_advertised_to_the_inline_loop() {
+        let advertised: BTreeSet<String> = builtin_tool_defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        // Every requiresApproval:true / reversible:false action in
+        // velionv3's src/shared/actions/action-registry.ts, plus the
+        // side-effecting medium-risk ones.
+        for write_action in [
+            "tickets_create",
+            "tickets.create",
+            "tickets_update",
+            "tickets_assign",
+            "tickets_resolve",
+            "tickets_classify_conversation",
+            "social_create_draft",
+            "social.create_draft",
+            "social_schedule_post",
+            "social_publish_post",
+            "social.publish_post",
+            "workflows_toggle_policy",
+            "workflows.toggle_policy",
+            "operating_map_generate",
+            "operating_map_review_proposal",
+            "operating_map_create_agent_blueprint",
+            "knowledge_scrape_url",
+            "knowledge_crawl_site",
+            "knowledge_import_source",
+            "knowledge_upload_files",
+            "knowledge_connect_source",
+            "knowledge_recrawl_source",
+        ] {
+            assert!(
+                !advertised.contains(write_action),
+                "'{write_action}' is a write action and must not be advertised inline — \
+                 it belongs to the approval-gated agentic path"
+            );
+        }
+    }
+
+    /// The organization must come from the verified request context, never from
+    /// the model. A tenant-scoping argument in a tool's schema is an invitation
+    /// for the model to read another tenant's data, so no advertised tool may
+    /// declare one.
+    #[test]
+    fn no_advertised_tool_lets_the_model_supply_a_tenant_scope() {
+        for def in builtin_tool_defs() {
+            let schema: Value = serde_json::from_str(&def.parameters_json)
+                .unwrap_or_else(|e| panic!("tool '{}' has invalid parameter JSON: {e}", def.name));
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for forbidden in ["org_id", "orgId", "organization_id", "tenant_id", "user_id"] {
+                assert!(
+                    !properties.contains_key(forbidden),
+                    "tool '{}' accepts '{forbidden}' — tenant scope must come from the verified \
+                     request context, not from model input",
+                    def.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn velion_read_tools_are_advertised_and_inline_allowed() {
+        let defs = builtin_tool_defs();
+        for name in [
+            "knowledge_list_documents",
+            "insights_overview",
+            "social_list_accounts",
+            "social_list_posts",
+            "social_list_campaigns",
+        ] {
+            let def = defs
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be advertised"));
+            assert!(inline_tool_allowed(name), "{name} must be inline-allowed");
+            // The house style: a description states what comes back AND when
+            // NOT to reach for it, because without the negative rule the model
+            // picks the wrong tool.
+            let lowered = def.description.to_lowercase();
+            assert!(
+                lowered.contains("do not use") || lowered.contains("read-only"),
+                "{name}'s description must carry a negative rule"
+            );
+        }
+    }
+
+    #[test]
+    fn velion_read_tools_accept_both_the_dotted_action_id_and_the_advertised_name() {
+        // Anthropic's tools[].custom.name rejects '.', so we advertise the
+        // underscore form; the Agent Console dispatches action-registry ids
+        // verbatim. Both must resolve, and neither may be treated as unknown.
+        for dotted in [
+            "knowledge.list_documents",
+            "insights.overview",
+            "social.list_accounts",
+            "social.list_posts",
+            "social.list_campaigns",
+        ] {
+            assert!(
+                inline_tool_allowed(dotted),
+                "{dotted} must be inline-allowed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn velion_read_tools_report_an_honest_cause_instead_of_empty_data() {
+        // With no internal API key configured, an Application Plane read must
+        // say so. The failure mode we must never ship is a plausible-looking
+        // empty success the model reports as "you have no social accounts".
+        let state = crate::state::AppState::new();
+        let call = tool_call("social_list_accounts", "{}");
+        let outcome = dispatch_tool(
+            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", true, &call, None,
+        )
+        .await;
+        assert!(outcome.output.is_empty(), "a failed read returns no output");
+        let error = outcome.error.expect("unconfigured upstream must error");
+        assert!(
+            error.contains("APPLICATION_CORE_INTERNAL_KEY"),
+            "error names the actual cause: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_list_documents_refuses_without_a_verified_data_plane_bearer() {
+        let state = crate::state::AppState::new();
+        let call = tool_call("knowledge_list_documents", r#"{"limit":5}"#);
+        let outcome = dispatch_tool(
+            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", true, &call, None,
+        )
+        .await;
+        let error = outcome.error.expect("missing bearer must error");
+        assert!(error.contains("verified user bearer"), "{error}");
+    }
+
+    #[test]
+    fn velion_read_outcome_truncates_output_and_preserves_call_identity() {
+        let call = tool_call("insights_overview", "{}");
+        let long = "y".repeat(MAX_TOOL_OUTPUT_CHARS + 500);
+        let outcome = velion_read_outcome(&call, Ok(long));
+        assert_eq!(outcome.call_id, call.id);
+        assert_eq!(outcome.name, "insights_overview");
+        assert!(outcome.error.is_none());
+        assert_eq!(
+            outcome.output.chars().count(),
+            MAX_TOOL_OUTPUT_CHARS + 1,
+            "capped at MAX_TOOL_OUTPUT_CHARS plus the ellipsis"
+        );
+
+        let outcome = velion_read_outcome(&call, Err("insight-core returned HTTP 503".to_owned()));
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("insight-core returned HTTP 503")
+        );
+        assert!(outcome.output.is_empty(), "an error carries no output");
+    }
+
     #[test]
     fn inline_loop_admits_the_orgs_own_connected_mcp_servers() {
         // The chat surface IS the product: an org's connected MCP server must
@@ -1649,6 +2636,24 @@ mod tests {
         // concept — only save_memory/browser_agent remain agentic-only.
         assert!(inline_tool_allowed("mcp__github__create_issue"));
         assert!(inline_tool_allowed("mcp__srv__a__b"));
+    }
+
+    #[test]
+    fn get_weather_is_unconditionally_builtin_and_inline_allowed() {
+        // Unlike `web_search` (gated behind the Search toggle/heuristic in
+        // sse.rs's `web_search_available`), `get_weather` is a cheap,
+        // read-only, side-effect-free structured lookup with no meaningful
+        // cost/latency concern — it must always be in the advertised set so
+        // the model can pick it autonomously, with no toggle or forced
+        // heuristic involved.
+        let defs = builtin_tool_defs();
+        let get_weather = defs
+            .iter()
+            .find(|tool| tool.name == "get_weather")
+            .expect("get_weather must be advertised in builtin_tool_defs unconditionally");
+        assert!(!get_weather.description.is_empty());
+        assert!(!get_weather.parameters_json.is_empty());
+        assert!(inline_tool_allowed("get_weather"));
     }
 
     #[test]
@@ -1820,6 +2825,9 @@ mod tests {
             events: vec![],
             resolved_model: Some("claude-sonnet-4-6".to_owned()),
             any_tool_succeeded: true,
+            tool_successes: 1,
+            tool_failures: 0,
+            web_citations: 0,
         };
         assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }
@@ -2014,9 +3022,476 @@ mod tests {
         assert!(should_force_web_search("hva er nyeste nytt om Velion"));
         assert!(should_force_web_search("hva er været i dag"));
         assert!(should_force_web_search("aksjekurs for Equinor akkurat nå"));
-        // A recent 4-digit year.
-        assert!(should_force_web_search("biggest tech releases in 2025"));
-        assert!(should_force_web_search("what happened in 2024"));
+        // A recent 4-digit year — computed relative to the real clock, not a
+        // literal, so this assertion can't itself go stale the way the
+        // production code just did (see `year_floor_tracks_the_real_current_
+        // year_not_a_fixed_constant` below for the regression this guards).
+        let this_year = super::year_floor() + 1;
+        assert!(should_force_web_search(&format!(
+            "biggest tech releases in {this_year}"
+        )));
+        assert!(should_force_web_search(&format!(
+            "what happened in {}",
+            this_year - 1
+        )));
+    }
+
+    /// The floor used to be a hardcoded `2024`, discovered stale mid-2026 (a
+    /// real answer stated 2024 population data as current, unqualified fact).
+    /// A fixed literal can only rot forward in time and nothing makes that
+    /// visible until a real question exposes it years later. Pin the fix
+    /// itself: the floor must track the real clock, not a constant, so this
+    /// test keeps passing in any year it happens to run.
+    #[test]
+    fn year_floor_tracks_the_real_current_year_not_a_fixed_constant() {
+        let now_year = i32::try_from(super::year_floor() + 1).expect("plausible year fits i32");
+        assert_eq!(
+            now_year,
+            chrono::Utc::now().year(),
+            "the floor must be derived from Utc::now(), not a literal"
+        );
+        // Whatever year this runs in, last year and this year both count as
+        // recent, and a year from a decade+ ago never does. Deliberately no
+        // other time-sensitive token in these queries (no "population",
+        // "latest", etc.) -- this isolates the YEAR check specifically, not
+        // the keyword list, which has its own independent test above.
+        assert!(should_force_web_search(&format!(
+            "what happened in {now_year}"
+        )));
+        assert!(should_force_web_search(&format!(
+            "what happened in {}",
+            now_year - 1
+        )));
+        assert!(!should_force_web_search(&format!(
+            "what happened in {}",
+            now_year - 20
+        )));
+    }
+
+    /// `get_weather` (an unconditional builtin backed by information-core's
+    /// real Yr connector, see `get_weather_is_unconditionally_builtin_and_
+    /// inline_allowed`) covers plain weather questions natively. Forcing
+    /// `web_search` availability for them too — the actual live bug: a bare
+    /// "what's the weather in Oslo" advertised BOTH tools and the model
+    /// dutifully called both, burning a redundant Quarry round-trip — is
+    /// exactly what this must not do. Deliberately no other time-sensitive
+    /// token here (no "today"/"i dag"/etc.), isolating the weather-keyword
+    /// removal from the still-present recency tokens tested elsewhere.
+    /// Substring matching made this heuristic fire on ordinary developer and
+    /// business vocabulary: a 21-query probe forced a web search on 19 of
+    /// them. Every case below is one of those real false positives, kept as a
+    /// group so a future token addition that reintroduces substring-style
+    /// matching fails here loudly instead of quietly costing a Quarry
+    /// round-trip on half the traffic.
+    #[test]
+    fn ordinary_dev_and_business_questions_never_force_a_search() {
+        for query in [
+            // Compounds that merely CONTAIN a token (the substring bug).
+            "how do I do type conversion in Rust",       // version
+            "why does my variable have an underscore",   // score
+            "how do I do model selection",               // election
+            "write me a newsletter for our customers",   // news
+            "hva er enterprise-arkitektur?",             // pris
+            "hvordan fungerer det i dagligvarehandelen?", // i dag
+            "hva er konversjon i markedsforing?",        // versjon
+            "hvordan unngar jeg konkurs i regnskapet?",  // kurs
+            "hva er været i Stockholm?",                 // stock
+            "explain scoreboard rendering",              // score
+            // Whole words too weak to justify FORCING a search — the model
+            // still has web_search in the loop if it disagrees.
+            "how do I schedule a cron job",
+            "is this a breaking change in my API",
+            "explain the current state of the loop",
+            "what is the currently selected item",
+            "show me recent changes in this file",
+            "how much does this function allocate",
+            "what is the cost of a database join",
+            "what version of my file is open",
+            "how much stock do we have in the warehouse",
+        ] {
+            assert!(
+                !should_force_web_search(query),
+                "must not force a web search for: {query}"
+            );
+        }
+    }
+
+    /// The other half of the same guarantee: pruning low-precision tokens and
+    /// tightening the matcher must not cost any genuinely stale-prone query.
+    #[test]
+    fn stale_prone_questions_still_force_a_search() {
+        for query in [
+            "hvor mange innbyggere er det i Oslo?", // the original Oslo-population bug
+            "what is the latest news on AI",
+            "hva er siste nytt om Velion",
+            "current price of bitcoin",
+            "AAPL share price right now",
+            "who won the election this week",
+            "aksjekurs for Equinor akkurat na",
+            "hva er inflasjonen i Norge na?",
+            "what is the exchange rate for USD to NOK",
+            "hva skjer i dag i Norge?",
+        ] {
+            assert!(
+                should_force_web_search(query),
+                "must force a web search for: {query}"
+            );
+        }
+    }
+
+    /// `code_interpreter` must be advertised like any other builtin, and must
+    /// be inline-allowed: the hermetic sandbox (read-only, no network, hard
+    /// timeout, output scrubbed) IS the safety boundary, so it does not need the
+    /// approval-gated agentic path the way a write-class tool does.
+    #[test]
+    fn code_interpreter_is_a_builtin_and_inline_allowed() {
+        let defs = builtin_tool_defs();
+        let code = defs
+            .iter()
+            .find(|d| d.name == "code_interpreter")
+            .expect("code_interpreter must be advertised to the model");
+        assert!(!code.description.is_empty());
+        assert!(
+            code.description.contains("NO network"),
+            "the description must state the sandbox limits, or the model will \
+             try to download things and read the failure as a bug"
+        );
+        assert!(
+            code.description.contains("xlsx") && code.description.contains("docx"),
+            "document generation is the headline use; the model must be told it \
+             can produce real files or it will never try"
+        );
+        assert!(code.parameters_json.contains("code"));
+        assert!(code.parameters_json.contains("files_in"));
+        assert!(inline_tool_allowed("code_interpreter"));
+        // The old name must be gone, so a stale client-declared spec cannot
+        // shadow the real tool with a dead one.
+        assert!(!defs.iter().any(|d| d.name == "run_code"));
+    }
+
+    /// The canvas tools are what make long-form work product a first-class
+    /// object instead of a wall of chat prose.
+    #[test]
+    fn canvas_tools_are_advertised_with_usable_contracts() {
+        let defs = builtin_tool_defs();
+        let create = defs
+            .iter()
+            .find(|d| d.name == "create_artifact")
+            .expect("create_artifact must be advertised");
+        for kind in ["document", "code", "html"] {
+            assert!(
+                create.parameters_json.contains(kind),
+                "create_artifact must offer the {kind} kind"
+            );
+        }
+        assert!(
+            create.description.contains("Do NOT use it for short answers"),
+            "without a negative rule the model wraps every reply in an artifact"
+        );
+        let update = defs
+            .iter()
+            .find(|d| d.name == "update_artifact")
+            .expect("update_artifact must be advertised");
+        assert!(
+            update.description.contains("COMPLETE"),
+            "a diff-shaped update would corrupt the artifact"
+        );
+        assert!(inline_tool_allowed("create_artifact"));
+        assert!(inline_tool_allowed("update_artifact"));
+    }
+
+    fn outcome_for(name: &str, output: String) -> ToolOutcome {
+        ToolOutcome {
+            call_id: "call-1".to_owned(),
+            name: name.to_owned(),
+            output,
+            error: None,
+        }
+    }
+
+    /// The whole point of the envelope: an authored artifact must reach the
+    /// client in full while the MODEL only gets a short receipt. Echoing a
+    /// 200 k-character document back into the conversation would consume the
+    /// context budget for the rest of the thread.
+    #[test]
+    fn authored_artifact_becomes_an_event_and_a_compact_receipt() {
+        let long_body = "x".repeat(50_000);
+        let payload = authored_artifact_payload(
+            "q3-rapport",
+            crate::artifacts::ArtifactKind::Document,
+            "Q3-rapport",
+            &long_body,
+            1,
+        );
+        let outcome = outcome_for("create_artifact", payload);
+        let (events, rewritten) = tool_artifact_events(&outcome, None);
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChatEvent::Artifact {
+                id,
+                kind,
+                title,
+                content,
+                version,
+            } => {
+                assert_eq!(id, "q3-rapport");
+                assert_eq!(kind, "document");
+                assert_eq!(title, "Q3-rapport");
+                // The client gets the FULL content.
+                assert_eq!(content.len(), long_body.len());
+                assert_eq!(*version, 1);
+            }
+            other => panic!("expected artifact, got {other:?}"),
+        }
+
+        let rewritten = rewritten.expect("must rewrite the model-facing output");
+        assert!(
+            !rewritten.contains(&long_body),
+            "the model must NOT receive the artifact body back"
+        );
+        assert!(rewritten.contains("Created artifact"));
+        assert!(rewritten.contains("50000 characters"));
+        assert!(
+            rewritten.contains("do not repeat its full contents"),
+            "without this the model pastes the document into its reply anyway"
+        );
+    }
+
+    /// `update_artifact` deliberately omits the kind (changing it mid-history
+    /// would break the client's renderer for earlier versions), so the loop's
+    /// remembered kind must carry forward — otherwise an updated HTML page
+    /// silently starts rendering as Markdown.
+    #[test]
+    fn updated_artifact_inherits_the_remembered_kind() {
+        let payload = updated_artifact_payload("landing", "", "<html></html>", 2);
+        let outcome = outcome_for("update_artifact", payload);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, Some(crate::artifacts::ArtifactKind::Html));
+        match &events[0] {
+            ChatEvent::Artifact { kind, version, .. } => {
+                assert_eq!(kind, "html", "the remembered kind must win");
+                assert_eq!(*version, 2);
+            }
+            other => panic!("expected artifact, got {other:?}"),
+        }
+        assert!(rewritten.expect("receipt").contains("Updated artifact"));
+    }
+
+    /// A generated file must arrive as BOTH an artifact (panel) and an
+    /// attachment (downloadable from the message), and its base64 must never
+    /// enter the conversation.
+    #[test]
+    fn generated_files_become_artifacts_and_attachments_without_leaking_base64() {
+        let base64_body = "QUFBQUFBQUFBQQ".repeat(400);
+        let payload = serde_json::json!({
+            "stdout": "wrote report.xlsx\n",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "report.xlsx",
+                "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "bytes": 4096,
+                "content_b64": base64_body,
+            }],
+        })
+        .to_string();
+        let outcome = outcome_for("code_interpreter", payload);
+        let (events, rewritten) = tool_artifact_events(&outcome, None);
+
+        assert_eq!(events.len(), 2, "one artifact + one attachment");
+        match &events[0] {
+            ChatEvent::Artifact {
+                kind,
+                title,
+                content,
+                ..
+            } => {
+                assert_eq!(kind, "spreadsheet");
+                assert_eq!(title, "report.xlsx");
+                assert!(
+                    content.starts_with(
+                        "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,"
+                    ),
+                    "the client needs a usable data URI, got: {}",
+                    &content[..content.len().min(60)]
+                );
+            }
+            other => panic!("expected artifact, got {other:?}"),
+        }
+        match &events[1] {
+            ChatEvent::Attachment {
+                name, mime, size, url, ..
+            } => {
+                assert_eq!(name, "report.xlsx");
+                assert!(mime.contains("spreadsheetml"));
+                assert_eq!(*size, 4096);
+                assert!(url.starts_with("data:"));
+            }
+            other => panic!("expected attachment, got {other:?}"),
+        }
+
+        let rewritten = rewritten.expect("must rewrite to strip base64");
+        assert!(
+            !rewritten.contains(&base64_body),
+            "base64 must never reach the model's context"
+        );
+        assert!(rewritten.contains("report.xlsx"));
+        assert!(rewritten.contains("4096"));
+        assert!(rewritten.contains("wrote report.xlsx"), "stdout is still useful");
+    }
+
+    /// Pure computation (a calculator call) produces no files, and its stdout
+    /// IS the answer — so the outcome must be left completely alone.
+    #[test]
+    fn pure_computation_output_is_not_rewritten() {
+        let payload = serde_json::json!({
+            "stdout": "121932631112635269\n",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [],
+        })
+        .to_string();
+        let outcome = outcome_for("code_interpreter", payload);
+        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        assert!(events.is_empty());
+        assert!(
+            rewritten.is_none(),
+            "rewriting would hide the computed answer from the model"
+        );
+    }
+
+    /// A file too large to inline must be REPORTED, not silently dropped —
+    /// otherwise the model tells the user about a download that does not exist.
+    #[test]
+    fn oversized_file_is_reported_instead_of_silently_dropped() {
+        let payload = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "huge.pdf",
+                "mime": "application/pdf",
+                "bytes": 90_000_000_i64,
+                "content_b64": "",
+                "truncated": true,
+            }],
+        })
+        .to_string();
+        let outcome = outcome_for("code_interpreter", payload);
+        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        assert!(
+            events.is_empty(),
+            "no artifact may be emitted for bytes we do not have"
+        );
+        let rewritten = rewritten.expect("receipt");
+        assert!(rewritten.contains("huge.pdf"));
+        assert!(rewritten.contains("TOO LARGE"));
+    }
+
+    /// A failed tool must never produce an artifact.
+    #[test]
+    fn failed_outcomes_produce_no_artifacts() {
+        let mut outcome = outcome_for("create_artifact", "{}".to_owned());
+        outcome.error = Some("boom".to_owned());
+        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        assert!(events.is_empty());
+        assert!(rewritten.is_none());
+    }
+
+    /// Ordinary tools must pass through untouched — this helper runs on every
+    /// outcome in the loop, so a false positive would corrupt search results.
+    #[test]
+    fn unrelated_tools_are_untouched() {
+        let outcome = outcome_for("web_search", r#"[{"url":"https://a"}]"#.to_owned());
+        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        assert!(events.is_empty());
+        assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn authored_artifact_validation_rejects_bad_input() {
+        assert!(validate_authored_artifact("", "document", "T", "body").is_err());
+        assert!(validate_authored_artifact("id", "document", "T", "   ").is_err());
+        // An unknown kind must be named in the error so the model can correct.
+        let err = validate_authored_artifact("id", "hologram", "T", "body")
+            .expect_err("unknown kind");
+        assert!(err.contains("hologram"), "{err}");
+        // A binary kind cannot be hand-authored — it must come from the
+        // interpreter, and the error has to say so.
+        let err = validate_authored_artifact("id", "spreadsheet", "T", "body")
+            .expect_err("binary kind");
+        assert!(err.contains("code_interpreter"), "{err}");
+        // Over the size ceiling.
+        let huge = "x".repeat(crate::artifacts::MAX_TEXT_ARTIFACT_CHARS + 1);
+        assert!(validate_authored_artifact("id", "document", "T", &huge).is_err());
+        // A missing title falls back to the id rather than rendering blank.
+        let (id, kind, title) =
+            validate_authored_artifact("min-rapport", "markdown", "  ", "body").expect("valid");
+        assert_eq!(id, "min-rapport");
+        assert_eq!(kind, crate::artifacts::ArtifactKind::Document);
+        assert_eq!(title, "min-rapport");
+    }
+
+    #[test]
+    fn code_interpreter_accepts_python_and_sh_and_refuses_everything_else() {
+        use crate::tools::normalize_code_language_for_test as lang;
+
+        // Default (empty) is python — "run some code" means python to a user.
+        assert_eq!(lang("").expect("default"), "python");
+        for alias in ["python", "python3", "PY", " Python "] {
+            assert_eq!(lang(alias).expect(alias), "python");
+        }
+        for alias in ["sh", "bash", "SHELL"] {
+            assert_eq!(lang(alias).expect(alias), "sh");
+        }
+        let err = lang("ruby").expect_err("ruby is not supported");
+        assert!(
+            err.contains("ruby"),
+            "the error must name the rejected language: {err}"
+        );
+    }
+
+    /// A pasted document is not a search query, even when a trigger word
+    /// happens to appear inside it: the forced path would have sent the entire
+    /// blob to Quarry as the query string.
+    #[test]
+    fn a_long_paste_is_never_forced_even_when_it_contains_a_trigger_word() {
+        let short = "what is the current price of bitcoin";
+        assert!(should_force_web_search(short), "control: short query forces");
+
+        let pasted_document = format!(
+            "Please review this contract excerpt and summarize the obligations. {}",
+            "The price stated in section four shall apply for the full term. ".repeat(12)
+        );
+        assert!(
+            pasted_document.chars().count() > super::MAX_FORCED_SEARCH_QUERY_CHARS,
+            "fixture must actually exceed the cap"
+        );
+        assert!(
+            !should_force_web_search(&pasted_document),
+            "a long paste must not be sent to Quarry as a search query"
+        );
+    }
+
+    /// Inflection is not compounding: a token must still match its own
+    /// Norwegian definite/plural forms and English plurals, or tightening the
+    /// matcher would have silently dropped the most natural phrasings.
+    #[test]
+    fn tokens_match_their_inflected_forms() {
+        assert!(should_force_web_search("hva er prisen pa bitcoin?"));
+        assert!(should_force_web_search("hva er prisene i butikken?"));
+        assert!(should_force_web_search("hva er befolkningen i Bergen?"));
+        assert!(should_force_web_search("how have prices moved"));
+        assert!(should_force_web_search("when are the elections"));
+    }
+
+    #[test]
+    fn does_not_force_web_search_for_plain_weather_questions() {
+        assert!(!should_force_web_search("what's the weather in Oslo"));
+        assert!(!should_force_web_search("hva er dagens vaer i Oslo?"));
+        assert!(!should_force_web_search("what's the forecast for Bergen"));
+        assert!(!should_force_web_search("what's the temperature outside"));
     }
 
     #[test]

@@ -11,6 +11,19 @@ async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("execution-core")?;
     info!("execution-core starting");
 
+    // Probe the OS sandbox ONCE, at boot, on the record. A capability problem in
+    // the container (bubblewrap installed but unable to build a namespace) used to
+    // surface as a generic per-call tool failure; now it is one line in the
+    // startup log, before any tool has run. Result is cached for the process.
+    execution_core::sandbox::log_support();
+
+    // Attest what the sandbox probe just measured to capability-core, then keep
+    // attesting: capability-core denies dispatch for any capability whose runtime
+    // health has never been attested (or whose attestation has expired), and
+    // nothing else in the system reports it. Detached and infallible on purpose —
+    // a service that cannot report its health must still serve.
+    execution_core::health_attest::spawn_heartbeat();
+
     let readiness = Readiness::new();
     let state = StateStore::new();
     let auth = JwtVerifier::from_env().await?;

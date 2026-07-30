@@ -242,6 +242,26 @@ mod tests {
     }
 
     #[test]
+    fn code_interpreter_runs_ungated_while_shell_stays_gated() {
+        // `code_interpreter` is hermetic (read-only rootfs outside its own
+        // per-call workspace, no network, wall-clock timeout, scrubbed output,
+        // workspace deleted afterwards), so it must NOT pause for a human under
+        // `ask` — and its name deliberately contains no RISKY substring, which
+        // this asserts so a future rename cannot silently gate or ungate it.
+        assert!(!is_risky_tool("code_interpreter"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "code_interpreter"),
+            PermissionDecision::Allow
+        );
+        // Arbitrary host commands keep the human gate.
+        assert!(is_risky_tool("shell"));
+        assert_eq!(
+            evaluate(PermissionMode::Ask, "shell"),
+            PermissionDecision::AwaitApproval
+        );
+    }
+
+    #[test]
     fn browser_agent_is_gated_under_ask() {
         // browser_agent drives real page side effects → treated as write-risky.
         assert!(is_risky_tool("browser_agent"));

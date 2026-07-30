@@ -48,6 +48,39 @@ func (staticSeedSource) Load() ([]*models.Capability, error) {
 		{ID: "cap.memory-adapter.redis", Name: "Redis Memory Adapter", Kind: models.KindMemoryAdapter, Version: "1.0.0", Description: "Adapter that persists and retrieves memory entries via Redis.", RiskLevel: models.RiskLow, LazyLoad: false, Scope: "workspace", Enabled: true, IdempotencyKey: "fbc1d94e94d756ede12c527b3d59e2204f58a623e6bd5a3d679eb03d93f22637:cap.memory-adapter.redis", OrgID: "triodelab", EnabledForScopes: []string{"workspace"}},
 		{ID: "cap.safety.pii-filter", Name: "PII Safety Filter", Kind: models.KindSafetyPolicy, Version: "1.0.0", Description: "Redact personally identifiable information from model I/O.", RiskLevel: models.RiskLow, LazyLoad: false, Scope: "global", Enabled: true, IdempotencyKey: "fbc1d94e94d756ede12c527b3d59e2204f58a623e6bd5a3d679eb03d93f22637:cap.safety.pii-filter", OrgID: "triodelab", EnabledForScopes: []string{"global"}},
 		{ID: "cap.command.shell", Name: "Shell Command", Kind: models.KindCommand, Version: "1.0.0", Description: "Execute an allowlisted shell command via the command plane.", RiskLevel: models.RiskHigh, LazyLoad: true, Scope: "workspace", Enabled: true, IdempotencyKey: "fbc1d94e94d756ede12c527b3d59e2204f58a623e6bd5a3d679eb03d93f22637:cap.command.shell", OrgID: "triodelab", EnabledForScopes: []string{"workspace"}},
+		// cap.command.sandbox is deliberately RiskLow while cap.command.shell
+		// directly above stays RiskHigh. They are not two settings of one tool.
+		//
+		// Shell runs an arbitrary operator-allowlisted command with the run's
+		// own filesystem and network reach, so policy.EvaluateCapability must
+		// keep returning `ask` for it — arbitrary command execution stays
+		// human-approved.
+		//
+		// The sandbox executor accepts only a code body, never a host command
+		// name, and runs it under constraints neither the caller nor the model
+		// can select, widen, or opt out of: read-only root filesystem (the code
+		// cannot mutate or persist into the image), networking disabled (no
+		// egress, no lateral reach, and therefore no exfiltration path), a
+		// wall-clock timeout that kills the process so worst-case spend is
+		// bounded by that ceiling, a per-call throwaway workspace discarded
+		// afterwards so nothing carries across invocations, runs, or tenants,
+		// and secret-scrubbed stdout/stderr so captured output cannot ferry
+		// credentials back into the transcript. With no egress, no writable
+		// image, no cross-call persistence, and no path from the code body to a
+		// named host command, the residual blast radius is bounded CPU and
+		// wall-clock time inside a container that is destroyed either way —
+		// which is what RiskLow means here. Routing it through the high-risk
+		// branch instead would make a calculator step `awaiting_approval` and
+		// train operators to rubber-stamp prompts, degrading the gate that
+		// cap.command.shell genuinely needs.
+		//
+		// Kind and scope mirror cap.command.shell's declaration in this seed.
+		// The durable row is seeded by
+		// migrations/0010_sandbox_code_execution_capability.up.sql, which
+		// mirrors the live cap.command.shell row instead (kind 'tool', global
+		// scope) — that divergence between seed and migration is pre-existing
+		// and deliberate on both sides.
+		{ID: "cap.command.sandbox", Name: "Sandboxed Code Execution", Kind: models.KindCommand, Version: "1.0.0", Description: "Run a code body in a hermetic per-call sandbox: read-only root filesystem, networking disabled, wall-clock timeout, throwaway workspace discarded after the call, and secret-scrubbed output. Cannot execute a named host command and cannot persist between calls.", RiskLevel: models.RiskLow, LazyLoad: true, Scope: "workspace", Enabled: true, IdempotencyKey: idempotencyPrefix + "cap.command.sandbox", OrgID: "triodelab", EnabledForScopes: []string{"workspace"}},
 	}, nil
 }
 

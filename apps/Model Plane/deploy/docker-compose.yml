@@ -317,6 +317,32 @@ services:
       # unreachable from inside this container; execution-core's own agentic
       # tool reaches the same service via its separate SHIPPING_CORE_URL_EXEC.
       SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}
+      # information-core (Application Plane weather/traffic/news aggregator,
+      # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
+      # this the gateway falls back to http://information-core:3190, which is
+      # already the right in-network name (both services join
+      # inter-plane-bus), so this mostly exists to make the wiring explicit
+      # and overridable. execution-core's separate agentic path reaches the
+      # same service via its own `_EXEC`-suffixed vars below; this pair is
+      # model-gateway's own, NOT a duplicate of those.
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL:-http://information-core:3190}
+      INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
+      # Velion workspace READ tools — the "AI-first" bridge: data the signed-in
+      # user can see in the UI is answerable in plain chat. Both cores join
+      # inter-plane-bus, same as information-core above, so the service-name
+      # defaults resolve in-network without host port mapping.
+      #   insights_overview       -> insight-core GET /api/v1/insights/overview
+      #   social_list_accounts    -> social-core  GET /api/v1/social/accounts
+      #   social_list_posts       -> social-core  GET /api/v1/social/posts
+      #   social_list_campaigns   -> social-core  GET /api/v1/social/campaigns
+      # Both gate on x-internal-api-key (their own INTERNAL_API_KEY) and scope
+      # every read by the x-org-id header, which model-gateway sets from the
+      # VERIFIED request org — never from model input. Leaving the key unset
+      # makes the tools fail with a named configuration error rather than
+      # sending a request that can only 401.
+      INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      APPLICATION_CORE_INTERNAL_KEY: ${APPLICATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
       # Velion's own public origin, as seen by a user's browser through the
       # velionv3 gateway. Used only to build the OAuth redirect_uri for MCP
       # server connections (e.g. Visma Net) — an external authorization
@@ -386,6 +412,17 @@ services:
       # Defaults to the EU region (Sweden Central).
       MODEL_PLANE_RESIDENCY: ${MODEL_PLANE_RESIDENCY:-swedencentral}
       LETTA_MEMORY_ADDR: ${LETTA_MEMORY_ADDR:-http://model-plane-letta-bridge-1:9096}
+      # Data Plane v2 grounding tiers for AssembleContext. Without these,
+      # session-core fell back to localhost inside its own container, so the
+      # retrieval, knowledge AND graph segments were silently always empty --
+      # connect_lazy() makes the clients look configured and the callers degrade
+      # to empty on RPC failure by design, so nothing ever errored. Reached over
+      # inter-plane-bus; grpc.rs::dataplane_addr accepts _URL or _ADDR.
+      DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL:-http://dpv2-retrieval-engine:50052}
+      DATAPLANE_GRAPH_URL: ${DATAPLANE_GRAPH_URL:-http://dpv2-graph-index:50053}
+      # Retrieval-engine-rs serves KnowledgeService on the same port; split only
+      # if the Data Plane ever separates them.
+      DATAPLANE_KNOWLEDGE_URL: ${DATAPLANE_KNOWLEDGE_URL:-http://dpv2-retrieval-engine:50052}
     depends_on:
       postgres:
         condition: service_healthy
@@ -581,6 +618,13 @@ services:
       # Documented primary for the agent run driver (RunAgent) Infer round.
       INFERENCE_CORE_URL: http://inference-core:9092
       CAPABILITY_CORE_ADDR: http://capability-core:9097
+      # Capability HEALTH attestation is an HTTP API, separate from the gRPC
+      # policy address above. execution-core is the health authority for the
+      # capabilities it owns (cap.command.sandbox, cap.command.shell): it probes
+      # bwrap + the interpreter and attests what it actually measured. Without
+      # this URL attestation is skipped with a WARN, and those capabilities stay
+      # `unavailable` — which is the correct fail-closed state, not a silent one.
+      CAPABILITY_CORE_HTTP_URL: http://capability-core:8085
       # Browser grants are revalidated immediately before browser_agent
       # dispatch. This private service endpoint is never a host-published API.
       BROWSER_BROKER_ADDR: http://browser-broker:9095
@@ -669,10 +713,17 @@ services:
       CAPABILITY_CORE_ADDR: capability-core:9097
       ENABLE_COMPAT_ADAPTER: "false"
       MP_COMPAT_MODE: v1_only
+      # Durable store for feedback_ratings (thumbs up/down -> skill promotion
+      # scores). Without this the service falls back to an in-memory store and
+      # logs a WARN: ratings survive only until the next restart, so a skill can
+      # never accumulate enough samples to be promoted.
+      DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
     depends_on:
       temporal:
         condition: service_healthy
       nats:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     # alpine final image has no curl (only ca-certificates); use busybox wget.
     healthcheck:

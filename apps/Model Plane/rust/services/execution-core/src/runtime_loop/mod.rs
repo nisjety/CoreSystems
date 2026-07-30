@@ -17,6 +17,16 @@ use crate::tool_bridge;
 /// the deterministic `tool_bridge` stub. Input is JSON `{"program","args"}`.
 const SHELL_TOOL: &str = "shell";
 
+/// Tool name that runs REAL code (`python`/`sh`) in a hermetic per-call
+/// workspace — see [`crate::code_interpreter`] for the full contract. Unlike
+/// `shell` it may WRITE, but only inside a directory created for that one call,
+/// with no network, a wall-clock timeout, scrubbed output and the workspace
+/// deleted afterwards. That hermetic shape is why it binds to the low-risk
+/// `cap.command.sandbox` capability and is absent from
+/// `permission::is_risky_tool`, while `shell` — arbitrary host commands — stays
+/// high-risk and pauses for a human under `ask`.
+const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
+
 /// Tool name that drives the live agentic browser loop through Quarry
 /// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
@@ -421,6 +431,8 @@ async fn execute_step_inner(
     // the same approval/deny policy.
     let exec = if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
+    } else if tool_name == CODE_INTERPRETER_TOOL {
+        execute_code_interpreter(tool_input, run_id, step_id).await
     } else if tool_name == WEB_SEARCH_TOOL {
         execute_web_search(tool_input, org_id).await
     } else if tool_name == WEB_FETCH_TOOL {
@@ -592,6 +604,29 @@ async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
             output: String::new(),
             error: Some(format!("shell exec failed: {e}")),
         },
+    }
+}
+
+/// Run a `code_interpreter` call — real code in a per-call workspace
+/// ([`crate::code_interpreter`]). The run/step ids name that workspace, so a
+/// leaked directory is always traceable back to the step that created it.
+///
+/// A non-zero exit is deliberately NOT a step failure: the result JSON carries
+/// `exit_code`, the scrubbed traceback and any files the program did manage to
+/// write, and the model needs all three to correct itself. Mapping it to
+/// `StepOutcome::failed` would throw every one of them away. `shell`, whose
+/// contract is "the command succeeded", keeps the opposite mapping.
+async fn execute_code_interpreter(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+) -> tool_bridge::ToolExecution {
+    match crate::code_interpreter::run(tool_input, run_id, step_id).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(error) => tool_error(error),
     }
 }
 

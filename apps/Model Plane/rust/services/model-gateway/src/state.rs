@@ -127,6 +127,32 @@ pub struct AppState {
     /// Base URL of shipping-core's HTTP API (Ingestion Plane carrier aggregator),
     /// e.g. "<http://shipping-core:8080>". Used by the `shipping.get_quotes` tool.
     pub shipping_core_base_url: String,
+    /// Base URL of information-core's HTTP API (Application Plane weather/
+    /// traffic/news aggregator, wraps Yr/met.no), e.g.
+    /// "<http://information-core:3190>". Used by the `get_weather` tool.
+    pub information_core_base_url: String,
+    /// Shared `x-internal-api-key` header value for calls to information-core.
+    /// Empty disables the header entirely (dev-mode information-core may not
+    /// enforce it); production sets `INFORMATION_CORE_INTERNAL_KEY` or falls
+    /// back to the shared `INTERNAL_API_KEY`, mirroring execution-core's own
+    /// `INFORMATION_CORE_INTERNAL_KEY` wiring for its separate `_EXEC` client.
+    pub information_core_internal_key: String,
+    /// Base URL of insight-core's HTTP API (Application Plane metrics/scorecard
+    /// projection), e.g. "<http://insight-core:3163>". Used by the
+    /// `insights.overview` read tool.
+    pub insight_core_base_url: String,
+    /// Base URL of social-core's HTTP API (Application Plane social accounts,
+    /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
+    /// `social.list_*` read tools.
+    pub social_core_base_url: String,
+    /// Shared `x-internal-api-key` header value for calls to the Application
+    /// Plane cores that gate on it (insight-core, social-core). Both read
+    /// `INTERNAL_API_KEY` on their own side, so this defaults to the same
+    /// shared secret; `APPLICATION_CORE_INTERNAL_KEY` overrides it. Empty means
+    /// the tools refuse to call rather than send an unauthenticated request —
+    /// those cores 401 a missing key, and an honest local error beats a
+    /// round-trip that can only fail.
+    pub application_core_internal_key: String,
     /// Velion's own public origin (e.g. "<http://localhost:5173>"), as seen by
     /// a user's browser through the gateway. Used only to build the OAuth
     /// `redirect_uri` for MCP server connections — an external authorization
@@ -193,6 +219,11 @@ pub struct AppState {
     pub lsp: crate::lsp::BridgeClient,
     /// Wave 10e — in-memory approval store. Gateway-scoped, ephemeral.
     pub approvals: crate::approvals::ApprovalStore,
+    /// Canvas artifact version counters, keyed by `(thread, artifact)`. The
+    /// gateway assigns versions because the model cannot reliably remember what
+    /// it emitted earlier in a thread; see `artifacts.rs` for the trade-off this
+    /// in-memory store accepts.
+    pub artifact_versions: crate::artifacts::ArtifactVersionStore,
     /// Wave 10f — in-memory trajectory ring-buffer. Bounded; older
     /// entries evicted FIFO. Durable retention should subscribe to the
     /// fixed `mp.v1.run.*.event` subject and filter `TRAJECTORY_RECORDED`.
@@ -261,6 +292,11 @@ impl AppState {
             capability_client: CapabilityCoreClient::new(capability_channel),
             capability_core_base_url: "http://localhost:8085".to_owned(),
             shipping_core_base_url: "http://localhost:8080".to_owned(),
+            information_core_base_url: "http://localhost:3190".to_owned(),
+            information_core_internal_key: String::new(),
+            insight_core_base_url: "http://localhost:3163".to_owned(),
+            social_core_base_url: "http://localhost:3162".to_owned(),
+            application_core_internal_key: String::new(),
             velion_public_origin: "http://localhost:5173".to_owned(),
             mcp_oauth_service_token: String::new(),
             http_client: reqwest::Client::new(),
@@ -288,6 +324,7 @@ impl AppState {
             team_workers: crate::coordinator::TeamWorkerStore::new(),
             lsp: crate::lsp::BridgeClient::new(""),
             approvals: crate::approvals::ApprovalStore::new(),
+            artifact_versions: crate::artifacts::ArtifactVersionStore::new(),
             trajectories: crate::trajectory::TrajectoryStore::new(),
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
             skills: crate::skills::SkillStore::new(),
@@ -426,6 +463,18 @@ impl AppState {
             .unwrap_or_else(|_| "http://localhost:8085".to_owned());
         let shipping_core_base_url = std::env::var("SHIPPING_CORE_URL")
             .unwrap_or_else(|_| "http://shipping-core:8080".to_owned());
+        let information_core_base_url = std::env::var("INFORMATION_CORE_URL")
+            .unwrap_or_else(|_| "http://information-core:3190".to_owned());
+        let information_core_internal_key = std::env::var("INFORMATION_CORE_INTERNAL_KEY")
+            .or_else(|_| std::env::var("INTERNAL_API_KEY"))
+            .unwrap_or_default();
+        let insight_core_base_url = std::env::var("INSIGHT_CORE_URL")
+            .unwrap_or_else(|_| "http://insight-core:3163".to_owned());
+        let social_core_base_url =
+            std::env::var("SOCIAL_CORE_URL").unwrap_or_else(|_| "http://social-core:3162".to_owned());
+        let application_core_internal_key = std::env::var("APPLICATION_CORE_INTERNAL_KEY")
+            .or_else(|_| std::env::var("INTERNAL_API_KEY"))
+            .unwrap_or_default();
         let velion_public_origin = std::env::var("VELION_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| "http://localhost:5173".to_owned());
         let mcp_oauth_service_token =
@@ -532,6 +581,11 @@ impl AppState {
             state.capability_client = capability_client;
             state.capability_core_base_url = capability_core_base_url.clone();
             state.shipping_core_base_url = shipping_core_base_url.clone();
+            state.information_core_base_url = information_core_base_url.clone();
+            state.information_core_internal_key = information_core_internal_key.clone();
+            state.insight_core_base_url = insight_core_base_url.clone();
+            state.social_core_base_url = social_core_base_url.clone();
+            state.application_core_internal_key = application_core_internal_key.clone();
             state.velion_public_origin = velion_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
             state.http_client = http_client;
@@ -568,6 +622,11 @@ impl AppState {
             state.capability_client = capability_client;
             state.capability_core_base_url = capability_core_base_url.clone();
             state.shipping_core_base_url = shipping_core_base_url.clone();
+            state.information_core_base_url = information_core_base_url;
+            state.information_core_internal_key = information_core_internal_key;
+            state.insight_core_base_url = insight_core_base_url;
+            state.social_core_base_url = social_core_base_url;
+            state.application_core_internal_key = application_core_internal_key;
             state.velion_public_origin = velion_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
             state.http_client = http_client;

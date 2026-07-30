@@ -151,11 +151,22 @@ struct CachedToken {
     expires_at: Instant,
 }
 
-struct ServiceTokenProvider {
+/// Mints Auth-Core-issued, audience-bound capability-core credentials from
+/// execution-core's deployment service principal.
+///
+/// This is the ONLY credential path to capability-core. Anything else that needs
+/// to call capability-core (health attestation, for example) requests a
+/// differently-scoped token from here rather than inventing a second identity —
+/// Auth Core owns the scope ceiling and the retention posture per audience, and
+/// a second path would mean a second place for those to drift.
+pub struct ServiceTokenProvider {
     auth_core_url: String,
     service_id: String,
     credential: String,
     http: reqwest::Client,
+    /// Keyed by tenant AND scope set: a token is only valid for the scopes it
+    /// was minted with, so caching by tenant alone would hand a `read` token to
+    /// a caller that asked for `health:global:write`.
     cache: tokio::sync::Mutex<HashMap<String, CachedToken>>,
 }
 
@@ -179,7 +190,14 @@ struct TokenResponse {
 }
 
 impl ServiceTokenProvider {
-    fn from_env() -> anyhow::Result<Self> {
+    /// Build the provider from execution-core's deployment configuration
+    /// (`AUTH_CORE_URL`, `EXECUTION_CORE_SERVICE_ID`,
+    /// `EXECUTION_CORE_SERVICE_API_KEY`).
+    ///
+    /// # Errors
+    /// Returns an error when required deployment configuration is missing or
+    /// blank, or the HTTP client cannot be built.
+    pub fn from_env() -> anyhow::Result<Self> {
         let required = |name: &'static str| {
             std::env::var(name)
                 .ok()
@@ -205,7 +223,7 @@ impl ServiceTokenProvider {
     }
 
     #[cfg(test)]
-    fn new_for_test(auth_core_url: &str, service_id: &str, credential: &str) -> Self {
+    pub(crate) fn new_for_test(auth_core_url: &str, service_id: &str, credential: &str) -> Self {
         Self {
             auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
             service_id: service_id.to_owned(),
@@ -221,15 +239,39 @@ impl ServiceTokenProvider {
     }
 
     async fn token(&self, org_id: &str) -> Result<String, anyhow::Error> {
+        self.token_with_scopes(org_id, &["capability:read"], "execution dispatch policy")
+            .await
+    }
+
+    /// Mint (or reuse) a capability-core token carrying exactly `scopes`.
+    ///
+    /// `reason` is audited by Auth Core, so it must describe the actual purpose
+    /// rather than being copied from another caller.
+    ///
+    /// # Errors
+    /// Fails when the tenant or scope set is empty, when Auth Core refuses the
+    /// principal (a scope outside the deployment allowlist is refused outright,
+    /// never silently narrowed), or when the issued credential is not a valid
+    /// capability-core token.
+    pub async fn token_with_scopes(
+        &self,
+        org_id: &str,
+        scopes: &[&str],
+        reason: &str,
+    ) -> Result<String, anyhow::Error> {
         let org_id = org_id.trim();
         if org_id.is_empty() {
             anyhow::bail!("capability token tenant is required");
         }
+        if scopes.is_empty() {
+            anyhow::bail!("capability token scopes are required");
+        }
+        let cache_key = format!("{org_id}|{}", scopes.join(" "));
         let now = Instant::now();
         {
             let mut cache = self.cache.lock().await;
             cache.retain(|_, token| token.expires_at > now + TOKEN_REFRESH_SKEW);
-            if let Some(token) = cache.get(org_id) {
+            if let Some(token) = cache.get(&cache_key) {
                 return Ok(token.value.clone());
             }
         }
@@ -247,13 +289,17 @@ impl ServiceTokenProvider {
             .header("x-service-api-key", credential)
             .json(&serde_json::json!({
                 "orgId": org_id,
-                "scopes": ["capability:read"],
-                "reason": "execution dispatch policy",
+                "scopes": scopes,
+                "reason": reason,
             }))
             .send()
             .await?;
         if !response.status().is_success() {
-            anyhow::bail!("Auth Core refused capability policy credential");
+            anyhow::bail!(
+                "Auth Core refused a capability-core credential for scopes [{}] (status {})",
+                scopes.join(", "),
+                response.status()
+            );
         }
         let bundle = response.json::<TokenResponse>().await?;
         if bundle.token.trim().is_empty()
@@ -263,7 +309,7 @@ impl ServiceTokenProvider {
             anyhow::bail!("Auth Core returned an invalid capability policy credential");
         }
         self.cache.lock().await.insert(
-            org_id.to_owned(),
+            cache_key,
             CachedToken {
                 value: bundle.token.clone(),
                 expires_at: Instant::now() + Duration::from_secs(bundle.expires_in_seconds),
@@ -283,6 +329,12 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
     }
     let capability = match tool_name {
         "shell" => "cap.command.shell",
+        // Distinct from `cap.command.shell` on purpose: `code_interpreter` runs
+        // in a hermetic per-call workspace (read-only rootfs, no network,
+        // wall-clock timeout, scrubbed output, workspace deleted afterwards), so
+        // capability-core governs it as a LOW-risk capability while arbitrary
+        // host commands stay behind the high-risk shell capability.
+        "code_interpreter" => "cap.command.sandbox",
         "browser_agent" => "cap.browser.open",
         "web_search" | "web_fetch" => "cap.tool.http",
         "knowledge_search" => "cap.retrieval.query",
@@ -316,6 +368,16 @@ mod tests {
         assert_eq!(
             trusted_capability_id("book_shipment").as_deref(),
             Some("cap.tool.shipping.book")
+        );
+        // The two execution tools must never collapse onto one capability: the
+        // sandboxed interpreter is governed as low-risk, arbitrary shell is not.
+        assert_eq!(
+            trusted_capability_id("code_interpreter").as_deref(),
+            Some("cap.command.sandbox")
+        );
+        assert_eq!(
+            trusted_capability_id("shell").as_deref(),
+            Some("cap.command.shell")
         );
         assert!(trusted_capability_id("knowledge_search ").is_none());
         assert!(trusted_capability_id("echo").is_none());

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -72,6 +73,58 @@ func TestNewRegistry_SeedsOperatingMapGenerateCapability(t *testing.T) {
 	}
 	if !capability.Enabled {
 		t.Fatalf("expected operating_map.generate to be enabled")
+	}
+}
+
+// TestNewRegistry_SeedsSandboxCommandCapabilitySeparatelyFromShell proves the
+// hermetic sandbox executor has its own registered, enabled, low-risk
+// capability and that registering it did not soften cap.command.shell. Policy
+// returns `ask` for high risk, so if shell ever drifted to low the human gate
+// on arbitrary command execution would silently disappear.
+func TestNewRegistry_SeedsSandboxCommandCapabilitySeparatelyFromShell(t *testing.T) {
+	r := newReg(t)
+
+	sandbox, err := r.Get("cap.command.sandbox", "")
+	if err != nil {
+		t.Fatalf("expected seeded cap.command.sandbox: %v", err)
+	}
+	if sandbox.Kind != models.KindCommand {
+		t.Fatalf("expected kind=command, got %s", sandbox.Kind)
+	}
+	if sandbox.RiskLevel != models.RiskLow {
+		t.Fatalf("expected cap.command.sandbox risk=low, got %s", sandbox.RiskLevel)
+	}
+	if !sandbox.Enabled {
+		t.Fatal("expected cap.command.sandbox to be enabled")
+	}
+	if sandbox.IdempotencyKey != idempotencyPrefix+"cap.command.sandbox" {
+		t.Fatalf("unexpected idempotency key %q", sandbox.IdempotencyKey)
+	}
+
+	shell, err := r.Get("cap.command.shell", "")
+	if err != nil {
+		t.Fatalf("expected seeded cap.command.shell: %v", err)
+	}
+	if shell.RiskLevel != models.RiskHigh {
+		t.Fatalf("cap.command.shell must stay risk=high, got %s", shell.RiskLevel)
+	}
+	if sandbox.ID == shell.ID {
+		t.Fatal("sandbox and shell must be distinct capabilities")
+	}
+
+	// The low-risk classification only holds because of the hermetic
+	// constraints, so the description has to keep stating them: an operator
+	// reading the catalog must be able to see why this one is not gated.
+	for _, constraint := range []string{
+		"read-only root filesystem",
+		"networking disabled",
+		"wall-clock timeout",
+		"throwaway workspace",
+		"secret-scrubbed",
+	} {
+		if !strings.Contains(sandbox.Description, constraint) {
+			t.Fatalf("cap.command.sandbox description must state %q", constraint)
+		}
 	}
 }
 
