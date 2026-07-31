@@ -256,13 +256,16 @@ fn push_indent(out: &mut String, depth: usize) {
     }
 }
 
-/// Estimate token count for a TOON string. Heuristic: ~4 chars per token,
-/// matching the convention used elsewhere in the Model Plane (see
-/// session-core `assemble_segments` budget math).
+/// Real token count for a TOON string.
+///
+/// This reports what the encoding actually COSTS, so it is the exact count with
+/// no budget margin — callers deciding whether something fits should charge
+/// `mp_tokens::count_for_budget` instead. It used to be `len() / 4`, which
+/// under-reported the structured, numeral-dense payloads TOON exists to encode
+/// by 20-26 %.
 #[must_use]
 pub fn estimate_tokens(toon: &str) -> u32 {
-    let len = u32::try_from(toon.len()).unwrap_or(u32::MAX);
-    len.saturating_div(4)
+    mp_tokens::count(toon)
 }
 
 #[cfg(test)]
@@ -376,9 +379,18 @@ mod tests {
     }
 
     #[test]
-    fn estimate_tokens_uses_4_chars_per_token() {
-        assert_eq!(estimate_tokens("12345678"), 2);
+    fn estimate_tokens_reports_a_real_bpe_count() {
         assert_eq!(estimate_tokens(""), 0);
+        // Digit runs are the case the old 4-chars-per-token rule got most wrong:
+        // a BPE splits them into short groups, so eight digits cost more than the
+        // two tokens the heuristic charged. TOON payloads are numeral-dense, so
+        // this under-charge was systematic rather than incidental.
+        assert!(
+            estimate_tokens("12345678") > 2,
+            "eight digits cost more than the old len()/4 charge of 2",
+        );
+        // Monotonic in content: a strict superset of text never costs less.
+        assert!(estimate_tokens("kundenummer: 10492") >= estimate_tokens("kundenummer"));
     }
 
     #[test]

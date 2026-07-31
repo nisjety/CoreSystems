@@ -13,6 +13,7 @@ mp-ids = { path = "../../crates/mp-ids" }
 mp-orchestration = { path = "../../crates/mp-orchestration" }
 mp-telemetry = { path = "../../crates/mp-telemetry" }
 mp-toon = { path = "../../crates/mp-toon" }
+mp-tokens = { path = "../../crates/mp-tokens" }
 
 tokio = { workspace = true }
 tonic = { workspace = true }

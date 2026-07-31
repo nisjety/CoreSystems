@@ -2604,12 +2604,17 @@ fn push_tier(
 const PROTECTED_BUDGET_NUM: u32 = 3;
 const PROTECTED_BUDGET_DEN: u32 = 5;
 
-/// Same estimate `try_push` charges, exposed so a tier's cost can be reserved
+/// Same charge `try_push` applies, exposed so a tier's cost can be reserved
 /// before a lower-priority tier is allowed to spend it.
+///
+/// This is a real BPE count plus an explicit safety margin, NOT the old
+/// `len() / 4`. That heuristic was wrong in both directions and the directions
+/// fail differently: it over-charged English prose by ~60 % (silently trimming
+/// grounding that would have fit) and under-charged Norwegian-with-numerals and
+/// JSON tool output by 20-26 % (overflowing the provider's input limit). It also
+/// divided BYTE length, so every æ/ø/å inflated the numerator. See `mp_tokens`.
 fn estimated_tokens(content: &str) -> u32 {
-    u32::try_from(content.len())
-        .unwrap_or(u32::MAX)
-        .saturating_div(4)
+    mp_tokens::count_for_budget(content)
 }
 
 fn try_push(
@@ -2619,8 +2624,7 @@ fn try_push(
     segs: &mut Vec<pb::ContextSegment>,
     total: &mut u32,
 ) -> bool {
-    let len = u32::try_from(content.len()).unwrap_or(u32::MAX);
-    let est = len.saturating_div(4);
+    let est = estimated_tokens(&content);
     if budget != 0 && total.saturating_add(est) > budget {
         return false;
     }

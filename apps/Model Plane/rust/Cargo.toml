@@ -9,6 +9,7 @@ members = [
     "crates/mp-orchestration",
     "crates/mp-eventlog",
     "crates/mp-toon",
+    "crates/mp-tokens",
     "crates/mp-authctx",
     "services/model-gateway",
     "services/session-core",

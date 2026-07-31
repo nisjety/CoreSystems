@@ -1,5 +1,5 @@
 [package]
-name = "mp-toon"
+name = "mp-tokens"
 version.workspace = true
 edition.workspace = true
 
@@ -7,5 +7,4 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-serde_json = { workspace = true }
-mp-tokens = { path = "../mp-tokens" }
+tiktoken-rs = "0.6"
