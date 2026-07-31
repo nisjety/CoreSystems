@@ -803,6 +803,17 @@ services:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
+      # Outbound service-token minting for the skill-learning review, which
+      # calls session-core (read the transcript, upsert the skill) and
+      # inference-core (review it). The two JWKS/ISSUER vars above verify
+      # INBOUND tokens; these mint OUTBOUND ones. Minting rather than a static
+      # token is not a preference: plane tokens for these audiences default to a
+      # 300-SECOND TTL, so a pasted token 401s about five minutes after boot.
+      # Absent key => minting is skipped, the consumer logs a WARN naming this
+      # variable, and learning stays disabled rather than failing silently.
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
+      CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
       APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
       # Optional Letta tool-definition ranking. This is not memory/passages
       # search and never expands the durable tenant-scoped capability catalog.

@@ -31,11 +31,14 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
+	"github.com/triodelab/model-plane/services/capability-core/internal/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const natsInboxPrefix = "_INBOX.CAPABILITY_CORE_RUNTIME"
@@ -462,15 +465,26 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 	// consumer reaches session-core and gets
 	// "Unauthenticated: verified caller credential required" on its very first
 	// transcript read, so the review never runs no matter how many RUN_COMPLETED
-	// events arrive. These tokens are the only way this service can present one.
+	// events arrive. These credentials are the only way this service can present
+	// one — see newBackendCredential for how each one is obtained.
 	sessConn, err := grpc.NewClient(sessAddr, creds,
-		bearerInterceptor("session-core", "SESSION_CORE_SERVICE_TOKEN"))
+		newBackendCredential(
+			"session-core",
+			"SESSION_CORE_SERVICE_TOKEN",
+			sessionCoreScopes,
+			sessionCoreTokenReason,
+		).dialOption())
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
 		return nil, nil
 	}
 	infConn, err := grpc.NewClient(infAddr, creds,
-		bearerInterceptor("inference-core", "INFERENCE_CORE_SERVICE_TOKEN"))
+		newBackendCredential(
+			"inference-core",
+			"INFERENCE_CORE_SERVICE_TOKEN",
+			inferenceCoreScopes,
+			inferenceCoreTokenReason,
+		).dialOption())
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
@@ -479,36 +493,239 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn)
 }
 
-// bearerInterceptor attaches the service credential named by tokenEnv to every
-// outbound unary RPC on a connection.
+// Auth Core service-principal configuration for capability-core's OWN identity.
+// This is the credential that is exchanged for per-audience, per-tenant backend
+// tokens; it is never sent to session-core or inference-core themselves.
+const (
+	// authCoreURLEnv is Auth Core's base URL. capability-core already knows
+	// AUTH_CORE_JWKS_URL / AUTH_CORE_ISSUER for *verifying* inbound tokens; this
+	// is the separate base URL used to *mint* outbound ones.
+	authCoreURLEnv = "AUTH_CORE_URL"
+	// serviceIDEnv / serviceCredentialEnv follow the naming every other minting
+	// service in this plane already uses (EXECUTION_CORE_SERVICE_ID /
+	// EXECUTION_CORE_SERVICE_API_KEY, SESSION_CORE_SERVICE_ID / ...).
+	serviceIDEnv         = "CAPABILITY_CORE_SERVICE_ID"
+	serviceCredentialEnv = "CAPABILITY_CORE_SERVICE_API_KEY"
+
+	defaultAuthCoreURL = "http://auth-core:3011"
+	defaultServiceID   = "capability-core"
+)
+
+// Per-audience scopes and audit reasons. Deliberately NOT a shared union: each
+// audience is minted with exactly the scopes it needs, so a session-core token
+// can never invoke inference and an inference token can never write skills.
+var (
+	// sessionCoreScopes covers the learning review's transcript read
+	// (ListConversation, ListAgentSkills → session:read) and its skill upsert
+	// (UpsertAgentSkill → session:skills:write).
+	sessionCoreScopes = []string{"session:read", "session:skills:write"}
+	// inferenceCoreScopes covers the review's model call (Infer).
+	inferenceCoreScopes = []string{"inference:invoke"}
+)
+
+const (
+	sessionCoreTokenReason   = "capability-core learning review: read a completed run's transcript and upsert learned skills"
+	inferenceCoreTokenReason = "capability-core learning review: extract skill candidates from a completed run"
+)
+
+// backendCredential is capability-core's credential source for ONE downstream
+// audience, and the interceptor that presents it.
 //
-// The token is an Auth Core service JWT for that backend's audience — both
-// `session-core` and `inference-core` are existing mintable plane audiences, so
-// this needs only a service-principal registry entry, no Control Plane code.
-// Required scopes: session:read + session:skills:write for session-core (the
-// learning review's transcript read and skill upsert), inference:invoke for
-// inference-core.
+// Exactly one of three modes is chosen at startup and logged once:
 //
-// Read per call rather than captured at dial time so a rotated token takes
-// effect on the next RPC instead of at the next restart. An unset token is left
-// as-is: the call then fails with an explicit Unauthenticated from the backend,
-// which is the honest outcome — far better than a silent no-op.
-func bearerInterceptor(backend, tokenEnv string) grpc.DialOption {
-	if strings.TrimSpace(os.Getenv(tokenEnv)) == "" {
-		slog.Warn("backend service credential unset; its RPCs will be rejected as unauthenticated",
-			"backend", backend, "env", tokenEnv)
+//   - static: the legacy `*_SERVICE_TOKEN` env var is set, so it is used
+//     verbatim and nothing is minted. Kept as a break-glass and test path.
+//   - minted: a service-principal credential is available, so a short-lived
+//     token is minted per tenant and refreshed ahead of expiry.
+//   - none: neither is available. RPCs go out unauthenticated and the backend
+//     rejects them — today's behaviour, preserved so a dev-bypass backend keeps
+//     working — but the startup WARN now names exactly what is missing.
+//
+// The mode is logged because a silent choice is how the previous gap stayed
+// invisible: a pasted token that expired minutes after boot produced logs
+// identical to a healthy consumer.
+type backendCredential struct {
+	backend  string
+	tokenEnv string
+	static   bool
+	minter   *servicetoken.Provider
+}
+
+func newBackendCredential(backend, tokenEnv string, scopes []string, reason string) *backendCredential {
+	credential := &backendCredential{backend: backend, tokenEnv: tokenEnv}
+
+	if strings.TrimSpace(os.Getenv(tokenEnv)) != "" {
+		credential.static = true
+		slog.Info("backend credential mode: static env override (no minting)",
+			"backend", backend, "env", tokenEnv,
+			"note", "a minted Auth Core plane token is short-lived (300s by default), "+
+				"so a pasted one will start returning Unauthenticated once it expires; "+
+				"clear "+tokenEnv+" to mint on demand instead")
+		return credential
 	}
-	return grpc.WithChainUnaryInterceptor(func(
-		ctx context.Context,
-		method string,
-		req, reply any,
-		cc *grpc.ClientConn,
-		invoker grpc.UnaryInvoker,
-		opts ...grpc.CallOption,
-	) error {
-		if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
-			ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+
+	minter, err := servicetoken.New(servicetoken.Config{
+		AuthCoreURL: envOrDefault(authCoreURLEnv, defaultAuthCoreURL),
+		ServiceID:   envOrDefault(serviceIDEnv, defaultServiceID),
+		Credential:  os.Getenv(serviceCredentialEnv),
+		Audience:    backend,
+		Scopes:      scopes,
+		Reason:      reason,
+	})
+	if err != nil {
+		// Non-fatal by design: a missing credential must not stop capability-core
+		// from serving its registry, policy and task surfaces. The learning review
+		// is the part that goes dark, and this WARN is what says so.
+		slog.Warn("backend credential unavailable; this backend's RPCs will be rejected as unauthenticated "+
+			"and the learning review will not run",
+			"backend", backend, "error", err,
+			"remedy", "set "+serviceCredentialEnv+" (and "+authCoreURLEnv+" if not "+defaultAuthCoreURL+
+				") to mint on demand, or "+tokenEnv+" for a static break-glass token")
+		return credential
+	}
+
+	credential.minter = minter
+	slog.Info("backend credential mode: minted on demand from auth-core",
+		"backend", backend,
+		"audience", minter.Audience(),
+		"scopes", minter.Scopes(),
+		"service_id", envOrDefault(serviceIDEnv, defaultServiceID),
+		"auth_core_url", envOrDefault(authCoreURLEnv, defaultAuthCoreURL))
+	return credential
+}
+
+// dialOption returns the unary interceptor that authenticates every outbound RPC
+// on the connection.
+func (b *backendCredential) dialOption() grpc.DialOption {
+	return grpc.WithChainUnaryInterceptor(b.intercept)
+}
+
+func (b *backendCredential) intercept(
+	ctx context.Context,
+	method string,
+	req, reply any,
+	cc *grpc.ClientConn,
+	invoker grpc.UnaryInvoker,
+	opts ...grpc.CallOption,
+) error {
+	switch {
+	case b.static:
+		// Re-read per call rather than captured at dial time, so a rotated token
+		// takes effect on the next RPC instead of at the next restart.
+		if token := strings.TrimSpace(os.Getenv(b.tokenEnv)); token != "" {
+			ctx = withBearer(ctx, token)
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
-	})
+	case b.minter == nil:
+		// No credential at all. Pass through so the backend answers with its own
+		// explicit Unauthenticated (or succeeds, if it runs an auth dev-bypass)
+		// rather than this process inventing a different failure.
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+
+	org := outboundOrg(ctx, req)
+	if org == "" {
+		// Minting without a tenant is not possible: the mint request carries orgId
+		// and session-core requires the request's org_id to equal the token's
+		// exactly. Guessing an org would produce a token that authenticates and is
+		// then refused on every call, which is strictly worse than saying so.
+		return status.Errorf(codes.FailedPrecondition,
+			"capability-core cannot mint a %s credential for %s: the request carries no org_id "+
+				"and the calling context has no verified principal",
+			b.backend, method)
+	}
+
+	token, err := b.minter.Token(ctx, org)
+	if err != nil {
+		slog.Warn("minting a backend service token failed",
+			"backend", b.backend, "method", method, "org_id", org, "error", err)
+		return status.Errorf(codes.Unavailable,
+			"capability-core could not obtain a %s credential", b.backend)
+	}
+
+	err = invoker(withBearer(ctx, token), method, req, reply, cc, opts...)
+	if status.Code(err) != codes.Unauthenticated {
+		return err
+	}
+
+	// 401 backstop — one forced re-mint and one retry, never a loop.
+	//
+	// Expiry is normally handled by the refresh margin; reaching here means the
+	// credential was rejected while we believed it live: a rotated principal, a
+	// re-keyed issuer, or clock skew. Retrying is safe even for the skill upsert
+	// because Unauthenticated is returned before the RPC does any work, so
+	// nothing was written on the first attempt.
+	//
+	// Note both invocations derive from the ORIGINAL ctx: metadata is appended,
+	// not replaced, so reusing the first attempt's context would send two
+	// authorization values.
+	b.minter.Invalidate(org)
+	fresh, mintErr := b.minter.Token(ctx, org)
+	if mintErr != nil {
+		slog.Warn("re-minting a backend service token after Unauthenticated failed",
+			"backend", b.backend, "method", method, "org_id", org, "error", mintErr)
+		return err
+	}
+	slog.Info("re-minted a backend service token after Unauthenticated; retrying once",
+		"backend", b.backend, "method", method, "org_id", org)
+	return invoker(withBearer(ctx, fresh), method, req, reply, cc, opts...)
+}
+
+// outboundOrg resolves the tenant an outbound RPC acts for, so the minted token
+// carries exactly that org.
+//
+// This is what makes the learning loop work for every tenant rather than one:
+// session-core's authorize_org requires an exact org_id match, so a single
+// startup-minted token would serve exactly one organisation and silently skip
+// every run belonging to any other.
+//
+// Preference order:
+//  1. The request message's own org_id. Every learning-review RPC carries one —
+//     ListConversation, ListAgentSkills, UpsertAgentSkill, Infer — which is why
+//     lazy per-run minting is possible at all.
+//  2. The verified principal on the calling context. The /commands delegation
+//     (ListModels, CompactNow) has no org_id field on the wire, and those
+//     handlers run behind the HTTP auth middleware, so acting as the caller's own
+//     org is both available and correct.
+//
+// Only a verified principal is consulted — never a header or a request field
+// other than the tenant the message itself declares.
+//
+// Deployment note: minting for an arbitrary tenant requires this service's
+// Auth Core principal to be registered with `allowAnyOrg: true` (as in the dev
+// deployment). Without it, only orgs listed in the principal's `orgIds` can be
+// minted for and every other tenant's review fails with Unavailable — visible
+// in the "minting a backend service token failed" WARN rather than silent.
+func outboundOrg(ctx context.Context, req any) string {
+	if org := requestOrg(req); org != "" {
+		return org
+	}
+	if principal, ok := authctx.PrincipalFromContext(ctx); ok {
+		return strings.TrimSpace(principal.OrganizationID)
+	}
+	return ""
+}
+
+// requestOrg reads org_id off a generated protobuf request when it has one.
+// Every mpv1 message with an org_id field exposes GetOrgId(), so this needs no
+// per-message wiring and cannot drift as RPCs are added.
+func requestOrg(req any) string {
+	scoped, ok := req.(interface{ GetOrgId() string })
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(scoped.GetOrgId())
+}
+
+// withBearer attaches a bearer credential to an outgoing gRPC context.
+func withBearer(ctx context.Context, token string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+}
+
+// envOrDefault returns the trimmed env value or fallback when unset/blank.
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }
