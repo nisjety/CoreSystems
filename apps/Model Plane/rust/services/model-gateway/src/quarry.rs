@@ -182,9 +182,32 @@ pub struct SearchResult {
     /// Provider that served this hit. Examples emitted by Quarry's
     /// `SmartSearchRouter`: `tantivy_local`, `tavily`, `bing`, `google`.
     pub source: String,
-    /// Relevance score 0.0–1.0. Provider-specific normalisation —
-    /// only meaningful within a single search response.
+    /// Relevance score 0.0–1.0, **0.0 when Quarry sent none**. Kept as a bare
+    /// `f32` because it feeds a non-optional proto field; anything deciding
+    /// whether the hit was actually judged must read [`Self::relevance`]
+    /// instead, where absent and zero are different values.
     pub score: f32,
+    /// Quarry's semantic-reranker relevance in `[0,1]`, or `None` when this hit
+    /// was not reranked.
+    ///
+    /// Quarry wraps its search provider in a `RerankingSearchProvider` that asks
+    /// the Model Plane to score how well each of the leading results answers the
+    /// query, and omits the field entirely otherwise — reranking is off for the
+    /// deployment, the Model Plane call failed (the reranker degrades to the
+    /// original order), or the hit fell outside the reranked head. Absent is
+    /// therefore "not judged", which is a different fact from "judged
+    /// irrelevant": collapsing the two into `0.0` (as [`Self::score`] must, for
+    /// the proto) would let an unreranked response filter itself to nothing.
+    /// [`crate::relevance`] depends on this distinction.
+    pub relevance: Option<f32>,
+    /// Provider-supplied SERP position, 1-based, `0` when Quarry sent none.
+    /// Lower is better. Always present in practice; the reranker renumbers it
+    /// after reordering, so it reflects the order the caller actually received.
+    pub rank: u32,
+    /// Query-relevant highlight passages attached by the reranker (Exa-style).
+    /// Empty when the hit was not reranked. Better evidence of *why* a hit
+    /// matched than a provider snippet, which is often boilerplate.
+    pub highlights: Vec<String>,
     pub raw: Value,
 }
 
@@ -724,6 +747,14 @@ fn extract_search_results(payload: &Value) -> Vec<Value> {
 fn project_search_result(v: &Value) -> SearchResult {
     let obj = v.as_object().cloned().unwrap_or_default();
     let source = string_field(&obj, "source");
+    // Score may be float or int depending on provider; coerce both. Absent (or
+    // non-finite) stays `None` — see `SearchResult::relevance` for why that is
+    // load-bearing rather than pedantry.
+    let relevance = obj
+        .get("score")
+        .and_then(|s| s.as_f64().or_else(|| s.as_i64().map(|n| n as f64)))
+        .map(|f| f as f32)
+        .filter(|f| f.is_finite());
     SearchResult {
         url: string_field(&obj, "url"),
         title: string_field(&obj, "title"),
@@ -733,11 +764,26 @@ fn project_search_result(v: &Value) -> SearchResult {
         } else {
             source
         },
-        // Score may be float or int depending on provider; coerce both.
-        score: obj
-            .get("score")
-            .and_then(|s| s.as_f64().or_else(|| s.as_i64().map(|n| n as f64)))
-            .map_or(0.0, |f| f as f32),
+        score: relevance.unwrap_or(0.0),
+        relevance,
+        rank: obj
+            .get("rank")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
+        highlights: obj
+            .get("highlights")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         raw: Value::Object(obj),
     }
 }
@@ -1378,5 +1424,65 @@ mod tests {
         assert_eq!(results[0].url, "https://example.com/docs");
         assert_eq!(results[0].source, "searxng");
         assert!((results[0].score - 0.82).abs() < f32::EPSILON);
+    }
+
+    /// Quarry's `rank`, reranker `score` and `highlights` were all reaching this
+    /// client and all being thrown away here — `rank` and `highlights` were never
+    /// projected at all, and `score` was flattened to `0.0` when absent. The
+    /// relevance gate is built on these three, so this test is the contract that
+    /// they survive the projection.
+    #[test]
+    fn search_projection_keeps_rank_reranker_score_and_highlights() {
+        let payload = serde_json::json!({
+            "data": {"results": [{
+                "url": "https://www.ssb.no/kpi",
+                "title": "Konsumprisindeksen",
+                "snippet": "KPI for Norge.",
+                "provider": "brave",
+                "rank": 3,
+                "score": 0.91,
+                "highlights": ["KPI steg 2,4 prosent", "   ", ""]
+            }]}
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert_eq!(results[0].rank, 3);
+        assert_eq!(results[0].relevance, Some(0.91));
+        assert!((results[0].score - 0.91).abs() < f32::EPSILON);
+        assert_eq!(
+            results[0].highlights,
+            vec!["KPI steg 2,4 prosent".to_owned()],
+            "blank highlights are dropped rather than shown as empty evidence"
+        );
+    }
+
+    /// An absent `score` must project as `None`, not as `0.0`.
+    ///
+    /// Quarry omits the field entirely whenever it did not rerank — reranking
+    /// disabled, the Model Plane call failed, or the hit fell outside the
+    /// reranked head — and the whole tail of every reranked response is in that
+    /// state. Reading absent as "scored zero" would make the relevance gate
+    /// filter an unreranked deployment down to nothing.
+    #[test]
+    fn an_absent_reranker_score_projects_as_none_not_zero() {
+        let payload = serde_json::json!({
+            "results": [{"url": "https://a.no/", "title": "A", "rank": 1}]
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert_eq!(results[0].relevance, None);
+        assert!(
+            (results[0].score - 0.0).abs() < f32::EPSILON,
+            "the compat mirror is still 0.0 for the proto field"
+        );
+        assert!(results[0].highlights.is_empty());
     }
 }

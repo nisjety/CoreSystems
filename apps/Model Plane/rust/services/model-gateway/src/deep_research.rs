@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, ToolCall};
 use serde_json::Value;
 
-use crate::{artifacts::ArtifactKind, sse_events::ChatEvent, state::AppState};
+use crate::{artifacts::ArtifactKind, relevance, sse_events::ChatEvent, state::AppState};
 
 // ---------------------------------------------------------------------------
 // Caps. Every one of these is a spend limit, not a tuning knob: deep research
@@ -283,7 +283,9 @@ cached_cap!(
 /// `number` is the load-bearing field: `Some(n)` means "we hold this page's own
 /// text and the report may cite it as `[n]`", `None` means "search found this
 /// but we never read it, so nothing may be attributed to it".
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: `relevance` is a float, and there is no honest total equality on it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResearchSource {
     /// Citation number, assigned ONLY once the page's text is in the corpus.
     pub number: Option<usize>,
@@ -298,10 +300,29 @@ pub struct ResearchSource {
     /// signal.
     pub sub_queries: Vec<usize>,
     /// Best (lowest) result position this URL reached in any sub-query, 0-based.
-    /// Kept as an integer rather than a normalized score because the audited
-    /// `web_search` projection does not carry provider scores, and inventing a
-    /// float from a rank would look more precise than it is.
+    /// Kept as an integer rather than a normalized score because a rank is a
+    /// rank — inventing a float from it would look more precise than it is.
     pub best_rank: usize,
+    /// Highest reranker score any sub-query's copy of this hit carried, when the
+    /// search path supplied one at all. Feeds [`crate::relevance`] as the
+    /// preferred signal; `None` means Quarry did not rerank, NOT "scored zero".
+    pub provider_score: Option<f32>,
+    /// How plausibly this source can answer the question, `0.0`–`1.0`, from
+    /// [`crate::relevance::assess`]. Load-bearing twice: it gates whether the
+    /// source may be read at all, and it is the primary key of [`read_order`].
+    /// `1.0` until the gate has run, so a source is never accidentally
+    /// down-ranked by a score nobody computed.
+    pub relevance: f32,
+    /// True when the relevance gate set this source aside as unable to answer the
+    /// question.
+    ///
+    /// A filtered source is excluded from the read budget and can never receive a
+    /// citation number, but it does NOT vanish: it keeps its Kilder row (labelled
+    /// via `unread_reason`), it is counted in [`Coverage::found`] and
+    /// [`Coverage::filtered`], and it is listed in the synthesis prompt as
+    /// explicitly uncitable. Dropping it silently would trade one dishonesty for
+    /// another.
+    pub filtered: bool,
     /// The page's own text, per-page-capped and corpus-bounded. `None` until the
     /// page is successfully read.
     pub extract: Option<String>,
@@ -329,6 +350,14 @@ pub struct Coverage {
     pub search_failures: usize,
     /// Unique URLs discovered across all sub-queries.
     pub found: usize,
+    /// Sources the relevance gate set aside as unable to answer the question.
+    /// A subset of `unread`, reported separately so "we found 16 and read 2"
+    /// cannot be read as "14 pages failed to load".
+    pub filtered: usize,
+    /// True when NOTHING cleared the relevance bar and the top-scoring few were
+    /// kept anyway. Stated in the coverage line: a silently relaxed filter is the
+    /// same dishonesty as a silently strict one.
+    pub relevance_fallback: bool,
     /// Sources whose text we hold (and which therefore carry a number).
     pub read: usize,
     /// Sources search found but we could not read.
@@ -641,13 +670,19 @@ pub fn normalize_url_key(raw: &str) -> String {
 
 /// One raw search hit, tagged with the sub-query that produced it and its
 /// position in that sub-query's result list.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: `score` is a float, and there is no honest total equality on it.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
     pub sub_query: usize,
     pub rank: usize,
     pub url: String,
     pub title: String,
     pub snippet: String,
+    /// Quarry's semantic-reranker relevance for this hit, when the search tool
+    /// passed one through. See [`hits_from_search_output`] for why this is
+    /// `None` on every deployment today.
+    pub score: Option<f32>,
 }
 
 /// Collapse hits from every sub-query into unique candidate sources.
@@ -676,6 +711,15 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
                 source.sub_queries.push(hit.sub_query);
             }
             source.best_rank = source.best_rank.min(hit.rank);
+            // Keep the highest reranker score any sub-query's copy carried. The
+            // reranker only scores the head of each response, so the same URL is
+            // routinely scored under one sub-query and unscored under another;
+            // taking the max means one sub-query's judgement is not lost to
+            // another's silence.
+            source.provider_score = match (source.provider_score, hit.score) {
+                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                (existing, incoming) => existing.or(incoming),
+            };
             // Keep the richest metadata we have seen for this URL: providers
             // differ on which fields they populate for the same page.
             if source.title.trim().is_empty() && !hit.title.trim().is_empty() {
@@ -699,6 +743,11 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
             snippet: hit.snippet.trim().to_owned(),
             sub_queries: vec![hit.sub_query],
             best_rank: hit.rank,
+            provider_score: hit.score,
+            // Neutral until `apply_relevance_gate` runs. Defaulting to 0.0 would
+            // make an ungated call silently rank every source as irrelevant.
+            relevance: 1.0,
+            filtered: false,
             extract: None,
             unread_reason: Some(NOT_ATTEMPTED.to_owned()),
         });
@@ -717,21 +766,121 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
 /// never has an unread source with a blank explanation.
 const NOT_ATTEMPTED: &str = "not selected for reading (page budget spent on higher-ranked sources)";
 
-/// Read priority: most corroborated first, then best search rank, then
-/// discovery order.
+/// How many relevance tiers [`read_order`] sorts on.
 ///
-/// Corroboration outranks rank because a page two independent sub-queries both
-/// surfaced is more likely to answer the actual question than the top hit of
-/// one narrow phrasing.
+/// Relevance is bucketed rather than compared as a raw float on purpose. The
+/// score is a plausibility estimate, not a measurement: claiming 0.62 beats 0.61
+/// would be false precision, and it would also throw away the corroboration
+/// signal, which is genuinely informative *between* sources of comparable
+/// relevance. Four buckets (`<0.25`, `<0.5`, `<0.75`, `≥0.75`) is the coarsest
+/// split that still separates "clearly on topic" from "probably not".
+const RELEVANCE_TIERS: usize = 4;
+
+/// Which relevance bucket a score falls in. Higher is better.
+// reason: RELEVANCE_TIERS is 4; the product is bounded by 4.0 and never negative
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn relevance_tier(relevance: f32) -> usize {
+    let scaled = (relevance.clamp(0.0, 1.0) * RELEVANCE_TIERS as f32) as usize;
+    scaled.min(RELEVANCE_TIERS - 1)
+}
+
+/// What the relevance gate did, as facts the coverage line must state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GateReport {
+    /// Sources set aside as unable to answer the question.
+    pub filtered: usize,
+    /// True when nothing cleared the bar and the top few were kept anyway.
+    pub fallback_used: bool,
+}
+
+/// Score every source against the question and set aside the ones that cannot
+/// plausibly answer it.
+///
+/// This is the gate that did not exist. Before it, every URL any sub-query
+/// returned was a read candidate and, once read, a numbered citation — which is
+/// how a Norwegian weather question came to cite an Instagram post about Paris
+/// cafés. It runs BEFORE reading (so the page budget is not spent on noise) and
+/// therefore before citing (a source that is never read is never numbered).
+///
+/// A filtered source is not deleted. It keeps its Kilder row, is counted, and is
+/// listed in the synthesis prompt as explicitly uncitable, with
+/// [`crate::relevance::filtered_reason`] saying why in words. See
+/// [`ResearchSource::filtered`].
+pub fn apply_relevance_gate(question: &str, sources: &mut [ResearchSource]) -> GateReport {
+    if sources.is_empty() {
+        return GateReport::default();
+    }
+    let parsed = relevance::Question::parse(question);
+    let verdicts: Vec<relevance::Verdict> = sources
+        .iter()
+        .map(|source| {
+            relevance::assess(
+                &parsed,
+                &relevance::Candidate {
+                    url: &source.url,
+                    title: &source.title,
+                    snippet: &source.snippet,
+                    provider_score: source.provider_score,
+                },
+            )
+        })
+        .collect();
+    let mask = relevance::keep_mask(&verdicts);
+
+    let mut filtered = 0usize;
+    for ((source, verdict), keep) in sources.iter_mut().zip(&verdicts).zip(&mask.keep) {
+        source.relevance = verdict.score;
+        if *keep {
+            // Left otherwise untouched, including `unread_reason`: the read phase
+            // owns that field and writes the specific reason a page could not be
+            // fetched. When the never-empty fallback fired, that fact is global
+            // rather than per-source, and it is carried by
+            // `Coverage::relevance_fallback` into the coverage line the report is
+            // required to reproduce.
+            source.filtered = false;
+            continue;
+        }
+        source.filtered = true;
+        source.extract = None;
+        source.number = None;
+        source.unread_reason = Some(relevance::filtered_reason(verdict));
+        filtered = filtered.saturating_add(1);
+    }
+
+    GateReport {
+        filtered,
+        fallback_used: mask.fallback_used,
+    }
+}
+
+/// Read priority: most relevant tier first, then most corroborated, then best
+/// search rank, then discovery order. Filtered sources are excluded outright.
+///
+/// Relevance leads because corroboration was actively harmful without it: six
+/// sub-queries all surfacing the same off-topic page counted as six independent
+/// votes for noise, and that page then out-ranked the one source that actually
+/// answered the question. Within a relevance tier corroboration is still the
+/// right signal — a page two independent sub-queries both surfaced beats the top
+/// hit of one narrow phrasing.
+///
+/// Excluding filtered sources here is what spends the read budget honestly: a
+/// source that is never in `order` is never fetched by [`pages_to_read`] and
+/// never numbered by [`number_and_bound`].
 #[must_use]
 pub fn read_order(sources: &[ResearchSource]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..sources.len()).collect();
+    let mut order: Vec<usize> = (0..sources.len())
+        .filter(|&index| !sources[index].filtered)
+        .collect();
     order.sort_by(|&left, &right| {
         let a = &sources[left];
         let b = &sources[right];
-        b.sub_queries
-            .len()
-            .cmp(&a.sub_queries.len())
+        relevance_tier(b.relevance)
+            .cmp(&relevance_tier(a.relevance))
+            .then(b.sub_queries.len().cmp(&a.sub_queries.len()))
             .then(a.best_rank.cmp(&b.best_rank))
             .then(left.cmp(&right))
     });
@@ -836,6 +985,7 @@ pub fn coverage_of(
     planned: usize,
     with_results: usize,
     search_failures: usize,
+    gate: GateReport,
     deadline_hit: bool,
     corpus_exhausted: bool,
 ) -> Coverage {
@@ -845,6 +995,8 @@ pub fn coverage_of(
         with_results,
         search_failures,
         found: sources.len(),
+        filtered: gate.filtered,
+        relevance_fallback: gate.fallback_used,
         read,
         unread: sources.len().saturating_sub(read),
         deadline_hit,
@@ -878,6 +1030,24 @@ pub fn coverage_statement(coverage: &Coverage) -> String {
         ". {} unique sources were found; {} were read successfully and {} could not be read",
         coverage.found, coverage.read, coverage.unread
     );
+    if coverage.filtered > 0 {
+        // Named separately from the general unread count so "found 16, read 2"
+        // cannot be misread as "14 pages failed to load". Nothing failed: those
+        // pages were never about this question, so they were never fetched.
+        let _ = write!(
+            statement,
+            " (of those, {} were set aside as irrelevant to the question before any page was \
+             fetched, and none of them is evidence for anything)",
+            coverage.filtered
+        );
+    }
+    if coverage.relevance_fallback {
+        statement.push_str(
+            ". WARNING: no source cleared the relevance bar for this question at all; the \
+             best-scoring few were kept as leads rather than returning nothing, so treat every \
+             source below as a weak match",
+        );
+    }
     if coverage.corpus_exhausted {
         statement.push_str(
             ". The evidence budget filled before every fetched page could be included",
@@ -941,9 +1111,11 @@ pub fn synthesis_prompt(question: &str, sources: &[ResearchSource], coverage: &C
     let unread: Vec<&ResearchSource> = sources.iter().filter(|s| !s.is_read()).collect();
     if !unread.is_empty() {
         prompt.push_str(
-            "FOUND BUT NOT READ — search returned these, but their text could NOT be retrieved. \
-             They have NO citation number. You may not cite them, quote them, or state anything \
-             as fact on their behalf; you may only name them as unverified leads:\n",
+            "FOUND BUT NOT READ — search returned these, but their text is NOT available to you: \
+             either it could not be retrieved, or the source was set aside as irrelevant to the \
+             question (the reason is stated per line). They have NO citation number. You may not \
+             cite them, quote them, or state anything as fact on their behalf; you may only name \
+             them as unverified leads, and a source marked irrelevant is not even a lead:\n",
         );
         for source in unread {
             let _ = writeln!(
@@ -1069,6 +1241,11 @@ pub fn research_receipt(plan: &[String], coverage: &Coverage, report_chars: usiz
         "sources_found": coverage.found,
         "sources_read": coverage.read,
         "sources_unread": coverage.unread,
+        // Why `found` and `read` can differ by a lot without anything being
+        // broken. Without this the receipt invites the model to explain a gap it
+        // has no information about.
+        "sources_filtered_irrelevant": coverage.filtered,
+        "relevance_fallback_used": coverage.relevance_fallback,
         "report_chars": report_chars,
         "deadline_hit": coverage.deadline_hit,
         "corpus_budget_exhausted": coverage.corpus_exhausted,
@@ -1197,6 +1374,18 @@ where
 }
 
 /// Parse one audited `web_search` outcome into hits.
+///
+/// `score` is read opportunistically. Quarry DOES return a semantic-reranker
+/// relevance per hit and `quarry::project_search_result` now keeps it, but the
+/// shared `web_search` tool arm in `tool_loop` projects each result down to
+/// `{url, title, snippet}` before this function ever sees it — so today the
+/// field is absent and every hit arrives unscored. That is a one-line change in
+/// a file this work does not own; reading the field here means the gate starts
+/// using Quarry's own judgement the moment it lands, with no further change.
+/// Until then the gate runs on lexical overlap and domain class alone, which is
+/// exactly what [`crate::relevance`] is built to do without a provider score.
+// reason: reranker scores are in [0,1]; f64→f32 loses nothing at that magnitude
+#[allow(clippy::cast_possible_truncation)]
 fn hits_from_search_output(sub_query: usize, output: &str) -> Vec<SearchHit> {
     let Ok(items) = serde_json::from_str::<Vec<Value>>(output) else {
         return Vec::new();
@@ -1223,6 +1412,11 @@ fn hits_from_search_output(sub_query: usize, output: &str) -> Vec<SearchHit> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
+                score: item
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .map(|value| value as f32)
+                    .filter(|value| value.is_finite()),
             })
         })
         .collect()
@@ -1396,17 +1590,23 @@ pub async fn run_deep_research(
     tool_failures =
         tool_failures.saturating_add(u32::try_from(search_failures).unwrap_or(u32::MAX));
     let mut sources = dedupe_hits(&hits);
+    // The relevance gate, before reading and therefore before citing. Filtered
+    // sources stay in `sources` (counted, shown, uncitable) but leave
+    // `read_order`, so the page budget is never spent on a hit that cannot
+    // answer the question.
+    let gate = apply_relevance_gate(question, &mut sources);
+    let relevant = sources.len().saturating_sub(gate.filtered);
     events
         .step(
             STEP_SEARCH,
             "Søker kilder",
             &format!(
-                "{} unike kilder fra {} av {} delspørsmål.",
+                "{relevant} relevante av {} unike kilder fra {} av {} delspørsmål.",
                 sources.len(),
                 search_ok,
                 plan.len()
             ),
-            if sources.is_empty() { "error" } else { "done" },
+            if relevant == 0 { "error" } else { "done" },
         )
         .await;
 
@@ -1481,6 +1681,7 @@ pub async fn run_deep_research(
         plan.len(),
         search_ok,
         search_failures,
+        gate,
         deadline_hit,
         dropped_for_budget > 0,
     );
@@ -1512,11 +1713,22 @@ pub async fn run_deep_research(
             "No search result was returned at all — the web is unreachable from this deployment, \
              or every search call failed."
                 .to_owned()
+        } else if coverage.filtered == coverage.found {
+            // Every hit was off-topic. Saying "none yielded readable text" here
+            // would blame the fetch layer for a search-quality problem and send
+            // the user looking for a bug that is not there.
+            format!(
+                "{} source(s) were found, but not one of them was about this question, so none \
+                 was read. The search engine returned results for the words, not for the \
+                 question.",
+                coverage.found
+            )
         } else {
             format!(
-                "{} source(s) were found but none yielded readable text (typically \
-                 JavaScript-rendered pages, whose content is not in the HTML).",
-                coverage.found
+                "{} source(s) were found ({} set aside as irrelevant) but none of the rest \
+                 yielded readable text (typically JavaScript-rendered pages, whose content is not \
+                 in the HTML).",
+                coverage.found, coverage.filtered
             )
         };
         let mut outcome = finish_without_evidence(
@@ -2102,9 +2314,23 @@ mod tests {
             snippet: "snippet".to_owned(),
             sub_queries,
             best_rank: rank,
+            provider_score: None,
+            // Ungated: the same neutral value `dedupe_hits` produces, so tests
+            // about ordering and numbering are not accidentally testing the gate.
+            relevance: 1.0,
+            filtered: false,
             extract: None,
             unread_reason: Some(NOT_ATTEMPTED.to_owned()),
         }
+    }
+
+    /// A source the relevance gate set aside.
+    fn filtered_source(url: &str, relevance: f32) -> ResearchSource {
+        let mut source = source(url, vec![0], 0);
+        source.relevance = relevance;
+        source.filtered = true;
+        source.unread_reason = Some("filtered as irrelevant to the question (test)".to_owned());
+        source
     }
 
     fn read_source(url: &str, text: &str) -> ResearchSource {
@@ -2230,6 +2456,7 @@ mod tests {
                 url: "https://a.no/x".into(),
                 title: String::new(),
                 snippet: String::new(),
+                score: None,
             },
             SearchHit {
                 sub_query: 1,
@@ -2237,6 +2464,7 @@ mod tests {
                 url: "https://www.a.no/x/".into(),
                 title: "A page".into(),
                 snippet: "about x".into(),
+                score: Some(0.8),
             },
             SearchHit {
                 sub_query: 1,
@@ -2244,11 +2472,17 @@ mod tests {
                 url: "https://b.no/y".into(),
                 title: "B".into(),
                 snippet: String::new(),
+                score: None,
             },
         ];
         let sources = dedupe_hits(&hits);
         assert_eq!(sources.len(), 2, "the two a.no URLs are one source");
         assert_eq!(sources[0].sub_queries, vec![0, 1]);
+        // The reranker only scores the head of each response, so the same URL is
+        // routinely scored under one sub-query and unscored under another. One
+        // sub-query's judgement must not be lost to another's silence.
+        assert_eq!(sources[0].provider_score, Some(0.8));
+        assert_eq!(sources[1].provider_score, None);
         assert_eq!(sources[0].best_rank, 1, "keeps the best rank seen");
         // Metadata is backfilled from the richer duplicate; a URL is a poor
         // title when a real one exists.
@@ -2477,6 +2711,8 @@ mod tests {
             with_results: 2,
             search_failures: 1,
             found: 5,
+            filtered: 0,
+            relevance_fallback: false,
             read: 2,
             unread: 3,
             deadline_hit: true,
@@ -2527,7 +2763,7 @@ mod tests {
         ];
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
-        let coverage = coverage_of(&sources, 3, 2, 1, false, false);
+        let coverage = coverage_of(&sources, 3, 2, 1, GateReport::default(), false, false);
         assert_eq!(coverage.found, 3);
         assert_eq!(coverage.read, 1);
         assert_eq!(coverage.unread, 2);
@@ -2548,7 +2784,7 @@ mod tests {
         sources[1].unread_reason = Some("JavaScript-rendered".to_owned());
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
-        let coverage = coverage_of(&sources, 2, 2, 0, false, false);
+        let coverage = coverage_of(&sources, 2, 2, 0, GateReport::default(), false, false);
 
         let prompt = synthesis_prompt("hvor mange bor i oslo", &sources, &coverage);
         assert!(prompt.contains("[1] Title of https://read.no — https://read.no"));
@@ -2640,6 +2876,8 @@ mod tests {
             with_results: 3,
             search_failures: 1,
             found: 9,
+            filtered: 0,
+            relevance_fallback: false,
             read: 5,
             unread: 4,
             deadline_hit: false,
@@ -2695,7 +2933,7 @@ mod tests {
         let mut sources = vec![read_source("https://a.no", "measured 42")];
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
-        let coverage = coverage_of(&sources, 1, 1, 0, false, false);
+        let coverage = coverage_of(&sources, 1, 1, 0, GateReport::default(), false, false);
         let message = unsynthesized_context_message(
             "q",
             &sources,
@@ -2751,6 +2989,22 @@ mod tests {
         assert!(hits_from_search_output(0, "not json").is_empty());
     }
 
+    /// Quarry's reranker score must be picked up the moment the shared
+    /// `web_search` arm starts forwarding it, and its absence must read as
+    /// "not scored" rather than "scored zero" — which is the state of every
+    /// deployment today, since that arm currently projects results down to
+    /// `{url, title, snippet}`.
+    #[test]
+    fn search_output_parsing_reads_a_reranker_score_when_one_is_present() {
+        let hits = hits_from_search_output(
+            0,
+            r#"[{"url":"https://a.no","title":"A","snippet":"s","score":0.91},
+                {"url":"https://b.no","title":"B","snippet":"s"}]"#,
+        );
+        assert_eq!(hits[0].score, Some(0.91));
+        assert_eq!(hits[1].score, None, "absent is not zero");
+    }
+
     #[test]
     fn fetch_output_parsing_treats_blank_content_as_no_extract() {
         assert_eq!(
@@ -2802,5 +3056,277 @@ mod tests {
         // No turn model to fall back to.
         assert!(!should_retry_plan_on_turn_model("", "velion-budget", ""));
         assert!(!should_retry_plan_on_turn_model("", "velion-budget", "  "));
+    }
+
+    // --- the relevance gate ----------------------------------------------
+
+    /// Build the exact source set the live weather turn produced: the four
+    /// observed noise hits plus one real met.no hit.
+    fn observed_weather_noise() -> Vec<ResearchSource> {
+        let hits = vec![
+            SearchHit {
+                sub_query: 0,
+                rank: 0,
+                url: "https://www.instagram.com/p/Cx123/".into(),
+                title: "The best cafés in Paris".into(),
+                snippet: "Coffee, croissants and a corner table.".into(),
+                score: None,
+            },
+            SearchHit {
+                sub_query: 1,
+                rank: 0,
+                url: "https://www.fhi.no/publ/2024/skjelettalder/".into(),
+                title: "Skjelettalder som metode for aldersvurdering".into(),
+                snippet: "Rapport om metodens treffsikkerhet.".into(),
+                score: None,
+            },
+            SearchHit {
+                sub_query: 2,
+                rank: 0,
+                url: "https://www.tiktok.com/@parfyme/video/7301".into(),
+                title: "Min nye parfyme".into(),
+                snippet: "Denne dufter helt vilt godt.".into(),
+                score: None,
+            },
+            SearchHit {
+                sub_query: 3,
+                rank: 0,
+                url: "https://no.linkedin.com/in/ola-nordmann".into(),
+                title: "Ola Nordmann - Senior Consultant".into(),
+                snippet: "Erfaren rådgiver innen prosjektledelse.".into(),
+                score: None,
+            },
+            SearchHit {
+                sub_query: 0,
+                rank: 1,
+                url: "https://www.yr.no/nb/v%C3%A6rvarsel/Oslo".into(),
+                title: "Været i Oslo - Yr".into(),
+                snippet: "Værvarsel for Oslo time for time.".into(),
+                score: None,
+            },
+        ];
+        dedupe_hits(&hits)
+    }
+
+    /// The whole reason this gate exists. A Norwegian weather question came back
+    /// with an Instagram café post, an FHI skeletal-age paper, a TikTok perfume
+    /// video and a LinkedIn profile, all shown in the Kilder tab as evidence.
+    /// Every one must be set aside, and the one real source must survive.
+    #[test]
+    fn the_gate_drops_the_observed_weather_noise_and_keeps_the_real_source() {
+        let mut sources = observed_weather_noise();
+        let gate = apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
+
+        assert_eq!(gate.filtered, 4, "the four observed noise hits");
+        assert!(!gate.fallback_used, "a real source cleared the bar");
+        let kept: Vec<&str> = sources
+            .iter()
+            .filter(|source| !source.filtered)
+            .map(|source| source.url.as_str())
+            .collect();
+        assert_eq!(kept, vec!["https://www.yr.no/nb/v%C3%A6rvarsel/Oslo"]);
+    }
+
+    /// The load-bearing honesty invariant, extended to filtering: a filtered
+    /// source must never end up with a citation number, even if the read phase
+    /// somehow put text on it. A number is a licence to cite, and nothing the
+    /// gate rejected may ever be cited.
+    #[test]
+    fn a_filtered_source_never_receives_a_citation_number() {
+        let mut sources = observed_weather_noise();
+        apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
+        // Adversarial: pretend the read phase managed to fetch a filtered page.
+        for source in sources.iter_mut().filter(|source| source.filtered) {
+            source.extract = Some("text from a page that was never about this".to_owned());
+        }
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, 100_000);
+
+        for source in sources.iter().filter(|source| source.filtered) {
+            assert_eq!(source.number, None, "{} was numbered", source.url);
+            assert!(!source.is_read(), "{} counted as read", source.url);
+        }
+    }
+
+    /// A filtered source must be excluded from the read budget, not merely from
+    /// the citation list — spending a fetch on a page we already judged
+    /// irrelevant burns the page cap that the real sources need.
+    #[test]
+    fn filtered_sources_never_enter_the_read_budget() {
+        let mut sources = observed_weather_noise();
+        apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
+        let order = read_order(&sources);
+        let to_read = pages_to_read(&order, max_pages());
+
+        assert_eq!(order.len(), 1, "only the surviving source is a read target");
+        for &index in &to_read {
+            assert!(!sources[index].filtered);
+        }
+    }
+
+    /// A dropped hit must not silently vanish. It keeps its Kilder row, but as a
+    /// `dr-unread-*` id whose snippet opens with the reason — the same vocabulary
+    /// an unreadable page already used, extended rather than duplicated.
+    #[test]
+    fn a_filtered_source_keeps_a_labelled_kilder_row_rather_than_vanishing() {
+        let mut sources = observed_weather_noise();
+        apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
+        sources[4].extract = Some("Værvarsel for Oslo.".to_owned());
+        sources[4].unread_reason = None;
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, 100_000);
+
+        let events = citation_events(&sources);
+        assert_eq!(events.len(), 5, "every source is still surfaced");
+        let ids: Vec<String> = events
+            .iter()
+            .map(|event| match event {
+                ChatEvent::Citation { id, .. } => id.clone(),
+                _ => unreachable!("citation_events emits only citations"),
+            })
+            .collect();
+        assert_eq!(ids[0], "dr-1", "the one read source is the only number");
+        assert!(ids[1..].iter().all(|id| id.starts_with("dr-unread-")));
+
+        let instagram = events
+            .iter()
+            .find_map(|event| match event {
+                ChatEvent::Citation { url, snippet, .. } if url.contains("instagram") => {
+                    Some(snippet.clone())
+                }
+                _ => None,
+            })
+            .expect("the filtered instagram row is still emitted");
+        assert!(
+            instagram.starts_with("[not read: filtered as irrelevant"),
+            "{instagram}"
+        );
+    }
+
+    /// The counts the model sees must stay truthful: a filtered source is still
+    /// `found`, is `unread`, is named in its own `filtered` count, and is never
+    /// `read`. Reporting it any other way would trade one dishonesty for another.
+    #[test]
+    fn counts_stay_truthful_when_the_gate_filters() {
+        let mut sources = observed_weather_noise();
+        let gate = apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
+        sources[4].extract = Some("Værvarsel for Oslo.".to_owned());
+        sources[4].unread_reason = None;
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, 100_000);
+        let coverage = coverage_of(&sources, 4, 4, 0, gate, false, false);
+
+        assert_eq!(coverage.found, 5);
+        assert_eq!(coverage.filtered, 4);
+        assert_eq!(coverage.read, 1);
+        assert_eq!(coverage.unread, 4);
+        assert_eq!(
+            coverage.found,
+            coverage.read + coverage.unread,
+            "the arithmetic the report reproduces must add up"
+        );
+
+        let statement = coverage_statement(&coverage);
+        assert!(
+            statement.contains("5 unique sources were found"),
+            "{statement}"
+        );
+        assert!(
+            statement.contains("4 were set aside as irrelevant"),
+            "the model must be able to say WHY 4 of 5 are unread: {statement}"
+        );
+    }
+
+    /// Never filter everything away. An empty Kilder tab with no explanation is
+    /// worse than a noisy one, so when nothing clears the bar the top few survive
+    /// — and the coverage line says so out loud rather than passing them off as
+    /// good matches.
+    #[test]
+    fn the_gate_never_filters_everything_away() {
+        let hits: Vec<SearchHit> = (0..6)
+            .map(|index| SearchHit {
+                sub_query: 0,
+                rank: index,
+                url: format!("https://www.instagram.com/p/{index}/"),
+                title: "Sommerferie i Italia".into(),
+                snippet: "Bilder fra turen.".into(),
+                score: None,
+            })
+            .collect();
+        let mut sources = dedupe_hits(&hits);
+        let gate = apply_relevance_gate("norsk havvind utbyggingstakt mot 2030", &mut sources);
+
+        assert!(gate.fallback_used);
+        let surviving = sources.iter().filter(|source| !source.filtered).count();
+        assert_eq!(surviving, relevance::fallback_keep());
+        assert!(surviving > 0, "the user must never get an empty result set");
+        assert_eq!(gate.filtered, sources.len() - surviving);
+
+        let coverage = coverage_of(&sources, 1, 1, 0, gate, false, false);
+        let statement = coverage_statement(&coverage);
+        assert!(
+            statement.contains("no source cleared the relevance bar"),
+            "a silently relaxed filter is as dishonest as a silently strict one: {statement}"
+        );
+    }
+
+    /// Corroboration was actively harmful without a relevance signal in front of
+    /// it: an off-topic page that every sub-query surfaced counted as several
+    /// independent votes and out-ranked the one source that answered the
+    /// question. Relevance tier must therefore lead the sort.
+    #[test]
+    fn read_order_puts_relevance_ahead_of_corroboration() {
+        let mut corroborated_noise = source("https://noise.example", vec![0, 1, 2, 3], 0);
+        corroborated_noise.relevance = 0.1;
+        let mut lone_answer = source("https://real.no", vec![2], 5);
+        lone_answer.relevance = 0.9;
+        let sources = vec![corroborated_noise, lone_answer];
+
+        assert_eq!(
+            read_order(&sources),
+            vec![1, 0],
+            "one relevant source beats four votes for noise"
+        );
+    }
+
+    /// Within one relevance tier the existing signals must still decide, so the
+    /// gate refines the old ordering rather than replacing it. Scores are
+    /// bucketed for exactly this reason: 0.62 does not really beat 0.61.
+    #[test]
+    fn read_order_still_uses_corroboration_inside_a_relevance_tier() {
+        let mut low = source("https://a.no", vec![0], 0);
+        low.relevance = 0.80;
+        let mut high = source("https://b.no", vec![0, 1], 4);
+        high.relevance = 0.99;
+        let sources = vec![low, high];
+
+        assert_eq!(
+            relevance_tier(0.80),
+            relevance_tier(0.99),
+            "both are in the top bucket"
+        );
+        assert_eq!(read_order(&sources), vec![1, 0], "corroboration decides");
+    }
+
+    /// Filtered sources leave the ordering entirely — `read_order` is the single
+    /// place the read budget is derived from, so exclusion has to happen here.
+    #[test]
+    fn read_order_excludes_filtered_sources_outright() {
+        let sources = vec![
+            filtered_source("https://noise.example", 0.05),
+            source("https://real.no", vec![0], 0),
+        ];
+        assert_eq!(read_order(&sources), vec![1]);
+    }
+
+    /// An empty source set must not trip the gate's fallback: there is nothing to
+    /// relax the bar for, and claiming the fallback fired would put a false
+    /// statement in the coverage line.
+    #[test]
+    fn the_gate_is_a_no_op_on_an_empty_source_set() {
+        let mut sources: Vec<ResearchSource> = Vec::new();
+        let gate = apply_relevance_gate("hva er været i Oslo", &mut sources);
+        assert_eq!(gate, GateReport::default());
+        assert!(!gate.fallback_used);
     }
 }
