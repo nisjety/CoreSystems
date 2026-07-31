@@ -382,6 +382,7 @@ async fn record_check(
         let artifact_run: RunKind = run_kind.unwrap_or_default();
         let handle = artifacts
             .put(
+                &req.org_id,
                 &artifact_run,
                 &req.fresh_fingerprint,
                 "raw",

@@ -130,13 +130,24 @@ pub async fn list_artifacts(
     Ok(Json(Envelope::ok(request_id, page)))
 }
 
-pub async fn get_artifact(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+/// `GET /v1/artifacts/{id}` — the only way to materialize the bytes behind a
+/// `FormatRef` returned by `/v1/scrape` (the scrape response carries references,
+/// never inline page text).
+///
+/// Tenant-bound: the store matches the artifact's stored org against the
+/// verified claim, so an artifact id from another tenant reads as `NotFound`
+/// rather than serving its bytes.
+pub async fn get_artifact(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+) -> Response {
     let request_id = RequestKind::new().to_string();
     let artifact_id = match id.parse::<ArtifactKind>() {
         Ok(value) => value,
         Err(err) => return err_response(&request_id, err).into_response(),
     };
-    let bytes = match state.artifacts.get(&artifact_id).await {
+    let bytes = match state.artifacts.get(&claims.org_id, &artifact_id).await {
         Ok(value) => value,
         Err(err) => return err_response(&request_id, err).into_response(),
     };
@@ -591,7 +602,14 @@ pub(crate) async fn upsert_source_internal(
     };
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("encode body: {e}")))?;
-    forward_mutation(state, reqwest::Method::POST, "/v1/sources", org_id, &body_bytes).await?;
+    forward_mutation(
+        state,
+        reqwest::Method::POST,
+        "/v1/sources",
+        org_id,
+        &body_bytes,
+    )
+    .await?;
     Ok(())
 }
 

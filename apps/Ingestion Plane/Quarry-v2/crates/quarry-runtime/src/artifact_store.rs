@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use quarry_core::artifact as artifact_meta;
 use quarry_core::ids::kinds::{ArtifactKind, RunKind};
@@ -46,16 +47,73 @@ pub struct ArtifactHandle {
     pub bytes: u64,
 }
 
+/// Reads back the tenant segment of an object key produced by
+/// [`quarry_core::artifact::object_key`] (`org={org}/run=.../page=.../stem.ext`).
+/// Returns `None` for any key that is not tenant-stamped.
+pub fn org_from_key(key: &str) -> Option<&str> {
+    key.split('/').next()?.strip_prefix("org=")
+}
+
+/// The `org=` segment is the only tenant boundary the CAS has, so an org id
+/// that contains a path separator would blur (or escape) it. Rejected at
+/// `put` time rather than sanitized, so a malformed claim can never silently
+/// write into another tenant's prefix.
+fn validate_org(org_id: &str) -> QuarryResult<()> {
+    if org_id.contains('/') || org_id.contains("..") {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "org id may not contain '/' or '..'",
+        ));
+    }
+    Ok(())
+}
+
+/// Read-side tenant check shared by every backend: the artifact's stored
+/// `org=` segment must equal the caller's verified org claim.
+///
+/// A mismatch is reported as `NotFound`, never `Forbidden` — artifact ids are
+/// ULIDs, and a distinguishable "exists but not yours" would turn that into an
+/// existence oracle. An empty requested org is refused outright so that
+/// unattributed writes (`org=`) can't be read back by an unauthenticated or
+/// org-less principal.
+fn ensure_org_owns(requested_org: &str, key: &str, id: &ArtifactKind) -> QuarryResult<()> {
+    let not_found = || QuarryError::new(ErrorCode::NotFound, format!("artifact {id} not found"));
+    if requested_org.is_empty() {
+        warn!(artifact = %id, "artifact read refused: caller has no org claim");
+        return Err(not_found());
+    }
+    match org_from_key(key) {
+        Some(owner) if owner == requested_org => Ok(()),
+        owner => {
+            warn!(
+                artifact = %id,
+                requested_org,
+                owner = owner.unwrap_or("<untagged>"),
+                "cross-tenant artifact read refused"
+            );
+            Err(not_found())
+        }
+    }
+}
+
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
+    /// Stores `body` and stamps it with the *caller's* org. `org_id` must come
+    /// from a verified claim — it becomes the artifact's tenant of record and
+    /// the only thing [`ArtifactStore::get`] will match a reader against.
     async fn put(
         &self,
+        org_id: &str,
         run_id: &RunKind,
         page_hash: &str,
         kind: &str,
         body: Vec<u8>,
     ) -> QuarryResult<ArtifactHandle>;
-    async fn get(&self, id: &ArtifactKind) -> QuarryResult<Vec<u8>>;
+
+    /// Reads an artifact by id on behalf of `org_id`. Artifacts owned by any
+    /// other tenant resolve to `NotFound`, so possession of an id is not by
+    /// itself authority to read the bytes.
+    async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>>;
 
     /// Cycle 22 / cluster #4 part 1 — paginated list of artifacts
     /// scoped to a single tenant. Returns an empty page by default so
@@ -95,22 +153,11 @@ pub struct InMemoryStore {
     /// store more than a handful of artifacts; production never uses
     /// this backend.
     meta: RwLock<Vec<InMemoryArtifactMeta>>,
-    /// The org_id every `put` is attributed to. Production uses the
-    /// `with_org` constructor; tests fall back to a default sentinel.
-    org_id: String,
 }
 
 impl InMemoryStore {
     pub fn new() -> Self {
-        Self::with_org("default-org")
-    }
-
-    pub fn with_org(org_id: impl Into<String>) -> Self {
-        Self {
-            inner: RwLock::default(),
-            meta: RwLock::default(),
-            org_id: org_id.into(),
-        }
+        Self::default()
     }
 }
 
@@ -118,18 +165,22 @@ impl InMemoryStore {
 impl ArtifactStore for InMemoryStore {
     async fn put(
         &self,
+        org_id: &str,
         run_id: &RunKind,
         page_hash: &str,
         kind: &str,
         body: Vec<u8>,
     ) -> QuarryResult<ArtifactHandle> {
+        validate_org(org_id)?;
         let id: ArtifactKind = Id::new();
-        let key = format!("{run_id}/{page_hash}/{kind}/{id}");
+        // Same `org=` leading segment as the durable backends so
+        // `org_from_key` is the single tenant parser across all three.
+        let key = format!("org={org_id}/{run_id}/{page_hash}/{kind}/{id}");
         let bytes = body.len() as u64;
         self.inner.write().await.insert(key.clone(), body);
         self.meta.write().await.push(InMemoryArtifactMeta {
             id: id.clone(),
-            org_id: self.org_id.clone(),
+            org_id: org_id.to_string(),
             kind: kind.to_string(),
             bytes,
             created_at: chrono::Utc::now(),
@@ -141,11 +192,12 @@ impl ArtifactStore for InMemoryStore {
         })
     }
 
-    async fn get(&self, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+    async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
         let map = self.inner.read().await;
         let id_str = id.to_string();
         for (k, v) in map.iter() {
             if k.ends_with(&id_str) {
+                ensure_org_owns(org_id, k, id)?;
                 return Ok(v.clone());
             }
         }
@@ -166,8 +218,8 @@ impl ArtifactStore for InMemoryStore {
         let meta = self.meta.read().await;
         let mut rows: Vec<&InMemoryArtifactMeta> = meta
             .iter()
-            // Tenant isolation: `org_id` must match the request claim.
-            // We bind it at construction; cross-org reads return empty.
+            // Tenant isolation: an artifact is only listable by the org that
+            // wrote it (stamped from the writer's claim at `put`).
             .filter(|m| m.org_id == org_id)
             .filter(|_m| match &filter.status {
                 // We don't track lifecycle status on artifacts in this
@@ -256,15 +308,10 @@ impl ArtifactStore for InMemoryStore {
 ///   {root}/org={org}/run={run_id}/page={page_hash}/{stem}.{ext}
 pub struct FilesystemStore {
     root: PathBuf,
-    org: String,
 }
 
 impl FilesystemStore {
     pub fn new(root: impl Into<PathBuf>) -> QuarryResult<Self> {
-        Self::with_org(root, "default-org")
-    }
-
-    pub fn with_org(root: impl Into<PathBuf>, org: impl Into<String>) -> QuarryResult<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|e| {
             QuarryError::new(
@@ -272,10 +319,7 @@ impl FilesystemStore {
                 format!("create artifact root {}: {e}", root.display()),
             )
         })?;
-        Ok(Self {
-            root,
-            org: org.into(),
-        })
+        Ok(Self { root })
     }
 
     fn abs_path(&self, rel: &str) -> PathBuf {
@@ -331,13 +375,15 @@ impl FilesystemStore {
 impl ArtifactStore for FilesystemStore {
     async fn put(
         &self,
+        org_id: &str,
         run_id: &RunKind,
         page_hash: &str,
         kind: &str,
         body: Vec<u8>,
     ) -> QuarryResult<ArtifactHandle> {
+        validate_org(org_id)?;
         let kind_enum = kind_from_str(kind)?;
-        let key = artifact_meta::object_key(&self.org, &run_id.to_string(), page_hash, kind_enum);
+        let key = artifact_meta::object_key(org_id, &run_id.to_string(), page_hash, kind_enum);
         let dest = self.abs_path(&key);
         let parent = dest
             .parent()
@@ -374,10 +420,11 @@ impl ArtifactStore for FilesystemStore {
         })
     }
 
-    async fn get(&self, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+    async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
         let key = self.lookup_index(id).await?.ok_or_else(|| {
             QuarryError::new(ErrorCode::NotFound, format!("artifact {id} not found"))
         })?;
+        ensure_org_owns(org_id, &key, id)?;
         let path = self.abs_path(&key);
         tokio::fs::read(&path).await.map_err(|e| {
             QuarryError::new(
@@ -398,30 +445,17 @@ fn _assert_path_trait<P: AsRef<Path>>(_p: P) {}
 pub struct S3Store {
     client: aws_sdk_s3::Client,
     bucket: String,
-    org: String,
 }
 
 impl S3Store {
     pub async fn new(bucket: String) -> QuarryResult<Self> {
-        Self::with_org(bucket, "default-org").await
-    }
-
-    pub async fn with_org(bucket: String, org: impl Into<String>) -> QuarryResult<Self> {
         let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_s3::Client::new(&cfg);
-        Ok(Self {
-            client,
-            bucket,
-            org: org.into(),
-        })
+        Ok(Self { client, bucket })
     }
 
-    pub fn from_parts(client: aws_sdk_s3::Client, bucket: String, org: impl Into<String>) -> Self {
-        Self {
-            client,
-            bucket,
-            org: org.into(),
-        }
+    pub fn from_parts(client: aws_sdk_s3::Client, bucket: String) -> Self {
+        Self { client, bucket }
     }
 
     fn index_key(id: &ArtifactKind) -> String {
@@ -433,13 +467,15 @@ impl S3Store {
 impl ArtifactStore for S3Store {
     async fn put(
         &self,
+        org_id: &str,
         run_id: &RunKind,
         page_hash: &str,
         kind: &str,
         body: Vec<u8>,
     ) -> QuarryResult<ArtifactHandle> {
+        validate_org(org_id)?;
         let kind_enum = kind_from_str(kind)?;
-        let key = artifact_meta::object_key(&self.org, &run_id.to_string(), page_hash, kind_enum);
+        let key = artifact_meta::object_key(org_id, &run_id.to_string(), page_hash, kind_enum);
         let bytes = body.len() as u64;
 
         self.client
@@ -473,7 +509,7 @@ impl ArtifactStore for S3Store {
         })
     }
 
-    async fn get(&self, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+    async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
         let idx_key = Self::index_key(id);
         let idx_resp = self
             .client
@@ -493,6 +529,7 @@ impl ArtifactStore for S3Store {
             .into_bytes();
         let key = String::from_utf8(idx_bytes.to_vec())
             .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("s3 index utf8: {e}")))?;
+        ensure_org_owns(org_id, &key, id)?;
 
         let obj = self
             .client
@@ -523,11 +560,17 @@ mod tests {
         let run_id: RunKind = Id::new();
         let body = b"<html>hi</html>".to_vec();
         let h = store
-            .put(&run_id, "blake3:deadbeef", "html", body.clone())
+            .put(
+                "org_alpha",
+                &run_id,
+                "blake3:deadbeef",
+                "html",
+                body.clone(),
+            )
             .await
             .unwrap();
         assert_eq!(h.bytes, body.len() as u64);
-        let got = store.get(&h.artifact_id).await.unwrap();
+        let got = store.get("org_alpha", &h.artifact_id).await.unwrap();
         assert_eq!(got, body);
     }
 
@@ -537,24 +580,131 @@ mod tests {
         let store = FilesystemStore::new(tmp.path()).unwrap();
         let run_id: RunKind = Id::new();
         let err = store
-            .put(&run_id, "blake3:x", "bogus", vec![])
+            .put("org_alpha", &run_id, "blake3:x", "bogus", vec![])
             .await
             .unwrap_err();
         assert!(format!("{err:?}").contains("bogus"));
+    }
+
+    // ---- Tenant binding on read-by-id ------------------------------------
+
+    #[tokio::test]
+    async fn fs_store_get_refuses_cross_tenant_id() {
+        // The whole point of the artifact read contract: holding a valid id is
+        // not authority to read the bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemStore::new(tmp.path()).unwrap();
+        let run_id: RunKind = Id::new();
+        let h = store
+            .put(
+                "org_alpha",
+                &run_id,
+                "blake3:x",
+                "markdown",
+                b"# secret".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let err = store.get("org_beta", &h.artifact_id).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound, "must not leak existence");
+        // The owner still reads it.
+        assert_eq!(
+            store.get("org_alpha", &h.artifact_id).await.unwrap(),
+            b"# secret".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_store_get_refuses_empty_org() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemStore::new(tmp.path()).unwrap();
+        let run_id: RunKind = Id::new();
+        let h = store
+            .put(
+                "",
+                &run_id,
+                "blake3:x",
+                "markdown",
+                b"# unattributed".to_vec(),
+            )
+            .await
+            .unwrap();
+        // An unattributed write must not be readable by an org-less caller
+        // either — otherwise `org=` would match `org=`.
+        let err = store.get("", &h.artifact_id).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn in_memory_get_refuses_cross_tenant_id() {
+        let store = InMemoryStore::new();
+        let run_id: RunKind = Id::new();
+        let h = store
+            .put(
+                "org_alpha",
+                &run_id,
+                "blake3:x",
+                "html",
+                b"<b>a</b>".to_vec(),
+            )
+            .await
+            .unwrap();
+        let err = store.get("org_beta", &h.artifact_id).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert_eq!(
+            store.get("org_alpha", &h.artifact_id).await.unwrap(),
+            b"<b>a</b>".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn put_rejects_org_that_would_escape_the_tenant_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemStore::new(tmp.path()).unwrap();
+        let run_id: RunKind = Id::new();
+        for bad in ["../other", "org_a/org_b"] {
+            let err = store
+                .put(bad, &run_id, "blake3:x", "html", b"x".to_vec())
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "org {bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn org_from_key_reads_the_tenant_segment() {
+        assert_eq!(
+            org_from_key("org=org_alpha/run=r/page=p/html.html"),
+            Some("org_alpha")
+        );
+        assert_eq!(org_from_key("run=r/page=p/html.html"), None);
     }
 
     // ---- Cycle 22 / cluster #4 — list() + count() coverage ---------------
 
     #[tokio::test]
     async fn in_memory_list_returns_put_artifacts() {
-        let store = InMemoryStore::with_org("org_alpha");
+        let store = InMemoryStore::new();
         let run_id: RunKind = Id::new();
         store
-            .put(&run_id, "blake3:p1", "html", b"<html>a</html>".to_vec())
+            .put(
+                "org_alpha",
+                &run_id,
+                "blake3:p1",
+                "html",
+                b"<html>a</html>".to_vec(),
+            )
             .await
             .unwrap();
         store
-            .put(&run_id, "blake3:p2", "markdown", b"# hi".to_vec())
+            .put(
+                "org_alpha",
+                &run_id,
+                "blake3:p2",
+                "markdown",
+                b"# hi".to_vec(),
+            )
             .await
             .unwrap();
 
@@ -570,40 +720,42 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_list_isolates_orgs() {
-        // Two stores bound to different orgs MUST not see each other's
-        // artifacts — even though both run in the same process.
-        let store_a = InMemoryStore::with_org("org_alpha");
-        let store_b = InMemoryStore::with_org("org_beta");
+        // One process-wide store serves every tenant, so isolation has to come
+        // from the per-`put` org stamp — not from which store instance was used.
+        let store = InMemoryStore::new();
         let run: RunKind = Id::new();
-        store_a
-            .put(&run, "blake3:x", "html", b"a".to_vec())
+        store
+            .put("org_alpha", &run, "blake3:x", "html", b"a".to_vec())
+            .await
+            .unwrap();
+        store
+            .put("org_beta", &run, "blake3:y", "html", b"b".to_vec())
             .await
             .unwrap();
 
-        // Cross-org read on the same store returns empty (matches the
-        // tenant-isolation contract enforced by P0).
-        let p = store_a
+        let p = store
             .list("org_beta", &quarry_core::pagination::ListFilter::default())
             .await
             .unwrap();
-        assert!(p.items.is_empty(), "cross-org list must leak nothing");
-        // Distinct store with a different org doesn't see org_a's data
-        // either (this is the multi-process production posture).
-        let p2 = store_b
-            .list("org_alpha", &quarry_core::pagination::ListFilter::default())
-            .await
-            .unwrap();
-        assert!(p2.items.is_empty(), "second store bound to org_b is empty");
+        assert_eq!(p.items.len(), 1, "each org sees only its own artifact");
+        assert_eq!(p.items[0].org_id, "org_beta");
+        assert_eq!(store.count("org_alpha").await.unwrap(), Some(1));
     }
 
     #[tokio::test]
     async fn in_memory_list_cursor_paginates_correctly() {
-        let store = InMemoryStore::with_org("org_a");
+        let store = InMemoryStore::new();
         let run: RunKind = Id::new();
         // Insert 5 artifacts.
         for i in 0..5 {
             store
-                .put(&run, &format!("blake3:{i}"), "html", format!("{i}").into())
+                .put(
+                    "org_a",
+                    &run,
+                    &format!("blake3:{i}"),
+                    "html",
+                    format!("{i}").into(),
+                )
                 .await
                 .unwrap();
             // Tick to ensure distinct created_at values for ordering.
@@ -662,6 +814,7 @@ mod tests {
         impl ArtifactStore for StubStore {
             async fn put(
                 &self,
+                _: &str,
                 _: &RunKind,
                 _: &str,
                 _: &str,
@@ -669,7 +822,7 @@ mod tests {
             ) -> QuarryResult<ArtifactHandle> {
                 unimplemented!()
             }
-            async fn get(&self, _: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+            async fn get(&self, _: &str, _: &ArtifactKind) -> QuarryResult<Vec<u8>> {
                 unimplemented!()
             }
         }

@@ -694,6 +694,9 @@ mod enabled {
             artifacts: Some(state.artifacts.clone()),
             events: Some(state.event_sink.clone()),
             visual_processor: state.visual_processor.clone(),
+            // The run's org (already checked against `claims.org_id` above) is
+            // the tenant every observation artifact is stamped with.
+            org_id: entry.org_id.clone(),
         };
 
         // Disjoint borrows: &session (shared) + &mut ctx (exclusive).
@@ -1043,6 +1046,9 @@ mod enabled {
             artifacts: Some(state.artifacts.clone()),
             events: Some(state.event_sink.clone()),
             visual_processor: state.visual_processor.clone(),
+            // The run's org (already checked against `claims.org_id` above) is
+            // the tenant every observation artifact is stamped with.
+            org_id: entry.org_id.clone(),
         };
         let entry_mut: &mut RunEntry = &mut entry;
         runner

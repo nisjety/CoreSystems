@@ -1195,25 +1195,49 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn artifact_route_returns_stored_bytes() {
-        let calls = Arc::new(AtomicU32::new(0));
-        let static_driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, b"unused"));
-        let drivers = DriverRegistry::new(DriverKind::Static);
-        let artifacts = Arc::new(InMemoryStore::new());
-        let handle = artifacts
+    fn claims_for_org(org_id: &str) -> crate::auth::Claims {
+        crate::auth::Claims {
+            sub: "u1".into(),
+            iss: "auth-core".into(),
+            exp: i64::MAX,
+            org_id: org_id.into(),
+            user_id: "u1".into(),
+            principal_type: None,
+            service_id: None,
+            nbf: None,
+            aud: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    async fn stored_screenshot(
+        artifacts: &InMemoryStore,
+        org_id: &str,
+    ) -> quarry_runtime::artifact_store::ArtifactHandle {
+        artifacts
             .put(
+                org_id,
                 &RunKind::new(),
                 "blake3:browser-frame",
                 "screenshot",
                 b"png bytes".to_vec(),
             )
             .await
-            .expect("stored artifact");
+            .expect("stored artifact")
+    }
+
+    #[tokio::test]
+    async fn artifact_route_returns_stored_bytes() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let static_driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, b"unused"));
+        let drivers = DriverRegistry::new(DriverKind::Static);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let handle = stored_screenshot(&artifacts, "org_alpha").await;
         let state = test_state_with_artifacts(static_driver, drivers, None, artifacts);
 
         let response = crate::resource_routes::get_artifact(
             State(state),
+            Extension(claims_for_org("org_alpha")),
             axum::extract::Path(handle.artifact_id.to_string()),
         )
         .await;
@@ -1230,6 +1254,31 @@ mod tests {
             .await
             .expect("response body");
         assert_eq!(&body[..], b"png bytes");
+    }
+
+    #[tokio::test]
+    async fn artifact_route_refuses_another_tenants_artifact_id() {
+        // Artifact ids are ULIDs, but obscurity is not isolation: a caller that
+        // learns an id from another org must still get nothing back.
+        let calls = Arc::new(AtomicU32::new(0));
+        let static_driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, b"unused"));
+        let drivers = DriverRegistry::new(DriverKind::Static);
+        let artifacts = Arc::new(InMemoryStore::new());
+        let handle = stored_screenshot(&artifacts, "org_alpha").await;
+        let state = test_state_with_artifacts(static_driver, drivers, None, artifacts);
+
+        let response = crate::resource_routes::get_artifact(
+            State(state),
+            Extension(claims_for_org("org_beta")),
+            axum::extract::Path(handle.artifact_id.to_string()),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "cross-tenant read must not serve bytes, and must not confirm the id exists"
+        );
     }
 
     #[tokio::test]

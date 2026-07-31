@@ -463,6 +463,21 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
         "/v1/scrape" => claims.has_scope("scrape:read") || claims.has_scope("scrape:write"),
         "/v1/search" => claims.has_scope("search:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
+        // Reading one artifact by id is part of the scrape/agent contract, not a
+        // separate capability: `/v1/scrape` answers with
+        // `FormatRef{artifact_id,bytes}` and never inline page text, and agent
+        // observations hand back screenshot/trace ids. A principal allowed to
+        // produce those refs but not to resolve them can only ever see empty
+        // content. The bytes stay tenant-bound in `get_artifact`, which matches
+        // the artifact's stored org against this claim.
+        //
+        // The `/v1/artifacts` *list* route is deliberately not included — no
+        // service integration enumerates artifacts.
+        _ if path.starts_with("/v1/artifacts/") => {
+            claims.has_scope("scrape:read")
+                || claims.has_scope("scrape:write")
+                || claims.has_scope("browser:execute")
+        }
         _ if path.starts_with("/v1/agent/") => claims.has_scope("browser:execute"),
         _ => false,
     };
@@ -613,8 +628,64 @@ mod tests {
             .route("/v1/search", get(ok_handler))
             .route("/v1/extract", get(ok_handler))
             .route("/v1/other", get(ok_handler))
+            .route("/v1/artifacts", get(ok_handler))
+            .route("/v1/artifacts/:id", get(ok_handler))
             .layer(middleware::from_fn(require_service_route_scope))
             .layer(Extension(claims))
+    }
+
+    fn service_claims(scopes: &[&str]) -> Claims {
+        Claims {
+            sub: "service:model-gateway".into(),
+            iss: "auth-core".into(),
+            exp: i64::MAX,
+            org_id: "alpha".into(),
+            user_id: "service:model-gateway".into(),
+            principal_type: Some("service".into()),
+            service_id: Some("service:model-gateway".into()),
+            nbf: None,
+            aud: Some("quarry".into()),
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    async fn status_for(claims: Claims, path: &str) -> StatusCode {
+        let request = HttpRequest::builder()
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        tower::ServiceExt::oneshot(scoped_router(claims), request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn scrape_scoped_service_can_resolve_the_artifact_its_scrape_returned() {
+        // `/v1/scrape` answers with `FormatRef{artifact_id,bytes}` and no inline
+        // text, so denying the by-id read made every service fetch resolve to
+        // empty content.
+        for scope in ["scrape:read", "scrape:write", "browser:execute"] {
+            assert_eq!(
+                status_for(service_claims(&[scope]), "/v1/artifacts/art_01ABC").await,
+                StatusCode::OK,
+                "{scope} must be able to read an artifact by id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_read_stays_closed_without_a_producing_scope() {
+        assert_eq!(
+            status_for(service_claims(&["search:read"]), "/v1/artifacts/art_01ABC").await,
+            StatusCode::FORBIDDEN
+        );
+        // Enumerating artifacts is not part of any service integration, so the
+        // collection route stays closed even for a scrape principal.
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/artifacts").await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
