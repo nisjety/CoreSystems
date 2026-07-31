@@ -12,13 +12,19 @@ import (
 
 // fakeSessionClient satisfies reviewSessionClient (transcript reader + skill
 // writer). fakeInfClient satisfies reviewInferenceClient.
+//
+// transcriptReads counts conversation reads so a test can assert that a
+// no-retention run is refused BEFORE any content is read, not merely that
+// nothing was persisted afterwards.
 type fakeSessionClient struct {
-	convo   *mpv1.ListConversationResponse
-	skills  *mpv1.ListAgentSkillsResponse
-	upserts []*mpv1.UpsertAgentSkillRequest
+	convo           *mpv1.ListConversationResponse
+	skills          *mpv1.ListAgentSkillsResponse
+	upserts         []*mpv1.UpsertAgentSkillRequest
+	transcriptReads int
 }
 
 func (f *fakeSessionClient) ListConversation(_ context.Context, _ *mpv1.ListConversationRequest, _ ...grpc.CallOption) (*mpv1.ListConversationResponse, error) {
+	f.transcriptReads++
 	return f.convo, nil
 }
 
@@ -37,7 +43,23 @@ func (f *fakeInfClient) Infer(_ context.Context, _ *mpv1.InferRequest, _ ...grpc
 	return &mpv1.InferResponse{Content: f.content}, nil
 }
 
+// envBytes builds a retainable (`zdr: false`) envelope — the only posture that
+// permits a review. Retention must be stated explicitly because absence fails
+// closed; see [RetentionPosture].
 func envBytes(t *testing.T, eventType, resourceRef, org, payload string) []byte {
+	t.Helper()
+	retainable := false
+	return envBytesWithRetention(t, eventType, resourceRef, org, payload, &retainable)
+}
+
+// envBytesWithRetention builds an envelope carrying an explicit `zdr` flag, or
+// none at all when zdr is nil.
+//
+// The flag is injected into the marshalled JSON rather than set on a struct
+// field because pkg/envelope.Envelope HAS no `zdr` field — the very gap that
+// makes this gate necessary. Injecting it reproduces what a producer at parity
+// with the proto `Event` (field 13) and the Rust envelope would put on the wire.
+func envBytesWithRetention(t *testing.T, eventType, resourceRef, org, payload string, zdr *bool) []byte {
 	t.Helper()
 	if payload == "" {
 		payload = "{}" // empty RawMessage is invalid JSON
@@ -51,7 +73,23 @@ func envBytes(t *testing.T, eventType, resourceRef, org, payload string) []byte 
 	if err != nil {
 		t.Fatalf("marshal envelope: %v", err)
 	}
-	return b
+	if zdr == nil {
+		return b
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("unmarshal envelope for zdr injection: %v", err)
+	}
+	if *zdr {
+		fields["zdr"] = json.RawMessage("true")
+	} else {
+		fields["zdr"] = json.RawMessage("false")
+	}
+	withZDR, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal envelope with zdr: %v", err)
+	}
+	return withZDR
 }
 
 func TestRunCompletedSubjectIsLimitedToCanonicalRunEvents(t *testing.T) {
@@ -106,5 +144,74 @@ func TestHandleRunCompleted_BadEnvelopeErrors(t *testing.T) {
 		&fakeSessionClient{}, &fakeInfClient{}, "m")
 	if err == nil {
 		t.Fatal("an undecodable envelope must error")
+	}
+}
+
+// A run that does not explicitly permit retention must be refused BEFORE the
+// transcript is read. Asserting zero reads (not merely zero upserts) is the
+// point: a skill distilled from a no-retention conversation is the exact leak
+// the platform's ZDR-propagation rule exists to prevent, and reading the content
+// at all already crosses the boundary.
+func TestHandleRunCompleted_RefusesRunWithoutRetentionPermission(t *testing.T) {
+	zdrTrue := true
+	for _, tc := range []struct {
+		name string
+		zdr  *bool
+	}{
+		{name: "explicit zero data retention", zdr: &zdrTrue},
+		// Absent `zdr` fails closed: the Go publish path neither stamps the flag
+		// nor suppresses ZDR envelopes, so absence asserts nothing.
+		{name: "retention posture unspecified", zdr: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := &fakeSessionClient{
+				convo: &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{
+					{Role: "user", Content: "must-not-be-read"},
+				}},
+				skills: &mpv1.ListAgentSkillsResponse{},
+			}
+			ic := &fakeInfClient{content: `{"skills":[{"name":"Leaked","content":"x","confidence":0.9}]}`}
+
+			data := envBytesWithRetention(t, "RUN_COMPLETED", "run/r-1", "org-7",
+				`{"thread_id":"t-1"}`, tc.zdr)
+			n, err := HandleRunCompleted(context.Background(), data, sc, ic, "test-model")
+			if err != nil {
+				t.Fatalf("a skipped run is not a failure, got error: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("persisted %d skills from a run that does not permit retention", n)
+			}
+			if sc.transcriptReads != 0 {
+				t.Fatalf("transcript was read %d time(s); a no-retention run must be refused before any read",
+					sc.transcriptReads)
+			}
+			if len(sc.upserts) != 0 {
+				t.Fatalf("wrote %d skill(s) derived from a no-retention run", len(sc.upserts))
+			}
+		})
+	}
+}
+
+func TestParseRetentionPostureDistinguishesAbsentFromFalse(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		raw   string
+		want  RetentionPosture
+		allow bool
+	}{
+		{name: "absent", raw: `{"event_type":"RUN_COMPLETED"}`, want: RetentionUnspecified, allow: false},
+		{name: "true", raw: `{"zdr":true}`, want: RetentionZeroData, allow: false},
+		{name: "false", raw: `{"zdr":false}`, want: RetentionDurable, allow: true},
+		{name: "undecodable", raw: `not json`, want: RetentionUnspecified, allow: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseRetentionPosture([]byte(tc.raw))
+			if got != tc.want {
+				t.Fatalf("posture = %v (%s), want %v (%s)", got, got, tc.want, tc.want)
+			}
+			if got.AllowsDerivedPersistence() != tc.allow {
+				t.Fatalf("AllowsDerivedPersistence() = %v, want %v", !tc.allow, tc.allow)
+			}
+		})
 	}
 }
