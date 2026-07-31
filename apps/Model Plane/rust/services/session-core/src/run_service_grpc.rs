@@ -27,13 +27,14 @@ use sqlx::PgPool;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
-use crate::auth::{authorize_operation, identity, VerifiedIdentity};
+use crate::auth::{authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity};
 use crate::orchestration_grpc::json_to_struct;
 
 async fn authorize_run_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     run_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
@@ -42,17 +43,14 @@ async fn authorize_run_owner(
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
-    caller.authorize_org(&org_id)?;
-    if !caller.is_service() {
-        caller.authorize_user(&user_id)?;
-    }
-    Ok(())
+    authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
 async fn authorize_thread_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     thread_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
@@ -61,11 +59,7 @@ async fn authorize_thread_owner(
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
-    caller.authorize_org(&org_id)?;
-    if !caller.is_service() {
-        caller.authorize_user(&user_id)?;
-    }
-    Ok(())
+    authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
 /// Hard cap on `ListRuns.limit` so a hostile or buggy caller cannot ask for an
@@ -212,7 +206,7 @@ impl RunService for RunServiceImpl {
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
 
             let row: Option<RunRow> = sqlx::query_as(&format!("{RUN_SELECT} WHERE r.id = $1"))
                 .bind(&req.run_id)
@@ -229,6 +223,67 @@ impl RunService for RunServiceImpl {
         result
     }
 
+    /// Org-scoped listing of runs with no human owner.
+    ///
+    /// `list_runs` is thread-scoped, and a system run lives in a thread its own
+    /// workload owns, so no person's thread listing can reach it — the run would
+    /// exist and be fully authorized yet be unreachable by construction. This is
+    /// the only way to see them.
+    ///
+    /// Read-only by design. The owner set is bound from the same constant the
+    /// authorization predicate reads (`auth::system_run_owners`), not a `LIKE
+    /// 'service:%'` pattern, so a row this query returns is exactly a row
+    /// [`authorize_owner_row`] would admit for reading.
+    async fn list_system_runs(
+        &self,
+        request: Request<pb::ListSystemRunsRequest>,
+    ) -> Result<Response<pb::ListRunsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ListRunsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            // The org boundary is absolute here exactly as everywhere else: a
+            // system run is org-readable, never cross-org readable.
+            caller.authorize_org(&req.org_id)?;
+
+            let limit = clamp_limit(req.limit);
+            let fetch = limit + 1;
+
+            let owners: Vec<String> = crate::auth::system_run_owners()
+                .iter()
+                .map(|owner| (*owner).to_owned())
+                .collect();
+
+            let mut query = format!("{RUN_SELECT} WHERE r.org_id = $1");
+            query.push_str(" AND r.user_id = ANY($2)");
+            query.push_str(" AND ($3 = '' OR r.status = $3)");
+            query.push_str(" AND ($4 = '' OR r.id < $4)");
+            query.push_str(" ORDER BY r.id DESC LIMIT $5");
+
+            let rows: Vec<RunRow> = sqlx::query_as(&query)
+                .bind(&req.org_id)
+                .bind(&owners)
+                .bind(&req.status_filter)
+                .bind(&req.after_run_id)
+                .bind(fetch)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
+            let runs: Vec<pb::RunDetail> = rows
+                .into_iter()
+                .take(usize::try_from(limit).unwrap_or(usize::MAX))
+                .map(row_to_detail)
+                .collect();
+            Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
+        }
+        .await;
+        record_metrics("list_system_runs", started, result.is_ok());
+        result
+    }
+
     async fn list_runs(
         &self,
         request: Request<pb::ListRunsRequest>,
@@ -241,7 +296,7 @@ impl RunService for RunServiceImpl {
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
 
             let limit = clamp_limit(req.limit);
             // Fetch one extra row to compute `has_more` without a second query.
@@ -290,7 +345,7 @@ impl RunService for RunServiceImpl {
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
 
             // Read the current status to reject a re-cancel of a terminal run
             // before flipping it. A missing run is a 404.

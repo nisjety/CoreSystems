@@ -168,6 +168,17 @@ message StartRunResponse {
 
   // Creation timestamp.
   google.protobuf.Timestamp created_at = 2;
+
+  // The owner session-core actually persisted, which is ALWAYS the verified
+  // caller's own identity and never the requested `user_id`. For a human it is
+  // their actor id; for a durable workflow with no human it is that workload's
+  // service principal.
+  //
+  // Echoed so the caller can stamp the same actor on the run's lifecycle
+  // envelopes. Without it a system-initiated run carries one actor string in
+  // `runs.user_id` and a different, locally-invented one on its NATS events,
+  // and nothing downstream can join the two.
+  string owner_id = 3;
 }
 
 // --- Managed run terminalization ---

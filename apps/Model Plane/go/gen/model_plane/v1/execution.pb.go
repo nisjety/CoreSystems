@@ -169,8 +169,14 @@ type RunAgentResponse struct {
 	FinalOutput string `protobuf:"bytes,2,opt,name=final_output,json=finalOutput,proto3" json:"final_output,omitempty"`
 	// Number of agent rounds actually executed.
 	RoundsExecuted uint32 `protobuf:"varint,3,opt,name=rounds_executed,json=roundsExecuted,proto3" json:"rounds_executed,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// HONESTY_CONTRACT: true when at least one knowledge_search call in this
+	// run actually returned org knowledge (status "ok"), so the gateway can
+	// score confidence honestly instead of assuming ungrounded. False for
+	// "awaiting_approval" (run not finished) and when no knowledge_search
+	// call succeeded with real results.
+	Grounded      bool `protobuf:"varint,4,opt,name=grounded,proto3" json:"grounded,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunAgentResponse) Reset() {
@@ -222,6 +228,13 @@ func (x *RunAgentResponse) GetRoundsExecuted() uint32 {
 		return x.RoundsExecuted
 	}
 	return 0
+}
+
+func (x *RunAgentResponse) GetGrounded() bool {
+	if x != nil {
+		return x.Grounded
+	}
+	return false
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.
@@ -675,11 +688,12 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"max_rounds\x18\b \x01(\rR\tmaxRounds\x12\x10\n" +
 	"\x03zdr\x18\t \x01(\bR\x03zdr\x124\n" +
 	"\x05tools\x18\n" +
-	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\"v\n" +
+	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\"\x92\x01\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
-	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\"\x8e\x02\n" +
+	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\x12\x1a\n" +
+	"\bgrounded\x18\x04 \x01(\bR\bgrounded\"\x8e\x02\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +

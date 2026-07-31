@@ -202,6 +202,15 @@ func (a *Activities) RecordFeedback(ctx context.Context, r feedback.Rating) erro
 // SystemActorID is the reserved actor stamped on a lifecycle envelope for a run
 // that has no human behind it — a cron-fired task, a maintenance sweep.
 //
+// The value is orchestrator-core's own service-principal subject because that is
+// what session-core persists into `runs.user_id` for a run this service owns (see
+// its `SYSTEM_RUN_OWNERS`). Any other spelling — a `system:` sentinel, say —
+// would put one actor string on the row and a different one on the run's events,
+// leaving nothing able to join the two.
+//
+// It remains a pre-run FALLBACK only: once StartRun answers, the owner it echoes
+// is authoritative and is what gets stamped.
+//
 // envelope.Validate() requires user_id, and Encode is never reached when it
 // fails, so before this constant existed EVERY system-initiated run silently
 // dropped its RUN_COMPLETED / RUN_FAILED envelope: the publish failed
@@ -209,7 +218,7 @@ func (a *Activities) RecordFeedback(ctx context.Context, r feedback.Rating) erro
 // consumer, which subscribes to exactly those events, could therefore never see
 // one. The colon makes the value unmistakably non-human: Auth Core actor ids are
 // base62, so this can never collide with a real user.
-const SystemActorID = "system:orchestrator-core"
+const SystemActorID = "service:orchestrator-core"
 
 // publishRunEvent emits one run-lifecycle envelope.
 //
@@ -322,7 +331,16 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 	if resp.RunId == "" {
 		return fallback, nil
 	}
-	return RunMetadata{RunID: resp.RunId, ThreadID: threadID, OrgID: orgID, UserID: userID, StartedAt: time.Now().UTC()}, nil
+	// Prefer the owner session-core actually persisted over the one we asked for.
+	// They differ for exactly the case this exists to support: a run with no human
+	// behind it is owned by this service's own principal, and stamping the
+	// requested (empty) user instead would make the run's lifecycle events
+	// unjoinable to its row.
+	owner := resp.OwnerId
+	if strings.TrimSpace(owner) == "" {
+		owner = userID
+	}
+	return RunMetadata{RunID: resp.RunId, ThreadID: threadID, OrgID: orgID, UserID: owner, StartedAt: time.Now().UTC()}, nil
 }
 
 // ── Activity 2: ExecuteStepLoopActivity + ExecuteStepActivity ────────────────

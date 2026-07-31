@@ -19,6 +19,16 @@ service RunService {
   // Cancel a running or queued run.
   rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
 
+  // ListSystemRuns — org-scoped listing of runs with no human owner.
+  //
+  // ListRuns is thread-scoped, and a run created by a durable workflow lives in
+  // a thread that same workflow owns, so no person's thread listing can ever
+  // reach it. Without this RPC a system-initiated run is unreachable by
+  // construction even when fully authorized. Read-only: system runs are
+  // org-readable (their content is by construction the org-visible set) but
+  // mutable only by the workload that owns them.
+  rpc ListSystemRuns(ListSystemRunsRequest) returns (ListRunsResponse);
+
   // ResolveRunOwner — authoritative tenant/user ownership check for internal
   // execution mutations. Returns only a boolean to avoid disclosing another
   // tenant's run metadata.
@@ -50,6 +60,21 @@ message ListRunsResponse {
 
   // True if more results exist.
   bool has_more = 2;
+}
+
+message ListSystemRunsRequest {
+  // Tenant to list within. Must equal the verified caller's organization; the
+  // org boundary is never relaxed for system runs.
+  string org_id = 1;
+
+  // Filter by status (empty = all).
+  string status_filter = 2;
+
+  // Pagination cursor (ULID of last seen run).
+  string after_run_id = 3;
+
+  // Maximum results.
+  uint32 limit = 4;
 }
 
 message CancelRunRequest {

@@ -489,7 +489,17 @@ type StartRunResponse struct {
 	// Newly created run identifier (ULID).
 	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// Creation timestamp.
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// The owner session-core actually persisted, which is ALWAYS the verified
+	// caller's own identity and never the requested `user_id`. For a human it is
+	// their actor id; for a durable workflow with no human it is that workload's
+	// service principal.
+	//
+	// Echoed so the caller can stamp the same actor on the run's lifecycle
+	// envelopes. Without it a system-initiated run carries one actor string in
+	// `runs.user_id` and a different, locally-invented one on its NATS events,
+	// and nothing downstream can join the two.
+	OwnerId       string `protobuf:"bytes,3,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -536,6 +546,13 @@ func (x *StartRunResponse) GetCreatedAt() *timestamppb.Timestamp {
 		return x.CreatedAt
 	}
 	return nil
+}
+
+func (x *StartRunResponse) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
 }
 
 // Starts a run and its durable terminalization obligation in one transaction.
@@ -2762,11 +2779,12 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x04goal\x18\x04 \x01(\tR\x04goal\x12\x12\n" +
 	"\x04mode\x18\x05 \x01(\tR\x04mode\x12\x15\n" +
 	"\x06org_id\x18\x06 \x01(\tR\x05orgId\x12\x17\n" +
-	"\auser_id\x18\a \x01(\tR\x06userId\"d\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\"\x7f\n" +
 	"\x10StartRunResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x129\n" +
 	"\n" +
-	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xb4\x02\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x19\n" +
+	"\bowner_id\x18\x03 \x01(\tR\aownerId\"\xb4\x02\n" +
 	"\x16StartManagedRunRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\"\n" +
 	"\rparent_run_id\x18\x02 \x01(\tR\vparentRunId\x12\x19\n" +

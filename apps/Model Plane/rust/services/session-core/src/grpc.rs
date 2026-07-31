@@ -29,7 +29,8 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{
-    authorize_operation, identity, DelegatedDataPlaneBearer, JwtVerifier, VerifiedIdentity,
+    authorize_operation, authorize_owner_row, authorize_system_run_owner, identity,
+    DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
     DATA_PLANE_AUTH_METADATA_KEY,
 };
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
@@ -232,23 +233,11 @@ fn authorize_dataplane<T>(
     Ok(request)
 }
 
-#[allow(clippy::result_large_err)]
-fn authorize_owner_row(
-    caller: &VerifiedIdentity,
-    org_id: &str,
-    user_id: &str,
-) -> Result<(), Status> {
-    caller.authorize_org(org_id)?;
-    if !caller.is_service() {
-        caller.authorize_user(user_id)?;
-    }
-    Ok(())
-}
-
 async fn authorize_thread_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     thread_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
@@ -257,13 +246,74 @@ async fn authorize_thread_owner(
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id)
+    authorize_owner_row(caller, &org_id, &user_id, intent)
+}
+
+/// Require that `thread_id` is owned by EXACTLY `owner` in the caller's org.
+///
+/// [`authorize_owner_row`] is org-only for a service caller, which is right for
+/// the ordinary service paths but too weak when a service is about to create a
+/// row it will own: without this, any allowlisted workload could start a system
+/// run inside an unrelated person's thread, and that thread's conversation would
+/// then be feeding a run nobody in the UI can see.
+#[allow(clippy::result_large_err)]
+async fn authorize_thread_owner_exact(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    thread_id: &str,
+    owner: &str,
+) -> Result<(), Status> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = row.ok_or_else(|| Status::not_found("thread not found"))?;
+    caller.authorize_org(&org_id)?;
+    if user_id != owner {
+        return Err(Status::permission_denied(
+            "a system-owned run requires a thread owned by the same principal",
+        ));
+    }
+    Ok(())
+}
+
+/// Require that a non-empty `parent_run_id` names a run owned by exactly `owner`.
+///
+/// `start_run_inner` binds the parent through `NULLIF($3, '')` with no ownership
+/// check of its own, so this is the only thing standing between a system run and
+/// a person's run tree.
+#[allow(clippy::result_large_err)]
+async fn authorize_parent_run_owner_exact(
+    pool: &PgPool,
+    parent_run_id: &str,
+    org_id: &str,
+    owner: &str,
+) -> Result<(), Status> {
+    if parent_run_id.trim().is_empty() {
+        return Ok(());
+    }
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
+            .bind(parent_run_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (parent_org, parent_owner) = row.ok_or_else(|| Status::not_found("run not found"))?;
+    if parent_org != org_id || parent_owner != owner {
+        return Err(Status::permission_denied(
+            "a system-owned run cannot be attached to another principal's run",
+        ));
+    }
+    Ok(())
 }
 
 async fn authorize_run_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     run_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
@@ -272,7 +322,7 @@ async fn authorize_run_owner(
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id)
+    authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
 /// Insert the `THREAD_CREATED` event row for a freshly created thread, within
@@ -612,6 +662,10 @@ async fn start_run_inner(
             seconds: now.timestamp(),
             nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
         }),
+        // The owner actually persisted, which the caller overwrote with the
+        // verified identity before reaching here. Echoed so a durable workflow
+        // stamps its lifecycle envelopes with the same actor the row carries.
+        owner_id: req.user_id,
     }))
 }
 
@@ -1733,10 +1787,15 @@ impl SessionCore for SessionService {
             authorize_operation(&caller, "session:write")?;
             let mut req = request.into_inner();
             caller.authorize_org(&req.org_id)?;
-            let user_id = caller.user_id().ok_or_else(|| {
-                Status::permission_denied("user-bound thread credential required")
-            })?;
-            req.user_id = user_id.to_owned();
+            // A system run needs a thread and no human can create it for the
+            // workflow (`runs.thread_id` is NOT NULL REFERENCES threads(id)), so
+            // the same allowlisted principals may own a thread. The scope is
+            // shared with start_run: the thread exists only to hold the run.
+            let user_id = match caller.user_id() {
+                Some(user_id) => user_id.to_owned(),
+                None => authorize_system_run_owner(&caller)?,
+            };
+            req.user_id = user_id;
             create_thread_inner(&self.pool, req).await
         }
         .await;
@@ -1753,7 +1812,7 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
             append_message_inner(
                 &self.pool,
                 self.letta_memory.as_ref(),
@@ -1774,14 +1833,43 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
+            // Stays FIRST and keeps this exact scope argument: it is what keeps a
+            // ZDR credential out of a durable write, and a run row is durable by
+            // definition.
             authorize_operation(&caller, "session:write")?;
             let mut req = request.into_inner();
             caller.authorize_org(&req.org_id)?;
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
-            let user_id = caller
-                .user_id()
-                .ok_or_else(|| Status::permission_denied("user-bound run credential required"))?;
-            req.user_id = user_id.to_owned();
+            // A run is normally owned by the person who asked for it. A durable
+            // workflow fired by cron has no person — a Temporal activity can only
+            // present a service credential, and auth-core mints no user
+            // delegation — so an allowlisted service may own the run itself.
+            let owner = match caller.user_id() {
+                Some(user_id) => {
+                    authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                        .await?;
+                    user_id.to_owned()
+                }
+                None => {
+                    let owner = authorize_system_run_owner(&caller)?;
+                    // Deliberately STRICTER than authorize_thread_owner, which is
+                    // org-only for a service caller and would otherwise let an
+                    // allowlisted workload park a system run inside a human's
+                    // thread.
+                    authorize_thread_owner_exact(&self.pool, &caller, &req.thread_id, &owner)
+                        .await?;
+                    // Same reasoning one level up the tree: without this a system
+                    // run could be grafted onto a person's run as a child.
+                    authorize_parent_run_owner_exact(
+                        &self.pool,
+                        &req.parent_run_id,
+                        &req.org_id,
+                        &owner,
+                    )
+                    .await?;
+                    owner
+                }
+            };
+            req.user_id = owner;
             start_run_inner(&self.pool, req).await
         }
         .await;
@@ -1798,7 +1886,7 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             complete_step_inner(&self.pool, self.audit_publisher.as_deref(), req).await
         }
         .await;
@@ -1815,7 +1903,7 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             reserve_tool_action_inner(&self.pool, self.audit_publisher.as_deref(), req).await
         }
         .await;
@@ -1832,7 +1920,7 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             finalize_tool_action_inner(&self.pool, self.audit_publisher.as_deref(), req).await
         }
         .await;
@@ -1850,7 +1938,7 @@ impl SessionCore for SessionService {
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
             validate_user_checkpoint(&req.checkpoint_id, &req.state)?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             let now = Utc::now();
 
             let mut tx = self
@@ -1928,7 +2016,7 @@ impl SessionCore for SessionService {
         let caller = identity(&request)?;
         authorize_operation(&caller, "session:read")?;
         let req = request.into_inner();
-        authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+        authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
         let pool = self.pool.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -2074,7 +2162,7 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("run_id and org_id are required"));
             }
             caller.authorize_org(&req.org_id)?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             let mode = match req.mode.as_str() {
                 "execute" | "plan" | "reactive" | "research" => req.mode.as_str(),
                 other => {
@@ -2196,7 +2284,7 @@ impl SessionCore for SessionService {
                 ));
             }
             caller.authorize_org(&req.org_id)?;
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
             let rows: Vec<(String, String)> = sqlx::query_as(
                 "SELECT m.role, m.content
                  FROM messages m
@@ -2327,8 +2415,8 @@ impl SessionCore for SessionService {
             // its metadata) is still intact.
             let dataplane_bearer = self.delegated_dataplane_bearer(&request, &caller)?;
             let req = request.into_inner();
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             get_context_assembly_inner(
                 self,
                 req,
@@ -2364,7 +2452,7 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             // content remains exclusively in the live gateway request path.
             if !caller.zdr() {
                 authorize_operation(&caller, "session:write")?;
-                authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+                authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
             }
             terminalization::start_managed_run_inner(&self.pool, req, caller.zdr())
                 .await
@@ -2387,7 +2475,7 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             terminalization::authorize_terminalization_source(&caller, source)?;
             // The outbox deliberately carries no caller-controlled tenant
             // fields; bind the service token to the durable run owner instead.
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             terminalization::record_terminal_outcome_inner(&self.pool, req)
                 .await
                 .map(|receipt| Response::new(receipt.into_proto()))
@@ -2407,7 +2495,7 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             let req = request.into_inner();
             let source = terminalization::source_from_wire(req.source)?;
             terminalization::authorize_heartbeat_source(&caller, source)?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             terminalization::heartbeat_managed_run_inner(&self.pool, req)
                 .await
                 .map(|heartbeat| Response::new(heartbeat.into_proto()))

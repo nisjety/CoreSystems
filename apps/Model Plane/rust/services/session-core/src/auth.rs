@@ -208,6 +208,158 @@ pub fn authorize_operation(caller: &VerifiedIdentity, service_scope: &str) -> Re
     }
 }
 
+/// Scope a service principal must additionally hold to create a run it owns
+/// itself, on top of the ordinary `session:write`.
+///
+/// It is separate from `session:write` on purpose. Every workload that writes
+/// sessions already holds `session:write`; owning a run is a strictly larger
+/// power (the row is then readable org-wide and mutable only by that workload),
+/// so it must be grantable independently in the service-principal registry.
+pub const SYSTEM_RUN_OWNER_SCOPE: &str = "session:runs:system-owner";
+
+/// The closed set of principals allowed to own a run with no human behind it.
+///
+/// A run row is normally owned by a person. A durable workflow fired by cron has
+/// no person: `orchestrator-core`'s Temporal activities hold only a service
+/// credential, and auth-core mints no user delegation (`issueInternalToken` sets
+/// `userId: principal.subject`), so before this existed every system-initiated
+/// run failed at `start_run`'s last gate.
+///
+/// # Why an allowlist and not a prefix test
+///
+/// `runs.user_id` is bare `TEXT NOT NULL` — no FK, no CHECK, no width. A
+/// predicate like `starts_with("service:")` would make every present and future
+/// value in that namespace a system-owned row, and the read allowance below
+/// would follow it automatically. Exact membership in this constant means
+/// appearing in `PLANE_SERVICE_PRINCIPALS_JSON` is NOT sufficient to own runs: a
+/// reviewed change to this file is also required.
+///
+/// # Why these ids and not a `system:` sentinel
+///
+/// The value is the caller's own signed `service_id` claim, so it is a fact the
+/// issuer asserted rather than a literal this code chose. That matters because
+/// [`authorize_owner_row`] lets ANY service pass the user check for a row inside
+/// its org: with one shared sentinel, every workload holding the scope could
+/// create runs indistinguishable from orchestrator-core's and then read and
+/// drive them. Deriving the owner from the credential makes that lateral move
+/// structurally impossible instead of policy-prevented — `capability-core`'s
+/// token can only ever produce `service:capability-core`. It also matches the
+/// spelling session-core already uses for non-human actors (see
+/// `terminalization.rs`'s `service:model-gateway` / `service:execution-core`).
+const SYSTEM_RUN_OWNERS: [&str; 1] = ["service:orchestrator-core"];
+
+/// Whether `user_id` names a principal from [`SYSTEM_RUN_OWNERS`].
+///
+/// Exact byte equality. No trimming, no case folding, no prefix match: a
+/// look-alike such as `"service:orchestrator-core-2"` or a trailing space must
+/// NOT be treated as a system owner, and Auth Core actor ids are base62 so a
+/// real person's id can never contain the `:` these values do.
+#[must_use]
+pub fn is_system_run_owner(user_id: &str) -> bool {
+    SYSTEM_RUN_OWNERS.contains(&user_id)
+}
+
+/// The system-run owner ids, for binding into SQL as `= ANY($n::text[])`.
+///
+/// Exposed so the org-scoped listing query reads the same constant the
+/// authorization code does, rather than re-encoding the set as a LIKE pattern.
+#[must_use]
+pub fn system_run_owners() -> &'static [&'static str] {
+    &SYSTEM_RUN_OWNERS
+}
+
+/// What a caller intends to do with a row whose owner is being checked.
+///
+/// The two intents differ ONLY for system-owned rows. A system run's content is
+/// by construction the org-visible set — orchestrator-core refuses to thread a
+/// `user_id` for a service principal precisely because that id narrows retrieval
+/// to one viewer's visible set — so org-wide readability discloses nothing that
+/// org membership did not already grant. Mutating one is different: it is an
+/// action on a workload's in-flight run, and only that workload may take it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerIntent {
+    /// Observe the row (get, list, stream events, read plans/todos/approvals).
+    Read,
+    /// Change the row or anything hanging off it (cancel, complete, set mode,
+    /// checkpoint, reserve a tool action).
+    Mutate,
+}
+
+/// The single ownership predicate for every owner-gated row in session-core.
+///
+/// Org equality is absolute and checked first on every path — no branch below
+/// relaxes it.
+///
+/// For a NON-system row the behaviour is unchanged: a human must match the row's
+/// user exactly, and a service caller skips that check (pre-existing, relied on
+/// by `RecordTerminalOutcome`).
+///
+/// For a system-owned row:
+///   * [`OwnerIntent::Read`] → org equality only.
+///   * [`OwnerIntent::Mutate`] → the caller must BE the owning workload. A human
+///     is refused, and so is a different service, which is what stops the read
+///     allowance from becoming a write allowance.
+#[allow(clippy::result_large_err)]
+pub fn authorize_owner_row(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    user_id: &str,
+    intent: OwnerIntent,
+) -> Result<(), Status> {
+    caller.authorize_org(org_id)?;
+    if is_system_run_owner(user_id) {
+        return match intent {
+            OwnerIntent::Read => Ok(()),
+            OwnerIntent::Mutate => {
+                if caller.is_service() && caller.principal_id() == user_id {
+                    Ok(())
+                } else {
+                    Err(Status::permission_denied(
+                        "only the owning workload may act on a system-owned run",
+                    ))
+                }
+            }
+        };
+    }
+    if !caller.is_service() {
+        caller.authorize_user(user_id)?;
+    }
+    Ok(())
+}
+
+/// Authorize a service principal to create a run or thread it owns itself.
+///
+/// Returns the owner id to persist. Every condition is required; the caller
+/// still runs `authorize_operation(caller, "session:write")` separately, which is
+/// what keeps a ZDR credential out of a durable write.
+#[allow(clippy::result_large_err)]
+pub fn authorize_system_run_owner(caller: &VerifiedIdentity) -> Result<String, Status> {
+    // Assert the kind explicitly rather than inferring "service" from a missing
+    // user_id: the two are equivalent today only because `validate_identity` has
+    // exactly two arms, and that is not an invariant worth depending on here.
+    if !caller.is_service() {
+        return Err(Status::permission_denied(
+            "user-bound run credential required",
+        ));
+    }
+    // Checked locally as well as via `authorize_operation`'s scope argument, so
+    // the invariant "a system run is durable" does not depend on the argument
+    // string passed to a different function.
+    if caller.zdr() {
+        return Err(Status::failed_precondition(
+            "ZDR credentials cannot own durable runs",
+        ));
+    }
+    caller.require_service_scope(SYSTEM_RUN_OWNER_SCOPE)?;
+    let owner = caller.principal_id();
+    if !is_system_run_owner(owner) {
+        return Err(Status::permission_denied(
+            "this service principal may not own runs",
+        ));
+    }
+    Ok(owner.to_owned())
+}
+
 #[derive(Debug, Deserialize)]
 struct Claims {
     sub: String,
@@ -530,6 +682,7 @@ fn rsa_modulus_bits(modulus: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use tonic::Code;
     use super::*;
     use jsonwebtoken::{encode, EncodingKey, Header};
     use rand::thread_rng;
@@ -828,5 +981,197 @@ mod tests {
             .get::<VerifiedIdentity>()
             .expect("identity")
             .zdr());
+    }
+
+    // ── System-owned runs ───────────────────────────────────────────────────
+    //
+    // These pin the authorization layer that lets a durable workflow with no
+    // human behind it own a run. Each test names the escalation it prevents.
+
+    const ORCH: &str = "service:orchestrator-core";
+    const BOTH_SCOPES: [&str; 2] = ["session:write", SYSTEM_RUN_OWNER_SCOPE];
+
+    /// R8: the allowlist is exact. A prefix or fuzzy match would make every
+    /// present and future `service:*` value a system owner, and `runs.user_id`
+    /// has no CHECK constraining who may write what shape.
+    #[test]
+    fn owner_allowlist_is_exact_match() {
+        assert!(is_system_run_owner(ORCH));
+        for look_alike in [
+            "service:orchestrator-core ",
+            " service:orchestrator-core",
+            "Service:Orchestrator-Core",
+            "service:orchestrator-core-2",
+            "service:orchestrator",
+            "system:orchestrator-core",
+            "service:orchestrator-core\0",
+            "",
+        ] {
+            assert!(
+                !is_system_run_owner(look_alike),
+                "{look_alike:?} must not be treated as a system owner",
+            );
+        }
+    }
+
+    /// R8, second half: this is what pins the collision argument. Auth Core actor
+    /// ids are base62, so a real person's id can never contain the `:` these
+    /// values do.
+    #[test]
+    fn a_real_auth_core_actor_id_is_never_a_system_owner() {
+        for actor in ["kx7Qa2Zb9Lm4", "MAF5Ey3xL8LwigSZ3ngKfGhUy54MlI2Y", "orchestratorcore"] {
+            assert!(!is_system_run_owner(actor));
+            assert!(!actor.contains(':'), "base62 ids contain no colon");
+        }
+    }
+
+    #[test]
+    fn an_allowlisted_service_with_both_scopes_may_own_a_run() {
+        let caller = VerifiedIdentity::service_for_test_as("org-1", ORCH, &BOTH_SCOPES, false);
+        assert_eq!(
+            authorize_system_run_owner(&caller).expect("allowlisted owner"),
+            ORCH,
+        );
+    }
+
+    /// R3: today's orchestrator-core token holds only `session:write`. Owning a
+    /// run is a strictly larger power than writing sessions, so it must not be
+    /// implied by the scope every session writer already has.
+    #[test]
+    fn system_run_requires_the_system_owner_scope() {
+        let caller =
+            VerifiedIdentity::service_for_test_as("org-1", ORCH, &["session:write"], false);
+        let error = authorize_system_run_owner(&caller).expect_err("must require the scope");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// R2: cross-service impersonation. Another workload holding the very same
+    /// scopes still cannot own runs, because the owner is derived from its own
+    /// signed identity rather than chosen.
+    #[test]
+    fn system_run_owner_must_be_allowlisted() {
+        let caller = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:capability-core",
+            &BOTH_SCOPES,
+            false,
+        );
+        let error = authorize_system_run_owner(&caller).expect_err("not allowlisted");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// R4: a run row is durable, so a Zero Data Retention credential must never
+    /// create one — asserted here as well as transitively via authorize_operation.
+    #[test]
+    fn zdr_service_credential_cannot_own_a_run() {
+        let caller = VerifiedIdentity::service_for_test_as("org-1", ORCH, &BOTH_SCOPES, true);
+        let error = authorize_system_run_owner(&caller).expect_err("ZDR must be refused");
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        // And the pre-existing gate refuses it too, on the write scope.
+        assert_eq!(
+            authorize_operation(&caller, "session:write")
+                .expect_err("ZDR write")
+                .code(),
+            Code::FailedPrecondition,
+        );
+    }
+
+    /// A human never reaches the system branch: the kind is asserted explicitly
+    /// rather than inferred from a missing user_id.
+    #[test]
+    fn a_human_is_not_a_system_run_owner() {
+        let caller = VerifiedIdentity::user_for_test("org-1", "user-1");
+        let error = authorize_system_run_owner(&caller).expect_err("humans use the normal path");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// The read allowance: a system run's content is by construction the
+    /// org-visible set, so anyone in the org may observe it.
+    #[test]
+    fn a_system_owned_row_is_readable_by_anyone_in_the_org() {
+        let human = VerifiedIdentity::user_for_test("org-1", "user-1");
+        authorize_owner_row(&human, "org-1", ORCH, OwnerIntent::Read).expect("org-readable");
+    }
+
+    /// R7: the read allowance must not become a write allowance.
+    #[test]
+    fn humans_cannot_mutate_a_system_owned_row() {
+        let human = VerifiedIdentity::user_for_test("org-1", "user-1");
+        let error = authorize_owner_row(&human, "org-1", ORCH, OwnerIntent::Mutate)
+            .expect_err("humans must not drive a system run");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// R7, second half: only the workload that owns the run may act on it. This
+    /// is what makes the derived owner id matter — a shared sentinel would let
+    /// every service holding the scope mutate every system run.
+    #[test]
+    fn only_the_owning_workload_can_mutate_a_system_owned_row() {
+        let owner = VerifiedIdentity::service_for_test_as("org-1", ORCH, &BOTH_SCOPES, false);
+        authorize_owner_row(&owner, "org-1", ORCH, OwnerIntent::Mutate).expect("owner may mutate");
+
+        let other = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:capability-core",
+            &BOTH_SCOPES,
+            false,
+        );
+        let error = authorize_owner_row(&other, "org-1", ORCH, OwnerIntent::Mutate)
+            .expect_err("a different workload must be refused");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// R6: the org boundary is absolute and is checked before any system branch.
+    #[test]
+    fn system_owned_rows_are_not_readable_across_orgs() {
+        let outsider = VerifiedIdentity::user_for_test("org-2", "user-2");
+        for intent in [OwnerIntent::Read, OwnerIntent::Mutate] {
+            let error = authorize_owner_row(&outsider, "org-1", ORCH, intent)
+                .expect_err("cross-org must be refused");
+            assert_eq!(error.code(), Code::PermissionDenied);
+        }
+        let outside_service = VerifiedIdentity::service_for_test_as("org-2", ORCH, &BOTH_SCOPES, false);
+        let error = authorize_owner_row(&outside_service, "org-1", ORCH, OwnerIntent::Mutate)
+            .expect_err("even the owning workload is org-scoped");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// R8: a look-alike owner gets none of the system treatment — it falls
+    /// through to the ordinary rules, where a human must match it exactly.
+    #[test]
+    fn a_look_alike_owner_gets_no_system_treatment() {
+        let human = VerifiedIdentity::user_for_test("org-1", "user-1");
+        let error = authorize_owner_row(&human, "org-1", "service:orchestrator-core-2", OwnerIntent::Read)
+            .expect_err("not a system row, so the user check applies");
+        assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// Non-system rows keep their existing behaviour exactly, including the
+    /// pre-existing service skip that RecordTerminalOutcome depends on.
+    #[test]
+    fn ordinary_rows_are_unchanged_by_the_system_branch() {
+        let human = VerifiedIdentity::user_for_test("org-1", "user-1");
+        for intent in [OwnerIntent::Read, OwnerIntent::Mutate] {
+            authorize_owner_row(&human, "org-1", "user-1", intent).expect("own row");
+            assert_eq!(
+                authorize_owner_row(&human, "org-1", "user-2", intent)
+                    .expect_err("another person's row")
+                    .code(),
+                Code::PermissionDenied,
+            );
+        }
+        let service = VerifiedIdentity::service_for_test("org-1", &["session:write"], false);
+        authorize_owner_row(&service, "org-1", "user-1", OwnerIntent::Mutate)
+            .expect("pre-existing service skip on ordinary rows");
+    }
+
+    /// The SQL binding source and the authorization predicate must be the same
+    /// set, or the org-scoped listing would show rows the guard does not admit.
+    #[test]
+    fn the_sql_owner_list_matches_the_predicate() {
+        for owner in system_run_owners() {
+            assert!(is_system_run_owner(owner));
+        }
+        assert_eq!(system_run_owners().len(), SYSTEM_RUN_OWNERS.len());
     }
 }

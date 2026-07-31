@@ -28,7 +28,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status};
 use tracing::warn;
 
-use crate::auth::{authorize_operation, identity, VerifiedIdentity};
+use crate::auth::{
+    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
+};
 use crate::orchestration_store as store;
 use crate::store::Pool;
 
@@ -223,22 +225,11 @@ impl Default for ReplayBuffer {
 }
 
 #[allow(clippy::result_large_err)]
-fn authorize_owner_row(
-    caller: &VerifiedIdentity,
-    org_id: &str,
-    user_id: &str,
-) -> Result<(), Status> {
-    caller.authorize_org(org_id)?;
-    if !caller.is_service() {
-        caller.authorize_user(user_id)?;
-    }
-    Ok(())
-}
-
 async fn authorize_run_owner(
     pool: &Pool,
     caller: &VerifiedIdentity,
     run_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
@@ -247,13 +238,14 @@ async fn authorize_run_owner(
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id)
+    authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
 async fn authorize_thread_owner(
     pool: &Pool,
     caller: &VerifiedIdentity,
     thread_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> =
         sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
@@ -262,25 +254,27 @@ async fn authorize_thread_owner(
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id)
+    authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
 async fn authorize_plan_owner(
     pool: &Pool,
     caller: &VerifiedIdentity,
     plan_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let row = store::get_plan(pool, plan_id)
         .await
         .map_err(|error| Status::internal(error.to_string()))?
         .ok_or_else(|| Status::not_found("plan not found"))?;
-    authorize_owner_row(caller, &row.org_id, &row.user_id)
+    authorize_owner_row(caller, &row.org_id, &row.user_id, intent)
 }
 
 async fn authorize_todo_owner(
     pool: &Pool,
     caller: &VerifiedIdentity,
     todo_id: &str,
+    intent: OwnerIntent,
 ) -> Result<(), Status> {
     let owner: Option<(String, String)> = sqlx::query_as(
         "SELECT p.org_id, p.user_id FROM todos t JOIN plans p ON p.id = t.plan_id WHERE t.id = $1",
@@ -290,7 +284,7 @@ async fn authorize_todo_owner(
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("todo not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id)
+    authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
 #[allow(clippy::result_large_err)]
@@ -951,7 +945,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
             let plan_rows = store::list_plans_by_run(&self.pool, &req.run_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -981,7 +975,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.plan_id.is_empty() {
                 return Err(Status::invalid_argument("plan_id is required"));
             }
-            authorize_plan_owner(&self.pool, &caller, &req.plan_id).await?;
+            authorize_plan_owner(&self.pool, &caller, &req.plan_id, OwnerIntent::Read).await?;
             let row = store::get_plan(&self.pool, &req.plan_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -1012,7 +1006,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.plan_id.is_empty() {
                 return Err(Status::invalid_argument("plan_id is required"));
             }
-            authorize_plan_owner(&self.pool, &caller, &req.plan_id).await?;
+            authorize_plan_owner(&self.pool, &caller, &req.plan_id, OwnerIntent::Mutate).await?;
             req.actor = caller.principal_id().to_owned();
             let new_status = plan_state_to_str(req.target_state)
                 .ok_or_else(|| Status::invalid_argument("invalid target_state"))?;
@@ -1073,7 +1067,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
             let rows = store::list_todos_by_thread(&self.pool, &req.thread_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -1107,7 +1101,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.todo_id.is_empty() {
                 return Err(Status::invalid_argument("todo_id is required"));
             }
-            authorize_todo_owner(&self.pool, &caller, &req.todo_id).await?;
+            authorize_todo_owner(&self.pool, &caller, &req.todo_id, OwnerIntent::Read).await?;
             let row = store::get_todo(&self.pool, &req.todo_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -1132,7 +1126,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.todo_id.is_empty() {
                 return Err(Status::invalid_argument("todo_id is required"));
             }
-            authorize_todo_owner(&self.pool, &caller, &req.todo_id).await?;
+            authorize_todo_owner(&self.pool, &caller, &req.todo_id, OwnerIntent::Mutate).await?;
             req.actor = caller.principal_id().to_owned();
             let new_status = todo_state_to_str(req.target_state)
                 .ok_or_else(|| Status::invalid_argument("invalid target_state"))?;
@@ -1193,7 +1187,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             validate_approval_org(&req.org_id)?;
             caller.authorize_org(&req.org_id)?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
             let rows = store::list_approvals_by_run_full_for_org(
                 &self.pool,
                 &req.run_id,
@@ -1288,7 +1282,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 return Err(Status::invalid_argument("run_id is required"));
             }
             pin_create_approval_identity(&caller, &mut req)?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             let kind = approval_kind_to_str(req.kind)
                 .ok_or_else(|| Status::invalid_argument("invalid approval kind"))?;
 
@@ -1629,7 +1623,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
             let lineage = fetch_lineage_for_thread(&self.pool, &req.thread_id)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -1664,9 +1658,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     "parent_run_id and child_run_id are required",
                 ));
             }
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
-            authorize_run_owner(&self.pool, &caller, &req.parent_run_id).await?;
-            authorize_run_owner(&self.pool, &caller, &req.child_run_id).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
+            authorize_run_owner(&self.pool, &caller, &req.parent_run_id, OwnerIntent::Mutate).await?;
+            authorize_run_owner(&self.pool, &caller, &req.child_run_id, OwnerIntent::Mutate).await?;
             let role_str = subagent_role_to_str(req.role);
 
             store::attach_subagent(
@@ -1738,7 +1732,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 ));
             }
             let run_id = event_run_id(&ev).expect("validated run id");
-            authorize_run_owner(&self.pool, &caller, run_id).await?;
+            authorize_run_owner(&self.pool, &caller, run_id, OwnerIntent::Mutate).await?;
             // Server owns the timestamp; fill it in when the caller left it empty.
             if ev.at.is_none() {
                 ev.at = Some(now_ts());
@@ -1763,7 +1757,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         if req.run_id.is_empty() {
             return Err(Status::invalid_argument("run_id is required"));
         }
-        authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
+        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
         let target = req.run_id;
         let after = req.after_event_id;
 
