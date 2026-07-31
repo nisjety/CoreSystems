@@ -40,6 +40,33 @@ type recordingDatabase struct {
 	queryErr  error
 	rowErr    error
 	rows      pgx.Rows
+	// nextRows are queued QueryRow answers, consumed in order. A durable write
+	// that persists through `INSERT ... RETURNING` needs a scannable result,
+	// not the ErrNoRows default; queue one with expectUpsertReturningID.
+	nextRows []pgx.Row
+}
+
+// databaseCalls counts every statement the stub has seen. Registration guards
+// assert on this rather than on execs alone: the MCP create path persists
+// through QueryRow (INSERT ... RETURNING id), so an execs-only count would
+// silently stop guarding that rejected input never reaches the database.
+func (database *recordingDatabase) databaseCalls() int {
+	return len(database.execs) + len(database.queries) + len(database.queryRows)
+}
+
+// expectUpsertReturningID queues the id the database keeps for the next
+// `INSERT ... RETURNING id`. The queue is per-subtest: an answer the handler
+// never consumed is cleared and reported, so it cannot leak into a later
+// subtest sharing this stub.
+func (database *recordingDatabase) expectUpsertReturningID(t *testing.T, id string) {
+	t.Helper()
+	database.nextRows = append(database.nextRows, stringRow{value: id})
+	t.Cleanup(func() {
+		if len(database.nextRows) > 0 {
+			database.nextRows = nil
+			t.Errorf("queued RETURNING id was never consumed")
+		}
+	})
 }
 
 func (database *recordingDatabase) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
@@ -65,16 +92,37 @@ func (database *recordingDatabase) Query(_ context.Context, query string, args .
 
 func (database *recordingDatabase) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
 	database.queryRows = append(database.queryRows, databaseCall{query: query, args: append([]any(nil), args...)})
-	err := database.rowErr
-	if err == nil {
-		err = pgx.ErrNoRows
+	if database.rowErr != nil {
+		return errorRow{err: database.rowErr}
 	}
-	return errorRow{err: err}
+	if len(database.nextRows) > 0 {
+		row := database.nextRows[0]
+		database.nextRows = database.nextRows[1:]
+		return row
+	}
+	return errorRow{err: pgx.ErrNoRows}
 }
 
 type errorRow struct{ err error }
 
 func (row errorRow) Scan(...any) error { return row.err }
+
+// stringRow answers an `INSERT ... RETURNING id` upsert with the id the
+// database actually kept. On the ON CONFLICT path that is deliberately NOT the
+// id the caller proposed — see the upsert comment in registry_apis.go.
+type stringRow struct{ value string }
+
+func (row stringRow) Scan(dest ...any) error {
+	if len(dest) != 1 {
+		return errors.New("stringRow: want exactly one scan destination")
+	}
+	target, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("stringRow: scan destination is not *string")
+	}
+	*target = row.value
+	return nil
+}
 
 type emptyRows struct{}
 
@@ -288,7 +336,6 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		if response.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", response.Code)
 		}
-		database.queryErr = nil
 	})
 
 	t.Run("write requires signed scope", func(t *testing.T) {
@@ -312,7 +359,11 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 	})
 
 	t.Run("database create error fails closed", func(t *testing.T) {
-		database.execErr = errors.New("database unavailable")
+		// The registration upsert persists through QueryRow (INSERT ...
+		// RETURNING id), so the failure has to be injected on the row path —
+		// execErr would leave this passing for the wrong reason.
+		database.rowErr = errors.New("database unavailable")
+		t.Cleanup(func() { database.rowErr = nil })
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", strings.NewReader(validMCPRegistrationJSON("org-a")))
 		request.Header.Set("Authorization", "Bearer "+writeToken)
 		response := httptest.NewRecorder()
@@ -320,10 +371,10 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		if response.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", response.Code)
 		}
-		database.execErr = nil
 	})
 
 	t.Run("create replaces caller supplied tenant", func(t *testing.T) {
+		database.expectUpsertReturningID(t, "mcp-kept-by-database")
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", strings.NewReader(validMCPRegistrationJSON("org-b")))
 		request.Header.Set("Authorization", "Bearer "+writeToken)
 		response := httptest.NewRecorder()
@@ -331,9 +382,23 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		if response.Code != http.StatusCreated {
 			t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 		}
-		call := database.execs[len(database.execs)-1]
-		if got := call.args[1]; got != "org-a" {
-			t.Fatalf("insert org = %v, want signed org-a", got)
+		call := database.queryRows[len(database.queryRows)-1]
+		if !strings.Contains(call.query, "INSERT INTO mcp_servers") {
+			t.Fatalf("last row call was not the registration upsert: %q", call.query)
+		}
+		if len(call.args) < 2 || call.args[1] != "org-a" {
+			t.Fatalf("insert org = %v, want signed org-a", call.args)
+		}
+		// The response must echo the id the database kept, not the
+		// caller-proposed id the ON CONFLICT path discards.
+		var body struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.ID != "mcp-kept-by-database" {
+			t.Fatalf("response id = %q, want the id the database kept", body.ID)
 		}
 	})
 
@@ -361,6 +426,7 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 
 	t.Run("patch database error fails closed", func(t *testing.T) {
 		database.execErr = errors.New("database unavailable")
+		t.Cleanup(func() { database.execErr = nil })
 		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mcp/mcp-1", strings.NewReader(`{"enabled":false}`))
 		request.Header.Set("Authorization", "Bearer "+writeToken)
 		response := httptest.NewRecorder()
@@ -368,12 +434,12 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		if response.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", response.Code)
 		}
-		database.execErr = nil
 	})
 
 	t.Run("rollout update error fails closed", func(t *testing.T) {
 		database.execErr = errors.New("database unavailable")
 		database.execErrAt = len(database.execs) + 2
+		t.Cleanup(func() { database.execErr, database.execErrAt = nil, 0 })
 		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mcp/mcp-1", strings.NewReader(`{"enabled":false,"rollout_state":"quarantine"}`))
 		request.Header.Set("Authorization", "Bearer "+writeToken)
 		response := httptest.NewRecorder()
@@ -381,8 +447,6 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		if response.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", response.Code)
 		}
-		database.execErr = nil
-		database.execErrAt = 0
 	})
 
 	t.Run("patch cannot bypass full validation to enable", func(t *testing.T) {
@@ -412,6 +476,7 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 
 	t.Run("delete database error fails closed", func(t *testing.T) {
 		database.execErr = errors.New("database unavailable")
+		t.Cleanup(func() { database.execErr = nil })
 		request := httptest.NewRequest(http.MethodDelete, "/api/v1/mcp/mcp-1", nil)
 		request.Header.Set("Authorization", "Bearer "+writeToken)
 		response := httptest.NewRecorder()
@@ -419,7 +484,6 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		if response.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500", response.Code)
 		}
-		database.execErr = nil
 	})
 
 	t.Run("unsupported method", func(t *testing.T) {
@@ -477,7 +541,7 @@ func TestMCPRegistrationRejectsUnsafeConfiguration(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			before := len(database.execs)
+			before := database.databaseCalls()
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", strings.NewReader(test.body))
 			request.Header.Set("Authorization", "Bearer "+writeToken)
 			response := httptest.NewRecorder()
@@ -485,7 +549,7 @@ func TestMCPRegistrationRejectsUnsafeConfiguration(t *testing.T) {
 			if response.Code != http.StatusBadRequest && response.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want 400 or 422; body=%s", response.Code, response.Body.String())
 			}
-			if got := len(database.execs); got != before {
+			if got := database.databaseCalls(); got != before {
 				t.Fatalf("unsafe registration reached database: before=%d after=%d", before, got)
 			}
 		})
@@ -508,7 +572,7 @@ func TestMCPRegistrationRejectsPrivateDNSResolution(t *testing.T) {
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422; body=%s", response.Code, response.Body.String())
 	}
-	if len(database.execs) != 0 {
+	if database.databaseCalls() != 0 {
 		t.Fatal("privately resolved endpoint reached database")
 	}
 }
@@ -522,6 +586,7 @@ func TestMCPRegistrationAcceptsManagedSecretReference(t *testing.T) {
 	mcp.Register(mux)
 	handler, _, writeToken := mcpAuthenticatedHandler(t, mux)
 
+	database.expectUpsertReturningID(t, "mcp-accounting")
 	body := `{"name":"accounting","endpoint_url":"https://mcp.example.test","transport":"http","auth_kind":"oauth","config_json":{"tool_allowlist":["invoices.read"],"secret_ref":"vault://model-plane/mcp-accounting"}}`
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+writeToken)
@@ -530,8 +595,10 @@ func TestMCPRegistrationAcceptsManagedSecretReference(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", response.Code, response.Body.String())
 	}
-	if len(database.execs) != 1 {
-		t.Fatalf("database writes = %d, want 1", len(database.execs))
+	// The registration is one durable statement, the RETURNING upsert.
+	if len(database.queryRows) != 1 || len(database.execs) != 0 {
+		t.Fatalf("database writes: upserts=%d execs=%d, want exactly 1 upsert",
+			len(database.queryRows), len(database.execs))
 	}
 }
 
@@ -551,7 +618,7 @@ func TestMCPRegistrationBodyIsBounded(t *testing.T) {
 	if response.Code != http.StatusBadRequest && response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 400 or 413", response.Code)
 	}
-	if len(database.execs) != 0 {
+	if database.databaseCalls() != 0 {
 		t.Fatal("oversize registration reached database")
 	}
 }
@@ -612,7 +679,7 @@ func TestMCPHandlerRejectsDirectUnauthenticatedWrite(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", response.Code)
 	}
-	if len(database.execs) != 0 {
+	if database.databaseCalls() != 0 {
 		t.Fatal("unauthenticated direct handler call reached database")
 	}
 }
