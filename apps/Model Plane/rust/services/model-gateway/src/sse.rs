@@ -1099,7 +1099,6 @@ pub async fn invoke_stream_sse(
         // evidence, so it grounds the confidence score just like a KB citation.
         // Without this every tool-sourced answer scored the ungrounded baseline
         // and was flagged "uncertain".
-        let mut tool_grounded = false;
         // Counted evidence for the graduated confidence score — the bool above
         // collapsed every grounded turn to one flat bonus (the "always 87%").
         let mut turn_evidence = crate::confidence::Evidence::default();
@@ -1166,7 +1165,6 @@ pub async fn invoke_stream_sse(
                 return;
             }
             deep_research_ran = true;
-            tool_grounded = tool_grounded || research.any_tool_succeeded;
             turn_evidence.tool_successes += research.tool_successes;
             turn_evidence.tool_failures += research.tool_failures;
             turn_evidence.web_citations += research.web_citations;
@@ -1221,7 +1219,6 @@ pub async fn invoke_stream_sse(
                 cancels.finish(&req_id);
                 return;
             };
-            tool_grounded = tool_grounded || forced.any_tool_succeeded;
             turn_evidence.tool_successes += forced.tool_successes;
             turn_evidence.tool_failures += forced.tool_failures;
             turn_evidence.web_citations += forced.web_citations;
@@ -1272,7 +1269,6 @@ pub async fn invoke_stream_sse(
                 cancels.finish(&req_id);
                 return;
             };
-            tool_grounded = tool_grounded || rounds.any_tool_succeeded;
             turn_evidence.tool_successes += rounds.tool_successes;
             turn_evidence.tool_failures += rounds.tool_failures;
             turn_evidence.web_citations += rounds.web_citations;
