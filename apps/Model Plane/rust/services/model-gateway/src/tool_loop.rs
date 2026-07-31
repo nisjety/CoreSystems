@@ -73,13 +73,34 @@ const MAX_FETCH_CHARS: usize = 4_000;
 
 /// Max output tokens for a tool-deciding round.
 ///
-/// Smaller than a user-facing answer (see `sse::answer_token_budget`) because
-/// this round emits tool-call arguments, not prose — but not as small as the
-/// original 1024, which a genuinely long argument can overrun: the model emits
-/// tool arguments as JSON, so hitting the cap mid-string yields malformed
-/// arguments that fail at the tool instead of failing visibly here. A real
-/// GraphQL query against an ERP schema is exactly that kind of argument.
-const TOOL_ROUND_TOKENS: i32 = 2048;
+/// Not "smaller than a user-facing answer" any more, because the largest
+/// legitimate tool argument in this loop *is* a user-facing answer:
+/// `create_artifact` carries an entire document in its `content` argument (up
+/// to `artifacts::MAX_TEXT_ARTIFACT_CHARS`). The previous 2048 therefore made
+/// the canvas silently *length-dependent*: measured live on this deployment, a
+/// ~3900-character document fit and rendered, while a longer one was cut off
+/// mid-`content` and arrived as `{"id":…,"kind":"document","title":…}` with the
+/// `content` key never emitted, failing validation with "create_artifact
+/// requires non-empty 'content'". The artifact panel just never appeared and
+/// the turn fell back to prose, with nothing logged to say why.
+///
+/// 8192 fits a substantial document (roughly 6000 words) with room for JSON
+/// escaping. It is a *ceiling*, not a spend — a round that only emits a
+/// `web_search` call still costs a few dozen tokens — so the headroom is free.
+/// It deliberately does not try to cover the 200 000-char artifact limit, which
+/// no output budget could; [`output_hit_token_ceiling`] is the backstop that
+/// makes exceeding it a clear, actionable error instead of a silent one.
+const TOOL_ROUND_TOKENS: i32 = 8192;
+
+/// Whether a provider's `stop_reason` says the model was cut off at the output
+/// ceiling rather than finishing on its own. Anthropic reports `max_tokens`,
+/// OpenAI/Azure-OpenAI report `length`.
+fn output_hit_token_ceiling(stop_reason: &str) -> bool {
+    matches!(
+        stop_reason.trim().to_ascii_lowercase().as_str(),
+        "max_tokens" | "length"
+    )
+}
 
 /// Told to the model when the tool phase ends on an inference failure rather
 /// than because the model was satisfied, so a half-finished lookup is not
@@ -2229,8 +2250,30 @@ pub async fn run_tool_rounds(
         // every tool_call event is emitted up front (so the user watches all of
         // them start), and results are emitted in the model's original call
         // order once the round completes.
+        // A round cut off at the output ceiling leaves its LAST tool call
+        // half-written: the provider returns the partial `tool_use` block with
+        // whatever argument keys it managed to emit, and nothing downstream can
+        // tell that apart from a call the model finished. Dispatching it anyway
+        // is what produced the baffling "create_artifact requires non-empty
+        // 'content'" on a document the model was still mid-sentence on — the
+        // real cause, truncation, was reported nowhere. Providers emit content
+        // blocks in order, so only the final call can be partial; earlier calls
+        // in the same round are complete and still run.
+        let truncated_index = if output_hit_token_ceiling(&resp.stop_reason) {
+            tracing::warn!(
+                %request_id,
+                stop_reason = %resp.stop_reason,
+                max_tokens = TOOL_ROUND_TOKENS,
+                tool = resp.tool_calls.last().map_or("", |call| call.name.as_str()),
+                "tool-round output hit the token ceiling; the last tool call's arguments are truncated"
+            );
+            Some(resp.tool_calls.len() - 1)
+        } else {
+            None
+        };
+
         let mut prepared = Vec::with_capacity(resp.tool_calls.len());
-        for call in &resp.tool_calls {
+        for (index, call) in resp.tool_calls.iter().enumerate() {
             let args = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
                 .unwrap_or_else(|_| serde_json::json!({}));
             events
@@ -2240,15 +2283,32 @@ pub async fn run_tool_rounds(
                     args,
                 })
                 .await;
+            let is_truncated = truncated_index == Some(index);
             // Duplicate detection stays sequential over the round so two
             // identical calls in the SAME round dedupe exactly like repeats
-            // across rounds.
-            let is_duplicate = duplicate_call_signature(call)
-                .is_some_and(|signature| !attempted_calls.insert(signature));
-            prepared.push((call, is_duplicate));
+            // across rounds. A truncated call is deliberately NOT recorded: its
+            // arguments are an accident of where the ceiling fell, and letting
+            // them into the signature set could suppress the model's retry.
+            let is_duplicate = !is_truncated
+                && duplicate_call_signature(call)
+                    .is_some_and(|signature| !attempted_calls.insert(signature));
+            prepared.push((call, is_duplicate, is_truncated));
         }
         let dispatched = futures::future::join_all(prepared.into_iter().map(
-            |(call, is_duplicate)| async move {
+            |(call, is_duplicate, is_truncated)| async move {
+                // Named as a truncation so the model can act on it. Left as a
+                // tool ERROR rather than a silent skip: the model reads tool
+                // errors and retries, and the user sees the step failed instead
+                // of watching an artifact never arrive.
+                if is_truncated {
+                    return Ok(err_outcome(
+                        call,
+                        format!(
+                            "your {} call was cut off at the {TOOL_ROUND_TOKENS}-token output limit, so its arguments are incomplete and it was NOT run. Retry with substantially shorter arguments — for a long artifact, create it with its first section and then extend it using update_artifact.",
+                            call.name
+                        ),
+                    ));
+                }
                 if is_duplicate {
                     return Ok(err_outcome(
                         call,
@@ -2894,10 +2954,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_round_output_cap_exceeds_the_original_so_long_arguments_survive() {
+    fn tool_round_output_cap_fits_a_document_artifact_argument() {
         // Tool arguments are JSON; clipping mid-string yields malformed arguments
-        // that fail at the tool rather than visibly here.
-        assert!(TOOL_ROUND_TOKENS > 1024);
+        // that fail at the tool rather than visibly here. The binding case is
+        // `create_artifact`, whose `content` argument is a whole document — 2048
+        // truncated every real document request, so guard the floor that fixed
+        // it rather than the 1024 it originally replaced.
+        assert!(TOOL_ROUND_TOKENS >= 8192);
+    }
+
+    #[test]
+    fn truncation_is_detected_from_either_provider_stop_reason() {
+        // Anthropic and OpenAI spell the same condition differently, and both
+        // reach this loop through inference-core's unified `stop_reason`.
+        assert!(output_hit_token_ceiling("max_tokens"));
+        assert!(output_hit_token_ceiling("length"));
+        assert!(output_hit_token_ceiling("  MAX_TOKENS  "));
+        // A model that finished on its own must never be treated as truncated —
+        // that would turn every healthy tool call into a spurious error.
+        assert!(!output_hit_token_ceiling("end_turn"));
+        assert!(!output_hit_token_ceiling("stop"));
+        assert!(!output_hit_token_ceiling("tool_use"));
+        assert!(!output_hit_token_ceiling(""));
     }
 
     #[test]

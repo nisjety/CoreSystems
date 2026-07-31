@@ -139,8 +139,13 @@ const MIN_REPORT_TOKENS: i32 = 512;
 
 /// Model tier for the planning inference: the Velion intent layer's cheapest
 /// mode. Splitting a question into sub-queries is a rewrite task, not a
-/// reasoning task, and it never reaches the user — same argument as
-/// `sse::TITLE_MODEL`.
+/// reasoning task, and it never reaches the user.
+///
+/// Still a *tier* here, unlike `sse::TITLE_MODEL`, which had to be pinned to a
+/// concrete non-reasoning model to make its 24-token budget honest. This one
+/// keeps the tier because the budget below is sized for a reasoning model's
+/// chain of thought either way, so whichever model the tier resolves to has
+/// room to answer.
 const PLAN_MODEL: &str = "velion-budget";
 /// Hard ceiling on the planning inference. It gates every later phase, so a
 /// slow planner must degrade to "search the question as asked" rather than eat

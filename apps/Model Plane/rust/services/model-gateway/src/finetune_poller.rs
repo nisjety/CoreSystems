@@ -37,6 +37,19 @@ use crate::state::DynPublisher;
 const FEATURE_ENV: &str = "FINETUNE_ENABLED";
 const INTERVAL_ENV: &str = "FINETUNE_POLLER_INTERVAL_SECS";
 const DEFAULT_INTERVAL_SECS: u64 = 60;
+
+/// Re-escalate a still-unresolved failure to WARN every this many suppressed
+/// ticks.
+///
+/// Suppression below exists so a *flapping* dependency does not emit an
+/// identical warning every interval. But a *permanently* broken poller must not
+/// become invisible, and that is exactly what happened: observed live sitting at
+/// 92 consecutive `Unauthenticated` ticks with nothing above DEBUG after the
+/// very first one, so at the production `RUST_LOG=info` the job had been dead
+/// for an hour and a half without a single log line saying so. At the default
+/// 60s interval this re-warns roughly hourly — rare enough not to spam, often
+/// enough that a dead poller cannot hide.
+const SUPPRESSED_WARN_EVERY: u64 = 60;
 const DEPLOYMENT_NAME_PREFIX: &str = "ft-";
 /// Length of the `job_id` suffix included in the deployment name. ULIDs are 26
 /// chars; we take 12 so the full name fits Azure's 64-char deployment-name
@@ -426,11 +439,21 @@ pub async fn run(
                 );
                 if last_err_signature.as_deref() == Some(signature.as_str()) {
                     suppressed_count += 1;
-                    tracing::debug!(
-                        error = %e,
-                        suppressed = suppressed_count,
-                        "finetune poller tick failed (suppressed; same signature)"
-                    );
+                    if suppressed_count % SUPPRESSED_WARN_EVERY == 0 {
+                        // Still broken, not flapping — say so at a level the
+                        // production log level actually shows.
+                        warn!(
+                            error = %e,
+                            consecutive_failures = suppressed_count,
+                            "finetune poller still failing with the same error"
+                        );
+                    } else {
+                        tracing::debug!(
+                            error = %e,
+                            suppressed = suppressed_count,
+                            "finetune poller tick failed (suppressed; same signature)"
+                        );
+                    }
                 } else {
                     warn!(error = %e, "finetune poller tick failed");
                     last_err_signature = Some(signature);

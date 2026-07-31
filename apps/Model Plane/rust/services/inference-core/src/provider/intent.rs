@@ -305,7 +305,25 @@ impl BudgetClient {
             return None;
         }
         let http = reqwest::Client::builder()
+            // Deliberately unchanged at 400ms: measured against the live
+            // deployment, cost-core answers this endpoint in 3–70ms on a warm
+            // connection, so this is already >5x headroom, and raising it would
+            // add that much latency to EVERY inference whenever cost-core is
+            // actually down (the gate runs once per infer and degrades silently
+            // to `Unknown`).
             .timeout(Duration::from_millis(400))
+            // But 400ms is a *total* budget covering DNS + TCP connect, and
+            // reqwest's default pool drops an idle connection after 90s. Chat
+            // traffic is bursty with long gaps, so the FIRST check of a turn
+            // routinely paid a cold setup out of that same 400ms while the
+            // checks seconds later reused the socket — which is exactly the
+            // shape of the one failure observed in 79 checks over 24h (the
+            // turn's main inference logged `Unknown`; its title and follow-up
+            // checks moments later both logged `Healthy`). Holding the idle
+            // connection much longer keeps the cold path rare without touching
+            // the timeout, so this costs no latency in any scenario.
+            .pool_idle_timeout(Duration::from_secs(600))
+            .tcp_keepalive(Duration::from_secs(60))
             .build()
             .ok()?;
         Some(Self {
@@ -356,7 +374,21 @@ impl BudgetClient {
         {
             Ok(r) => r,
             Err(error) => {
-                warn!(%error, "budget check request failed; posture Unknown");
+                // `%error` alone prints only reqwest's outermost Display —
+                // "error sending request for url (…)" — which names the URL and
+                // nothing about the cause. That is why the one observed failure
+                // could not be classified after the fact: timeout, refused
+                // connection and DNS failure all render identically, and they
+                // have completely different fixes. Classify explicitly and walk
+                // the source chain so the next occurrence is diagnosable from
+                // the log alone.
+                warn!(
+                    %error,
+                    timeout = error.is_timeout(),
+                    connect = error.is_connect(),
+                    cause = ?std::error::Error::source(&error),
+                    "budget check request failed; posture Unknown"
+                );
                 return BudgetPosture::Unknown;
             }
         };

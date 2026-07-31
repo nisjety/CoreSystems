@@ -26,8 +26,7 @@ use axum::{
     Extension, Json, Router,
 };
 use mp_contracts::model_plane::v1::{
-    CancelRunRequest, CreateThreadRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest,
-    ValidateGrantRequest,
+    CancelRunRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest, ValidateGrantRequest,
 };
 use mp_ids::new_ulid;
 use serde::Deserialize;
@@ -804,9 +803,10 @@ mod tests {
         execution_core_client::ExecutionCoreClient,
         execution_core_server::{ExecutionCore, ExecutionCoreServer},
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
-        CancelRunRequest, CancelRunResponse, ExecuteStepRequest, ExecuteStepResponse,
-        PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RevokeGrantRequest,
-        RevokeGrantResponse, RunAgentRequest, RunAgentResponse, ValidateGrantResponse,
+        CancelRunRequest, CancelRunResponse, CreateThreadRequest, ExecuteStepRequest,
+        ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse,
+        RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest, RunAgentResponse,
+        ValidateGrantResponse,
     };
     use tonic::{Response, Status};
 

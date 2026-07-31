@@ -3512,15 +3512,43 @@ async fn direct_infer(
         .map(|r| r.into_inner().content)
 }
 
-/// Model tier for the thread-title summarization: the Velion intent layer's
-/// cheapest mode, resolved by inference-core to the cheapest configured
-/// concrete model. A sidebar label never justifies a premium tier.
-const TITLE_MODEL: &str = "velion-budget";
+/// Model for the thread-title summarization: a **pinned** cheap non-reasoning
+/// model, deliberately *not* the `velion-budget` tier it used to name.
+///
+/// A tier is the wrong dependency for a micro-call with a fixed token budget.
+/// `velion-budget` is resolved by inference-core's intent layer, which re-routes
+/// by prompt size — and one of the models it lands on, `gpt-5-nano`, is a
+/// *reasoning* model that bills its chain of thought against `max_tokens`.
+/// Measured live on this deployment, same code path, same 24-token budget:
+///
+/// * short exchange → `complexity: simple` → `gpt-5-nano` → HTTP 200 with
+///   **zero content** after 1.1s (the entire budget went to reasoning tokens),
+/// * long exchange → `complexity: moderate` → `gpt-4o-mini` → a usable title
+///   in 0.6s.
+///
+/// So the sidebar label quietly worked on long answers and vanished on short
+/// ones — the common case — which is exactly how this survived unnoticed.
+/// A pinned id bypasses the intent layer entirely (`intent::parse_mode` treats
+/// only the `velion-*` names as modes), so the budget below is honest and the
+/// behaviour no longer depends on how much the user happened to type.
+///
+/// `gpt-4o-mini` specifically: inference-core's designated cheap fallback
+/// (`intent::CHEAP_FALLBACK`), always in the deployed chat roster, and already
+/// the model behind every title this feature has ever actually shown.
+const TITLE_MODEL: &str = "gpt-4o-mini";
 /// Hard ceiling on the title inference. The title arrives after the answer is
 /// already on screen, but it still holds the terminal `done` frame back — so a
 /// slow summarizer must degrade to "no title" rather than a visible stall.
+///
+/// Deliberately left at 4s while fixing the empty-title bug: the pinned model
+/// above answers in well under a second (0.6s measured), which is ~6x headroom,
+/// and the broken calls were never timing out — they returned *early* and
+/// empty. Raising this would push `done` later for every user and buy nothing.
 const TITLE_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-/// Output budget for a 3–6 word title.
+/// Output budget for a 3–6 word title. Honest now that [`TITLE_MODEL`] spends
+/// its budget on visible text instead of hidden reasoning: 24 tokens is
+/// live-proven sufficient — it is the budget that produced the titles that did
+/// work, on the same model this now pins.
 const TITLE_MAX_TOKENS: i32 = 24;
 /// Longest sanitized title emitted to clients, in characters. Matches what a
 /// sidebar row can show pre-ellipsis.
@@ -3530,12 +3558,18 @@ const TITLE_ANSWER_SNIPPET_CHARS: usize = 2000;
 /// How much of the user question the title prompt sees.
 const TITLE_QUESTION_SNIPPET_CHARS: usize = 1000;
 
-/// Same tier/timeout/snippet posture as [`TITLE_MODEL`] and friends — a
-/// composer suggestion never justifies a premium tier or a visible stall
-/// either.
-const FOLLOW_UPS_MODEL: &str = "velion-budget";
+/// Same pinned-model/timeout/snippet posture as [`TITLE_MODEL`] and friends — a
+/// composer suggestion never justifies a premium model or a visible stall
+/// either, and it was starved by the same tier indirection: on a short exchange
+/// this call also resolved to reasoning-model `gpt-5-nano` and came back HTTP
+/// 200 with no content, so the chips silently never rendered.
+const FOLLOW_UPS_MODEL: &str = "gpt-4o-mini";
+/// Also left at 4s: measured at ~1.4s on the pinned model, and — like the title
+/// above — the broken calls returned early and empty rather than timing out.
 const FOLLOW_UPS_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-/// Output budget for up to 3 short questions, one per line.
+/// Output budget for up to 3 short questions, one per line. Live-proven at this
+/// value on [`FOLLOW_UPS_MODEL`] (three full Norwegian suggestions), and honest
+/// now that no part of it is spent on hidden reasoning tokens.
 const FOLLOW_UPS_MAX_TOKENS: i32 = 96;
 /// Longest sanitized suggestion emitted to clients, in characters.
 const FOLLOW_UP_MAX_CHARS: usize = 96;
@@ -3594,7 +3628,24 @@ async fn generate_thread_title(
     )
     .await;
     let raw = match response {
-        Ok(Ok(resp)) => resp.into_inner().content,
+        Ok(Ok(resp)) => {
+            let content = resp.into_inner().content;
+            // A successful-but-empty response was the ONE path here that logged
+            // nothing, which is why a title generator that had been dead on
+            // every short exchange survived undetected. Warn, not debug: an
+            // HTTP 200 carrying no text means the model or its token budget is
+            // wrong, and that must never again be invisible at default log
+            // levels.
+            if content.trim().is_empty() {
+                tracing::warn!(
+                    %request_id,
+                    model = TITLE_MODEL,
+                    max_tokens = TITLE_MAX_TOKENS,
+                    "thread title inference succeeded but returned empty content"
+                );
+            }
+            content
+        }
         Ok(Err(error)) => {
             tracing::debug!(%error, %request_id, "thread title inference failed; keeping the preview title");
             return None;
@@ -3661,7 +3712,21 @@ async fn generate_follow_ups(
     )
     .await;
     let raw = match response {
-        Ok(Ok(resp)) => resp.into_inner().content,
+        Ok(Ok(resp)) => {
+            let content = resp.into_inner().content;
+            // Same reasoning as the title's empty-content warn above: silence on
+            // this path is what let the chips disappear from every short
+            // exchange without a single log line to point at.
+            if content.trim().is_empty() {
+                tracing::warn!(
+                    %request_id,
+                    model = FOLLOW_UPS_MODEL,
+                    max_tokens = FOLLOW_UPS_MAX_TOKENS,
+                    "follow-up suggestion inference succeeded but returned empty content"
+                );
+            }
+            content
+        }
         Ok(Err(error)) => {
             tracing::debug!(%error, %request_id, "follow-up suggestion inference failed; skipping chips");
             return Vec::new();
