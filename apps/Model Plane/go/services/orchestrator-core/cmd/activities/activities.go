@@ -17,6 +17,7 @@ import (
 	"github.com/triodelab/model-plane/pkg/natsx"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/grpcclient"
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/servicecred"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -156,17 +157,17 @@ type ConsolidationOutput struct {
 	Summary             string
 }
 type WriteMemoryInput struct{ Entries []MemoryEntry }
-type SkillValidationInput struct{ SkillID string }
+type SkillValidationInput struct{ SkillID, OrgID string }
 type SkillValidationOutput struct {
 	Valid  bool
 	Errors []string
 }
-type PromotionGateInput struct{ SkillID, FromScope, ToScope string }
+type PromotionGateInput struct{ SkillID, FromScope, ToScope, OrgID string }
 type PromotionGateOutput struct {
 	Passed bool
 	Checks []string
 }
-type RegistryUpdateInput struct{ SkillID, FromScope, NewScope string }
+type RegistryUpdateInput struct{ SkillID, FromScope, NewScope, OrgID string }
 
 // ── Struct + constructor ─────────────────────────────────────────────────────
 
@@ -264,6 +265,16 @@ func (a *Activities) publishRunEvent(runID, orgID, userID, eventType, idemSuffix
 
 // ── Activity 1: StartRunActivity ─────────────────────────────────────────────
 
+// userBoundCredentialRequired is session-core's refusal when the caller proved a
+// valid service identity but no human: `start_run` ends with
+// `caller.user_id().ok_or_else(|| permission_denied("user-bound run credential
+// required"))`, because a run row is owned by a user.
+//
+// It is matched by message because the gRPC code alone (PermissionDenied) is also
+// returned for a tenant mismatch and for thread-ownership failures, which are
+// real authorization errors an operator must not confuse with this one.
+const userBoundCredentialRequired = "user-bound run credential required"
+
 func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgID, userID string) (RunMetadata, error) {
 	fallback := RunMetadata{RunID: runID, ThreadID: threadID, OrgID: orgID, UserID: userID, StartedAt: time.Now().UTC()}
 	if a.clients == nil || a.clients.SessionCore == nil {
@@ -279,6 +290,32 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 		if status.Code(err) == codes.Unavailable {
 			a.logger.Warn("SessionCore unavailable", "method", "StartRun")
 			return fallback, nil
+		}
+		// Name the cause. This activity has no inbound credential to forward —
+		// its context comes from the Temporal worker — so it presents
+		// orchestrator-core's own minted service token, and a service token's
+		// subject is the service (auth-core's issueInternalToken sets
+		// `userId: principal.subject` and has no delegation field). session-core
+		// authenticates it, accepts the `session:write` scope, matches the org
+		// and clears thread ownership, then refuses at the last gate because a
+		// run must be owned by a person.
+		//
+		// Retrying cannot help and the bare status hides why, so the error says
+		// what has to change instead: either the run is created by the request
+		// that has the user's credential and this workflow only supervises it
+		// (which is what StartWorkflowRequest.run_id already describes), or
+		// session-core gains an explicit owner for system-initiated runs — the
+		// reserved SystemActorID above is the convention that would express it.
+		if status.Code(err) == codes.PermissionDenied &&
+			strings.Contains(err.Error(), userBoundCredentialRequired) {
+			a.logger.Error(
+				"StartRun refused: a service credential cannot create a user-owned run",
+				"run_id", runID, "org_id", orgID, "has_user", userID != "",
+				"remedy", "create the run with the user's credential before starting the "+
+					"workflow, or give session-core an owner for system-initiated runs")
+			return fallback, fmt.Errorf(
+				"start run for %s: session-core requires a user-bound credential and a "+
+					"Temporal activity can only present a service token: %w", runID, err)
 		}
 		return fallback, err
 	}
@@ -522,6 +559,9 @@ func (a *Activities) ValidateSkillBundleActivity(ctx context.Context, input Skil
 	if a.clients == nil || a.clients.CapabilityCore == nil {
 		return SkillValidationOutput{}, status.Error(codes.Unavailable, "capability-core unavailable")
 	}
+	// capability-core's skill RPCs carry no org_id, so the tenant must reach the
+	// outbound interceptor through the context or no org-bound token can be minted.
+	ctx = servicecred.WithOrg(ctx, input.OrgID)
 	resp, err := mpv1.NewCapabilityCoreClient(a.clients.CapabilityCore).ValidateSkillBundle(ctx, &mpv1.ValidateSkillBundleRequest{SkillId: input.SkillID})
 	if err != nil {
 		return SkillValidationOutput{}, err
@@ -533,6 +573,7 @@ func (a *Activities) RunPromotionGateActivity(ctx context.Context, input Promoti
 	if a.clients == nil || a.clients.CapabilityCore == nil {
 		return PromotionGateOutput{}, status.Error(codes.Unavailable, "capability-core unavailable")
 	}
+	ctx = servicecred.WithOrg(ctx, input.OrgID)
 	resp, err := mpv1.NewCapabilityCoreClient(a.clients.CapabilityCore).CheckSkillPromotion(ctx, &mpv1.CheckSkillPromotionRequest{
 		SkillId:   input.SkillID,
 		FromScope: input.FromScope,
@@ -548,6 +589,7 @@ func (a *Activities) UpdateRegistryActivity(ctx context.Context, input RegistryU
 	if a.clients == nil || a.clients.CapabilityCore == nil {
 		return status.Error(codes.Unavailable, "capability-core unavailable")
 	}
+	ctx = servicecred.WithOrg(ctx, input.OrgID)
 	_, err := mpv1.NewCapabilityCoreClient(a.clients.CapabilityCore).PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
 		SkillId:   input.SkillID,
 		FromScope: input.FromScope,

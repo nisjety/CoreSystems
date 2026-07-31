@@ -15,6 +15,10 @@ type FeedbackPromotionInput struct {
 	MinSamples int `json:"min_samples"`
 	// Good-ratio required to promote (0..1). 0 → activity default.
 	PromoteThreshold float64 `json:"promote_threshold"`
+	// OrgID is the tenant whose skills this sweep promotes. It is threaded to
+	// each child SkillPromotionWorkflow because capability-core's promotion RPCs
+	// carry no org of their own — see SkillPromotionInput.OrgID.
+	OrgID string `json:"org_id"`
 }
 
 // FeedbackPromotionOutput summarizes the sweep.
@@ -79,6 +83,7 @@ func FeedbackPromotionWorkflow(ctx workflow.Context, input FeedbackPromotionInpu
 			SkillID:   cand.SkillID,
 			FromScope: cand.FromScope,
 			ToScope:   cand.ToScope,
+			OrgID:     input.OrgID,
 		}).Get(ctx, &result)
 
 		if err == nil && result.Promoted {

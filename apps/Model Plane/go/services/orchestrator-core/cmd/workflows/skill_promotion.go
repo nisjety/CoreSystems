@@ -15,6 +15,13 @@ type SkillPromotionInput struct {
 	SkillID   string `json:"skill_id"`
 	FromScope string `json:"from_scope"`
 	ToScope   string `json:"to_scope"`
+	// OrgID is the tenant the promotion belongs to.
+	//
+	// capability-core's promotion RPCs carry no org_id of their own — a skill id
+	// and two scopes is the whole message — so the tenant reaches capability-core
+	// only through the caller's credential. The activities need it to mint an
+	// org-bound token; without it every promotion RPC is Unauthenticated.
+	OrgID string `json:"org_id"`
 }
 
 // SkillPromotionOutput contains the result of the promotion process.
@@ -51,6 +58,7 @@ func SkillPromotionWorkflow(ctx workflow.Context, input SkillPromotionInput) (Sk
 	// Step 1: Validate skill bundle.
 	validationInput := activities.SkillValidationInput{
 		SkillID: input.SkillID,
+		OrgID:   input.OrgID,
 	}
 
 	var validationResult activities.SkillValidationOutput
@@ -77,6 +85,7 @@ func SkillPromotionWorkflow(ctx workflow.Context, input SkillPromotionInput) (Sk
 		SkillID:   input.SkillID,
 		FromScope: input.FromScope,
 		ToScope:   input.ToScope,
+		OrgID:     input.OrgID,
 	}
 
 	var gateResult activities.PromotionGateOutput
@@ -104,6 +113,7 @@ func SkillPromotionWorkflow(ctx workflow.Context, input SkillPromotionInput) (Sk
 		SkillID:   input.SkillID,
 		FromScope: input.FromScope,
 		NewScope:  input.ToScope,
+		OrgID:     input.OrgID,
 	}
 
 	err = workflow.ExecuteActivity(actCtx,

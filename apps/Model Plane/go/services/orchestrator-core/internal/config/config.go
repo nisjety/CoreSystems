@@ -43,6 +43,21 @@ type Config struct {
 	// organizations. There is no wildcard; an empty list disables the path even
 	// when a token is set, so the credential can never be unbounded.
 	InternalServiceOrgs []string
+
+	// --- Outbound service credential (Temporal activity path) --------------
+	// A Temporal activity has no inbound gRPC metadata, so it has nothing to
+	// forward and must present a credential it minted itself. These configure
+	// that minting; without them every activity calls its sibling
+	// uncredentialed and is answered Unauthenticated.
+
+	// AuthCoreURL is Auth Core's base URL, e.g. http://auth-core:3011.
+	AuthCoreURL string
+	// ServicePrincipalID is orchestrator-core's service-principal id, sent as
+	// `x-service-id` when minting (ORCHESTRATOR_CORE_SERVICE_ID).
+	ServicePrincipalID string
+	// ServicePrincipalKey is that principal's secret (`x-service-api-key`,
+	// ORCHESTRATOR_CORE_SERVICE_API_KEY). Never logged.
+	ServicePrincipalKey string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -67,6 +82,10 @@ func Load() Config {
 
 		InternalServiceToken: strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_TOKEN")),
 		InternalServiceOrgs:  splitList(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_ORGS")),
+
+		AuthCoreURL:         strings.TrimSpace(os.Getenv("AUTH_CORE_URL")),
+		ServicePrincipalID:  strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_SERVICE_ID")),
+		ServicePrincipalKey: strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_SERVICE_API_KEY")),
 	}
 }
 

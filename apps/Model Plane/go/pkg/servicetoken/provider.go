@@ -1,18 +1,37 @@
 // Package servicetoken mints short-lived, audience-bound Auth Core service
-// JWTs for capability-core's own outbound calls (session-core, inference-core).
+// JWTs for a Model Plane service's own outbound calls.
+//
+// It is used by any service that must call a sibling on its OWN behalf rather
+// than while proxying a user request — capability-core's learning consumer and
+// orchestrator-core's Temporal activities are both of that shape. A Temporal
+// activity is the clearest case: its context comes from the worker, not from a
+// gRPC server handler, so there is no inbound credential to forward and the
+// only credential it can present is one it minted itself.
 //
 // # Why this exists
 //
-// Both backends authenticate every RPC, and the only credential capability-core
-// can present is an Auth Core service JWT. Reading one from the environment
-// cannot keep working: auth-core issues plane tokens with a 300-second default
-// TTL (`PLANE_TOKEN_TTL_SESSION_CORE_SECONDS` /
+// Every backend authenticates every RPC, and the only credential a service can
+// present for itself is an Auth Core service JWT. Reading one from the
+// environment cannot keep working: auth-core issues plane tokens with a
+// 300-second default TTL (`PLANE_TOKEN_TTL_SESSION_CORE_SECONDS` /
 // `PLANE_TOKEN_TTL_INFERENCE_CORE_SECONDS` in auth-core's
 // `convex-token.service.ts`, floor 60s). A pasted token therefore starts
 // answering Unauthenticated roughly five minutes after the operator pasted it
-// and never recovers — the events keep arriving, the work silently never runs.
+// and never recovers — the work keeps being dispatched and silently never runs.
 // Minting on demand and refreshing ahead of expiry is the only arrangement that
 // stays live.
+//
+// # What this CANNOT do
+//
+// The minted token's subject is the SERVICE principal: auth-core's
+// `issueInternalToken` sets `userId: principal.subject` and its request body
+// accepts only `orgId`, `scopes` and `reason` — there is no user-delegation
+// field. A service token therefore proves "this service, in this org", never
+// "this service acting as user X". Backends that require the caller's identity
+// to equal a specific end user (execution-core's `authorize`, which compares
+// `req.user_id` to the caller's own, and its run-ownership resolution) cannot
+// be satisfied by anything this package mints, and that is deliberate: a
+// background workflow must not silently wield a user's privileges.
 //
 // # Mint contract
 //

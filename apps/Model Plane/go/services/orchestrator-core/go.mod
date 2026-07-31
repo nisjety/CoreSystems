@@ -11,6 +11,7 @@ require (
 	github.com/triodelab/model-plane/pkg/authctx v0.0.0
 	github.com/triodelab/model-plane/pkg/envelope v0.0.0
 	github.com/triodelab/model-plane/pkg/natsx v0.0.0
+	github.com/triodelab/model-plane/pkg/servicetoken v0.0.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	go.temporal.io/api v1.62.9
@@ -61,6 +62,7 @@ replace (
 	github.com/triodelab/model-plane/pkg/authctx => ../../pkg/authctx
 	github.com/triodelab/model-plane/pkg/envelope => ../../pkg/envelope
 	github.com/triodelab/model-plane/pkg/natsx => ../../pkg/natsx
+	github.com/triodelab/model-plane/pkg/servicetoken => ../../pkg/servicetoken
 )
 
 replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260414002931-afd174a4e478

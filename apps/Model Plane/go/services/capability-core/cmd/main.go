@@ -31,7 +31,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
-	"github.com/triodelab/model-plane/services/capability-core/internal/servicetoken"
+	"github.com/triodelab/model-plane/pkg/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"google.golang.org/grpc"

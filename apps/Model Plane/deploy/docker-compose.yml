@@ -741,6 +741,8 @@ services:
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
+      # Mint endpoint for the outbound activity credential (see the block below).
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       INFERENCE_CORE_ADDR: inference-core:9092
       EXECUTION_CORE_ADDR: execution-core:9093
       CAPABILITY_CORE_ADDR: capability-core:9097
@@ -772,6 +774,30 @@ services:
       # for. There is no wildcard, so a leaked secret still cannot reach another
       # tenant.
       ORCHESTRATOR_INTERNAL_SERVICE_ORGS: ${ORCHESTRATOR_INTERNAL_SERVICE_ORGS:-}
+      # --- Outbound credential for Temporal activities -----------------------
+      # A Temporal activity's context comes from the SDK worker, not from a gRPC
+      # server handler, so there is NO inbound bearer for the client factory to
+      # forward. Without these, every activity dials session-core /
+      # inference-core / capability-core / letta-bridge with no credential and is
+      # answered Unauthenticated — and because the activities treat only
+      # Unavailable as non-fatal, that is a hard failure: workflows start but no
+      # activity that touches a sibling can do real work.
+      #
+      # The token is minted per (org, audience) and refreshed ahead of expiry;
+      # a pasted static token cannot work, because auth-core's plane tokens
+      # default to a 300-second TTL. Absent key => minting is skipped and the
+      # service logs a WARN naming these variables.
+      #
+      # Requires an `orchestrator-core` entry in Auth Core's
+      # PLANE_SERVICE_PRINCIPALS_JSON whose retentionByAudience for session-core
+      # is `persistent`: session-core refuses any ZDR credential for a
+      # non-`:read` scope, and StartRun is a write.
+      #
+      # execution-core is deliberately NOT in that audience list — its
+      # ExecuteStep requires the caller's identity to equal the request's user,
+      # which no service token can satisfy. See internal/servicecred.
+      ORCHESTRATOR_CORE_SERVICE_ID: ${ORCHESTRATOR_CORE_SERVICE_ID:-orchestrator-core}
+      ORCHESTRATOR_CORE_SERVICE_API_KEY: ${ORCHESTRATOR_CORE_SERVICE_API_KEY:-}
     depends_on:
       temporal:
         condition: service_healthy

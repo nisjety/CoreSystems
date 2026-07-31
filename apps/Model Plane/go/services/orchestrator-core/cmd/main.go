@@ -32,6 +32,7 @@ import (
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/grpcclient"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/natsadapter"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/orchestration"
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/servicecred"
 )
 
 func main() {
@@ -45,6 +46,26 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	// Outbound credential for the Temporal activity path. An activity's context
+	// comes from the worker, not a gRPC handler, so there is no inbound bearer
+	// to forward and every sibling answers Unauthenticated without this. A
+	// failure here is a WARN, not fatal: the inbound proxy path (run-event
+	// streaming, approvals) forwards the caller's own credential and keeps
+	// working, so refusing to boot would take down working functionality to
+	// punish an unconfigured one.
+	minters, merr := servicecred.NewMinters(servicecred.Options{
+		AuthCoreURL: cfg.AuthCoreURL,
+		ServiceID:   cfg.ServicePrincipalID,
+		Credential:  cfg.ServicePrincipalKey,
+	}, logger)
+	if merr != nil {
+		slog.Warn("outbound service tokens unavailable; workflow activities "+
+			"that call sibling services will fail Unauthenticated", "error", merr)
+	} else {
+		slog.Info("outbound service tokens configured",
+			"audiences", len(minters), "principal", cfg.ServicePrincipalID)
+	}
+
 	// gRPC clients to sibling services (non-blocking; logs warnings on dial failure)
 	clients, cerr := grpcclient.Dial(ctx, grpcclient.Options{
 		SessionCoreAddr:    cfg.SessionCoreAddr,
@@ -54,6 +75,8 @@ func main() {
 		SandboxManagerAddr: cfg.SandboxManagerAddr,
 		BrowserBrokerAddr:  cfg.BrowserBrokerAddr,
 		LettaBridgeAddr:    cfg.LettaBridgeAddr,
+		Minters:            minters,
+		Logger:             logger,
 	})
 	if cerr != nil {
 		slog.Warn("grpcclient.Dial returned error; continuing", "error", cerr)

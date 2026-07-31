@@ -10,6 +10,7 @@ use (
 	./pkg/natsx
 	./pkg/publisher
 	./pkg/quarry
+	./pkg/servicetoken
 	./pkg/temporalreg
 	./services/bridge-core
 	./services/browser-broker

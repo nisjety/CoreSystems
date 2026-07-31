@@ -327,7 +327,7 @@ func buildMemoryConsolidationInput(raw json.RawMessage, t Tenancy) (any, error) 
 	return in, nil
 }
 
-func buildSkillPromotionInput(raw json.RawMessage, _ Tenancy) (any, error) {
+func buildSkillPromotionInput(raw json.RawMessage, t Tenancy) (any, error) {
 	var in workflows.SkillPromotionInput
 	if err := decodeInput(raw, &in); err != nil {
 		return nil, err
@@ -338,13 +338,18 @@ func buildSkillPromotionInput(raw json.RawMessage, _ Tenancy) (any, error) {
 	if strings.TrimSpace(in.ToScope) == "" {
 		return nil, errors.New("orchestration: SkillPromotionWorkflow requires a to_scope")
 	}
+	// The verified caller's tenant, not the request body's: capability-core
+	// authorizes the promotion purely by the credential this org mints, so a
+	// body-supplied org would be a cross-tenant promotion primitive.
+	in.OrgID = t.OrgID
 	return in, nil
 }
 
-func buildFeedbackPromotionInput(raw json.RawMessage, _ Tenancy) (any, error) {
+func buildFeedbackPromotionInput(raw json.RawMessage, t Tenancy) (any, error) {
 	var in workflows.FeedbackPromotionInput
 	if err := decodeInput(raw, &in); err != nil {
 		return nil, err
 	}
+	in.OrgID = t.OrgID
 	return in, nil
 }

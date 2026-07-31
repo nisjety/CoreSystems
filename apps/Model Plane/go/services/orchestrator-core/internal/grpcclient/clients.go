@@ -8,46 +8,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/servicecred"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 )
-
-// withForwardedMetadata copies the inbound gRPC metadata (notably the caller's
-// verified `authorization` bearer) onto the outbound context. orchestrator-core
-// proxies these RPCs to session-core, whose interceptor requires that
-// credential; gRPC-Go does NOT propagate incoming metadata to outgoing calls
-// automatically, so without this the upstream rejects every proxied call with
-// "verified caller credential required" (breaking run-events streaming and
-// approval decisions through the gateway).
-func withForwardedMetadata(ctx context.Context) context.Context {
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		return metadata.NewOutgoingContext(ctx, md)
-	}
-	return ctx
-}
-
-func forwardMetadataUnaryInterceptor(
-	ctx context.Context,
-	method string,
-	req, reply any,
-	cc *grpc.ClientConn,
-	invoker grpc.UnaryInvoker,
-	opts ...grpc.CallOption,
-) error {
-	return invoker(withForwardedMetadata(ctx), method, req, reply, cc, opts...)
-}
-
-func forwardMetadataStreamInterceptor(
-	ctx context.Context,
-	desc *grpc.StreamDesc,
-	cc *grpc.ClientConn,
-	method string,
-	streamer grpc.Streamer,
-	opts ...grpc.CallOption,
-) (grpc.ClientStream, error) {
-	return streamer(withForwardedMetadata(ctx), desc, cc, method, opts...)
-}
 
 // Clients holds gRPC connections to sibling services.
 type Clients struct {
@@ -70,45 +34,67 @@ type Options struct {
 	BrowserBrokerAddr  string
 	LettaBridgeAddr    string
 	DialTimeout        time.Duration
+
+	// Minters supplies the per-audience service-token minter used when a call
+	// has no inbound credential to forward — the Temporal activity path. A nil
+	// map keeps the pure-forwarding behavior on every connection.
+	Minters servicecred.Minters
+
+	// Logger receives the interceptor's re-mint warnings.
+	Logger *slog.Logger
 }
 
 // Dial creates gRPC connections to all configured sibling services.
 // Connections that fail to dial are logged as warnings but do not block startup,
 // allowing the orchestrator to start even when some services are unavailable.
+//
+// Each connection gets interceptors bound to ITS OWN plane audience, because a
+// minted token is audience-bound: one shared interceptor could carry only one
+// audience's credential and would present it to every sibling, where the rest
+// reject it. Connections with no audience (sandbox-manager, browser-broker) and
+// execution-core — which requires a user-scoped identity no service token can
+// provide, see the servicecred package doc — get forwarding only.
 func Dial(ctx context.Context, opts Options) (*Clients, error) {
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = 5 * time.Second
 	}
-
-	dialOpts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		// Proxy the caller's verified credential to upstream session-core.
-		grpc.WithChainUnaryInterceptor(forwardMetadataUnaryInterceptor),
-		grpc.WithChainStreamInterceptor(forwardMetadataStreamInterceptor),
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 
 	clients := &Clients{}
 
-	dial := func(addr string, name string) *grpc.ClientConn {
+	dial := func(addr, name, audience string) *grpc.ClientConn {
 		dialCtx, cancel := context.WithTimeout(ctx, opts.DialTimeout)
 		defer cancel()
+
+		minter := opts.Minters.Get(audience)
+		dialOpts := []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			// Proxies the caller's verified credential upstream; mints
+			// orchestrator-core's own when there is none to forward.
+			grpc.WithChainUnaryInterceptor(servicecred.UnaryInterceptor(minter, logger)),
+			grpc.WithChainStreamInterceptor(servicecred.StreamInterceptor()),
+		}
 
 		conn, err := grpc.DialContext(dialCtx, addr, dialOpts...)
 		if err != nil {
 			slog.Warn("failed to dial service", "service", name, "addr", addr, "error", err)
 			return nil
 		}
-		slog.Info("connected to service", "service", name, "addr", addr)
+		slog.Info("connected to service",
+			"service", name, "addr", addr, "service_token", minter != nil)
 		return conn
 	}
 
-	clients.SessionCore = dial(opts.SessionCoreAddr, "session-core")
-	clients.InferenceCore = dial(opts.InferenceCoreAddr, "inference-core")
-	clients.ExecutionCore = dial(opts.ExecutionCoreAddr, "execution-core")
-	clients.CapabilityCore = dial(opts.CapabilityCoreAddr, "capability-core")
-	clients.SandboxManager = dial(opts.SandboxManagerAddr, "sandbox-manager")
-	clients.BrowserBroker = dial(opts.BrowserBrokerAddr, "browser-broker")
-	clients.LettaBridge = dial(opts.LettaBridgeAddr, "letta-bridge")
+	clients.SessionCore = dial(opts.SessionCoreAddr, "session-core", servicecred.AudienceSessionCore)
+	clients.InferenceCore = dial(opts.InferenceCoreAddr, "inference-core", servicecred.AudienceInferenceCore)
+	clients.ExecutionCore = dial(opts.ExecutionCoreAddr, "execution-core", "")
+	clients.CapabilityCore = dial(opts.CapabilityCoreAddr, "capability-core", servicecred.AudienceCapabilityCore)
+	clients.SandboxManager = dial(opts.SandboxManagerAddr, "sandbox-manager", "")
+	clients.BrowserBroker = dial(opts.BrowserBrokerAddr, "browser-broker", "")
+	clients.LettaBridge = dial(opts.LettaBridgeAddr, "letta-bridge", servicecred.AudienceLettaBridge)
 
 	return clients, nil
 }
