@@ -26,6 +26,7 @@ use crate::{
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
         VerifiedIngestionBearer,
     },
+    relevance,
     sse_events::ChatEvent,
     state::AppState,
 };
@@ -784,6 +785,355 @@ pub fn should_force_web_search(query: &str) -> bool {
     mentions_recent_year(&lower)
 }
 
+// ---------------------------------------------------------------------------
+// Search-query normalization
+// ---------------------------------------------------------------------------
+
+/// Conversational scaffolding that only ever appears as a run of consecutive
+/// tokens, removed as a unit.
+///
+/// Most entries are formulas whose individual words are NOT independently
+/// strippable — above all `vær så snill` ("please"), which contains the single
+/// highest-signal token a Norwegian weather question has. Removing `vær` on its
+/// own would be catastrophic; removing the three-word politeness formula is
+/// exactly right. The same holds for `finne ut` and `på forhånd takk`.
+///
+/// The quantity frames are the exception: their question word is strippable
+/// alone, but stripping only it leaves a dangling quantifier behind.
+///
+/// Nothing in this list is a topic word, so a missed entry only leaves a query
+/// more verbose — never wrong.
+#[rustfmt::skip]
+const SCAFFOLD_PHRASES: &[&str] = &[
+    // Interrogative quantity frames: dropping only the question word would leave
+    // a dangling "mange"/"many" that retrieval reads as a content term.
+    "hvor mange", "hvor mye", "hvor stor", "hvor stort", "hvor lang", "hvor gammel",
+    "how many", "how much", "how big", "how long", "how old",
+    // Norwegian politeness and request formulas.
+    "vær så snill", "vær så god", "er du snill",
+    "på forhånd takk", "takk på forhånd", "tusen takk", "takk skal du ha",
+    "med vennlig hilsen", "på forhånd",
+    // Norwegian first-person request frames.
+    "jeg lurer på", "jeg vil gjerne vite", "jeg vil vite", "jeg trenger å vite",
+    "jeg ønsker å vite", "jeg vil gjerne", "jeg trenger",
+    "fortelle meg", "fortell meg", "si meg", "hjelp meg", "hjelpe meg",
+    "finne ut av", "finne ut", "slå opp",
+    // English politeness and request frames.
+    "want to know", "would like to know", "like to know", "need to know",
+    "was wondering", "am wondering", "let me know", "looking for",
+    "thanks in advance", "thank you", "in advance", "best regards", "kind regards",
+    "tell me", "do you know",
+];
+
+/// Longest [`SCAFFOLD_PHRASES`] entry, in words. A longer entry would never be
+/// matched, so the window ceiling and the list are checked against each other by
+/// `scaffold_phrases_fit_the_match_window`.
+const MAX_SCAFFOLD_PHRASE_WORDS: usize = 4;
+
+/// Single-token conversational scaffolding: greetings, courtesies, interrogative
+/// framing, first/second-person pronouns, auxiliaries, articles and the request
+/// verbs that wrap the actual question.
+///
+/// The product's primary language is Norwegian, so both languages are listed and
+/// a Norwegian question is never handed to an English-only stoplist. Two classes
+/// are deliberately ABSENT:
+///
+/// * negations (`ikke`, `not`, `uten`) — dropping one inverts the question;
+/// * recency and live-data words (`nå`, `i dag`, `pris`, `innbyggere`) — those
+///   are the very tokens that made [`should_force_web_search`] fire, and they are
+///   additionally protected by [`protect_time_sensitive`].
+///
+/// Directional prepositions (`fra`/`til`, `from`/`to`) are also kept: "fra Oslo
+/// til Bergen" means something the bare pair of city names does not.
+#[rustfmt::skip]
+const SCAFFOLD_WORDS: &[&str] = &[
+    // Norwegian — greetings and courtesy.
+    "hei", "heisann", "hallo", "halla", "morn", "takk", "mvh", "vennligst",
+    // Norwegian — interrogative framing.
+    "hva", "hvem", "hvilken", "hvilke", "hvilket", "hvordan", "hvorfor", "hvor", "når",
+    // Norwegian — auxiliaries and copulas.
+    "er", "var", "har", "hadde", "kan", "kunne", "vil", "ville", "skal", "skulle",
+    // Norwegian — pronouns and determiners.
+    "jeg", "du", "dere", "meg", "deg", "vi", "oss", "min", "mitt", "mine",
+    "din", "ditt", "dine", "en", "et", "ei", "den", "det", "de",
+    // Norwegian — particles and light prepositions.
+    "å", "at", "som", "og", "i", "på", "av", "om", "for",
+    // Norwegian — request verbs.
+    "fortelle", "fortell", "forklar", "forklare", "sjekke", "sjekk", "finne",
+    "vite", "hjelpe", "gjerne",
+    // English — greetings and courtesy.
+    "hi", "hello", "hey", "thanks", "thank", "please", "regards", "cheers",
+    // English — interrogative framing.
+    "what", "what's", "whats", "which", "who", "who's", "whom", "when", "when's",
+    "where", "where's", "why", "how", "how's",
+    // English — auxiliaries and copulas.
+    "is", "are", "was", "were", "be", "do", "does", "did", "can", "could",
+    "would", "will", "should", "shall", "have", "has", "had",
+    // English — pronouns and determiners.
+    "i", "i'm", "i'd", "you", "me", "my", "we", "us", "our", "your", "it",
+    "a", "an", "the",
+    // English — particles and light prepositions.
+    "of", "in", "on", "at", "that", "and", "or", "as",
+    // English — request verbs.
+    "tell", "know", "find", "check", "explain", "wondering", "let", "want", "need",
+];
+
+/// Punctuation that ends a sentence, so the next capitalized token is merely
+/// sentence-initial rather than a proper noun.
+const SENTENCE_ENDINGS: &[char] = &['.', '!', '?', '…', ':', ';'];
+
+/// Tokens whose capitalization carries no proper-noun information because English
+/// capitalizes them wherever they appear.
+///
+/// Without this, "I want to know the latest price of Equinor shares" kept a bare
+/// `I` in the query: mid-sentence and capitalized, it looked exactly like a proper
+/// noun to the protection rule. Norwegian has no equivalent — `jeg` is lowercase —
+/// which is precisely the kind of asymmetry an English-first rule imports into a
+/// Norwegian-first product.
+const ALWAYS_CAPITALIZED: &[&str] = &["i", "i'm", "i'd", "i've", "i'll"];
+
+/// Shortest surviving token that on its own makes a normalized query usable.
+/// Below this the normalizer has gutted the message and falls back to it.
+const MIN_USABLE_QUERY_TERM_CHARS: usize = 3;
+
+/// One whitespace-delimited piece of a message, pre-analysed for the strip
+/// passes.
+struct QueryToken {
+    /// Output form: the token as written, minus edge punctuation.
+    text: String,
+    /// Lowercased [`Self::text`], the form every list comparison uses.
+    key: String,
+    /// Never removable: a proper noun, a number or year, a quoted phrase, or a
+    /// recency token that made this a searchable question.
+    protected: bool,
+    /// Removed by a strip pass.
+    dropped: bool,
+}
+
+/// Byte ranges covered by a closed quotation, whose contents are verbatim.
+///
+/// A user who quotes a phrase has told us it is the query. Only paired
+/// delimiters count — an unterminated quote yields nothing, so a stray `"` or a
+/// Norwegian apostrophe cannot protect the rest of the message by accident.
+fn quoted_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut open: Option<(usize, char)> = None;
+    for (index, ch) in text.char_indices() {
+        match open {
+            Some((start, opener)) => {
+                let closes = match opener {
+                    '«' => ch == '»',
+                    '\u{201c}' => ch == '\u{201d}',
+                    _ => ch == '"',
+                };
+                if closes {
+                    spans.push((start, index + ch.len_utf8()));
+                    open = None;
+                }
+            }
+            None => {
+                if matches!(ch, '"' | '«' | '\u{201c}') {
+                    open = Some((index, ch));
+                }
+            }
+        }
+    }
+    spans
+}
+
+/// Whitespace-delimited tokens with their byte offsets, so quote spans can be
+/// resolved against them.
+fn whitespace_tokens(text: &str) -> Vec<(usize, &str)> {
+    let mut tokens = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(begin) = start.take() {
+                tokens.push((begin, &text[begin..index]));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(begin) = start {
+        tokens.push((begin, &text[begin..]));
+    }
+    tokens
+}
+
+/// Strip punctuation that frames a token without belonging to it. Internal
+/// punctuation stays: `openai.com`, `E-24`, `1,5` and `U.S.` are all one term.
+fn trim_token_edges(raw: &str) -> &str {
+    let front = raw.trim_start_matches(['(', '[', '{', '¿', '¡']);
+    let back = front.trim_end_matches([')', ']', '}', '?', '!', ',', ';', ':', '…']);
+    let Some(stem) = back.strip_suffix('.') else {
+        return back;
+    };
+    // A sentence period goes; an abbreviation's final dot stays, recognized by its
+    // last segment being a single letter (`U.S.`).
+    let abbreviation = stem
+        .rsplit('.')
+        .next()
+        .is_some_and(|last| last.chars().count() == 1);
+    if abbreviation {
+        back
+    } else {
+        stem
+    }
+}
+
+/// True when the token's first letter is uppercase — the proper-noun signal.
+fn starts_uppercase(text: &str) -> bool {
+    text.chars()
+        .find(|ch| ch.is_alphabetic())
+        .is_some_and(char::is_uppercase)
+}
+
+/// Protect the tokens that made this a searchable question in the first place.
+///
+/// [`TIME_SENSITIVE_TOKENS`] is the list that decided to search at all, so
+/// stripping one of its words would delete the reason for the round-trip. It
+/// also rescues the light prepositions inside multi-word triggers: `i` is
+/// ordinarily scaffolding, but `i dag` is a recency phrase.
+fn protect_time_sensitive(tokens: &mut [QueryToken]) {
+    for trigger in TIME_SENSITIVE_TOKENS {
+        let words: Vec<&str> = trigger.split_whitespace().collect();
+        let width = words.len();
+        if width == 0 {
+            continue;
+        }
+        for start in 0..tokens.len().saturating_sub(width - 1) {
+            let matched = tokens[start..start + width]
+                .iter()
+                .zip(&words)
+                .all(|(token, word)| token.key == *word);
+            if matched {
+                for token in &mut tokens[start..start + width] {
+                    token.protected = true;
+                }
+            }
+        }
+    }
+}
+
+/// Split a message into analysed tokens.
+fn query_tokens(message: &str) -> Vec<QueryToken> {
+    let quoted = quoted_spans(message);
+    let mut tokens: Vec<QueryToken> = Vec::new();
+    // The first token of the message is sentence-initial, so its capitalization
+    // carries no proper-noun information.
+    let mut sentence_start = true;
+    for (offset, raw) in whitespace_tokens(message) {
+        let ends_sentence = raw.ends_with(SENTENCE_ENDINGS);
+        let text = trim_token_edges(raw);
+        if !text.chars().any(char::is_alphanumeric) {
+            // Pure punctuation carries nothing, but a lone "?" still ends the
+            // sentence for the token that follows.
+            sentence_start = sentence_start || ends_sentence;
+            continue;
+        }
+        let quoted_token = quoted
+            .iter()
+            .any(|(start, end)| offset < *end && offset + raw.len() > *start);
+        let key = text.to_lowercase();
+        let proper_noun = !sentence_start
+            && starts_uppercase(text)
+            && !ALWAYS_CAPITALIZED.contains(&key.as_str());
+        let protected = quoted_token || proper_noun || text.chars().any(|ch| ch.is_ascii_digit());
+        tokens.push(QueryToken {
+            key,
+            text: text.to_owned(),
+            protected,
+            dropped: false,
+        });
+        sentence_start = ends_sentence;
+    }
+    protect_time_sensitive(&mut tokens);
+    tokens
+}
+
+/// Drop [`SCAFFOLD_PHRASES`] runs, longest window first so a long formula is
+/// never half-matched by a shorter one inside it.
+fn strip_scaffold_phrases(tokens: &mut [QueryToken]) {
+    for width in (2..=MAX_SCAFFOLD_PHRASE_WORDS).rev() {
+        let mut start = 0;
+        while start + width <= tokens.len() {
+            let window = &tokens[start..start + width];
+            let eligible = window
+                .iter()
+                .all(|token| !token.protected && !token.dropped);
+            let joined = window
+                .iter()
+                .map(|token| token.key.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if eligible && SCAFFOLD_PHRASES.contains(&joined.as_str()) {
+                for token in &mut tokens[start..start + width] {
+                    token.dropped = true;
+                }
+                start += width;
+            } else {
+                start += 1;
+            }
+        }
+    }
+}
+
+/// Drop [`SCAFFOLD_WORDS`] tokens.
+fn strip_scaffold_words(tokens: &mut [QueryToken]) {
+    for token in tokens {
+        if !token.protected && !token.dropped && SCAFFOLD_WORDS.contains(&token.key.as_str()) {
+            token.dropped = true;
+        }
+    }
+}
+
+/// True when the normalized query still carries something a search engine can
+/// work with: one term of real length, or any token bearing a digit or a capital
+/// (`EU`, `KI`, `2026` are short but they are the whole question).
+fn normalized_is_usable(normalized: &str) -> bool {
+    normalized.split_whitespace().any(|word| {
+        word.chars().count() >= MIN_USABLE_QUERY_TERM_CHARS
+            || word
+                .chars()
+                .any(|ch| ch.is_ascii_digit() || ch.is_uppercase())
+    })
+}
+
+/// Turn a conversational message into a search query.
+///
+/// A chat message is not a search query, and the forced path used to send it
+/// verbatim. "Hva er været i Paris akkurat nå?" reached Quarry with its
+/// interrogative frame and preposition attached, and the engine answered the
+/// shape of the sentence rather than its subject: an Instagram post about Paris
+/// cafés, an FHI paper on skeletal age, a perfume video on `TikTok` and a
+/// `LinkedIn` profile. Stripping the framing leaves "været Paris akkurat nå" —
+/// the same question, expressed the way retrieval reads it.
+///
+/// Four things are never removed, because they are the highest-signal terms a
+/// question has: proper nouns (capitalized away from a sentence start), numbers
+/// and years, quoted phrases, and the recency tokens that triggered the search.
+/// And normalization never returns a gutted query: if the strip passes leave
+/// nothing usable the original message is returned, because a verbose query
+/// still retrieves something while a degenerate one retrieves noise.
+fn normalize_search_query(message: &str) -> String {
+    let message = message.trim();
+    let mut tokens = query_tokens(message);
+    strip_scaffold_phrases(&mut tokens);
+    strip_scaffold_words(&mut tokens);
+    let normalized = tokens
+        .iter()
+        .filter(|token| !token.dropped)
+        .map(|token| token.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized_is_usable(&normalized) {
+        normalized
+    } else {
+        message.to_owned()
+    }
+}
+
 fn latest_declared_user_name(messages: &[ChatMessage], current_query: &str) -> Option<String> {
     let current_query = current_query.trim();
     messages
@@ -794,17 +1144,23 @@ fn latest_declared_user_name(messages: &[ChatMessage], current_query: &str) -> O
         .find_map(|message| extract_declared_user_name(&message.content))
 }
 
+/// The query the forced pre-loop search actually issues.
+///
+/// Two rewrites, in order of specificity. First the name-meaning special case: a
+/// question about "what my name means" has its subject in the conversation, not
+/// in the sentence, so it resolves to the declared name. Otherwise the message is
+/// normalized from conversational prose into a search query (see
+/// [`normalize_search_query`]) — the previous behaviour sent it verbatim, which is
+/// where the irrelevant-source problem started.
 #[must_use]
 fn resolve_forced_web_search_query(messages: &[ChatMessage], query: &str) -> String {
     let query = query.trim();
-    if !asks_for_own_name_meaning(query) {
-        return query.to_owned();
+    if asks_for_own_name_meaning(query) {
+        if let Some(name) = latest_declared_user_name(messages, query) {
+            return format!("{name} name meaning");
+        }
     }
-
-    match latest_declared_user_name(messages, query) {
-        Some(name) => format!("{name} name meaning"),
-        None => query.to_owned(),
-    }
+    normalize_search_query(query)
 }
 
 fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
@@ -2031,7 +2387,7 @@ pub async fn run_forced_web_search(
 ) -> Result<ToolRounds, &'static str> {
     let search_query = resolve_forced_web_search_query(&base_messages, query);
     let args = serde_json::json!({
-        "query": search_query,
+        "query": &search_query,
         "limit": 5,
         "intent": "answer",
     });
@@ -2040,7 +2396,7 @@ pub async fn run_forced_web_search(
         name: "web_search".to_owned(),
         arguments_json: args.to_string(),
     };
-    let outcome = dispatch_audited_tool(
+    let mut outcome = dispatch_audited_tool(
         state,
         request_id,
         run_id,
@@ -2056,6 +2412,20 @@ pub async fn run_forced_web_search(
         None,
     )
     .await?;
+    // Gate BEFORE anything is emitted: the citations are built from the surviving
+    // hits only, and the `tool_result` the client renders carries the same
+    // found-vs-kept counts the model is given. The reference question is the
+    // query that was actually issued, not the raw message — that is what the hits
+    // were retrieved for.
+    let gate = gate_web_search_outcome(&search_query, &mut outcome);
+    if gate.found != gate.kept {
+        tracing::debug!(
+            found = gate.found,
+            kept = gate.kept,
+            query = %search_query,
+            "forced web search: relevance gate set hits aside"
+        );
+    }
     let mut events = match sink {
         Some(sink) => ToolEvents::Live(sink),
         None => ToolEvents::Buffered(Vec::new()),
@@ -2079,9 +2449,8 @@ pub async fn run_forced_web_search(
             error: outcome.error.clone(),
         })
         .await;
-    let citations = web_search_citations(&outcome);
-    let web_citations = u32::try_from(citations.len()).unwrap_or(u32::MAX);
-    for citation in citations {
+    let web_citations = u32::try_from(gate.citations.len()).unwrap_or(u32::MAX);
+    for citation in gate.citations {
         events.push(citation).await;
     }
 
@@ -2106,42 +2475,221 @@ pub async fn run_forced_web_search(
     })
 }
 
-fn web_search_citations(outcome: &ToolOutcome) -> Vec<ChatEvent> {
-    if outcome.name != "web_search" || outcome.error.is_some() {
-        return Vec::new();
-    }
-    let Ok(items) = serde_json::from_str::<Vec<Value>>(&outcome.output) else {
-        return Vec::new();
-    };
+// ---------------------------------------------------------------------------
+// web_search relevance gate
+// ---------------------------------------------------------------------------
 
-    items
-        .into_iter()
-        .take(5)
+/// Cap on citations emitted from one `web_search` result set — the Kilder tab is
+/// a shortlist, not a result page.
+const MAX_WEB_CITATIONS: usize = 5;
+
+/// One `web_search` hit, parsed back out of the tool's JSON output.
+struct WebSearchHit {
+    url: String,
+    title: String,
+    snippet: String,
+    /// Quarry's reranker score when it supplied one. Absent and zero mean
+    /// different things to [`relevance::assess`] (unjudged vs judged-irrelevant),
+    /// so a missing field stays `None`.
+    provider_score: Option<f32>,
+}
+
+/// What the relevance gate did to one `web_search` result set.
+struct WebSearchGate {
+    /// Citation events for the hits that survived — and only those.
+    citations: Vec<ChatEvent>,
+    /// Hits the search returned.
+    found: usize,
+    /// Hits that may be read and cited.
+    kept: usize,
+}
+
+impl WebSearchGate {
+    /// A gate that did nothing: the outcome was not a citable `web_search`
+    /// result set (wrong tool, an error, or an unparseable body).
+    fn inert() -> Self {
+        Self {
+            citations: Vec::new(),
+            found: 0,
+            kept: 0,
+        }
+    }
+}
+
+// reason: reranker scores are ratios in [0,1]; f64→f32 loses nothing there
+#[allow(clippy::cast_possible_truncation)]
+fn parse_web_search_hits(outcome: &ToolOutcome) -> Option<Vec<WebSearchHit>> {
+    if outcome.name != "web_search" || outcome.error.is_some() {
+        return None;
+    }
+    let items = serde_json::from_str::<Vec<Value>>(&outcome.output).ok()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| {
+                let url = item.get("url")?.as_str()?.trim().to_owned();
+                if url.is_empty() {
+                    return None;
+                }
+                let title = item
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map_or_else(|| url.clone(), ToOwned::to_owned);
+                Some(WebSearchHit {
+                    url,
+                    title,
+                    snippet: item
+                        .get("snippet")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned(),
+                    provider_score: item
+                        .get("score")
+                        .and_then(Value::as_f64)
+                        .map(|score| score as f32)
+                        .filter(|score| score.is_finite()),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Citation events for the kept hits, numbered in kept order so the Kilder tab
+/// reads 1..n with no gaps where a filtered hit used to be.
+fn web_search_citations(hits: &[WebSearchHit], kept: &[usize]) -> Vec<ChatEvent> {
+    kept.iter()
         .enumerate()
-        .filter_map(|(index, item)| {
-            let url = item.get("url")?.as_str()?.trim().to_owned();
-            if url.is_empty() {
-                return None;
-            }
-            let title = item
-                .get("title")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(url.as_str())
-                .to_owned();
-            let snippet = item
-                .get("snippet")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
+        .filter_map(|(rank, index)| {
+            let hit = hits.get(*index)?;
             Some(ChatEvent::Citation {
-                id: format!("web-{}-{}", index + 1, url),
-                title,
-                url,
-                snippet,
+                id: format!("web-{}-{}", rank + 1, hit.url),
+                title: hit.title.clone(),
+                url: hit.url.clone(),
+                snippet: hit.snippet.clone(),
             })
         })
         .collect()
+}
+
+/// Rewrite a gated result set into the text the model reads.
+///
+/// Filtering has to be VISIBLE. A silently shortened result list makes the model
+/// report "I found 5 sources" while the user's Kilder tab shows 2 — the same
+/// dishonesty as citing the noise, just harder to notice. So the counts lead, the
+/// kept hits are named as the only citable ones, and every dropped hit is listed
+/// with [`relevance::filtered_reason`] saying why in words.
+fn gated_web_search_output(
+    hits: &[WebSearchHit],
+    verdicts: &[relevance::Verdict],
+    kept: &[usize],
+    fallback_used: bool,
+) -> String {
+    let found = hits.len();
+    let keep_count = kept.len();
+    let dropped = found.saturating_sub(keep_count);
+    let mut out = format!(
+        "RELEVANCE GATE: {found} hits found, {keep_count} kept as able to answer the query, \
+         {dropped} set aside as unable to. Cite ONLY the kept hits below, and never report more \
+         sources than are listed there. The set-aside hits are NOT citable: if the kept hits do \
+         not contain the answer, say so or search again with a more specific query — do not fall \
+         back to a set-aside hit.\n"
+    );
+    if fallback_used {
+        let _ = writeln!(
+            out,
+            "WEAK EVIDENCE: no hit cleared the relevance bar, so the {keep_count} best-scoring \
+             were kept anyway rather than leaving the user with nothing. Treat them as weak \
+             support and say plainly that the search did not find a source that clearly answers \
+             the question."
+        );
+    }
+    let _ = writeln!(out, "KEPT ({keep_count}, citable):");
+    for (rank, index) in kept.iter().enumerate() {
+        if let (Some(hit), Some(verdict)) = (hits.get(*index), verdicts.get(*index)) {
+            let _ = writeln!(
+                out,
+                "{}. {} — {} (relevance {:.2})\n   {}",
+                rank + 1,
+                hit.title,
+                hit.url,
+                verdict.score,
+                hit.snippet
+            );
+        }
+    }
+    if dropped == 0 {
+        return out;
+    }
+    let _ = writeln!(out, "SET ASIDE ({dropped}, NOT citable):");
+    for (index, (hit, verdict)) in hits.iter().zip(verdicts).enumerate() {
+        if kept.contains(&index) {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "- {} — {} — {}",
+            hit.title,
+            hit.url,
+            relevance::filtered_reason(verdict)
+        );
+    }
+    out
+}
+
+/// Score a `web_search` result set against the query it answered, drop the hits
+/// that cannot answer it, and rewrite the model-facing output to say what was
+/// dropped and why.
+///
+/// This is the gate the forced and model-chosen `web_search` paths did not have.
+/// `deep_research` has applied it since [`relevance`] landed, but plain chat —
+/// the path almost every question takes — still turned every hit into a
+/// [`ChatEvent::Citation`], which is how a Norwegian weather question came to
+/// cite an Instagram post about Paris cafés. Filtering here happens BEFORE the
+/// citation events exist, so a filtered hit never becomes a source at all.
+///
+/// Never empties the set: [`relevance::keep_mask`] keeps the best few when
+/// nothing clears the bar, and that fact is reported rather than hidden.
+fn gate_web_search_outcome(question: &str, outcome: &mut ToolOutcome) -> WebSearchGate {
+    let Some(hits) = parse_web_search_hits(outcome) else {
+        return WebSearchGate::inert();
+    };
+    if hits.is_empty() {
+        return WebSearchGate::inert();
+    }
+    let parsed = relevance::Question::parse(question);
+    let verdicts: Vec<relevance::Verdict> = hits
+        .iter()
+        .map(|hit| {
+            relevance::assess(
+                &parsed,
+                &relevance::Candidate {
+                    url: &hit.url,
+                    title: &hit.title,
+                    snippet: &hit.snippet,
+                    provider_score: hit.provider_score,
+                },
+            )
+        })
+        .collect();
+    let mask = relevance::keep_mask(&verdicts);
+    let kept: Vec<usize> = mask
+        .keep
+        .iter()
+        .enumerate()
+        .filter_map(|(index, keep)| keep.then_some(index))
+        .take(MAX_WEB_CITATIONS)
+        .collect();
+
+    let citations = web_search_citations(&hits, &kept);
+    outcome.output = gated_web_search_output(&hits, &verdicts, &kept, mask.fallback_used);
+    WebSearchGate {
+        found: hits.len(),
+        kept: kept.len(),
+        citations,
+    }
 }
 
 /// Run the function-calling loop to resolution: unary infer-with-tools →
@@ -2373,6 +2921,22 @@ pub async fn run_tool_rounds(
             if let Some(rewritten) = rewritten {
                 outcome.output = rewritten;
             }
+            // A model-chosen web_search is gated exactly like the forced one:
+            // the model wrote the query, so the query is what its hits are
+            // judged against. An unresolvable or empty query leaves the gate a
+            // no-op (see `relevance::Question`), which is the honest
+            // degradation — it never filters on a question it cannot read.
+            let gate = if outcome.name == "web_search" {
+                let searched = resp
+                    .tool_calls
+                    .iter()
+                    .find(|candidate| candidate.id == outcome.call_id)
+                    .map(|candidate| arg_str(&candidate.arguments_json, "query"))
+                    .unwrap_or_default();
+                gate_web_search_outcome(&searched, &mut outcome)
+            } else {
+                WebSearchGate::inert()
+            };
             for event in &artifact_events {
                 // Remember each artifact's kind so a later `update_artifact`
                 // (which deliberately does not resupply it) renders as the same
@@ -2398,7 +2962,9 @@ pub async fn run_tool_rounds(
             // A model-chosen web_search must populate the Sources tab exactly
             // like the forced pre-loop path does — the citations are what let
             // the user (and the verification step) see what grounded the answer.
-            for citation in web_search_citations(&outcome) {
+            // Only gate survivors reach this point, so a filtered hit is never a
+            // source.
+            for citation in gate.citations {
                 events.push(citation).await;
                 web_citations = web_citations.saturating_add(1);
             }
@@ -3128,6 +3694,10 @@ mod tests {
         );
     }
 
+    /// The name special case must not fire on a question that merely happens to
+    /// follow a name declaration. The query is still normalized (that is the
+    /// other half of this path), so the invariant under test is "no invented
+    /// name", not "byte-identical message".
     #[test]
     fn forced_web_search_query_leaves_unrelated_queries_unchanged() {
         let messages = vec![ChatMessage {
@@ -3136,9 +3706,11 @@ mod tests {
             name: String::new(),
         }];
 
-        assert_eq!(
-            resolve_forced_web_search_query(&messages, "hva er model plane?"),
-            "hva er model plane?"
+        let resolved = resolve_forced_web_search_query(&messages, "hva er model plane?");
+        assert_eq!(resolved, "model plane");
+        assert!(
+            !resolved.contains("name meaning"),
+            "the name rule must not fire here: {resolved}"
         );
     }
 
@@ -3660,16 +4232,16 @@ mod tests {
 
     #[test]
     fn web_search_outputs_become_citation_events() {
-        let outcome = ToolOutcome {
+        let mut outcome = ToolOutcome {
             call_id: "c1".into(),
             name: "web_search".into(),
-            output: r#"[{"url":"https://example.com/model-plane","title":"Model Plane","snippet":"Overview"}]"#.into(),
+            output: r#"[{"url":"https://example.com/model-plane","title":"Model Plane","snippet":"Overview of the Model Plane"}]"#.into(),
             error: None,
         };
 
-        let citations = web_search_citations(&outcome);
-        assert_eq!(citations.len(), 1);
-        match &citations[0] {
+        let gate = gate_web_search_outcome("model plane", &mut outcome);
+        assert_eq!(gate.citations.len(), 1);
+        match &gate.citations[0] {
             ChatEvent::Citation {
                 title,
                 url,
@@ -3678,9 +4250,268 @@ mod tests {
             } => {
                 assert_eq!(title, "Model Plane");
                 assert_eq!(url, "https://example.com/model-plane");
-                assert_eq!(snippet, "Overview");
+                assert_eq!(snippet, "Overview of the Model Plane");
             }
             other => panic!("expected citation, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Search-query normalization
+    // -----------------------------------------------------------------------
+
+    /// A phrase longer than the match window could never fire, and the failure
+    /// would be silent — the phrase would simply never be stripped.
+    #[test]
+    fn scaffold_phrases_fit_the_match_window() {
+        for phrase in SCAFFOLD_PHRASES {
+            let words = phrase.split_whitespace().count();
+            assert!(
+                (2..=MAX_SCAFFOLD_PHRASE_WORDS).contains(&words),
+                "{phrase:?} has {words} words; the window is 2..={MAX_SCAFFOLD_PHRASE_WORDS}"
+            );
+        }
+    }
+
+    /// Norwegian is the product's primary language, so the normalizer is judged
+    /// on real Norwegian phrasings: the greeting, the politeness frame, the
+    /// request verb and the interrogative go; the content terms, the proper noun
+    /// and the year stay. An English-only stoplist would have kept every word of
+    /// this sentence.
+    #[test]
+    fn norwegian_scaffolding_is_stripped_while_content_terms_survive() {
+        assert_eq!(
+            normalize_search_query(
+                "Hei! Kan du fortelle meg hvor mange innbyggere Oslo har i 2026?"
+            ),
+            "innbyggere Oslo 2026"
+        );
+
+        // The live weather case, verbatim. `akkurat nå` is recency, not framing,
+        // and is kept — it is why the search was forced at all.
+        assert_eq!(
+            normalize_search_query("Hva er været i Paris akkurat nå?"),
+            "været Paris akkurat nå"
+        );
+
+        // `vær så snill` contains the single highest-signal token a weather
+        // question has. Removing the politeness formula must not remove `været`.
+        assert_eq!(
+            normalize_search_query("Hva er været i Bergen? Vær så snill."),
+            "været Bergen"
+        );
+
+        // A quoted phrase is the user telling us what the query is.
+        assert_eq!(
+            normalize_search_query("Kan du sjekke hva \"Kongens nei\" handler om?"),
+            "\"Kongens nei\" handler"
+        );
+
+        // Negation is content: dropping `ikke` would invert the question.
+        assert!(
+            normalize_search_query("Hvilke kommuner har ikke eiendomsskatt i 2026?")
+                .contains("ikke"),
+            "negation must survive normalization"
+        );
+    }
+
+    /// The same treatment for English phrasings, including the trailing courtesy
+    /// that a naive tokenizer keeps as a content word.
+    #[test]
+    fn english_scaffolding_is_stripped_while_content_terms_survive() {
+        assert_eq!(
+            normalize_search_query(
+                "Hello! Could you please tell me what the current population of Oslo is in 2026? Thanks!"
+            ),
+            "current population Oslo 2026"
+        );
+        assert_eq!(
+            normalize_search_query("Hi, I want to know the latest price of Equinor shares."),
+            "latest price Equinor shares"
+        );
+    }
+
+    /// A message made entirely of scaffolding normalizes to nothing, and nothing
+    /// is a worse query than the verbose original: an empty or one-letter query
+    /// retrieves pure noise, while the raw sentence at least retrieves something.
+    #[test]
+    fn degenerate_normalization_falls_back_to_the_original_message() {
+        for message in [
+            "Hva er det?",
+            "Kan du hjelpe meg?",
+            "Hei, kan du fortelle meg?",
+            "What is it?",
+        ] {
+            assert_eq!(
+                normalize_search_query(message),
+                message,
+                "normalization gutted {message:?} and must have fallen back"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // web_search relevance gate
+    // -----------------------------------------------------------------------
+
+    fn web_search_outcome(hits: &[(&str, &str, &str)]) -> ToolOutcome {
+        let items: Vec<Value> = hits
+            .iter()
+            .map(|(url, title, snippet)| {
+                serde_json::json!({"url": url, "title": title, "snippet": snippet})
+            })
+            .collect();
+        outcome_for(
+            "web_search",
+            serde_json::to_string(&items).expect("serialize hits"),
+        )
+    }
+
+    /// The four hits the live weather turn actually cited, plus the one hit that
+    /// could answer the question. Every one of the four matched the *shape* of
+    /// the sentence rather than its subject, and every one of them reached the
+    /// Kilder tab as a numbered source. None of them may become a citation.
+    #[test]
+    fn the_four_observed_noise_cases_are_never_cited_for_a_weather_question() {
+        let question = normalize_search_query("Hva er været i Paris akkurat nå?");
+        let mut outcome = web_search_outcome(&[
+            (
+                "https://www.yr.no/nb/v%C3%A6rvarsel/daglig-tabell/2-2988507/Frankrike/Paris",
+                "Været i Paris akkurat nå – Yr",
+                "Værvarsel for Paris med temperatur og nedbør time for time.",
+            ),
+            (
+                "https://www.instagram.com/p/CyZq1x2ABCD/",
+                "De fineste kafeene i Paris",
+                "Kafétips fra en helg i Paris.",
+            ),
+            (
+                "https://www.fhi.no/publ/2019/skjelettalder-og-biologisk-alder/",
+                "Skjelettalder og biologisk alder",
+                "Rapport om metoder for aldersvurdering.",
+            ),
+            (
+                "https://www.tiktok.com/@bruker/video/7123456789",
+                "Parfyme haul",
+                "Ny parfyme kjøpt i Paris.",
+            ),
+            (
+                "https://no.linkedin.com/in/ola-nordmann",
+                "Ola Nordmann – rådgiver",
+                "Erfaring fra Paris og Oslo.",
+            ),
+        ]);
+
+        let gate = gate_web_search_outcome(&question, &mut outcome);
+
+        assert_eq!(gate.found, 5);
+        assert_eq!(
+            gate.kept, 1,
+            "only the forecast can answer a weather question: {}",
+            outcome.output
+        );
+        let cited: Vec<String> = gate
+            .citations
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::Citation { url, .. } => Some(url.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cited.len(), 1, "{cited:?}");
+        assert!(cited[0].contains("yr.no"), "{cited:?}");
+        for noise in ["instagram.com", "fhi.no", "tiktok.com", "linkedin.com"] {
+            assert!(
+                !cited.iter().any(|url| url.contains(noise)),
+                "{noise} became a source: {cited:?}"
+            );
+        }
+    }
+
+    /// Silent filtering is its own dishonesty: the model would report "I found 5
+    /// sources" while the user's Kilder tab showed one. The counts and the
+    /// per-hit reason have to be in the text the model reads.
+    #[test]
+    fn filtered_counts_and_reasons_reach_the_model_facing_output() {
+        let mut outcome = web_search_outcome(&[
+            (
+                "https://www.yr.no/nb/v%C3%A6rvarsel/Paris",
+                "Været i Paris akkurat nå – Yr",
+                "Værvarsel for Paris.",
+            ),
+            (
+                "https://www.instagram.com/p/CyZq1x2ABCD/",
+                "De fineste kafeene i Paris",
+                "Kafétips fra en helg i Paris.",
+            ),
+        ]);
+
+        let gate = gate_web_search_outcome("været Paris akkurat nå", &mut outcome);
+
+        assert_eq!((gate.found, gate.kept), (2, 1));
+        assert!(
+            outcome.output.contains("2 hits found, 1 kept"),
+            "{}",
+            outcome.output
+        );
+        assert!(outcome.output.contains("1 set aside"), "{}", outcome.output);
+        assert!(outcome.output.contains("NOT citable"), "{}", outcome.output);
+        // The reason comes from `relevance::filtered_reason`, so the model is told
+        // WHY rather than just being handed a shorter list.
+        assert!(
+            outcome.output.contains("filtered as irrelevant"),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains("instagram.com"),
+            "a set-aside hit stays visible, it is not deleted: {}",
+            outcome.output
+        );
+    }
+
+    /// The gate ranks noise down; it does not make the feature disappear. When
+    /// nothing clears the bar, `relevance::keep_mask`'s never-empty fallback keeps
+    /// the best few — and the output has to say that it did, or "weak evidence"
+    /// reads as "verified".
+    #[test]
+    fn the_gate_never_filters_everything() {
+        let mut outcome = web_search_outcome(&[
+            (
+                "https://www.instagram.com/p/CyZq1x2ABCD/",
+                "De fineste kafeene i Paris",
+                "Kafétips.",
+            ),
+            (
+                "https://www.fhi.no/publ/2019/skjelettalder/",
+                "Skjelettalder og biologisk alder",
+                "Aldersvurdering.",
+            ),
+            (
+                "https://www.tiktok.com/@bruker/video/7123456789",
+                "Parfyme haul",
+                "Ny parfyme.",
+            ),
+            (
+                "https://no.linkedin.com/in/ola-nordmann",
+                "Ola Nordmann – rådgiver",
+                "Rådgiver.",
+            ),
+        ]);
+
+        let gate = gate_web_search_outcome("været Paris akkurat nå", &mut outcome);
+
+        assert_eq!(gate.found, 4);
+        assert_eq!(
+            gate.kept,
+            relevance::fallback_keep().min(4),
+            "the never-empty fallback must fire instead of an empty Kilder tab"
+        );
+        assert_eq!(gate.citations.len(), gate.kept);
+        assert!(
+            outcome.output.contains("WEAK EVIDENCE"),
+            "a relaxed gate must be stated, not hidden: {}",
+            outcome.output
+        );
     }
 }
