@@ -55,8 +55,8 @@ use crate::{
     config::AppState,
     domains::chat::shared::{
         data_plane_token, delegated_auth_unavailable, model_token, proxy_model_json,
-        proxy_model_json_with_data_plane, required_execution_token, required_inference_token,
-        required_session_token,
+        proxy_model_json_with_data_plane, proxy_model_json_with_session, required_execution_token,
+        required_inference_token, required_session_token,
     },
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
@@ -1290,12 +1290,29 @@ async fn control_ai_run(
     (StatusCode::OK, Json(ok(response_body))).into_response()
 }
 
+/// `GET /api/v1/browser/sessions/:session_id/artifacts/:artifact_id` — serve one
+/// piece of a run's captured evidence (a step screenshot, a DOM snapshot, a
+/// visual observation) as bytes the SPA can point an `<img>` at.
+///
+/// `:session_id` is whichever id the run's evidence was registered under: a
+/// Quarry browser session for the in-app browser surface, or an orchestration run
+/// id for a chat turn whose browser loop ran inside execution-core. Both are
+/// authorized by [`owned_browser_artifact_run`]; neither can read the other
+/// tenant's evidence.
+///
+/// Quarry's own `GET /v1/artifacts/:id` applies no tenant scoping, so the
+/// ownership gate below is the *only* isolation boundary on this path and must
+/// run before any upstream call.
 async fn get_artifact(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path((session_id, artifact_id)): Path<(String, String)>,
 ) -> Response {
+    // The `art_` prefix rule is mirrored client-side
+    // (`chat-run-watch.ts::isFetchableArtifactRef`) so a malformed reference
+    // degrades to an honest "could not fetch" state instead of being retried as
+    // an `<img>` src against a 400.
     if !is_valid_path_segment(&session_id) || !is_valid_artifact_id(&artifact_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1306,8 +1323,20 @@ async fn get_artifact(
         )
             .into_response();
     }
-    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
-        return response;
+    let metadata = match owned_browser_artifact_run(&state, &user, &headers, &session_id).await {
+        Ok(metadata) => metadata,
+        Err(response) => return response,
+    };
+    // Zero Data Retention: Quarry refuses every durable artifact write for a ZDR
+    // run (`quarry-core::zdr` guards `WriteKind::Artifact`), so no capture for
+    // this run can ever exist. Answer that as an explicit, terminal "no
+    // artifact" — never a 5xx, and never an authorization code, both of which the
+    // panel renders as different copy. Runs authorized as orchestration runs
+    // carry no ZDR flag here (that posture lives with the turn, not this
+    // gateway); they reach the same outcome through the not-found normalization
+    // below, because the capture was never written.
+    if metadata.zdr {
+        return BrowserArtifactAbsence::Withheld.into_response();
     }
 
     let cookie = cookie_header(&headers);
@@ -1327,6 +1356,14 @@ async fn get_artifact(
             let status =
                 StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             if !status.is_success() {
+                // A capture that was never written (ZDR run) and one that has
+                // aged out of the store are the same terminal fact to the
+                // caller: there is no artifact. Normalize both into one stable
+                // code instead of forwarding Quarry's envelope, so the panel can
+                // tell "no image will ever come" apart from a real failure.
+                if matches!(status, StatusCode::NOT_FOUND | StatusCode::GONE) {
+                    return BrowserArtifactAbsence::NeverStored.into_response();
+                }
                 let body = upstream.json::<Value>().await.unwrap_or_else(
                     |_| json!({ "error": { "code": "browser_artifact_unavailable" } }),
                 );
@@ -2858,42 +2895,249 @@ async fn resolve_browser_run_owner(
     })
 }
 
+/// The single "this browser run is not yours / not here" answer. Deliberately
+/// indistinguishable between "no such id" and "owned by someone else" so the
+/// route never confirms the existence of another tenant's run.
+fn browser_session_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "browser_session_not_found",
+            "The browser session is not active.",
+        )),
+    )
+        .into_response()
+}
+
+/// Why the in-process `browser_run_store` did not hand back owned metadata.
+///
+/// The three cases are kept apart because they authorize differently: an id this
+/// gateway *registered* under a different owner is a decided denial, an id it
+/// never registered at all is simply unknown to this store — and may still be an
+/// orchestration run the caller owns (see [`owned_orchestration_run`]) — and a
+/// poisoned lock is an infrastructure failure that must fail closed. Collapsing
+/// them, as a plain `Option` does, is what forces every unregistered-but-owned
+/// run to 404.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserRunMiss {
+    /// An entry exists under a DIFFERENT owner. A decided denial: it must never
+    /// get a second authorization attempt.
+    Foreign,
+    /// No entry under this id. NOT an authorization decision.
+    Absent,
+    /// The store lock is poisoned; ownership cannot be verified at all.
+    Unavailable,
+}
+
+impl BrowserRunMiss {
+    /// The response for a miss that ends the request. `Absent` is deliberately
+    /// answered exactly like `Foreign` so the route never confirms the existence
+    /// of another tenant's run.
+    fn into_response(self) -> Response {
+        match self {
+            Self::Foreign | Self::Absent => browser_session_not_found(),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "browser_store_unavailable",
+                    "Browser run ownership could not be verified.",
+                )),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Read the in-process store under an already-resolved owner, reporting *why* a
+/// lookup missed so callers can tell a decided denial from an id this store
+/// simply does not know about.
+fn browser_run_lookup(
+    state: &AppState,
+    owner: &BrowserRunOwner,
+    run_id: &str,
+) -> Result<BrowserRunMetadata, BrowserRunMiss> {
+    let runs = state
+        .browser_run_store
+        .lock()
+        .map_err(|_| BrowserRunMiss::Unavailable)?;
+    match runs.get(run_id) {
+        None => Err(BrowserRunMiss::Absent),
+        Some(metadata)
+            if browser_run_owner_matches(
+                &metadata.owner.user_id,
+                &metadata.owner.org_id,
+                &owner.user_id,
+                &owner.org_id,
+            ) =>
+        {
+            Ok(metadata.clone())
+        }
+        Some(_) => Err(BrowserRunMiss::Foreign),
+    }
+}
+
 async fn owned_browser_run_metadata(
     state: &AppState,
     user: &AuthenticatedUser,
     run_id: &str,
 ) -> Result<BrowserRunMetadata, Response> {
     let owner = resolve_browser_run_owner(state, user).await?;
-    let runs = state.browser_run_store.lock().map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "browser_store_unavailable",
-                "Browser run ownership could not be verified.",
-            )),
+    browser_run_lookup(state, &owner, run_id).map_err(BrowserRunMiss::into_response)
+}
+
+/// How long a *proven* orchestration-run ownership decision may be reused.
+///
+/// The live panel renders one frame per agent step and the browser issues those
+/// `<img>` requests in parallel, so re-probing the Model Plane per frame turns
+/// one panel open into dozens of upstream round trips. Only positive decisions
+/// are cached, and the key includes the caller's own validated org and user, so
+/// an entry can never be served to a different principal; denials are never
+/// cached, so a run that becomes readable is not stuck denied.
+const BROWSER_RUN_OWNERSHIP_TTL_SECS: u64 = 120;
+
+/// Prove the caller owns `run_id` as an **orchestration** run.
+///
+/// A chat turn's browser loop runs inside execution-core: it publishes its
+/// events keyed by the orchestration run id and never passes through
+/// `create_session` / `start_ai_run`, so `browser_run_store` — written only by
+/// those two — has no entry for it and the in-process check alone can only ever
+/// answer "not found". Ownership is instead proven with exactly the mechanism
+/// that already authorizes the panel's own subscription to that same run
+/// (`chat/streams.rs::run_events_stream`; `agents_runs.rs::get_run` is the
+/// single-run read built on it):
+///
+/// 1. the caller's user id and org id are resolved SERVER-SIDE by
+///    [`resolve_browser_run_owner`] — `user.user_id` plus `authorized_org_id`,
+///    which reads the live membership decision `require_session` attached, never
+///    a client-supplied header. Nothing on this route lets a caller choose the
+///    identity the probe runs under.
+/// 2. the caller's own short-lived, active-organization-bound
+///    `aud=model-gateway` and `aud=session-core` credentials are minted from
+///    their session cookie. The session credential is *required*, not
+///    best-effort: `GET /v1/runs/{run_id}` extracts a verified
+///    `aud=session-core` **user** bearer from `x-session-authorization` and
+///    forwards exactly that to session-core, so it is what makes the check below
+///    user-scoped rather than service-scoped. Losing it must read as "auth
+///    unavailable", never as "this run is not yours".
+/// 3. the Model Plane run read model is asked to resolve the run under exactly
+///    that identity (`GET /v1/runs/{run_id}` → session-core
+///    `RunService.GetRun` → `authorize_run_owner`), which authorizes against the
+///    stored `runs.org_id` / `runs.user_id`. Because the forwarded principal is a
+///    user and not a service, both halves apply: another org is
+///    `permission_denied`, another user is `permission_denied`, an unknown id is
+///    `not_found`.
+///
+/// Every other outcome denies: a non-success status, a transport failure, a
+/// degraded upstream that answers `200` with no run, or a run whose echoed id is
+/// not the one asked for. There is no allow-on-error path.
+async fn owned_orchestration_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    owner: &BrowserRunOwner,
+    run_id: &str,
+) -> Result<(), Response> {
+    let cache_key = crate::cache::cache_key(
+        "browser-run-owner",
+        &[&owner.org_id, &owner.user_id, run_id],
+    );
+    if state
+        .cache
+        .lookup_within(&cache_key, BROWSER_RUN_OWNERSHIP_TTL_SECS)
+        .await
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let (token, session) = tokio::join!(
+        model_token(state, user, headers),
+        required_session_token(state, user, headers),
+    );
+    let session = match session {
+        Ok(token) => token,
+        Err(error) => return Err(delegated_auth_unavailable(error).into_response()),
+    };
+    let url = format!(
+        "{}/v1/runs/{}",
+        state.model_gateway_url,
+        urlencoding::encode(run_id)
+    );
+    let (status, Json(body)) = proxy_model_json_with_session(
+        state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session),
+        user,
+    )
+    .await;
+    if !status.is_success() || !run_detail_confirms(&body, run_id) {
+        return Err(browser_session_not_found());
+    }
+
+    state
+        .cache
+        .store_for_secs(
+            &cache_key,
+            &json!({ "run_id": run_id }),
+            BROWSER_RUN_OWNERSHIP_TTL_SECS,
         )
-            .into_response()
-    })?;
-    runs.get(run_id)
-        .filter(|metadata| {
-            browser_run_owner_matches(
-                &metadata.owner.user_id,
-                &metadata.owner.org_id,
-                &owner.user_id,
-                &owner.org_id,
-            )
-        })
-        .cloned()
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(error(
-                    "browser_session_not_found",
-                    "The browser session is not active.",
-                )),
-            )
-                .into_response()
-        })
+        .await;
+    Ok(())
+}
+
+/// A run read only counts as ownership proof when the upstream actually returned
+/// *the* run. A `200` carrying an empty envelope, an error envelope, or some
+/// other run must never read as an authorization.
+fn run_detail_confirms(body: &Value, run_id: &str) -> bool {
+    if body.get("error").is_some() {
+        return false;
+    }
+    body.get("run")
+        .or_else(|| body.get("data").and_then(|data| data.get("run")))
+        .and_then(|run| run.get("run_id"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == run_id)
+}
+
+/// Authorize an evidence-artifact read for `run_id`, whichever way the run was
+/// started.
+///
+/// Checks the in-process store first, so a session registered by
+/// `create_session` / `start_ai_run` keeps its recorded owner as the only
+/// answer and that path is untouched. Only a genuinely unregistered id falls
+/// through to the orchestration-run proof — a store entry owned by someone else,
+/// and a poisoned store, both deny here rather than getting a second attempt.
+async fn owned_browser_artifact_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    run_id: &str,
+) -> Result<BrowserRunMetadata, Response> {
+    let owner = resolve_browser_run_owner(state, user).await?;
+    match browser_run_lookup(state, &owner, run_id) {
+        Ok(metadata) => Ok(metadata),
+        // A registered id owned by someone else, and a store we cannot read, are
+        // both decided here. Only a genuinely unknown id gets the second path.
+        Err(miss @ (BrowserRunMiss::Foreign | BrowserRunMiss::Unavailable)) => {
+            Err(miss.into_response())
+        }
+        Err(BrowserRunMiss::Absent) => {
+            owned_orchestration_run(state, user, headers, &owner, run_id).await?;
+            // The orchestration run is the caller's, but this gateway holds no
+            // Quarry lease, profile or observation history for it — that state
+            // lives in execution-core. Deliberately NOT written into
+            // `browser_run_store`: an entry there would make every other
+            // `/browser/sessions/:session_id/*` route accept this run id, which
+            // is exactly the broadening this change must not do.
+            Ok(BrowserRunMetadata {
+                owner,
+                ..browser_run_metadata(state, run_id)
+            })
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3289,6 +3533,40 @@ fn cookie_header(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+/// Why an authorized artifact read has nothing to return.
+///
+/// Both variants are terminal — no image will ever arrive — and both answer
+/// `404`. They are separate codes because the panel shows different copy for
+/// them, and because neither may be confused with the two states that *do* mean
+/// something went wrong: an authorization denial (`browser_session_not_found`)
+/// or a transport/upstream failure (`5xx`). A ZDR run must land here, never on
+/// either of those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserArtifactAbsence {
+    /// Zero Data Retention run: Quarry refused the artifact write at capture
+    /// time, so nothing was ever stored and nothing ever will be.
+    Withheld,
+    /// The store has no such artifact — never written (a ZDR run reaching this
+    /// path without a local ZDR flag) or aged out of retention.
+    NeverStored,
+}
+
+impl BrowserArtifactAbsence {
+    fn into_response(self) -> Response {
+        let (code, message) = match self {
+            Self::Withheld => (
+                "browser_artifact_withheld",
+                "Zero Data Retention is on for this run, so no screenshot was captured.",
+            ),
+            Self::NeverStored => (
+                "browser_artifact_missing",
+                "The browser artifact is no longer available.",
+            ),
+        };
+        (StatusCode::NOT_FOUND, Json(error(code, message))).into_response()
+    }
+}
+
 fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
     if body.get("error").is_some() {
         return (status, Json(body)).into_response();
@@ -3461,6 +3739,465 @@ mod tests {
         )
         .await
         .is_ok());
+    }
+
+    // ---------------------------------------------------------------------
+    // Orchestration-run ownership (chat live panel frames)
+    // ---------------------------------------------------------------------
+
+    /// Stand in for model-gateway's `GET /v1/runs/:run_id`, reproducing the
+    /// authority the real chain applies: session-core answers from the stored
+    /// `runs.org_id` / `runs.user_id`, so `run-owned` resolves only for
+    /// `org-owner` + `user-owner` and every other principal is
+    /// `permission_denied`. Any other run id is unknown.
+    async fn model_plane_run_read_model() -> wiremock::MockServer {
+        use wiremock::{
+            matchers::{header, method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let upstream = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/runs/run-owned"))
+            .and(header("x-org-id", "org-owner"))
+            .and(header("x-user-id", "user-owner"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "run": { "run_id": "run-owned", "status": "running" }
+            })))
+            .with_priority(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/runs/run-owned"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(json!({ "error": "run access denied" })),
+            )
+            .with_priority(5)
+            .mount(&upstream)
+            .await;
+        Mock::given(wm_method("GET"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(json!({ "error": "run not found" })),
+            )
+            .with_priority(10)
+            .mount(&upstream)
+            .await;
+        upstream
+    }
+
+    /// Stand in for auth-core's plane-token endpoints so the tests run the real
+    /// credential path (`model_token` + `required_session_token`) instead of
+    /// skipping it. `GET /api/{audience}/token` → `{ "token": ... }`.
+    async fn plane_token_issuer() -> wiremock::MockServer {
+        use wiremock::{
+            matchers::{method as wm_method, path_regex},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(path_regex(r"^/api/[a-z-]+/token$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "token": "test-plane-token" })),
+            )
+            .mount(&auth)
+            .await;
+        auth
+    }
+
+    fn state_for(
+        auth_core: &wiremock::MockServer,
+        run_read_model: &wiremock::MockServer,
+    ) -> AppState {
+        let mut state = test_app_state();
+        state.auth_core_url = auth_core.uri();
+        state.model_gateway_url = run_read_model.uri();
+        state
+    }
+
+    fn owner_of(user_id: &str, org_id: &str) -> BrowserRunOwner {
+        BrowserRunOwner {
+            user_id: user_id.to_owned(),
+            org_id: org_id.to_owned(),
+        }
+    }
+
+    /// The whole point of this route: the run's owner may read its evidence and
+    /// nobody else may — not another user in the same org, not the same user id
+    /// in another org, and not a run id that does not exist.
+    #[tokio::test]
+    async fn orchestration_run_ownership_admits_only_the_runs_own_user_and_org() {
+        let upstream = model_plane_run_read_model().await;
+        let auth = plane_token_issuer().await;
+        let state = state_for(&auth, &upstream);
+        let headers = HeaderMap::new();
+
+        let owner = owned_orchestration_run(
+            &state,
+            &test_user("user-owner", "org-owner"),
+            &headers,
+            &owner_of("user-owner", "org-owner"),
+            "run-owned",
+        )
+        .await;
+        assert!(owner.is_ok(), "the run's own owner must be able to read it");
+
+        let wrong_user = owned_orchestration_run(
+            &state,
+            &test_user("user-attacker", "org-owner"),
+            &headers,
+            &owner_of("user-attacker", "org-owner"),
+            "run-owned",
+        )
+        .await
+        .expect_err("another user in the same org must be denied");
+        assert_eq!(wrong_user.status(), StatusCode::NOT_FOUND);
+
+        let cross_org = owned_orchestration_run(
+            &state,
+            &test_user("user-owner", "org-attacker"),
+            &headers,
+            &owner_of("user-owner", "org-attacker"),
+            "run-owned",
+        )
+        .await
+        .expect_err("the same user id in another org must be denied");
+        assert_eq!(cross_org.status(), StatusCode::NOT_FOUND);
+
+        let unknown = owned_orchestration_run(
+            &state,
+            &test_user("user-owner", "org-owner"),
+            &headers,
+            &owner_of("user-owner", "org-owner"),
+            "run-does-not-exist",
+        )
+        .await
+        .expect_err("an unknown run id must be denied");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Tenant isolation depends on the probe running under the caller's own
+    /// validated identity, so a client-supplied `x-user-id` / `x-org-id` must
+    /// never reach the upstream. If it could, forging those headers would hand
+    /// the caller another tenant's frames.
+    #[tokio::test]
+    async fn orchestration_probe_ignores_client_supplied_identity_headers() {
+        let upstream = model_plane_run_read_model().await;
+        let auth = plane_token_issuer().await;
+        let state = state_for(&auth, &upstream);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user-id", "user-owner".parse().unwrap());
+        headers.insert("x-org-id", "org-owner".parse().unwrap());
+
+        // A caller validated as `user-attacker`/`org-attacker` claiming to be the
+        // owner in request headers is still probed as themselves, so denied.
+        let forged = owned_orchestration_run(
+            &state,
+            &test_user("user-attacker", "org-attacker"),
+            &headers,
+            &owner_of("user-attacker", "org-attacker"),
+            "run-owned",
+        )
+        .await
+        .expect_err("forged identity headers must not authorize a foreign run");
+        assert_eq!(forged.status(), StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("recorded requests");
+        let last = received.last().expect("the probe must reach the upstream");
+        assert_eq!(
+            last.headers.get("x-user-id").map(|v| v.to_str().unwrap()),
+            Some("user-attacker"),
+            "the probe must carry the validated user, not the client's claim"
+        );
+        assert_eq!(
+            last.headers.get("x-org-id").map(|v| v.to_str().unwrap()),
+            Some("org-attacker"),
+            "the probe must carry the validated org, not the client's claim"
+        );
+    }
+
+    /// The session credential is what makes the upstream check user-scoped, so
+    /// losing it must deny — but as "auth unavailable", not as a false
+    /// "this run is not yours". Either way no bytes are served.
+    #[tokio::test]
+    async fn losing_the_session_credential_denies_without_claiming_the_run_is_foreign() {
+        let upstream = model_plane_run_read_model().await;
+        let mut state = test_app_state();
+        state.model_gateway_url = upstream.uri();
+        // `auth_core_url` is unreachable, so no `aud=session-core` token mints.
+
+        let denied = owned_orchestration_run(
+            &state,
+            &test_user("user-owner", "org-owner"),
+            &HeaderMap::new(),
+            &owner_of("user-owner", "org-owner"),
+            "run-owned",
+        )
+        .await
+        .expect_err("an unmintable session credential must deny");
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            upstream
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty(),
+            "the probe must not run unscoped when the session credential is missing"
+        );
+    }
+
+    /// A `200` is only proof when the upstream really returned the run asked
+    /// for. A degraded or generic answer must not read as an authorization.
+    #[test]
+    fn run_detail_only_confirms_the_requested_run() {
+        assert!(run_detail_confirms(
+            &json!({ "run": { "run_id": "run-owned" } }),
+            "run-owned"
+        ));
+        assert!(run_detail_confirms(
+            &json!({ "data": { "run": { "run_id": "run-owned" } } }),
+            "run-owned"
+        ));
+        assert!(!run_detail_confirms(&json!({}), "run-owned"));
+        assert!(!run_detail_confirms(&json!({ "run": {} }), "run-owned"));
+        assert!(!run_detail_confirms(
+            &json!({ "run": { "run_id": "run-somebody-else" } }),
+            "run-owned"
+        ));
+        assert!(!run_detail_confirms(
+            &json!({ "error": { "code": "forbidden" }, "run": { "run_id": "run-owned" } }),
+            "run-owned"
+        ));
+    }
+
+    /// A session id this gateway DID register is answered by its recorded owner
+    /// and nothing else. It must not get a second chance at the orchestration
+    /// probe, which would turn one denied lookup into two authorization attempts.
+    #[tokio::test]
+    async fn a_registered_session_owned_by_another_user_never_reaches_the_run_probe() {
+        use wiremock::{matchers::method as wm_method, Mock, MockServer, ResponseTemplate};
+
+        let permissive = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "run": { "run_id": "run-owned" }
+            })))
+            .mount(&permissive)
+            .await;
+        let mut state = test_app_state();
+        state.model_gateway_url = permissive.uri();
+
+        let mut metadata = browser_run_metadata(&state, "missing");
+        metadata.owner = owner_of("user-owner", "org-owner");
+        store_browser_run_metadata(&state, "run-owned", metadata).expect("store owned session");
+
+        let denied = owned_browser_artifact_run(
+            &state,
+            &test_user("user-attacker", "org-attacker"),
+            &HeaderMap::new(),
+            "run-owned",
+        )
+        .await
+        .expect_err("a foreign owner on a registered session must be denied outright");
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        assert!(
+            permissive
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty(),
+            "a decided store denial must not fall through to the run probe"
+        );
+    }
+
+    /// An unregistered id falls through to the run probe, and on success the
+    /// caller's own validated identity — never the upstream's answer — is what
+    /// the returned metadata is owned by.
+    #[tokio::test]
+    async fn an_unregistered_orchestration_run_resolves_to_the_callers_own_owner() {
+        let upstream = model_plane_run_read_model().await;
+        let auth = plane_token_issuer().await;
+        let state = state_for(&auth, &upstream);
+
+        let metadata = owned_browser_artifact_run(
+            &state,
+            &test_user("user-owner", "org-owner"),
+            &HeaderMap::new(),
+            "run-owned",
+        )
+        .await
+        .expect("the run's owner may read its evidence");
+        assert_eq!(metadata.owner, owner_of("user-owner", "org-owner"));
+        assert!(
+            !state
+                .browser_run_store
+                .lock()
+                .expect("store")
+                .contains_key("run-owned"),
+            "an orchestration run must not be registered as a browser session, \
+             which would make every other /browser/sessions route accept it"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Artifact responses (owner reads bytes; ZDR reads a clean "no artifact")
+    // ---------------------------------------------------------------------
+
+    async fn artifact_response_body(response: Response) -> Value {
+        use http_body_util::BodyExt;
+
+        serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("artifact response body")
+                .to_bytes(),
+        )
+        .expect("JSON error envelope")
+    }
+
+    fn register_session(state: &AppState, session_id: &str, zdr: bool) {
+        let mut metadata = browser_run_metadata(state, "missing");
+        metadata.owner = owner_of("user-owner", "org-owner");
+        metadata.zdr = zdr;
+        store_browser_run_metadata(state, session_id, metadata).expect("store session");
+    }
+
+    /// PNG magic bytes — enough for `safe_browser_artifact_content_type` to keep
+    /// the upstream image type rather than sniffing it as JSON.
+    const PNG_BYTES: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+    #[tokio::test]
+    async fn the_owner_of_a_registered_session_reads_the_real_artifact_bytes() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_shot1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(PNG_BYTES.to_vec(), "image/png"))
+            .mount(&quarry)
+            .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        register_session(&state, "run-owned", false);
+
+        let response = get_artifact(
+            State(state),
+            Extension(test_user("user-owner", "org-owner")),
+            HeaderMap::new(),
+            Path(("run-owned".to_owned(), "art_shot1".to_owned())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png")
+        );
+    }
+
+    /// ZDR is a distinct, terminal outcome: `404` with its own code, no upstream
+    /// call at all — never a 5xx and never an authorization error, both of which
+    /// the panel renders as different copy.
+    #[tokio::test]
+    async fn a_zdr_run_yields_a_clean_no_artifact_outcome_without_touching_quarry() {
+        use wiremock::MockServer;
+
+        let quarry = MockServer::start().await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        register_session(&state, "run-zdr01", true);
+
+        let response = get_artifact(
+            State(state),
+            Extension(test_user("user-owner", "org-owner")),
+            HeaderMap::new(),
+            Path(("run-zdr01".to_owned(), "art_shot1".to_owned())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            artifact_response_body(response).await["error"]["code"],
+            json!("browser_artifact_withheld")
+        );
+        assert!(
+            quarry
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty(),
+            "a ZDR run has no capture to fetch, so nothing may be requested"
+        );
+    }
+
+    /// The same terminal fact reached the other way: capture was never stored
+    /// (ZDR without a local flag) or has aged out. Still `404` with a stable
+    /// code, not Quarry's envelope and not a 5xx.
+    #[tokio::test]
+    async fn an_absent_capture_is_normalized_into_one_stable_no_artifact_code() {
+        use wiremock::{matchers::method as wm_method, Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "not_found", "message": "artifact art_shot1 not found" }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        register_session(&state, "run-owned", false);
+
+        let response = get_artifact(
+            State(state),
+            Extension(test_user("user-owner", "org-owner")),
+            HeaderMap::new(),
+            Path(("run-owned".to_owned(), "art_shot1".to_owned())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            artifact_response_body(response).await["error"]["code"],
+            json!("browser_artifact_missing")
+        );
+    }
+
+    /// The `art_` prefix rule the SPA mirrors client-side must stay enforced, so
+    /// a malformed reference is rejected before any ownership or upstream work.
+    #[tokio::test]
+    async fn malformed_artifact_references_are_rejected_before_authorization() {
+        let state = test_app_state();
+        for artifact_id in [
+            "shot1",
+            "art_",
+            "art_/../etc",
+            &format!("art_{}", "a".repeat(200)),
+        ] {
+            let response = get_artifact(
+                State(state.clone()),
+                Extension(test_user("user-owner", "org-owner")),
+                HeaderMap::new(),
+                Path(("run-owned".to_owned(), artifact_id.to_owned())),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "`{artifact_id}` must not be accepted as an artifact id"
+            );
+        }
     }
 
     #[test]
