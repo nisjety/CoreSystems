@@ -12,7 +12,7 @@ type capturedPublish struct {
 
 type fakeRaw struct {
 	calls   []capturedPublish
-	failAt  int  // 1-based index; 0 = never fail
+	failAt  int // 1-based index; 0 = never fail
 	callNum int
 }
 
@@ -124,5 +124,66 @@ func TestPublisher_Mode(t *testing.T) {
 	p := NewPublisher(&fakeRaw{}, ModeDualWrite)
 	if p.Mode() != ModeDualWrite {
 		t.Errorf("Mode() = %v, want ModeDualWrite", p.Mode())
+	}
+}
+
+// ── Zero Data Retention suppression ─────────────────────────────────────────
+
+// TestPublisher_ZDREnvelopeNeverReachesAnyBackend is the Go twin of
+// model-gateway's Rust `zdr_envelopes_never_enter_any_publisher_backend`. It runs
+// across EVERY compat mode because dual-write would otherwise mirror a
+// no-retention envelope onto the legacy subject even if the v1 leg were guarded.
+func TestPublisher_ZDREnvelopeNeverReachesAnyBackend(t *testing.T) {
+	const zdrEnvelope = `{"event_id":"e","event_type":"RUN_COMPLETED","org_id":"o",` +
+		`"payload":{"summary":"must-not-persist"},"zdr":true}`
+
+	for _, mode := range []CompatMode{ModeV1Only, ModeDualRead, ModeDualWrite, ModeLegacyOnly} {
+		t.Run(mode.String(), func(t *testing.T) {
+			f := &fakeRaw{}
+			p := NewPublisher(f, mode)
+			// A suppressed publish is a success, not an error: the Rust twin
+			// returns Ok(()), and failing it would turn a satisfied retention
+			// rule into a producer-side retry storm.
+			if err := p.Publish("mp.v1.run.run-1.event", []byte(zdrEnvelope)); err != nil {
+				t.Fatalf("suppressed publish must not error: %v", err)
+			}
+			if f.callNum != 0 {
+				t.Fatalf("backend was called %d time(s); a ZDR envelope must reach no backend", f.callNum)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("expected 0 published messages, got %d", len(f.calls))
+			}
+		})
+	}
+}
+
+// TestPublisher_ZDRSuppressionIsExactlyZDRTrue guards the blast radius: only an
+// explicit `zdr: true` is suppressed. Dropping envelopes with an ABSENT posture
+// would silently delete lifecycle signal that downstream run counters depend on,
+// and non-envelope payloads must pass through untouched.
+func TestPublisher_ZDRSuppressionIsExactlyZDRTrue(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		data        string
+		wantPublish bool
+	}{
+		{name: "zdr true suppressed", data: `{"zdr":true}`, wantPublish: false},
+		{name: "zdr false published", data: `{"zdr":false}`, wantPublish: true},
+		{name: "posture absent published", data: `{"event_id":"e"}`, wantPublish: true},
+		{name: "zdr null published", data: `{"zdr":null}`, wantPublish: true},
+		{name: "non-json payload published", data: `not-an-envelope`, wantPublish: true},
+		{name: "empty payload published", data: ``, wantPublish: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRaw{}
+			p := NewPublisher(f, ModeV1Only)
+			if err := p.Publish("mp.v1.run.run-1.event", []byte(tc.data)); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := len(f.calls) == 1
+			if got != tc.wantPublish {
+				t.Fatalf("published = %v, want %v (calls: %d)", got, tc.wantPublish, len(f.calls))
+			}
+		})
 	}
 }

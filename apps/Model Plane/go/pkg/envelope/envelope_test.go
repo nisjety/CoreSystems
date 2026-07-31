@@ -201,6 +201,168 @@ func TestGoldenFixture_Roundtrip(t *testing.T) {
 	}
 }
 
+// ── Zero Data Retention (`zdr`, proto field 13) ──────────────────────────────
+
+// TestZDR_RoundTripsAllThreeStates is the core of the contract: the flag must
+// survive marshal → unmarshal, and ABSENT must stay distinguishable from an
+// explicit `false`. A plain bool field would collapse those two, which is what
+// makes a consumer unable to tell "declared retainable" from "nobody said".
+func TestZDR_RoundTripsAllThreeStates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		set     *bool
+		wantKey string // literal that must appear (or not) on the wire
+		absent  bool
+	}{
+		{name: "absent", set: nil, absent: true},
+		{name: "explicit false", set: envelope.ZDRFlag(false), wantKey: `"zdr":false`},
+		{name: "explicit true", set: envelope.ZDRFlag(true), wantKey: `"zdr":true`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnvelope()
+			env.Zdr = tc.set
+
+			data, err := env.Encode()
+			if err != nil {
+				t.Fatalf("encode error: %v", err)
+			}
+			if tc.absent {
+				if containsSubstr(string(data), `"zdr"`) {
+					t.Fatalf("an undeclared posture must not appear on the wire: %s", data)
+				}
+			} else if !containsSubstr(string(data), tc.wantKey) {
+				t.Fatalf("missing %s on the wire: %s", tc.wantKey, data)
+			}
+
+			decoded, err := envelope.Decode(data)
+			if err != nil {
+				t.Fatalf("decode error: %v", err)
+			}
+			switch {
+			case tc.set == nil && decoded.Zdr != nil:
+				t.Fatalf("absent became %v after round-trip", *decoded.Zdr)
+			case tc.set != nil && decoded.Zdr == nil:
+				t.Fatal("declared posture was lost in the round-trip")
+			case tc.set != nil && *decoded.Zdr != *tc.set:
+				t.Fatalf("zdr = %v, want %v", *decoded.Zdr, *tc.set)
+			}
+		})
+	}
+}
+
+// TestZDR_JSONKeyMatchesProtoAndRust pins the wire key. The proto declares
+// `bool zdr = 13` and the Rust twin derives Serialize on a field literally named
+// `zdr` with no rename, so both producers must emit exactly `zdr` — a mismatched
+// key is the same dropped-flag bug in a new place.
+func TestZDR_JSONKeyMatchesProtoAndRust(t *testing.T) {
+	env := validEnvelope()
+	env.Zdr = envelope.ZDRFlag(true)
+	data, err := env.Encode()
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+	var generic map[string]json.RawMessage
+	if err := json.Unmarshal(data, &generic); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	raw, ok := generic["zdr"]
+	if !ok {
+		t.Fatalf("expected key %q, got keys: %v", "zdr", generic)
+	}
+	if string(raw) != "true" {
+		t.Fatalf("zdr = %s, want true", raw)
+	}
+	// A Rust-shaped payload (plain bool, same key) must decode here too.
+	fromRust, err := envelope.Decode([]byte(`{"event_id":"e","zdr":true}`))
+	if err != nil {
+		t.Fatalf("decode rust-shaped payload: %v", err)
+	}
+	if fromRust.Zdr == nil || !*fromRust.Zdr {
+		t.Fatal("a Rust-produced zdr:true must decode as declared ZDR")
+	}
+}
+
+// TestZDR_GoldenFixtureStaysByteCompatible guards the shared Go/Rust fixture,
+// which carries no `zdr` key. Re-encoding it must NOT inject one: a struct shape
+// that emitted `"zdr":false` for an unset field would silently upgrade every
+// legacy envelope from "no posture declared" to "declared retainable".
+func TestZDR_GoldenFixtureStaysByteCompatible(t *testing.T) {
+	fixturePath := filepath.Join("..", "..", "..", "rust", "crates", "mp-events", "tests", "fixtures", "envelope_valid.json")
+	data, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Skipf("golden fixture not found at %s: %v", fixturePath, err)
+	}
+	env, err := envelope.Decode(data)
+	if err != nil {
+		t.Fatalf("decode golden fixture: %v", err)
+	}
+	if env.Zdr != nil {
+		t.Fatalf("fixture declares no posture, got %v", *env.Zdr)
+	}
+	reEncoded, err := env.Encode()
+	if err != nil {
+		t.Fatalf("re-encode error: %v", err)
+	}
+	if containsSubstr(string(reEncoded), `"zdr"`) {
+		t.Fatalf("re-encoding invented a posture the fixture never declared: %s", reEncoded)
+	}
+}
+
+func TestIsZDR(t *testing.T) {
+	env := validEnvelope()
+	if env.IsZDR() {
+		t.Error("an undeclared posture is not ZDR (it is unknown)")
+	}
+	env.Zdr = envelope.ZDRFlag(false)
+	if env.IsZDR() {
+		t.Error("zdr:false must not read as ZDR")
+	}
+	env.Zdr = envelope.ZDRFlag(true)
+	if !env.IsZDR() {
+		t.Error("zdr:true must read as ZDR")
+	}
+}
+
+// TestDeclaredZDR covers the byte-level probe used on the publish path, where
+// the payload is already serialized.
+func TestDeclaredZDR(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		data         string
+		wantZDR      bool
+		wantDeclared bool
+	}{
+		{name: "explicit true", data: `{"zdr":true}`, wantZDR: true, wantDeclared: true},
+		{name: "explicit false", data: `{"zdr":false}`, wantZDR: false, wantDeclared: true},
+		{name: "absent key", data: `{"event_id":"e"}`},
+		{name: "explicit null", data: `{"zdr":null}`},
+		{name: "not json", data: `payload`},
+		{name: "empty", data: ``},
+		{name: "json but not an object", data: `["zdr",true]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zdr, declared := envelope.DeclaredZDR([]byte(tc.data))
+			if zdr != tc.wantZDR || declared != tc.wantDeclared {
+				t.Fatalf("DeclaredZDR(%q) = (%v, %v), want (%v, %v)",
+					tc.data, zdr, declared, tc.wantZDR, tc.wantDeclared)
+			}
+		})
+	}
+}
+
+// TestValidate_IgnoresRetentionPosture documents that an undeclared posture is
+// still a VALID envelope. Validation must not start rejecting them: the
+// lifecycle fact is what downstream run counters consume, and the retention
+// decision belongs to whoever wants to persist content, which fails closed on
+// absence.
+func TestValidate_IgnoresRetentionPosture(t *testing.T) {
+	env := validEnvelope()
+	env.Zdr = nil
+	if err := env.Validate(); err != nil {
+		t.Fatalf("an undeclared posture must remain valid, got: %v", err)
+	}
+}
+
 func TestDeriveIdempotencyHash_MatchesRust(t *testing.T) {
 	const goldenHex = "fbc1d94e94d756ede12c527b3b59e2204f58a623e6bd5a3d679eb03d93f22637"
 	got := envelope.DeriveIdempotencyHash("model-gateway", "INGRESS_ACCEPTED", "thread/abc", "req-1")

@@ -46,6 +46,22 @@ type Tenancy struct {
 	// that carry a retention flag receive it so the posture propagates into the
 	// durable path instead of being silently dropped.
 	ZDR bool
+	// RetentionAttested reports whether the issuer stamped a retention posture
+	// at all. Without it `ZDR: false` is ambiguous — it is the value both for
+	// "declared retainable" and for "nobody declared anything" — and the
+	// lifecycle envelope would publish an unearned durability guarantee.
+	RetentionAttested bool
+}
+
+// Retention maps the caller's signed posture onto the marker the lifecycle
+// activities stamp on run events. An unattested caller yields
+// [activities.RetentionUnspecified], which fails closed downstream rather than
+// asserting that the run's content may be retained.
+func (t Tenancy) Retention() activities.Retention {
+	if !t.RetentionAttested {
+		return activities.RetentionUnspecified
+	}
+	return activities.RetentionFor(t.ZDR)
 }
 
 // WorkflowSpec is one entry of the start allowlist.
@@ -195,6 +211,10 @@ func buildInteractiveRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 	in.RunID = t.RunID
 	in.OrgID = t.OrgID
 	in.UserID = t.UserID
+	// Server-owned, exactly like the identity fields above: the signed posture
+	// always overwrites whatever the caller put in the body, so a client cannot
+	// declare its own run retainable.
+	in.Retention = t.Retention()
 	if strings.TrimSpace(in.ThreadID) == "" {
 		in.ThreadID = t.RunID
 	}
@@ -293,7 +313,8 @@ func buildEvaluatorOptimizerInput(raw json.RawMessage, t Tenancy) (any, error) {
 		JudgeMaxTokens:      req.JudgeMaxTokens,
 		Temperature:         req.Temperature,
 		// The signed posture wins; the caller cannot hand us a ZDR flag.
-		ZDR: t.ZDR,
+		ZDR:               t.ZDR,
+		RetentionAttested: t.RetentionAttested,
 	}, nil
 }
 

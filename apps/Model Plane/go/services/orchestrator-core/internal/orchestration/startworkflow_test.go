@@ -476,8 +476,106 @@ func TestZDRPostureIsPropagatedIntoTheWorkflowInput(t *testing.T) {
 	require.Len(t, starter.starts, 1)
 	in := starter.starts[0].arg.(activities.EvalOptimizerInput)
 	assert.True(t, in.ZDR, "the signed posture must reach the durable input")
+	assert.True(t, in.RetentionAttested,
+		"the presence of the claim must travel too, or zdr:false is ambiguous downstream")
+	assert.Equal(t, activities.RetentionZeroData, in.Retention(),
+		"the lifecycle-envelope posture must resolve from the signed claim")
 	assert.Equal(t, "org-a", in.OrgID)
 	assert.Equal(t, "run-1", in.RunID)
+}
+
+// TestRetentionPostureReachesTheInteractiveRunInput closes the leg that made the
+// whole chain inert: the caller's signed posture has always been verified at
+// start, but nothing carried it into the run's lifecycle envelope, so
+// RUN_COMPLETED declared no `zdr` and every downstream retention gate refused.
+func TestRetentionPostureReachesTheInteractiveRunInput(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim *bool
+		want  activities.Retention
+	}{
+		{name: "attested non-ZDR caller", claim: boolPtr(false), want: activities.RetentionDurable},
+		{name: "attested ZDR caller", claim: boolPtr(true), want: activities.RetentionZeroData},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth, key := testAuth(t)
+			starter := &fakeStarter{}
+			svc := NewWorkflowStartService(auth, starter, testQueue)
+
+			token := sign(t, key, testClaims{
+				OrgID: "org-a", UserID: "user-a", PrincipalType: "user", ZDR: tc.claim,
+			})
+			_, err := svc.Start(bearerCtx(token), &mpv1.StartWorkflowRequest{
+				WorkflowType: "InteractiveRunSupervision", RunId: "run-1",
+				Input: mustStruct(t, map[string]any{"goal": "g"}),
+			})
+			require.NoError(t, err)
+			require.Len(t, starter.starts, 1)
+			in := starter.starts[0].arg.(workflows.InteractiveRunInput)
+			assert.Equal(t, tc.want, in.Retention)
+		})
+	}
+}
+
+// TestClientCannotForgeTheRetentionPosture — Retention is server-owned like
+// OrgID/UserID: a ZDR caller that puts `retention: durable` in the request body
+// must still get a ZDR run, or the flag would be a self-service opt-out from its
+// own privacy guarantee.
+func TestClientCannotForgeTheRetentionPosture(t *testing.T) {
+	auth, key := testAuth(t)
+	starter := &fakeStarter{}
+	svc := NewWorkflowStartService(auth, starter, testQueue)
+
+	zdrUser := sign(t, key, testClaims{
+		OrgID: "org-a", UserID: "user-a", PrincipalType: "user", ZDR: boolPtr(true),
+	})
+	_, err := svc.Start(bearerCtx(zdrUser), &mpv1.StartWorkflowRequest{
+		WorkflowType: "InteractiveRunSupervision", RunId: "run-1",
+		Input: mustStruct(t, map[string]any{"goal": "g", "retention": string(activities.RetentionDurable)}),
+	})
+	require.NoError(t, err)
+	require.Len(t, starter.starts, 1)
+	in := starter.starts[0].arg.(workflows.InteractiveRunInput)
+	assert.Equal(t, activities.RetentionZeroData, in.Retention,
+		"the signed posture must overwrite anything the client sent")
+}
+
+// TestInternalStarterCarriesUnspecifiedRetention documents the one start path
+// with no signed posture at all. It must NOT be defaulted to durable: the
+// shared-secret caller has made no retention assertion, so the run's envelope
+// declares nothing and every content-persisting consumer downstream refuses.
+// The cost is real — such runs teach the skill-learning loop nothing — and it is
+// the correct trade: an inert loop is recoverable, a leaked skill is not.
+func TestInternalStarterCarriesUnspecifiedRetention(t *testing.T) {
+	auth, _ := testAuth(t)
+	starter := &fakeStarter{}
+	svc := NewWorkflowStartService(auth, starter, testQueue)
+
+	_, err := svc.Start(internalCtx(internalTok), &mpv1.StartWorkflowRequest{
+		WorkflowType: "InteractiveRunSupervision",
+		OrgId:        "org-allowed",
+		RunId:        "run-1",
+		Input:        mustStruct(t, map[string]any{"goal": "g"}),
+	})
+	require.NoError(t, err)
+	require.Len(t, starter.starts, 1)
+	in := starter.starts[0].arg.(workflows.InteractiveRunInput)
+	assert.Equal(t, activities.RetentionUnspecified, in.Retention)
+	assert.False(t, in.Retention.AllowsContent())
+}
+
+// TestEveryJWTStartHasAnAttestedPosture pins why RetentionUnspecified is rare in
+// practice: authorizeRetention already refuses a JWT caller with no explicit
+// posture, so a bearer-started run always resolves to ZeroData or Durable.
+func TestEveryJWTStartHasAnAttestedPosture(t *testing.T) {
+	for _, claim := range []*bool{boolPtr(false), boolPtr(true)} {
+		caller := Caller{RetentionPolicyPresent: true, ZDR: *claim}
+		got := Tenancy{ZDR: caller.ZDR, RetentionAttested: caller.RetentionPolicyPresent}.Retention()
+		assert.NotEqual(t, activities.RetentionUnspecified, got)
+	}
+	unattested := Tenancy{ZDR: false, RetentionAttested: false}
+	assert.Equal(t, activities.RetentionUnspecified, unattested.Retention(),
+		"absent must never render as durable")
 }
 
 // --- input validation ------------------------------------------------------

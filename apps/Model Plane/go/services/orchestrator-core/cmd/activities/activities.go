@@ -68,8 +68,76 @@ type StepInput struct {
 	UserID    string
 	StepIndex int
 }
-type CompletionInput struct{ RunID, OrgID, UserID, Summary string }
-type FailureInput struct{ RunID, OrgID, UserID, Reason string }
+
+// Retention is a run's Zero Data Retention posture as it travels from the
+// workflow input to the lifecycle envelope. It is a tri-state on purpose: a
+// bool would force a workflow that was never told a posture to assert one, and
+// asserting "retainable" is the failure mode that leaks content.
+//
+// The zero value is [RetentionUnspecified], so a construction site that forgets
+// to supply a posture fails closed instead of silently claiming durability.
+type Retention string
+
+const (
+	// RetentionUnspecified means no posture was attested. The envelope carries
+	// no `zdr` key and every downstream content-persisting consumer must refuse
+	// (capability-core's learning review already does).
+	RetentionUnspecified Retention = ""
+	// RetentionZeroData means the run is Zero Data Retention: its lifecycle
+	// envelope is suppressed before any NATS backend.
+	RetentionZeroData Retention = "zero_data_retention"
+	// RetentionDurable means an issuer explicitly attested that this run's
+	// content may be retained. Only this value admits run-derived content into
+	// an event payload.
+	RetentionDurable Retention = "durable"
+)
+
+// RetentionFor maps an ATTESTED boolean posture onto a Retention. Only call it
+// where the caller's retention claim is known to have been present; when the
+// claim is absent use [RetentionUnspecified] instead of RetentionFor(false),
+// which would upgrade "nobody said" into "explicitly retainable".
+func RetentionFor(zdr bool) Retention {
+	if zdr {
+		return RetentionZeroData
+	}
+	return RetentionDurable
+}
+
+// AllowsContent reports whether run-derived content (a summary, a model
+// critique) may be placed in an event payload under this posture.
+func (r Retention) AllowsContent() bool { return r == RetentionDurable }
+
+// envelopeFlag renders the posture as the envelope's tri-state `zdr` field.
+func (r Retention) envelopeFlag() *bool {
+	switch r {
+	case RetentionZeroData:
+		return envelope.ZDRFlag(true)
+	case RetentionDurable:
+		return envelope.ZDRFlag(false)
+	default:
+		return nil
+	}
+}
+
+// CompletionInput is the terminal input for a successful run.
+//
+// Retention carries the run's ZDR posture so CompleteRunActivity can stamp the
+// lifecycle envelope. Without it the RUN_COMPLETED envelope declares nothing,
+// and capability-core's skill-learning review — which admits only an explicit
+// `zdr: false` — skips every run, leaving the learning loop inert.
+type CompletionInput struct {
+	RunID, OrgID, UserID, Summary string
+	Retention                     Retention
+}
+
+// FailureInput is the compensation input for a failed run. Retention has the
+// same meaning as on [CompletionInput]: the failure reason can embed downstream
+// error text, so a Zero Data Retention run's RUN_FAILED envelope must be
+// suppressed exactly like its RUN_COMPLETED one.
+type FailureInput struct {
+	RunID, OrgID, UserID, Reason string
+	Retention                    Retention
+}
 type MemoryQueryInput struct {
 	OrgID    string
 	Since    time.Time
@@ -142,7 +210,16 @@ func (a *Activities) RecordFeedback(ctx context.Context, r feedback.Rating) erro
 // base62, so this can never collide with a real user.
 const SystemActorID = "system:orchestrator-core"
 
-func (a *Activities) publishRunEvent(runID, orgID, userID, eventType, idemSuffix string, payload any) {
+// publishRunEvent emits one run-lifecycle envelope.
+//
+// retention is stamped onto the envelope's `zdr` field. A [RetentionZeroData]
+// event is dropped by natsx.Publisher before it reaches any backend, so nothing
+// is emitted at all; a [RetentionUnspecified] event is emitted with no `zdr`
+// key, which downstream content-persisting consumers must treat as a refusal.
+// Callers are responsible for keeping run-derived content out of payload unless
+// retention.AllowsContent() — suppression protects the ZDR case, but an
+// unattested run is published and mp.v1.run.*.event is JetStream-retained.
+func (a *Activities) publishRunEvent(runID, orgID, userID, eventType, idemSuffix string, retention Retention, payload any) {
 	if a.publisher == nil {
 		return
 	}
@@ -169,6 +246,7 @@ func (a *Activities) publishRunEvent(runID, orgID, userID, eventType, idemSuffix
 		ResourceRef:    "run/" + runID,
 		IdempotencyKey: runID + ":" + idemSuffix,
 		Payload:        data,
+		Zdr:            retention.envelopeFlag(),
 	}
 	if err := env.Validate(); err != nil {
 		a.logger.Error("envelope validate", "err", err, "event", eventType)
@@ -344,19 +422,34 @@ func summarizeMemoryEntries(entries []MemoryEntry) []MemoryEntry {
 	return consolidated
 }
 
+// CompleteRunActivity publishes the run's RUN_COMPLETED lifecycle envelope,
+// stamped with the run's retention posture.
+//
+// The summary is the run's own output — customer content — and mp.v1.run.*.event
+// is captured by the JetStream stream MODEL_PLANE_RUN_EVENTS (48h, file-backed),
+// so emitting it puts that content on disk. It is therefore included ONLY under
+// an explicitly attested durable posture. A Zero Data Retention run emits
+// nothing at all (natsx suppresses the envelope); an unattested run still emits
+// the lifecycle fact — insight-core's run counters depend on it — but without
+// the content, because "nobody declared a posture" is not permission to retain.
 func (a *Activities) CompleteRunActivity(_ context.Context, input CompletionInput) error {
-	a.publishRunEvent(input.RunID, input.OrgID, input.UserID, "RUN_COMPLETED", "completed", map[string]any{
-		"run_id":  input.RunID,
-		"summary": input.Summary,
-	})
+	payload := map[string]any{"run_id": input.RunID}
+	if input.Retention.AllowsContent() {
+		payload["summary"] = input.Summary
+	}
+	a.publishRunEvent(input.RunID, input.OrgID, input.UserID, "RUN_COMPLETED", "completed", input.Retention, payload)
 	return nil
 }
 
+// FailRunActivity publishes RUN_FAILED. The reason string can carry downstream
+// error text, so it is gated on the retention posture exactly like the summary
+// in [Activities.CompleteRunActivity].
 func (a *Activities) FailRunActivity(_ context.Context, input FailureInput) error {
-	a.publishRunEvent(input.RunID, input.OrgID, input.UserID, "RUN_FAILED", "failed", map[string]any{
-		"run_id": input.RunID,
-		"reason": input.Reason,
-	})
+	payload := map[string]any{"run_id": input.RunID}
+	if input.Retention.AllowsContent() {
+		payload["reason"] = input.Reason
+	}
+	a.publishRunEvent(input.RunID, input.OrgID, input.UserID, "RUN_FAILED", "failed", input.Retention, payload)
 	return nil
 }
 

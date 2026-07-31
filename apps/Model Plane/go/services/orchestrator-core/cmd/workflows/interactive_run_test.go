@@ -105,6 +105,10 @@ func TestInteractiveRun_HappyPath_EmitsRunCompletedWithOrgID(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-happy",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
@@ -145,6 +149,10 @@ func TestInteractiveRun_StartRunFailure_EmitsRunFailedWithOrgID(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-fail",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
@@ -185,6 +193,10 @@ func TestInteractiveRun_CancelSignal_EmitsRunFailed(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-cancel",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
@@ -230,6 +242,10 @@ func TestInteractiveRun_ApprovalSignal_AllowsCompletion(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-approve",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
@@ -259,6 +275,10 @@ func TestInteractiveRun_StepLoopFailure_EmitsRunFailed(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-steploop",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
@@ -297,6 +317,10 @@ func TestInteractiveRun_CompleteRunFailure_FallsBackToFailRun(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-complete-fail",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
@@ -331,6 +355,10 @@ func TestInteractiveRun_CancelMidActivity_StillEmitsRunFailed(t *testing.T) {
 		Policy:   "default",
 		OrgID:    "org-cancel-mid",
 		UserID:   "user-1",
+		// An ordinary run whose issuer attested that its content is retainable.
+		// Without an explicit posture the lifecycle payload omits run-derived
+		// content by design — see the retention tests at the end of this file.
+		Retention: activities.RetentionDurable,
 	}
 	env.ExecuteWorkflow(InteractiveRunSupervision, input)
 	require.True(t, env.IsWorkflowCompleted())

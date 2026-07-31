@@ -54,36 +54,48 @@ func (a *Activities) InferModelActivity(ctx context.Context, in InferInput) (eva
 
 // EvalRoundEvent is the per-round observability record the durable workflow
 // emits after each generator→judge round completes.
+//
+// Retention is the run's ZDR posture. Feedback is the judge model's critique of
+// the generated answer — run-derived content — so it is emitted only under an
+// attested durable posture.
 type EvalRoundEvent struct {
-	RunID    string
-	OrgID    string
-	UserID   string
-	Round    int
-	Passed   bool
-	Score    float64
-	Feedback string
+	RunID     string
+	OrgID     string
+	UserID    string
+	Round     int
+	Passed    bool
+	Score     float64
+	Feedback  string
+	Retention Retention
 }
 
 // PublishEvalRoundActivity emits one round's outcome as a run event and counts
 // the round. Publishing is best-effort (a nil publisher is a no-op); this
 // activity never fails the loop over observability.
 func (a *Activities) PublishEvalRoundActivity(ctx context.Context, ev EvalRoundEvent) error {
+	payload := map[string]any{
+		"run_id": ev.RunID,
+		"round":  ev.Round,
+		"passed": ev.Passed,
+		"score":  ev.Score,
+	}
+	if ev.Retention.AllowsContent() {
+		payload["feedback"] = ev.Feedback
+	}
 	a.publishRunEvent(ev.RunID, ev.OrgID, ev.UserID,
 		"EVALUATOR_OPTIMIZER_ROUND",
 		fmt.Sprintf("eval-opt-round-%d", ev.Round),
-		map[string]any{
-			"run_id":   ev.RunID,
-			"round":    ev.Round,
-			"passed":   ev.Passed,
-			"score":    ev.Score,
-			"feedback": ev.Feedback,
-		})
+		ev.Retention,
+		payload)
 	telemetry.EvaluatorOptimizerRoundsTotal.Add(ctx, 1)
 	return nil
 }
 
 // EvalOutcomeEvent is the terminal record for one durable evaluator-optimizer
-// run, making a did-not-pass outcome observable downstream.
+// run, making a did-not-pass outcome observable downstream. Retention is the
+// run's ZDR posture; every field here is a metric or a control-flow reason
+// rather than run content, so nothing in the payload is retention-gated — but a
+// ZDR run's envelope is still suppressed whole.
 type EvalOutcomeEvent struct {
 	RunID       string
 	OrgID       string
@@ -93,6 +105,7 @@ type EvalOutcomeEvent struct {
 	RoundsRun   int
 	TotalTokens int
 	BestScore   float64
+	Retention   Retention
 }
 
 // RecordEvalOutcomeActivity publishes the terminal outcome event and counts
@@ -101,6 +114,7 @@ func (a *Activities) RecordEvalOutcomeActivity(ctx context.Context, ev EvalOutco
 	a.publishRunEvent(ev.RunID, ev.OrgID, ev.UserID,
 		"EVALUATOR_OPTIMIZER_OUTCOME",
 		"eval-opt-outcome",
+		ev.Retention,
 		map[string]any{
 			"run_id":       ev.RunID,
 			"stop_reason":  ev.StopReason,

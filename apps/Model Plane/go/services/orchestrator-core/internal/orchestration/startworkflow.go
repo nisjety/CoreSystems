@@ -313,6 +313,10 @@ func (s *WorkflowStartService) Start(
 		UserID: userID,
 		RunID:  runID,
 		ZDR:    caller.ZDR,
+		// Carry the presence of the retention claim, not just its value: the
+		// lifecycle envelope must be able to say "unknown" rather than assert
+		// durability for a caller whose issuer never stamped a posture.
+		RetentionAttested: caller.RetentionPolicyPresent,
 	})
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())

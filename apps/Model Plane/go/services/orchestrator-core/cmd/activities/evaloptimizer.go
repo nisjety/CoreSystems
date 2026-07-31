@@ -42,6 +42,25 @@ type EvalOptimizerInput struct {
 	Temperature         float32
 
 	ZDR bool
+
+	// RetentionAttested reports whether an issuer actually stamped a retention
+	// posture on the caller. It exists because `ZDR: false` alone is ambiguous:
+	// it is the value both for "the issuer declared this run retainable" and for
+	// "nobody said anything". The model-invocation legs may treat the ambiguity
+	// as non-ZDR (inference-core enforces its own floor), but the lifecycle
+	// envelope may not — publishing `zdr: false` for an unattested run would
+	// hand a downstream consumer a durability guarantee nobody made.
+	RetentionAttested bool
+}
+
+// Retention resolves the run's posture for the lifecycle-envelope path. An
+// unattested caller yields [RetentionUnspecified], which fails closed
+// downstream rather than asserting durability.
+func (in EvalOptimizerInput) Retention() Retention {
+	if !in.RetentionAttested {
+		return RetentionUnspecified
+	}
+	return RetentionFor(in.ZDR)
 }
 
 // ToConfig maps the activity/workflow input onto the pure loop config. It is
@@ -186,18 +205,27 @@ func (a *Activities) EvaluatorOptimizerActivity(ctx context.Context, input EvalO
 // publishOptimizerRounds emits one run event per executed round through the
 // existing NATS publisher (no-op when no publisher is wired), making the loop's
 // progress and a did-not-pass outcome observable to downstream consumers.
+//
+// The judge's feedback is run-derived content, so it rides along only under an
+// attested durable posture; see [Activities.PublishEvalRoundActivity], the
+// durable-workflow twin of this in-process path.
 func (a *Activities) publishOptimizerRounds(input EvalOptimizerInput, out EvalOptimizerOutput) {
+	retention := input.Retention()
 	for _, r := range out.Rounds {
+		payload := map[string]any{
+			"run_id": input.RunID,
+			"round":  r.Round,
+			"passed": r.Passed,
+			"score":  r.Score,
+		}
+		if retention.AllowsContent() {
+			payload["feedback"] = r.Feedback
+		}
 		a.publishRunEvent(input.RunID, input.OrgID, input.UserID,
 			"EVALUATOR_OPTIMIZER_ROUND",
 			fmt.Sprintf("eval-opt-round-%d", r.Round),
-			map[string]any{
-				"run_id":   input.RunID,
-				"round":    r.Round,
-				"passed":   r.Passed,
-				"score":    r.Score,
-				"feedback": r.Feedback,
-			})
+			retention,
+			payload)
 	}
 }
 

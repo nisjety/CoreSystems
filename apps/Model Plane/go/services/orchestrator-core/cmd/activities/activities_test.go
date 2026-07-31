@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -158,10 +159,11 @@ func TestCompleteRunActivity_PublishesRunCompletedEnvelope(t *testing.T) {
 	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
 
 	err := a.CompleteRunActivity(context.Background(), activities.CompletionInput{
-		RunID:   "r1",
-		OrgID:   "o1",
-		UserID:  "user-1",
-		Summary: "done",
+		RunID:     "r1",
+		OrgID:     "o1",
+		UserID:    "user-1",
+		Summary:   "done",
+		Retention: activities.RetentionDurable,
 	})
 	require.NoError(t, err)
 
@@ -233,10 +235,11 @@ func TestFailRunActivity_PublishesRunFailedEnvelope(t *testing.T) {
 	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
 
 	err := a.FailRunActivity(context.Background(), activities.FailureInput{
-		RunID:  "r1",
-		OrgID:  "o1",
-		UserID: "user-1",
-		Reason: "boom",
+		RunID:     "r1",
+		OrgID:     "o1",
+		UserID:    "user-1",
+		Reason:    "boom",
+		Retention: activities.RetentionDurable,
 	})
 	require.NoError(t, err)
 
@@ -271,4 +274,162 @@ func TestCompleteRunActivity_NilPublisher_NoOp(t *testing.T) {
 		})
 		require.NoError(t, err)
 	})
+}
+
+// ── Zero Data Retention ─────────────────────────────────────────────────────
+
+// TestRetentionPosture_MapsAttestedFlagAndGatesContent pins the tri-state:
+// only an attested non-ZDR posture admits run-derived content, and the zero
+// value is "unspecified" so a forgotten field fails closed.
+func TestRetentionPosture_MapsAttestedFlagAndGatesContent(t *testing.T) {
+	var zero activities.Retention
+	assert.Equal(t, activities.RetentionUnspecified, zero, "the zero value must be the fail-closed posture")
+	assert.False(t, zero.AllowsContent(), "an unspecified posture must not admit content")
+
+	assert.Equal(t, activities.RetentionZeroData, activities.RetentionFor(true))
+	assert.False(t, activities.RetentionZeroData.AllowsContent())
+
+	assert.Equal(t, activities.RetentionDurable, activities.RetentionFor(false))
+	assert.True(t, activities.RetentionDurable.AllowsContent(),
+		"only an explicitly attested durable posture admits content")
+}
+
+// TestCompleteRunActivity_DurableRunDeclaresZDRFalse is the contract that makes
+// the skill-learning loop able to run at all: capability-core admits ONLY an
+// explicit `zdr: false` and skips on absence, so the key must actually be on the
+// wire — not omitted because false is Go's zero value.
+func TestCompleteRunActivity_DurableRunDeclaresZDRFalse(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	require.NoError(t, a.CompleteRunActivity(context.Background(), activities.CompletionInput{
+		RunID: "r-durable", OrgID: "o1", UserID: "user-1", Summary: "done",
+		Retention: activities.RetentionDurable,
+	}))
+
+	events := stub.Events()
+	require.Len(t, events, 1)
+	zdr, declared := envelope.DeclaredZDR(events[0].data)
+	require.True(t, declared, "a durable run must DECLARE its posture, not omit the key")
+	assert.False(t, zdr)
+	assert.Contains(t, string(events[0].data), `"zdr":false`, "the literal wire key the consumer probes")
+}
+
+// TestCompleteRunActivity_ZDRRunEmitsNothing verifies the Go leg now matches the
+// Rust DynPublisher: a ZDR envelope never reaches a backend. This matters beyond
+// any single consumer because mp.v1.run.*.event is captured by the JetStream
+// stream MODEL_PLANE_RUN_EVENTS (48h, file-backed), so an emitted envelope is
+// retained on disk regardless of who reads it.
+func TestCompleteRunActivity_ZDRRunEmitsNothing(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	require.NoError(t, a.CompleteRunActivity(context.Background(), activities.CompletionInput{
+		RunID: "r-zdr", OrgID: "o1", UserID: "user-1", Summary: "customer secret",
+		Retention: activities.RetentionZeroData,
+	}), "a suppressed publish is not an error")
+
+	assert.Empty(t, stub.Events(), "no ZDR envelope may reach any backend")
+}
+
+// TestCompleteRunActivity_UnattestedRunEmitsLifecycleWithoutContent covers the
+// posture nobody declared. The lifecycle FACT still ships — insight-core counts
+// agent_runs_completed off it — but the run's summary does not, because an
+// unattested run may in truth be a ZDR run whose posture was never threaded, and
+// the subject is retained for 48h.
+func TestCompleteRunActivity_UnattestedRunEmitsLifecycleWithoutContent(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	require.NoError(t, a.CompleteRunActivity(context.Background(), activities.CompletionInput{
+		RunID: "r-unknown", OrgID: "o1", UserID: "user-1", Summary: "customer secret",
+		// Retention deliberately omitted.
+	}))
+
+	events := stub.Events()
+	require.Len(t, events, 1, "the lifecycle fact must still be observable")
+	assert.NotContains(t, string(events[0].data), "customer secret",
+		"run content must not ride an envelope with no attested posture")
+
+	_, declared := envelope.DeclaredZDR(events[0].data)
+	assert.False(t, declared, "an unattested run must not fake a posture; absence is the signal")
+
+	env := decodeEnvelope(t, events[0].data)
+	assert.Equal(t, "RUN_COMPLETED", env.EventType)
+	assert.Nil(t, env.Zdr, "absent on the wire must stay absent after decoding")
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(env.Payload, &payload))
+	assert.Equal(t, "r-unknown", payload["run_id"])
+	assert.NotContains(t, payload, "summary")
+}
+
+// TestFailRunActivity_ZDRRunEmitsNothing — the failure reason can embed
+// downstream error text, so RUN_FAILED is suppressed for a ZDR run exactly like
+// RUN_COMPLETED. Without this a ZDR run leaks on every unhappy path.
+func TestFailRunActivity_ZDRRunEmitsNothing(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	require.NoError(t, a.FailRunActivity(context.Background(), activities.FailureInput{
+		RunID: "r-zdr", OrgID: "o1", UserID: "user-1", Reason: "step loop: leaked detail",
+		Retention: activities.RetentionZeroData,
+	}))
+
+	assert.Empty(t, stub.Events())
+}
+
+func TestFailRunActivity_UnattestedRunOmitsReason(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	stub := &capturingRawPublisher{}
+	a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+	require.NoError(t, a.FailRunActivity(context.Background(), activities.FailureInput{
+		RunID: "r-unknown", OrgID: "o1", UserID: "user-1", Reason: "step loop: leaked detail",
+	}))
+
+	events := stub.Events()
+	require.Len(t, events, 1)
+	assert.NotContains(t, string(events[0].data), "leaked detail")
+	env := decodeEnvelope(t, events[0].data)
+	assert.Equal(t, "RUN_FAILED", env.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(env.Payload, &payload))
+	assert.NotContains(t, payload, "reason")
+}
+
+// TestPublishEvalRoundActivity_RetentionGatesJudgeFeedback — the judge's critique
+// is model output derived from the run, so it obeys the same rule as the summary.
+func TestPublishEvalRoundActivity_RetentionGatesJudgeFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		retention   activities.Retention
+		wantEvents  int
+		wantContent bool
+	}{
+		{"zdr suppresses the whole envelope", activities.RetentionZeroData, 0, false},
+		{"unattested emits without feedback", activities.RetentionUnspecified, 1, false},
+		{"durable emits with feedback", activities.RetentionDurable, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := activities.NewActivities(newDiscardLogger(), nil)
+			stub := &capturingRawPublisher{}
+			a.SetPublisher(natsx.NewPublisher(stub, natsx.ModeV1Only))
+
+			require.NoError(t, a.PublishEvalRoundActivity(context.Background(), activities.EvalRoundEvent{
+				RunID: "r-eval", OrgID: "o1", UserID: "user-1", Round: 1,
+				Feedback: "verdict-detail", Retention: tc.retention,
+			}))
+
+			events := stub.Events()
+			require.Len(t, events, tc.wantEvents)
+			if tc.wantEvents == 0 {
+				return
+			}
+			assert.Equal(t, tc.wantContent, strings.Contains(string(events[0].data), "verdict-detail"))
+		})
+	}
 }

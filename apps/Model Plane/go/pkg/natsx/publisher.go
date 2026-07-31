@@ -2,7 +2,12 @@
 // dispatches v1 subjects to v1 and/or legacy subjects based on CompatMode.
 package natsx
 
-import "fmt"
+import (
+	"fmt"
+	"log/slog"
+
+	"github.com/triodelab/model-plane/pkg/envelope"
+)
 
 // RawPublisher is the minimal publish surface required by the wrapper.
 // *nats.Conn satisfies this interface.
@@ -31,7 +36,28 @@ func (p *Publisher) Mode() CompatMode { return p.mode }
 //	ModeV1Only, ModeDualRead — publish v1 only
 //	ModeDualWrite            — publish v1, then legacy mirror if mapping exists
 //	ModeLegacyOnly           — publish only legacy (error if no mapping)
+//
+// # Zero Data Retention suppression
+//
+// An envelope declaring `zdr: true` is dropped before ANY backend, mirroring
+// model-gateway's Rust `DynPublisher::publish`. This is enforced here rather
+// than at each call site because run-event subjects are JetStream-captured
+// (`MODEL_PLANE_RUN_EVENTS`, 48h file-backed), so a single unguarded producer
+// would put no-retention content on disk. A suppressed publish is NOT an error
+// — the Rust twin returns Ok(()) — because the producer did nothing wrong and
+// failing it would only turn a satisfied retention rule into a retry storm.
+//
+// The check reads the serialized bytes, so it holds for every caller regardless
+// of how the payload was built. Payloads that are not JSON envelopes (and
+// envelopes with no `zdr` key at all) declare no posture and are published
+// unchanged: suppressing an undeclared event would silently delete lifecycle
+// signal, and the retention decision for undeclared events belongs to the
+// consumer, which fails closed on absence.
 func (p *Publisher) Publish(v1Subject string, data []byte) error {
+	if zdr, declared := envelope.DeclaredZDR(data); declared && zdr {
+		slog.Debug("natsx: ZDR envelope suppressed before publisher backend", "subject", v1Subject)
+		return nil
+	}
 	switch p.mode {
 	case ModeV1Only, ModeDualRead:
 		return p.raw.Publish(v1Subject, data)

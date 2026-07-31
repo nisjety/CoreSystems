@@ -79,6 +79,13 @@ func EvaluatorOptimizerWorkflow(ctx workflow.Context, input EvaluatorOptimizerIn
 	}
 	actCtx := workflow.WithActivityOptions(ctx, activityOpts)
 
+	// The run's retention posture, resolved once from the (server-owned) input.
+	// A pure function of the workflow argument, so it is replay-deterministic.
+	// Every leg that emits a run event carries it, which is what lets a ZDR run
+	// be suppressed at the publisher instead of leaking round feedback and the
+	// terminal summary onto a JetStream-retained subject.
+	retention := input.Retention()
+
 	var (
 		rounds []evaloptimizer.Attempt
 		spent  int
@@ -106,7 +113,7 @@ func EvaluatorOptimizerWorkflow(ctx workflow.Context, input EvaluatorOptimizerIn
 					RoundsRun:  len(rounds),
 					Summary:    fmt.Sprintf("generator leg failed at round %d: %v", round, err),
 				},
-				handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("evaluator-optimizer generator round %d: %v", round, err))
+				handleFailure(ctx, input.RunID, input.OrgID, input.UserID, retention, fmt.Sprintf("evaluator-optimizer generator round %d: %v", round, err))
 		}
 		spent += genRes.TotalTokens()
 
@@ -123,7 +130,7 @@ func EvaluatorOptimizerWorkflow(ctx workflow.Context, input EvaluatorOptimizerIn
 					RoundsRun:  len(rounds),
 					Summary:    fmt.Sprintf("judge leg failed at round %d: %v", round, err),
 				},
-				handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("evaluator-optimizer judge round %d: %v", round, err))
+				handleFailure(ctx, input.RunID, input.OrgID, input.UserID, retention, fmt.Sprintf("evaluator-optimizer judge round %d: %v", round, err))
 		}
 		spent += judgeRes.TotalTokens()
 
@@ -132,13 +139,14 @@ func EvaluatorOptimizerWorkflow(ctx workflow.Context, input EvaluatorOptimizerIn
 
 		// Per-round observability; best-effort — never fails the loop.
 		if perr := workflow.ExecuteActivity(actCtx, "PublishEvalRoundActivity", activities.EvalRoundEvent{
-			RunID:    input.RunID,
-			OrgID:    input.OrgID,
-			UserID:   input.UserID,
-			Round:    attempt.Round,
-			Passed:   attempt.Verdict.Passed,
-			Score:    attempt.Verdict.Score,
-			Feedback: attempt.Verdict.Feedback,
+			RunID:     input.RunID,
+			OrgID:     input.OrgID,
+			UserID:    input.UserID,
+			Round:     attempt.Round,
+			Passed:    attempt.Verdict.Passed,
+			Score:     attempt.Verdict.Score,
+			Feedback:  attempt.Verdict.Feedback,
+			Retention: retention,
 		}).Get(ctx, nil); perr != nil {
 			logger.Warn("eval round publish failed", "round", round, "error", perr)
 		}
@@ -166,19 +174,21 @@ func EvaluatorOptimizerWorkflow(ctx workflow.Context, input EvaluatorOptimizerIn
 		RoundsRun:   outcome.RoundsRun(),
 		TotalTokens: outcome.TotalTokens,
 		BestScore:   outcome.Best.Verdict.Score,
+		Retention:   retention,
 	}).Get(ctx, nil); rerr != nil {
 		logger.Warn("eval outcome record failed", "error", rerr)
 	}
 
 	completionInput := activities.CompletionInput{
-		RunID:   input.RunID,
-		OrgID:   input.OrgID,
-		UserID:  input.UserID,
-		Summary: summary,
+		RunID:     input.RunID,
+		OrgID:     input.OrgID,
+		UserID:    input.UserID,
+		Summary:   summary,
+		Retention: retention,
 	}
 	if cerr := workflow.ExecuteActivity(actCtx, "CompleteRunActivity", completionInput).Get(ctx, nil); cerr != nil {
 		return EvaluatorOptimizerResult{StopReason: outcome.StopReason, Summary: summary},
-			handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("complete run: %v", cerr))
+			handleFailure(ctx, input.RunID, input.OrgID, input.UserID, retention, fmt.Sprintf("complete run: %v", cerr))
 	}
 
 	logger.Info("EvaluatorOptimizerWorkflow completed",

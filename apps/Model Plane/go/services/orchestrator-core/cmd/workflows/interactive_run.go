@@ -12,13 +12,20 @@ import (
 )
 
 // InteractiveRunInput is the input for the interactive run supervision workflow.
+//
+// Retention is server-owned like OrgID/UserID: the start handler overwrites
+// whatever the client sent with the caller's signed posture, so a client cannot
+// claim durability for a Zero Data Retention run. It is threaded to the
+// lifecycle activities so RUN_COMPLETED / RUN_FAILED can declare the posture
+// instead of dropping it.
 type InteractiveRunInput struct {
-	RunID    string `json:"run_id"`
-	ThreadID string `json:"thread_id"`
-	Goal     string `json:"goal"`
-	Policy   string `json:"policy"`
-	OrgID    string `json:"org_id"`
-	UserID   string `json:"user_id"`
+	RunID     string               `json:"run_id"`
+	ThreadID  string               `json:"thread_id"`
+	Goal      string               `json:"goal"`
+	Policy    string               `json:"policy"`
+	OrgID     string               `json:"org_id"`
+	UserID    string               `json:"user_id"`
+	Retention activities.Retention `json:"retention"`
 }
 
 const (
@@ -72,11 +79,11 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 		input.RunID, input.ThreadID, input.OrgID, input.UserID,
 	).Get(ctx, &runMeta)
 	if err != nil {
-		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("start run: %v", err))
+		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, fmt.Sprintf("start run: %v", err))
 	}
 
 	if cancelled {
-		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, "cancelled before step loop")
+		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, "cancelled before step loop")
 	}
 
 	// Step 2: Execute step loop.
@@ -92,7 +99,7 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 
 	stepOutput, err := runStepLoop(actCtx, stepInput)
 	if err != nil {
-		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("step loop: %v", err))
+		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, fmt.Sprintf("step loop: %v", err))
 	}
 
 	// Step 3: If approval is needed, block until the approval signal arrives.
@@ -111,33 +118,37 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 		selector.Select(ctx)
 
 		if cancelled || !approved {
-			return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, "cancelled during approval wait")
+			return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, "cancelled during approval wait")
 		}
 
 		// Resume step loop after approval.
 		stepOutput, err = runStepLoop(actCtx, stepInput)
 		if err != nil {
-			return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("resumed step loop: %v", err))
+			return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, fmt.Sprintf("resumed step loop: %v", err))
 		}
 	}
 
 	if cancelled {
-		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, "cancelled after step loop")
+		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, "cancelled after step loop")
 	}
 
-	// Step 4: Complete the run.
+	// Step 4: Complete the run. The retention posture rides along so the
+	// RUN_COMPLETED envelope can declare it — a ZDR run's envelope is then
+	// suppressed outright, and the summary never leaves this workflow unless an
+	// issuer explicitly attested the run is retainable.
 	completionInput := activities.CompletionInput{
-		RunID:   input.RunID,
-		OrgID:   input.OrgID,
-		UserID:  input.UserID,
-		Summary: stepOutput.Summary,
+		RunID:     input.RunID,
+		OrgID:     input.OrgID,
+		UserID:    input.UserID,
+		Summary:   stepOutput.Summary,
+		Retention: input.Retention,
 	}
 	err = workflow.ExecuteActivity(actCtx,
 		"CompleteRunActivity",
 		completionInput,
 	).Get(ctx, nil)
 	if err != nil {
-		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, fmt.Sprintf("complete run: %v", err))
+		return handleFailure(ctx, input.RunID, input.OrgID, input.UserID, input.Retention, fmt.Sprintf("complete run: %v", err))
 	}
 
 	logger.Info("InteractiveRunSupervision completed", "run_id", input.RunID)
@@ -151,15 +162,16 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 // Temporal workflow cancellation propagated down from the parent). This is
 // the standard SAGA compensation pattern: reversal work must not inherit
 // the cancellation that triggered it.
-func handleFailure(ctx workflow.Context, runID, orgID, userID, reason string) error {
+func handleFailure(ctx workflow.Context, runID, orgID, userID string, retention activities.Retention, reason string) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Error("run failed", "run_id", runID, "reason", reason)
 
 	failInput := activities.FailureInput{
-		RunID:  runID,
-		OrgID:  orgID,
-		UserID: userID,
-		Reason: reason,
+		RunID:     runID,
+		OrgID:     orgID,
+		UserID:    userID,
+		Reason:    reason,
+		Retention: retention,
 	}
 
 	// Use a disconnected context so compensation runs even when the outer
