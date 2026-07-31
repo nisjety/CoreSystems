@@ -168,7 +168,19 @@ services:
     environment:
       # Node otherwise derives a ~256 MiB heap from the container cgroup and
       # Vite enters a GC/OOM loop while transforming this large workspace.
-      NODE_OPTIONS: ${VELION_NODE_OPTIONS:---max-old-space-size=512}
+      #
+      # 512 was enough until the chat surface grew (artifact panel, code
+      # highlighter, live run panel, run-watch). Vite then died mid-transform
+      # with "Ineffective mark-compacts near heap limit" at ~500 MiB, and the
+      # symptom was NOT an error page: index.html served 200, #root stayed
+      # empty, and the console was silent, because the crash happens in the
+      # dev server rather than the browser. Raised with headroom so the next
+      # module does not reproduce a blank page that looks like a UI bug.
+      #
+      # Keep this BELOW the container's memory limit below (2 GiB) — the heap is
+      # only part of Node's footprint, and a cap above the cgroup just moves the
+      # kill from V8 to the OOM killer.
+      NODE_OPTIONS: ${VELION_NODE_OPTIONS:---max-old-space-size=1536}
       # Enable Vite HMR (Hot Module Replacement)
       VITE_HMR_HOST: localhost
       VITE_HMR_PORT: 5173
