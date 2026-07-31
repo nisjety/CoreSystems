@@ -102,10 +102,28 @@ export type PlaneAudience =
   | 'letta-bridge'
   | 'browser-broker'
   | 'sandbox-manager'
-  | 'bridge-core';
+  | 'bridge-core'
+  | 'orchestrator-core';
 
 export type AuthCoreAudience = 'model-gateway' | PlaneAudience;
-export type InteractivePlaneAudience = Exclude<PlaneAudience, 'control-policy'>;
+
+/**
+ * Audiences a signed-in USER may mint a token for through the interactive
+ * session route.
+ *
+ * `control-policy` is excluded because it is a machine-to-machine decision
+ * surface. `orchestrator-core` is excluded for a sharper reason: its
+ * StartWorkflow lets a NON-service caller start any run-scoped workflow
+ * (`authorizePolicy`'s `PolicyRunScoped` returns early for `!caller.Service`).
+ * People already start runs through model-gateway, so an interactive
+ * orchestrator-core token would add a way to drive the durable tier directly
+ * with no product need for it. Service principals are unaffected — they mint
+ * through the internal-token route, which is not gated on this type.
+ */
+export type InteractivePlaneAudience = Exclude<
+  PlaneAudience,
+  'control-policy' | 'orchestrator-core'
+>;
 
 type ServiceRetentionPosture = {
   zdr: boolean;
@@ -353,6 +371,24 @@ export class ConvexTokenService {
         audience: exactAudience('BRIDGE_CORE_AUTH_AUDIENCE', 'bridge-core'),
         ttlSeconds: parsePositiveTtl(
           'PLANE_TOKEN_TTL_BRIDGE_CORE_SECONDS',
+          300,
+        ),
+      },
+      // Durable workflow tier. Its StartWorkflow accepts an Auth Core JWT and
+      // verifies `aud` against ORCHESTRATOR_CORE_AUTH_AUDIENCES (default
+      // `orchestrator-core`), so the slug must match exactly.
+      //
+      // Until this entry existed no such token could be issued at all, which is
+      // why every system-initiated workflow fell back to a shared secret — and a
+      // shared-secret caller carries no signed retention posture, so the three
+      // workflows that persist derived content refused to start.
+      'orchestrator-core': {
+        audience: exactAudience(
+          'ORCHESTRATOR_CORE_AUTH_AUDIENCE',
+          'orchestrator-core',
+        ),
+        ttlSeconds: parsePositiveTtl(
+          'PLANE_TOKEN_TTL_ORCHESTRATOR_CORE_SECONDS',
           300,
         ),
       },

@@ -889,11 +889,31 @@ services:
       # the run's CompleteRunActivity emits RUN_COMPLETED, which is what the
       # learning-review consumer in this service has always been waiting for.
       ORCHESTRATOR_WORKFLOW_ADDR: ${ORCHESTRATOR_WORKFLOW_ADDR:-orchestrator-core:9080}
-      # Must equal orchestrator-core's ORCHESTRATOR_INTERNAL_SERVICE_TOKEN, and
-      # that side must list this deployment's org(s) in
-      # ORCHESTRATOR_INTERNAL_SERVICE_ORGS. Unset ⇒ no workflow dispatch ⇒ the
-      # task executor stays OFF (see below) rather than stranding tasks.
+      # FALLBACK credential only. Must equal orchestrator-core's
+      # ORCHESTRATOR_INTERNAL_SERVICE_TOKEN, and that side must list this
+      # deployment's org(s) in ORCHESTRATOR_INTERNAL_SERVICE_ORGS.
+      #
+      # The PREFERRED credential is a minted service JWT for audience
+      # `orchestrator-core`, taken automatically from the
+      # CAPABILITY_CORE_SERVICE_ID / _SERVICE_API_KEY / AUTH_CORE_URL trio above —
+      # no extra variable needed. It matters because only a JWT carries a SIGNED
+      # retention posture, and orchestrator-core refuses the three workflows that
+      # persist derived content (MemoryConsolidation, SkillPromotion,
+      # FeedbackPromotion) to any caller without one. That refusal is by identity,
+      # so nothing configured on this shared-secret path can reach them.
+      #
+      # Requires an `orchestrator-core` entry on capability-core's service
+      # principal in Auth Core with BOTH `orchestration:workflow:start` and
+      # `:start:global` (PolicyGlobalRegistry demands both) and
+      # retentionByAudience `persistent` — a service token defaults to zdr:true,
+      # and a ZDR caller is refused by the very gate this exists to satisfy.
+      #
+      # Either credential alone is enough to dispatch; with neither, workflow
+      # dispatch is disabled and the task executor stays OFF (see below) rather
+      # than stranding tasks. ORCHESTRATOR_CORE_SERVICE_TOKEN is a static
+      # break-glass override for the mint.
       ORCHESTRATOR_INTERNAL_SERVICE_TOKEN: ${ORCHESTRATOR_INTERNAL_SERVICE_TOKEN:-}
+      ORCHESTRATOR_CORE_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_SERVICE_TOKEN:-}
       # Workflow a fired task runs when its cron template names none.
       TASK_DEFAULT_WORKFLOW_TYPE: ${TASK_DEFAULT_WORKFLOW_TYPE:-InteractiveRunSupervision}
       # Tri-state, deliberately left unset by default:

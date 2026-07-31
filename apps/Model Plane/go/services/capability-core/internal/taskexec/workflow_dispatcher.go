@@ -28,6 +28,19 @@ import (
 // modules with no shared contract package.
 const InternalTokenMetadataKey = "x-model-plane-internal-token"
 
+// WorkflowStartScopes are the scopes a minted orchestrator-core token needs.
+//
+// BOTH are required, not just the first: orchestrator-core's PolicyGlobalRegistry
+// demands `orchestration:workflow:start` AND
+// `orchestration:workflow:start:global`, and the two workflows that mutate the
+// shared skill registry (SkillPromotion, FeedbackPromotion) carry that policy.
+// Requesting only the base scope would leave them refused with a scope error that
+// reads like a misconfiguration rather than a missing grant.
+var WorkflowStartScopes = []string{
+	"orchestration:workflow:start",
+	"orchestration:workflow:start:global",
+}
+
 // DefaultWorkflowType is the workflow a fired task runs when its template does
 // not name one. InteractiveRunSupervision is the run-supervision envelope: it
 // starts the run, drives the step loop, and — the reason this whole path
@@ -37,6 +50,12 @@ const DefaultWorkflowType = "InteractiveRunSupervision"
 
 // dispatchActor identifies this component in task_events.actor.
 const dispatchActor = "capability-core/task-executor"
+
+// WorkflowMinter mints an Auth Core service JWT for the orchestrator-core
+// audience. *servicetoken.Provider satisfies it; tests inject a fake.
+type WorkflowMinter interface {
+	Token(ctx context.Context, orgID string) (string, error)
+}
 
 // WorkflowStarter is the slice of orchestrator-core's workflow API the
 // dispatcher needs. The generated mpv1.OrchestratorWorkflowServiceClient
@@ -67,18 +86,27 @@ type WorkflowStarter interface {
 type WorkflowDispatcher struct {
 	pool                *pgxpool.Pool
 	client              WorkflowStarter
+	minter              WorkflowMinter
 	internalToken       string
 	pub                 publisher.EventPublisher
 	defaultWorkflowType string
 }
 
 // NewWorkflowDispatcher builds the dispatcher. pub may be nil (reconcile events
-// then no-op). internalToken is required: without a credential every start would
-// be refused, so an empty token is a configuration error the caller must catch
-// before enabling the executor.
+// then no-op).
+//
+// Exactly one credential is needed, and which one decides what this dispatcher
+// can start. A minted service JWT carries a SIGNED retention posture, which is
+// what the three workflows that persist derived content
+// (MemoryConsolidation, SkillPromotion, FeedbackPromotion) require; the shared
+// secret carries none and is refused for all three by identity. So `minter` is
+// preferred and `internalToken` is the fallback for a deployment that has not
+// configured minting yet. Neither one present is a configuration error the caller
+// must catch before enabling the executor, because every start would be refused.
 func NewWorkflowDispatcher(
 	pool *pgxpool.Pool,
 	client WorkflowStarter,
+	minter WorkflowMinter,
 	internalToken string,
 	pub publisher.EventPublisher,
 	defaultWorkflowType string,
@@ -89,8 +117,9 @@ func NewWorkflowDispatcher(
 	if client == nil {
 		return nil, errors.New("taskexec: workflow dispatcher requires an orchestrator client")
 	}
-	if strings.TrimSpace(internalToken) == "" {
-		return nil, errors.New("taskexec: workflow dispatcher requires an internal service token")
+	if minter == nil && strings.TrimSpace(internalToken) == "" {
+		return nil, errors.New(
+			"taskexec: workflow dispatcher requires either a service-token minter or an internal service token")
 	}
 	if strings.TrimSpace(defaultWorkflowType) == "" {
 		defaultWorkflowType = DefaultWorkflowType
@@ -98,6 +127,7 @@ func NewWorkflowDispatcher(
 	return &WorkflowDispatcher{
 		pool:                pool,
 		client:              client,
+		minter:              minter,
 		internalToken:       strings.TrimSpace(internalToken),
 		pub:                 pub,
 		defaultWorkflowType: strings.TrimSpace(defaultWorkflowType),
@@ -144,7 +174,7 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 	}
 	workflowType := req.GetWorkflowType()
 
-	resp, err := d.client.StartWorkflow(d.authorize(ctx), req)
+	resp, err := d.client.StartWorkflow(d.authorize(ctx, detail.orgID), req)
 	if err != nil {
 		return fmt.Errorf("taskexec: start %s for task %s: %w", workflowType, task.ID, err)
 	}
@@ -169,10 +199,38 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 	return nil
 }
 
-// authorize attaches the Model-Plane-local internal credential. There is no
-// live per-user bearer on a cron-fired path, which is exactly the case
-// orchestrator-core's org-bound internal credential exists for.
-func (d *WorkflowDispatcher) authorize(ctx context.Context) context.Context {
+// authorize attaches this dispatcher's credential for one org.
+//
+// A minted service JWT is preferred and is attached ALONE. The internal
+// shared-secret key must not travel alongside it: orchestrator-core checks that
+// key FIRST and returns immediately when present, so a request carrying both is
+// still authenticated as the internal caller — which has no signed retention
+// posture and is refused for every workflow that persists derived content. The
+// bearer would be silently ignored and the failure would look like a scope
+// problem.
+//
+// A mint failure falls back to the shared secret rather than failing the
+// dispatch. Run-scoped workflows work under either credential, so degrading to
+// "starts, but cannot start the three retention-gated ones" beats not starting
+// anything; the WARN names the org so the cause is visible.
+func (d *WorkflowDispatcher) authorize(ctx context.Context, orgID string) context.Context {
+	if d.minter != nil {
+		token, err := d.minter.Token(ctx, orgID)
+		if err == nil && strings.TrimSpace(token) != "" {
+			return metadata.NewOutgoingContext(
+				ctx, metadata.Pairs("authorization", "Bearer "+token))
+		}
+		if d.internalToken == "" {
+			// Nothing to fall back to; send the failed attempt so the callee's
+			// Unauthenticated names the real problem.
+			slog.Error("mint orchestrator-core workflow token failed and no fallback credential is configured",
+				"org", orgID, "error", err)
+			return ctx
+		}
+		slog.Warn("mint orchestrator-core workflow token failed, falling back to the shared secret "+
+			"(workflows that persist derived content will be refused)",
+			"org", orgID, "error", err)
+	}
 	return metadata.NewOutgoingContext(ctx, metadata.Pairs(InternalTokenMetadataKey, d.internalToken))
 }
 

@@ -378,9 +378,31 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (task
 
 	addr := strings.TrimSpace(os.Getenv("ORCHESTRATOR_WORKFLOW_ADDR"))
 	token := strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_TOKEN"))
-	if addr == "" || token == "" {
+
+	// Prefer a minted service JWT over the shared secret. Only a JWT carries a
+	// SIGNED retention posture, and orchestrator-core refuses the three workflows
+	// that persist derived content (MemoryConsolidation, SkillPromotion,
+	// FeedbackPromotion) to any caller without one — by identity, so no amount of
+	// configuration on the shared-secret path can reach them.
+	//
+	// Assigned through an explicitly nil-checked interface variable: a nil
+	// *servicetoken.Provider stored in a non-nil interface would make the
+	// dispatcher believe it can mint and lose the shared-secret fallback.
+	var workflowMinter taskexec.WorkflowMinter
+	orchestratorCredential := newBackendCredential(
+		"orchestrator-core",
+		"ORCHESTRATOR_CORE_SERVICE_TOKEN",
+		taskexec.WorkflowStartScopes,
+		orchestratorCoreTokenReason,
+	)
+	if orchestratorCredential.minter != nil {
+		workflowMinter = orchestratorCredential.minter
+	}
+
+	if addr == "" || (workflowMinter == nil && token == "") {
 		slog.Warn("task workflow dispatch disabled; cron-fired tasks cannot become runs",
 			"orchestrator_workflow_addr_set", addr != "",
+			"service_jwt_available", workflowMinter != nil,
 			"internal_service_token_set", token != "")
 		return fallback, false
 	}
@@ -393,6 +415,7 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (task
 	dispatcher, err := taskexec.NewWorkflowDispatcher(
 		pool,
 		mpv1.NewOrchestratorWorkflowServiceClient(conn),
+		workflowMinter,
 		token,
 		pub,
 		os.Getenv("TASK_DEFAULT_WORKFLOW_TYPE"),
@@ -402,7 +425,10 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (task
 		_ = conn.Close()
 		return fallback, false
 	}
-	slog.Info("task workflow dispatch enabled", "orchestrator_workflow_addr", addr)
+	slog.Info("task workflow dispatch enabled",
+		"orchestrator_workflow_addr", addr,
+		"credential", map[bool]string{true: "minted service JWT (signed retention posture)",
+			false: "shared secret (workflows that persist derived content will be refused)"}[workflowMinter != nil])
 	return dispatcher, true
 }
 
@@ -526,6 +552,7 @@ var (
 const (
 	sessionCoreTokenReason   = "capability-core learning review: read a completed run's transcript and upsert learned skills"
 	inferenceCoreTokenReason = "capability-core learning review: extract skill candidates from a completed run"
+	orchestratorCoreTokenReason = "capability-core task executor: start the durable workflow for a fired cron task"
 )
 
 // backendCredential is capability-core's credential source for ONE downstream
