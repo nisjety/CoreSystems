@@ -14,6 +14,7 @@ pub mod confidence;
 pub mod coordinator;
 pub mod dataplane;
 pub mod deep_research;
+pub mod dissatisfaction;
 pub mod doc_indexed_consumer;
 pub mod finetune_azure;
 pub mod finetune_poller;
