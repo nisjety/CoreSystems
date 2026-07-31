@@ -38,6 +38,16 @@ type reviewInferenceClient interface {
 // survivors (session-core, provenance-guarded). Returns the number persisted
 // (0 for any non-trigger event). This is the WHOLE trigger path from bytes to
 // persistence and is unit-tested with fake clients.
+//
+// # Zero Data Retention gate
+//
+// A review turns conversation content into a durable skill, so this function is
+// a content-persisting boundary and must not act on a no-retention run. The
+// posture is checked BEFORE the transcript source is built, so a ZDR (or
+// unattested) run never causes even a READ of the conversation — reading it and
+// discarding the result later would already have moved the content across the
+// boundary. Anything other than an explicit `zdr: false` is skipped; see
+// [RetentionPosture] for why absence fails closed and what that costs.
 func HandleRunCompleted(
 	ctx context.Context,
 	data []byte,
@@ -52,6 +62,12 @@ func HandleRunCompleted(
 	ref, ok := ParseRunCompleted(&env)
 	if !ok {
 		return 0, nil // not a run-completion we act on
+	}
+	// Retention gate — ahead of every session-core read, by construction.
+	if posture := parseRetentionPosture(data); !posture.AllowsDerivedPersistence() {
+		slog.Info("learning review skipped: run retention posture forbids derived persistence",
+			"run_id", ref.RunID, "posture", posture.String())
+		return 0, nil
 	}
 	reviewer := llmreviewer.NewReviewer(ic, model, ref.OrgID)
 	sink := skillsink.NewSessionCoreSink(sc, ref.OrgID)

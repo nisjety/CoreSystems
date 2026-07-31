@@ -67,6 +67,7 @@ impl AgentLoop {
                 artifacts: None,
                 events: None,
                 visual_processor: None,
+                org_id: String::new(),
             },
             constraints,
             zdr,
@@ -77,7 +78,14 @@ impl AgentLoop {
         }
     }
 
-    pub fn with_artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
+    /// `org_id` is the verified org that owns this agent run; artifacts written
+    /// by the loop are readable only by that tenant.
+    pub fn with_artifacts(
+        mut self,
+        org_id: impl Into<String>,
+        store: Arc<dyn ArtifactStore>,
+    ) -> Self {
+        self.runner.org_id = org_id.into();
         self.runner.artifacts = Some(store);
         self
     }

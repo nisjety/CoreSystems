@@ -66,6 +66,10 @@ pub struct ActionRuntime {
     events: Option<EventSink>,
     run_id: Option<RunKind>,
     page_hash: Option<String>,
+    /// Verified org of the owning run — stamped onto every screenshot/PDF this
+    /// runtime stores so the bytes are only readable back by that tenant. Set
+    /// via [`ActionRuntime::with_run_context`].
+    org_id: String,
 }
 
 impl Default for ActionRuntime {
@@ -83,17 +87,14 @@ impl ActionRuntime {
             events: None,
             run_id: None,
             page_hash: None,
+            org_id: String::new(),
         }
     }
 
     pub fn with_browser(browser: Arc<dyn BrowserDriver>) -> Self {
         Self {
             browser: Some(browser),
-            session: None,
-            artifact_store: None,
-            events: None,
-            run_id: None,
-            page_hash: None,
+            ..Self::new()
         }
     }
 
@@ -107,7 +108,15 @@ impl ActionRuntime {
         self
     }
 
-    pub fn with_run_context(mut self, run_id: RunKind, page_hash: impl Into<String>) -> Self {
+    /// `org_id` must be the verified org claim of the run — it becomes the
+    /// tenant of record for every artifact this runtime writes.
+    pub fn with_run_context(
+        mut self,
+        org_id: impl Into<String>,
+        run_id: RunKind,
+        page_hash: impl Into<String>,
+    ) -> Self {
+        self.org_id = org_id.into();
         self.run_id = Some(run_id);
         self.page_hash = Some(page_hash.into());
         self
@@ -199,7 +208,13 @@ impl ActionRuntime {
                         self.page_hash.as_ref(),
                     ) {
                         let handle = store
-                            .put(run_id, page_hash, "screenshot", payload.clone())
+                            .put(
+                                &self.org_id,
+                                run_id,
+                                page_hash,
+                                "screenshot",
+                                payload.clone(),
+                            )
                             .await?;
                         artifact_id = Some(handle.artifact_id);
                     }
@@ -219,7 +234,9 @@ impl ActionRuntime {
                         self.run_id.as_ref(),
                         self.page_hash.as_ref(),
                     ) {
-                        let handle = store.put(run_id, page_hash, "pdf", payload.clone()).await?;
+                        let handle = store
+                            .put(&self.org_id, run_id, page_hash, "pdf", payload.clone())
+                            .await?;
                         artifact_id = Some(handle.artifact_id);
                     }
                     Some(payload)

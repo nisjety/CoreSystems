@@ -437,15 +437,24 @@ impl PageRunner {
         // giving a stable artifact key that is independent of run_id.
         let page_hash = quarry_core::artifact::page_hash(resp.final_url.as_ref(), &fp.0);
 
-        // Artifacts — skip durable writes when ZDR is active.
+        // Artifacts — skip durable writes when ZDR is active. Every artifact is
+        // stamped with the run's org so `GET /v1/artifacts/{id}` can bind the
+        // read back to the same tenant.
+        let artifact_org = self.org_id.as_deref().unwrap_or_default();
         let (html_fmt, md_fmt) = if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
             let html_art = self
                 .artifacts
-                .put(run_id, &page_hash, "html", resp.body.clone())
+                .put(artifact_org, run_id, &page_hash, "html", resp.body.clone())
                 .await?;
             let md_art = self
                 .artifacts
-                .put(run_id, &page_hash, "markdown", md.as_bytes().to_vec())
+                .put(
+                    artifact_org,
+                    run_id,
+                    &page_hash,
+                    "markdown",
+                    md.as_bytes().to_vec(),
+                )
                 .await?;
             self.event_sink
                 .emit(
@@ -487,7 +496,7 @@ impl PageRunner {
                 .map_err(|e| QuarryError::new(ErrorCode::Internal, e.to_string()))?;
             let meta_art = self
                 .artifacts
-                .put(run_id, &page_hash, "meta.json", meta_bytes)
+                .put(artifact_org, run_id, &page_hash, "meta.json", meta_bytes)
                 .await?;
             self.event_sink
                 .emit(
@@ -730,7 +739,12 @@ impl PageRunner {
                                         if let Some(host) = parsed.host_str() {
                                             let root = format!("{}://{}", parsed.scheme(), host);
                                             if let Err(e) = registrar
-                                                .register_source(&registrar_org, host, &root, "crawl")
+                                                .register_source(
+                                                    &registrar_org,
+                                                    host,
+                                                    &root,
+                                                    "crawl",
+                                                )
                                                 .await
                                             {
                                                 tracing::warn!(

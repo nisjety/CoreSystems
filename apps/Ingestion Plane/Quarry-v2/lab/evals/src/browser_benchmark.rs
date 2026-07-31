@@ -44,6 +44,9 @@ use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
 const PAGE_HASH: &str = "blake3:browser-preview-benchmark";
+/// Tenant stamped on benchmark artifacts. The benchmark store discards bodies,
+/// so this only has to be a stable, non-production org id.
+const BENCHMARK_ORG: &str = "org_benchmark";
 
 #[derive(Debug, Clone)]
 struct BenchmarkConfig {
@@ -148,6 +151,7 @@ struct ArtifactSnapshot {
 impl ArtifactStore for CountingArtifactStore {
     async fn put(
         &self,
+        org_id: &str,
         run_id: &RunKind,
         page_hash: &str,
         kind: &str,
@@ -166,12 +170,12 @@ impl ArtifactStore for CountingArtifactStore {
 
         Ok(ArtifactHandle {
             artifact_id: id,
-            key: format!("{run_id}/{page_hash}/{kind}"),
+            key: format!("org={org_id}/{run_id}/{page_hash}/{kind}"),
             bytes,
         })
     }
 
-    async fn get(&self, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+    async fn get(&self, _org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
         Err(QuarryError::new(
             ErrorCode::NotFound,
             format!("artifact {id} is not retained by the benchmark store"),
@@ -365,7 +369,13 @@ async fn run_scenario(
             ScenarioKind::ScreenshotArtifactRefresh => {
                 let screenshot = driver.screenshot(&session, false).await?;
                 store
-                    .put(&run_id, PAGE_HASH, "screenshot", screenshot.to_vec())
+                    .put(
+                        BENCHMARK_ORG,
+                        &run_id,
+                        PAGE_HASH,
+                        "screenshot",
+                        screenshot.to_vec(),
+                    )
                     .await?;
                 persisted_preview_image_payloads += 1;
             }
@@ -391,7 +401,13 @@ async fn run_scenario(
         }
         let screenshot = driver.screenshot(&session, false).await?;
         store
-            .put(&run_id, PAGE_HASH, "screenshot", screenshot.to_vec())
+            .put(
+                BENCHMARK_ORG,
+                &run_id,
+                PAGE_HASH,
+                "screenshot",
+                screenshot.to_vec(),
+            )
             .await?;
         action_latencies.push(start.elapsed());
     }

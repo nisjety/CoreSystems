@@ -40,6 +40,7 @@ pub mod quarry;
 mod quarry_auth;
 pub mod rate_limit;
 pub mod readiness;
+pub mod relevance;
 pub mod retrieval;
 pub mod runtime_registries;
 pub mod session_flow;

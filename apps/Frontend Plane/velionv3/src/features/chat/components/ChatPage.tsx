@@ -27,6 +27,9 @@ import {
   StepsPanel,
 } from './ChatPanels'
 import {
+  ChatLiveRunPanel,
+} from './ChatLiveRunPanel'
+import {
   shouldShowDateDivider,
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
@@ -41,6 +44,9 @@ export default function ChatPage() {
     artifactItems,
     artifacts,
     latestScreen,
+    liveRunId,
+    runPanelCollapsed,
+    toggleRunPanel,
     title,
     handleScroll,
     scrollToBottom,
@@ -99,7 +105,13 @@ export default function ChatPage() {
   )
 
   return (
-    <div class={`velion-chat-page${launchMotion() ? ' velion-chat-page-launch' : ''}`}>
+    <div
+      class={`velion-chat-page${launchMotion() ? ' velion-chat-page-launch' : ''}`}
+      classList={{
+        'velion-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
+        'velion-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
+      }}
+    >
       <Show when={launchMotion()}>
         <div class="velion-chat-launch-wash" aria-hidden="true" />
       </Show>
@@ -218,6 +230,18 @@ export default function ChatPage() {
           </div>
         </Show>
       </section>
+
+      {/*
+        Watch-the-agent-work split view. Only agentic / plan-mode turns carry a
+        durable run id, so a plain chat turn renders no panel at all rather than
+        an empty frame — see `liveRunId` in the controller.
+      */}
+      <ChatLiveRunPanel
+        collapsed={runPanelCollapsed()}
+        onToggleCollapsed={toggleRunPanel}
+        runId={liveRunId()}
+        zdr={isActiveThreadTemporary()}
+      />
     </div>
   )
 }

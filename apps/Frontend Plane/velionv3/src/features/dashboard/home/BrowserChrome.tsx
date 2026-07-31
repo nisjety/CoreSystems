@@ -388,6 +388,14 @@ export function BrowserChrome(props: {
   browserRationales?: BrowserStepRationale[]
   /** Fallback body (non-live render modes); shown instead of the live page. */
   children?: JSX.Element
+  /**
+   * Density variant for narrow columns (the chat split view's live panel).
+   * Purely additive: it only adds a modifier class the stylesheet uses to
+   * tighten paddings and hide the chrome that needs horizontal room. Omitting
+   * it — as the Knowledge surface does — keeps the full-width layout byte-for
+   * byte unchanged.
+   */
+  compact?: boolean
   /** Approval *keys* (see `BrowserApprovalEntry.key`) with an in-flight
    * decide call — disables that card's Approve/Reject buttons. */
   decidingBrowserApprovalKeys?: string[]
@@ -1000,7 +1008,10 @@ export function BrowserChrome(props: {
   })
 
   return (
-    <div class="knowledge-browser-chrome">
+    <div
+      class="knowledge-browser-chrome"
+      classList={{ 'knowledge-browser-chrome--compact': props.compact }}
+    >
       <div class="knowledge-browser-frame__topbar knowledge-browser-frame__topbar--minimal">
         <div class="knowledge-browser-frame__window">
           <span class="knowledge-browser-traffic" aria-hidden="true">

@@ -1259,7 +1259,25 @@ pub async fn dispatch_tool(
                         .results
                         .iter()
                         .map(|r| {
-                            serde_json::json!({ "url": r.url, "title": r.title, "snippet": r.snippet })
+                            let mut item = serde_json::json!({
+                                "url": r.url, "title": r.title, "snippet": r.snippet
+                            });
+                            // Quarry's semantic reranker scores only the leading
+                            // `top_n` hits, so ABSENT and ZERO mean different
+                            // things: unjudged vs judged-irrelevant. The proto
+                            // carries a bare `f32` and has already flattened
+                            // `None` to 0.0 by this point, so emitting it
+                            // unconditionally would tell `relevance::assess`
+                            // that every unjudged hit scored zero — worse than
+                            // sending nothing, because the gate would trust it.
+                            // Omitting zero keeps the distinction: a real 0.0
+                            // simply falls through to the lexical + domain
+                            // signals, which is the correct treatment for a hit
+                            // the reranker never looked at.
+                            if r.score > 0.0 {
+                                item["score"] = serde_json::json!(r.score);
+                            }
+                            item
                         })
                         .collect();
                     ToolOutcome {

@@ -24,6 +24,11 @@ pub struct ObservationRunner {
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
     pub events: Option<EventSink>,
     pub visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
+    /// Verified org of the run these observations belong to. Every artifact
+    /// written here (screenshots, traces, visual diffs) is stamped with it so
+    /// only this tenant can read the bytes back by id. Empty means the run has
+    /// no tenant attribution — such artifacts stay write-only.
+    pub org_id: String,
 }
 
 pub struct ObservationContext {
@@ -465,7 +470,9 @@ impl ObservationRunner {
         let Some(store) = &self.artifacts else {
             return Ok(None);
         };
-        let handle = store.put(run_id, page_hash, kind, body).await?;
+        let handle = store
+            .put(&self.org_id, run_id, page_hash, kind, body)
+            .await?;
         Ok(Some(handle.artifact_id))
     }
 
@@ -821,12 +828,13 @@ mod tests {
 
     #[tokio::test]
     async fn put_artifact_if_allowed_skips_zdr_writes() {
-        let store = Arc::new(InMemoryStore::with_org("org_a"));
+        let store = Arc::new(InMemoryStore::new());
         let runner = ObservationRunner {
             browser: Arc::new(crate::tests::MockBrowserDriver),
             artifacts: Some(store.clone()),
             events: None,
             visual_processor: None,
+            org_id: "org_a".into(),
         };
         let run_id: RunKind = Id::new();
 
@@ -847,12 +855,13 @@ mod tests {
 
     #[tokio::test]
     async fn put_artifact_if_allowed_stores_visual_observation_when_zdr_off() {
-        let store = Arc::new(InMemoryStore::with_org("org_a"));
+        let store = Arc::new(InMemoryStore::new());
         let runner = ObservationRunner {
             browser: Arc::new(crate::tests::MockBrowserDriver),
             artifacts: Some(store.clone()),
             events: None,
             visual_processor: None,
+            org_id: "org_a".into(),
         };
         let run_id: RunKind = Id::new();
 
@@ -932,13 +941,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_stores_visual_artifact_fanout_when_zdr_off() {
-        let store = Arc::new(InMemoryStore::with_org("org_a"));
+        let store = Arc::new(InMemoryStore::new());
         let browser = Arc::new(crate::tests::MockBrowserDriver);
         let runner = ObservationRunner {
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: None,
             visual_processor: Some(Arc::new(MockVisualProcessor)),
+            org_id: "org_a".into(),
         };
         let lease = BrowserLease {
             lease_id: Id::new(),
@@ -1002,7 +1012,7 @@ mod tests {
         }
 
         let obs_id = observation.visual_observation_artifact_id.unwrap();
-        let bytes = store.get(&obs_id).await.unwrap();
+        let bytes = store.get("org_a", &obs_id).await.unwrap();
         let artifact: VisualObservationArtifact = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(artifact.change_ratio, 0.42);
         assert!(artifact.change_artifact_id.is_some());
