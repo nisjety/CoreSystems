@@ -804,9 +804,9 @@ mod tests {
         execution_core_server::{ExecutionCore, ExecutionCoreServer},
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
         CancelRunRequest, CancelRunResponse, CreateThreadRequest, ExecuteStepRequest,
-        ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse,
-        RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest, RunAgentResponse,
-        ValidateGrantResponse,
+        ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest,
+        ResumeRunResponse, RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest,
+        RunAgentResponse, ValidateGrantResponse,
     };
     use tonic::{Response, Status};
 

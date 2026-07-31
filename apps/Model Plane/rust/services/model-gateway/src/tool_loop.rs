@@ -2975,9 +2975,9 @@ mod tests {
     fn tool_round_output_cap_fits_a_document_artifact_argument() {
         // Tool arguments are JSON; clipping mid-string yields malformed arguments
         // that fail at the tool rather than visibly here. The binding case is
-        // `create_artifact`, whose `content` argument is a whole document — 2048
-        // truncated every real document request, so guard the floor that fixed
-        // it rather than the 1024 it originally replaced.
+        // `create_artifact`, whose `content` argument is a whole document — at
+        // 2048 anything past roughly 4000 characters was truncated, so guard the
+        // floor that fixed it rather than the 1024 it originally replaced.
         assert!(TOOL_ROUND_TOKENS >= 8192);
     }
 

@@ -439,7 +439,7 @@ pub async fn run(
                 );
                 if last_err_signature.as_deref() == Some(signature.as_str()) {
                     suppressed_count += 1;
-                    if suppressed_count % SUPPRESSED_WARN_EVERY == 0 {
+                    if suppressed_count.is_multiple_of(SUPPRESSED_WARN_EVERY) {
                         // Still broken, not flapping — say so at a level the
                         // production log level actually shows.
                         warn!(
