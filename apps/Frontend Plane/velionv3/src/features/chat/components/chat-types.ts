@@ -185,7 +185,12 @@ export type ChatTurn = {
   artifacts?: ChatArtifact[]
   files?: GeneratedFile[]
   grounding?: ChatKnowledgeGrounding
-  /** Orchestration run id (captured from a `paused` step) — drives approvals. */
+  /**
+   * Orchestration run id. Captured from the `connected` SSE event on an
+   * agentic / plan-mode turn (and, as a fallback, from a `paused` step). Drives
+   * both the human-approval cards and the live agent panel's subscription to
+   * `GET /api/v1/runs/:run_id/events`.
+   */
   runId?: string
   /** Pending human-approval requests gating this agentic run's next tool. */
   pendingApprovals?: Approval[]
@@ -247,6 +252,7 @@ export type SendOptions = {
   actions?: ChatAction[]
   attachments?: StreamAttachment[]
   browseWeb?: boolean
+  deepResearch?: boolean
   createdAt?: string
   displayAttachments?: ComposerAttachment[]
   generateImage?: boolean

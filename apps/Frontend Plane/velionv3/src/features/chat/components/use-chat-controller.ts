@@ -31,6 +31,10 @@ import {
   consumePendingChatLaunch,
 } from '@/features/chat/lib/pending-chat-launch'
 import {
+  readChatRunPanelCollapsed,
+  writeChatRunPanelCollapsed,
+} from '@/features/chat/lib/chat-run-watch'
+import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import {
@@ -159,6 +163,13 @@ export function useChatController() {
    * failed, and a rejected thumbs-up says nothing about the answer.
    */
   const [feedbackNotice, setFeedbackNotice] = createSignal<string | null>(null)
+  /** Chat split view: whether the live agent panel is folded to its rail. */
+  const [runPanelCollapsed, setRunPanelCollapsed] = createSignal(readChatRunPanelCollapsed())
+  const toggleRunPanel = () => {
+    const next = !runPanelCollapsed()
+    setRunPanelCollapsed(next)
+    writeChatRunPanelCollapsed(next)
+  }
   let feedbackNoticeTimer: number | undefined
   let abortController: AbortController | undefined
   let messageListRef: HTMLDivElement | undefined
@@ -175,6 +186,18 @@ export function useChatController() {
   const artifacts = createMemo(() => artifactItems().map((item) => item.artifact))
   const latestScreen = createMemo(() => selectLatestImageArtifact(state.turns))
   const title = () => createChatTitle(state.turns)
+  /**
+   * The run the live agent panel watches: the most recent assistant turn that
+   * actually has a durable orchestration run id. Plain chat turns have none, so
+   * this stays null and the panel never opens.
+   */
+  const liveRunId = createMemo(() => {
+    for (let index = state.turns.length - 1; index >= 0; index -= 1) {
+      const turn = state.turns[index]
+      if (turn?.role === 'assistant' && turn.runId) return turn.runId
+    }
+    return null
+  })
   let serverSnapshotTimer: number | undefined
   let pendingServerSnapshot: {
     preview?: string
@@ -570,6 +593,7 @@ export function useChatController() {
         await sendContent(pending.text, pending.model, {
           attachments: attachments.length > 0 ? attachments : undefined,
           browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
+          deepResearch: pending.tools?.includes('research'),
           displayAttachments: pending.attachments ?? [],
           generateImage: pending.tools?.includes('image'),
           tools: pending.tools ?? [],
@@ -746,6 +770,7 @@ export function useChatController() {
           threadId: activeThreadId,
           sessionKey: activeThreadId,
           browseWeb: options.browseWeb,
+          deepResearch: options.deepResearch,
           generateImage: options.generateImage,
           attachments: options.attachments,
           actions: options.actions,
@@ -753,8 +778,13 @@ export function useChatController() {
           zdr: options.zdr,
         },
         {
-          onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel }) => {
+          onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel, runId }) => {
             captureRequestId(requestId)
+            // An agentic / plan-mode turn learns its durable orchestration run
+            // id here — this is what lets the live agent panel attach to
+            // `GET /api/v1/runs/:run_id/events` from the very first step
+            // instead of only once the run pauses for an approval.
+            if (runId) setTurnRunId(assistantId, runId)
             if (serverThreadId) {
               if (serverThreadId !== activeThreadId) {
                 const provisionalThreadId = activeThreadId
@@ -969,6 +999,7 @@ export function useChatController() {
     void sendContent(payload.text, model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: payload.tools.includes('search') || payload.tools.includes('research'),
+      deepResearch: payload.tools.includes('research'),
       displayAttachments: payload.attachments,
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
@@ -1125,6 +1156,7 @@ export function useChatController() {
     void sendContent(lastUser.content, lastUser.model, {
       appendUser: false,
       browseWeb: lastUser.tools.includes('search') || lastUser.tools.includes('research'),
+      deepResearch: lastUser.tools.includes('research'),
       displayAttachments: lastUser.attachments,
       generateImage: lastUser.tools.includes('image'),
       tools: lastUser.tools,
@@ -1147,6 +1179,7 @@ export function useChatController() {
     await sendContent(next, original.model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: original.tools.includes('search') || original.tools.includes('research'),
+      deepResearch: original.tools.includes('research'),
       displayAttachments: original.attachments,
       generateImage: original.tools.includes('image'),
       tools: original.tools,
@@ -1220,6 +1253,9 @@ export function useChatController() {
     artifactItems,
     artifacts,
     latestScreen,
+    liveRunId,
+    runPanelCollapsed,
+    toggleRunPanel,
     title,
     handleScroll,
     scrollToBottom,
