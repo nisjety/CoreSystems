@@ -18,6 +18,7 @@ mod gdpr;
 mod gdpr_nats;
 mod grpc;
 mod http_health;
+mod learning_events;
 mod letta_adapter;
 mod memory_grpc;
 mod nats;

@@ -28,7 +28,10 @@ use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use crate::auth::{authorize_operation, identity, JwtVerifier, VerifiedIdentity};
+use crate::auth::{
+    authorize_operation, identity, DelegatedDataPlaneBearer, JwtVerifier, VerifiedIdentity,
+    DATA_PLANE_AUTH_METADATA_KEY,
+};
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
 use crate::terminalization;
 
@@ -186,6 +189,12 @@ pub struct SessionService {
     /// Transactional audit outbox. Tool-step intent is committed with the step;
     /// delivery retries independently until Audit Core acknowledges it.
     audit_publisher: Option<std::sync::Arc<crate::audit_publisher::AuditOutbox>>,
+    /// Same verifier the interceptor uses, retained so a delegated Data Plane
+    /// credential can be re-verified and bound to the caller before it is
+    /// forwarded. `None` only in tests that never delegate; a delegation
+    /// arriving without a verifier fails closed rather than being forwarded
+    /// unverified.
+    auth: Option<JwtVerifier>,
 }
 
 /// Additive managed-run protocol. Keeping this service separate preserves the
@@ -193,6 +202,34 @@ pub struct SessionService {
 /// durable, source-bound terminal receipt contract.
 pub struct ManagedRunLifecycleService {
     pool: PgPool,
+}
+
+/// Attach the caller's delegated Data Plane credential to an outbound Data
+/// Plane v2 gRPC request.
+///
+/// Data Plane retrieval enforces per-user, private-until-shared authorization
+/// with a post-filter keyed on this token's `sub`/`org_id`, so forwarding the
+/// caller's own already-verified credential is exactly what keeps one user's
+/// context assembly from reading another user's corpus. A shared internal key or
+/// a session-core service token would collapse every user's view into one
+/// identity, so no such substitute is accepted here: the only input is a
+/// [`DelegatedDataPlaneBearer`], which cannot be constructed without passing
+/// verification and caller binding.
+///
+/// # Errors
+///
+/// Returns `Unauthenticated` if the verified credential cannot be encoded as
+/// gRPC metadata. Keeping `tonic::Status` preserves the auth boundary.
+#[allow(clippy::result_large_err)]
+fn authorize_dataplane<T>(
+    message: T,
+    bearer: &DelegatedDataPlaneBearer,
+) -> Result<Request<T>, Status> {
+    let value = tonic::metadata::MetadataValue::try_from(format!("Bearer {}", bearer.as_str()))
+        .map_err(|_| Status::unauthenticated("verified bearer cannot be forwarded"))?;
+    let mut request = Request::new(message);
+    request.metadata_mut().insert("authorization", value);
+    Ok(request)
 }
 
 #[allow(clippy::result_large_err)]
@@ -319,16 +356,49 @@ async fn create_thread_inner(
     }))
 }
 
+/// Persist dream-memory candidates to Letta unless the verified caller is Zero
+/// Data Retention.
+///
+/// The gate lives here rather than inside `dreaming::sync_candidates_to_letta`
+/// because that function is shared with the background dreaming worker, which
+/// has no caller credential at all — it re-reads rows that already survived the
+/// RPC-level write gate. Keeping "verified caller implies policy" on the request
+/// path leaves the worker unchanged and keeps the decision next to the identity
+/// it is derived from.
+async fn sync_dream_memory_unless_zdr(
+    letta: Option<&LettaMemoryAdapter>,
+    retention: MemoryRetention,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    candidates: &[crate::dreaming::DreamMemoryCandidate],
+) {
+    if !retention.permits_durable_memory() {
+        // Skipped outright: no write-then-delete, and no reliance on
+        // letta-bridge's own authorizer refusing us. ZDR content never reaches
+        // the wire.
+        record_semantic_memory_degraded(ZDR_MEMORY_WRITE_SUPPRESSED);
+        warn!(
+            reason = ZDR_MEMORY_WRITE_SUPPRESSED,
+            thread_id, "durable Letta memory write suppressed for a ZDR caller"
+        );
+        return;
+    }
+    crate::dreaming::sync_candidates_to_letta(letta, org_id, user_id, thread_id, candidates).await;
+}
+
 /// Core of `SessionCore::append_message`, factored out to keep the trait method
 /// small. Inserts the message row and its `MESSAGE_APPENDED` event in one tx.
 async fn append_message_inner(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
+    retention: MemoryRetention,
     req: pb::AppendMessageRequest,
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
     let msg_id = new_ulid();
     let now = Utc::now();
-    let mut letta_sync: Option<(String, Vec<crate::dreaming::DreamMemoryCandidate>)> = None;
+    let mut letta_sync: Option<(String, String, Vec<crate::dreaming::DreamMemoryCandidate>)> =
+        None;
 
     let mut tx = pool
         .begin()
@@ -417,16 +487,23 @@ async fn append_message_inner(
             memories_saved = saved,
             "dream memory extraction completed"
         );
-        letta_sync = Some((org_id, candidates));
+        letta_sync = Some((org_id, user_id, candidates));
     }
 
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-    if let Some((org_id, candidates)) = letta_sync {
-        crate::dreaming::sync_candidates_to_letta(letta, &org_id, &req.thread_id, &candidates)
-            .await;
+    if let Some((org_id, user_id, candidates)) = letta_sync {
+        sync_dream_memory_unless_zdr(
+            letta,
+            retention,
+            &org_id,
+            &user_id,
+            &req.thread_id,
+            &candidates,
+        )
+        .await;
     }
 
     Ok(Response::new(pb::AppendMessageResponse { sequence }))
@@ -702,13 +779,14 @@ async fn record_run_terminal(
         &terminal_resource,
         &format!("{}:terminal", &req.run_id),
     );
+    let terminal_event_id = new_ulid();
     let terminal_insert = sqlx::query(
         "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
          SELECT $1, $2, $3, $4, now(), r.org_id, r.user_id, $3, $5, $8, $6, $7, 'session-core', 1
          FROM runs r WHERE r.id = $3
          ON CONFLICT (org_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING",
     )
-    .bind(new_ulid())
+    .bind(&terminal_event_id)
     .bind(terminal_event_type)
     .bind(&req.run_id)
     .bind(serde_json::json!({ "error": &req.error }))
@@ -759,6 +837,22 @@ async fn record_run_terminal(
     .execute(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
+
+    // §1.1 learning loop, legacy/unmanaged arm. This `CompleteStep` path is
+    // retained only for unmanaged runs (a managed run is rejected above and must
+    // use `ManagedRunLifecycle.RecordTerminalOutcome`, which announces itself in
+    // `terminalization::apply_managed_terminal_outcome`). Announce the same
+    // `RUN_COMPLETED` here so an unmanaged completion is learned from too.
+    // Enqueueing cannot fail this call by contract.
+    if terminal_event_type == "RUN_COMPLETED" {
+        crate::learning_events::enqueue_run_completed(
+            tx,
+            &req.run_id,
+            &terminal_event_id,
+            Utc::now(),
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -1296,9 +1390,71 @@ fn semantic_memory_query(thread_messages: &[(String, String)]) -> String {
         .join("\n")
 }
 
+/// Durable-memory posture of the verified caller, as it applies to the Letta
+/// memory boundary.
+///
+/// Letta is a content-persisting boundary that lives outside session-core's own
+/// database, so the plane rule "Zero Data Retention must propagate through any
+/// content-persisting boundary" has to be enforced here in its own right.
+/// `authorize_operation` already refuses every non-`:read` session operation for
+/// a ZDR credential, but that is a coarse RPC-level check on a different
+/// concern; deriving the posture explicitly at the memory boundary means a
+/// later change to the RPC gate cannot silently start persisting ZDR content in
+/// Letta, and it makes the read side — which legitimately runs under
+/// `session:read` — decidable at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryRetention {
+    /// The trusted issuer did not mark the credential Zero Data Retention.
+    Durable,
+    /// The trusted issuer marked the credential Zero Data Retention.
+    ZeroDataRetention,
+}
+
+impl MemoryRetention {
+    pub(crate) fn of(caller: &VerifiedIdentity) -> Self {
+        if caller.zdr() {
+            Self::ZeroDataRetention
+        } else {
+            Self::Durable
+        }
+    }
+
+    /// Whether durable Letta memory may be touched at all, in either direction.
+    ///
+    /// Writes are the obvious half: a ZDR turn must leave nothing behind, and
+    /// the skip happens here rather than relying on letta-bridge to refuse, so
+    /// no ZDR content is ever put on the wire.
+    ///
+    /// Reads are denied too, deliberately. Two reasons. Consistency: the
+    /// explicit `MemoryService` surface already refuses `memory:read` for a ZDR
+    /// caller (`memory_grpc::authorize_memory_preflight`), so allowing it here
+    /// would make one credential's reach depend on which RPC it happened to
+    /// take. Substance: a durable memory is by construction a distillation of
+    /// *other, retained* sessions, so injecting one would pull retained content
+    /// into a turn whose caller was promised no retention, where the model
+    /// re-processes it and echoes it into the answer — retained data leaking
+    /// into a no-retention context. Reading persists nothing new, which is why
+    /// this is a judgement call rather than a mechanical one, but a retention
+    /// boundary fails closed: a ZDR turn gets no memory in and leaves none
+    /// behind.
+    pub(crate) const fn permits_durable_memory(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+}
+
+/// The two ways session-core itself suppresses the durable Letta path. Unlike
+/// every other reason on this path these are local policy decisions rather than
+/// `LettaReadiness` values — the bridge is never called, so it has no readiness
+/// to report — but they ride the same
+/// `mp_session_semantic_memory_context_degraded_total` series so a retention
+/// skip is exactly as visible as a bridge outage.
+pub(crate) const ZDR_MEMORY_READ_SUPPRESSED: &str = "DEGRADED_LETTA_ZDR_READ_SUPPRESSED";
+pub(crate) const ZDR_MEMORY_WRITE_SUPPRESSED: &str = "DEGRADED_LETTA_ZDR_WRITE_SUPPRESSED";
+
 /// Bounded operational outcome of semantic augmentation in the default chat
 /// context path. The reason originates from `LettaReadiness`, whose values are
-/// static protocol codes rather than provider-supplied text.
+/// static protocol codes rather than provider-supplied text, or from the
+/// `ZDR_MEMORY_*_SUPPRESSED` policy codes above.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SemanticContextSearchStatus {
     Empty,
@@ -1317,6 +1473,17 @@ fn semantic_context_search_status(
     }
 }
 
+/// Single emitter for every degraded semantic-memory reason, so a retention skip
+/// on the write side lands in the same series as a bridge outage on the read
+/// side instead of needing a parallel mechanism.
+fn record_semantic_memory_degraded(reason: &'static str) {
+    metrics::counter!(
+        "mp_session_semantic_memory_context_degraded_total",
+        "reason" => reason,
+    )
+    .increment(1);
+}
+
 fn record_semantic_context_search(status: SemanticContextSearchStatus) {
     let outcome = match status {
         SemanticContextSearchStatus::Empty => "empty",
@@ -1330,11 +1497,7 @@ fn record_semantic_context_search(status: SemanticContextSearchStatus) {
     .increment(1);
 
     if let SemanticContextSearchStatus::Degraded(reason) = status {
-        metrics::counter!(
-            "mp_session_semantic_memory_context_degraded_total",
-            "reason" => reason,
-        )
-        .increment(1);
+        record_semantic_memory_degraded(reason);
         warn!(reason, "semantic memory context augmentation degraded");
     }
 }
@@ -1372,26 +1535,44 @@ fn append_letta_search_outcome(
     status
 }
 
+/// Semantic-memory augmentation for the default chat context path.
+///
+/// Returns the recorded outcome so the retention gate is assertable structurally
+/// rather than by scraping a log line. `None` means the path did not apply at
+/// all — memory is not configured, or the thread has no org — which is not a
+/// degradation and is deliberately left uncounted, matching prior behaviour.
 async fn append_letta_memory_rows(
-    svc: &SessionService,
+    letta: Option<&LettaMemoryAdapter>,
+    retention: MemoryRetention,
     org_id: Option<&str>,
     thread_id: &str,
     thread_messages: &[(String, String)],
     memory_rows: &mut Vec<(String, String)>,
-) {
-    let (Some(letta), Some(org_id)) = (svc.letta_memory.as_ref(), org_id) else {
-        return;
+) -> Option<SemanticContextSearchStatus> {
+    let (Some(letta), Some(org_id)) = (letta, org_id) else {
+        return None;
     };
+
+    // Zero Data Retention read gate. See `MemoryRetention::permits_durable_memory`
+    // for why a ZDR turn is denied memory reads and not just memory writes. The
+    // skip is reported as a degradation, never as an empty result, so it cannot
+    // be mistaken for "this thread has no memories".
+    if !retention.permits_durable_memory() {
+        let status = SemanticContextSearchStatus::Degraded(ZDR_MEMORY_READ_SUPPRESSED);
+        record_semantic_context_search(status);
+        return Some(status);
+    }
 
     let query = semantic_memory_query(thread_messages);
     let outcome = letta
         .search_detailed(org_id, thread_id, &query, &[], 8)
         .await;
-    append_letta_search_outcome(memory_rows, outcome, 8);
+    Some(append_letta_search_outcome(memory_rows, outcome, 8))
 }
 
 async fn load_context_memory_rows(
     svc: &SessionService,
+    retention: MemoryRetention,
     thread_id: &str,
     user_id: Option<&str>,
     thread_messages: &[(String, String)],
@@ -1426,7 +1607,8 @@ async fn load_context_memory_rows(
     .map_err(|e| Status::internal(e.to_string()))?;
     rows.append(&mut agent_rows);
     append_letta_memory_rows(
-        svc,
+        svc.letta_memory.as_ref(),
+        retention,
         thread_org_id.as_deref(),
         thread_id,
         thread_messages,
@@ -1442,6 +1624,8 @@ async fn load_context_memory_rows(
 async fn get_context_assembly_inner(
     svc: &SessionService,
     req: pb::GetContextAssemblyRequest,
+    retention: MemoryRetention,
+    dataplane_bearer: Option<&DelegatedDataPlaneBearer>,
 ) -> Result<Response<pb::GetContextAssemblyResponse>, Status> {
     let thread_id = req.thread_id.clone();
     let run_id = req.run_id.clone();
@@ -1470,8 +1654,14 @@ async fn get_context_assembly_inner(
     };
 
     let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
-    let memory_rows =
-        load_context_memory_rows(svc, &thread_id, user_id.as_deref(), &thread_messages).await?;
+    let memory_rows = load_context_memory_rows(
+        svc,
+        retention,
+        &thread_id,
+        user_id.as_deref(),
+        &thread_messages,
+    )
+    .await?;
     let memory = bucket_memory_segments(memory_rows);
 
     let evidence = svc
@@ -1480,6 +1670,7 @@ async fn get_context_assembly_inner(
             &thread_messages,
             req.max_tokens,
             &memory.retrieval,
+            dataplane_bearer,
         )
         .await;
 
@@ -1495,9 +1686,11 @@ async fn get_context_assembly_inner(
     }
 
     let knowledge_segments = svc
-        .fetch_knowledge_segments(&thread_id, &evidence.document_ids)
+        .fetch_knowledge_segments(&thread_id, &evidence.document_ids, dataplane_bearer)
         .await;
-    let graph_segments = svc.fetch_graph_segments(&thread_id).await;
+    let graph_segments = svc
+        .fetch_graph_segments(&thread_id, dataplane_bearer)
+        .await;
 
     let inputs = AssemblyInputs {
         policy_id: req.policy_id,
@@ -1561,7 +1754,13 @@ impl SessionCore for SessionService {
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
             authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
-            append_message_inner(&self.pool, self.letta_memory.as_ref(), req).await
+            append_message_inner(
+                &self.pool,
+                self.letta_memory.as_ref(),
+                MemoryRetention::of(&caller),
+                req,
+            )
+            .await
         }
         .await;
         record_metrics("append_message", started, result.is_ok());
@@ -2123,10 +2322,20 @@ impl SessionCore for SessionService {
         let result = async {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:read")?;
+            // Data Plane grounding runs on the caller's own delegated
+            // `aud=data-plane` credential. Resolve it while the request (and so
+            // its metadata) is still intact.
+            let dataplane_bearer = self.delegated_dataplane_bearer(&request, &caller)?;
             let req = request.into_inner();
             authorize_thread_owner(&self.pool, &caller, &req.thread_id).await?;
             authorize_run_owner(&self.pool, &caller, &req.run_id).await?;
-            get_context_assembly_inner(self, req).await
+            get_context_assembly_inner(
+                self,
+                req,
+                MemoryRetention::of(&caller),
+                dataplane_bearer.as_ref(),
+            )
+            .await
         }
         .await;
         record_metrics("get_context_assembly", started, result.is_ok());
@@ -2294,12 +2503,36 @@ fn map_retrieve_response(
 }
 
 impl SessionService {
+    /// Re-verify the caller's delegated Data Plane credential, if any.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the verifier's status for a malformed, unverifiable, or
+    /// identity-mismatched delegation. When no verifier is configured, a
+    /// delegation that was nonetheless supplied fails closed instead of being
+    /// forwarded unverified.
+    #[allow(clippy::result_large_err)]
+    fn delegated_dataplane_bearer<T>(
+        &self,
+        request: &Request<T>,
+        caller: &VerifiedIdentity,
+    ) -> Result<Option<DelegatedDataPlaneBearer>, Status> {
+        match &self.auth {
+            Some(auth) => auth.delegated_data_plane_bearer(request, caller),
+            None if request.metadata().get(DATA_PLANE_AUTH_METADATA_KEY).is_some() => Err(
+                Status::unavailable("delegated Data Plane credential cannot be verified"),
+            ),
+            None => Ok(None),
+        }
+    }
+
     async fn fetch_retrieval_segments(
         &self,
         thread_id: &str,
         thread_messages: &[(String, String)],
         max_tokens: u32,
         local_fallback: &[String],
+        bearer: Option<&DelegatedDataPlaneBearer>,
     ) -> RetrievalEvidence {
         let local = || RetrievalEvidence {
             segments: local_fallback.to_vec(),
@@ -2311,6 +2544,17 @@ impl SessionService {
         let mut client = match &self.retrieval_client {
             Some(c) => c.clone(),
             None => return local(),
+        };
+
+        // Data Plane requires the caller's own `aud=data-plane` bearer and there
+        // is no honest substitute, so an undelegated call answers from durable
+        // local memory instead of attempting a call that can only 401.
+        let Some(bearer) = bearer else {
+            tracing::debug!(
+                thread_id,
+                "no delegated Data Plane credential; using local memory for retrieval"
+            );
+            return local();
         };
 
         let query = thread_messages
@@ -2364,7 +2608,15 @@ impl SessionService {
             agent_id: None,
         };
 
-        match client.retrieve(retrieve_req).await {
+        let request = match authorize_dataplane(retrieve_req, bearer) {
+            Ok(request) => request,
+            Err(e) => {
+                warn!(error = %e, "retrieval credential cannot be forwarded, using local fallback");
+                return local();
+            }
+        };
+
+        match client.retrieve(request).await {
             Ok(resp) => map_retrieve_response(resp.into_inner(), local_fallback),
             Err(e) => {
                 warn!(error = %e, "retrieval service call failed, using local fallback");
@@ -2383,6 +2635,7 @@ impl SessionService {
         &self,
         thread_id: &str,
         document_ids: &[String],
+        bearer: Option<&DelegatedDataPlaneBearer>,
     ) -> Vec<String> {
         let client = match &self.knowledge_client {
             Some(c) => c.clone(),
@@ -2391,6 +2644,13 @@ impl SessionService {
         if document_ids.is_empty() {
             return Vec::new();
         }
+        let Some(bearer) = bearer else {
+            tracing::debug!(
+                thread_id,
+                "no delegated Data Plane credential; skipping knowledge units"
+            );
+            return Vec::new();
+        };
         let org_id: Option<String> =
             match sqlx::query_scalar("SELECT org_id FROM threads WHERE id = $1")
                 .bind(thread_id)
@@ -2409,12 +2669,22 @@ impl SessionService {
         };
 
         let take = document_ids.len().min(KNOWLEDGE_DOC_LIMIT);
-        let futures = document_ids[..take].iter().map(|doc_id| {
-            let mut c = client.clone();
+        let mut requests = Vec::with_capacity(take);
+        for doc_id in &document_ids[..take] {
             let req = know_pb::GetKnowledgeUnitsRequest {
                 document_id: doc_id.clone(),
                 org_id: org_id.clone(),
             };
+            match authorize_dataplane(req, bearer) {
+                Ok(request) => requests.push(request),
+                Err(e) => {
+                    warn!(error = %e, "knowledge credential cannot be forwarded");
+                    return Vec::new();
+                }
+            }
+        }
+        let futures = requests.into_iter().map(|req| {
+            let mut c = client.clone();
             async move { c.get_knowledge_units(req).await }
         });
         let results = futures::future::join_all(futures).await;
@@ -2489,10 +2759,22 @@ impl SessionService {
     /// for the thread's org so the model is aware of conflicting claims when reasoning
     /// over retrieval evidence. Returns an empty vec if the graph service is unconfigured
     /// or any call fails — graph context is opportunistic, never blocking.
-    async fn fetch_graph_segments(&self, thread_id: &str) -> Vec<String> {
+    async fn fetch_graph_segments(
+        &self,
+        thread_id: &str,
+        bearer: Option<&DelegatedDataPlaneBearer>,
+    ) -> Vec<String> {
         let mut client = match &self.graph_client {
             Some(c) => c.clone(),
             None => return Vec::new(),
+        };
+
+        let Some(bearer) = bearer else {
+            tracing::debug!(
+                thread_id,
+                "no delegated Data Plane credential; skipping graph contradictions"
+            );
+            return Vec::new();
         };
 
         let org_id: Option<String> =
@@ -2520,7 +2802,15 @@ impl SessionService {
             offset: 0,
         };
 
-        match client.get_contradictions(req).await {
+        let request = match authorize_dataplane(req, bearer) {
+            Ok(request) => request,
+            Err(e) => {
+                warn!(error = %e, "graph credential cannot be forwarded");
+                return Vec::new();
+            }
+        };
+
+        match client.get_contradictions(request).await {
             Ok(resp) => resp
                 .into_inner()
                 .contradictions
@@ -2773,6 +3063,38 @@ fn event_type_to_i32(s: &str) -> i32 {
     }
 }
 
+/// Resolve a Data Plane endpoint, accepting either spelling of the variable.
+///
+/// This service historically read only `DATAPLANE_<TIER>_ADDR`, while
+/// model-gateway (`state.rs::from_env`) reads `DATAPLANE_<TIER>_URL` first and
+/// falls back to `_ADDR`. Compose was written against model-gateway's spelling,
+/// so session-core silently received nothing and every tier fell back to
+/// `localhost` — inside its own container. Because the clients are built with
+/// `connect_lazy()` they still look configured, and the callers degrade to empty
+/// on RPC failure by design, so the whole retrieval/knowledge/graph grounding
+/// path went quiet without a single error.
+///
+/// Accepting both spellings here means a future compose edit cannot reintroduce
+/// that drift. An empty value is treated as unset so `FOO=` in an env file does
+/// not defeat the fallback.
+fn dataplane_addr(tier: &str, default: &str) -> String {
+    resolve_dataplane_addr(
+        &["URL", "ADDR"].map(|s| std::env::var(format!("DATAPLANE_{tier}_{s}")).ok()),
+        default,
+    )
+}
+
+/// Pure precedence core of [`dataplane_addr`], split out so the ordering and the
+/// empty-string handling are testable without mutating process env (which races
+/// under a parallel test runner).
+fn resolve_dataplane_addr(candidates: &[Option<String>], default: &str) -> String {
+    candidates
+        .iter()
+        .flatten()
+        .find(|v| !v.trim().is_empty())
+        .map_or_else(|| default.to_string(), Clone::clone)
+}
+
 /// Start the gRPC server on :9091.
 ///
 /// # Errors
@@ -2787,8 +3109,7 @@ pub async fn serve(
     let addr = "0.0.0.0:9091".parse()?;
     info!("gRPC listening on :9091");
 
-    let retrieval_addr = std::env::var("DATAPLANE_RETRIEVAL_ADDR")
-        .unwrap_or_else(|_| "http://localhost:50052".into());
+    let retrieval_addr = dataplane_addr("RETRIEVAL", "http://localhost:50052");
 
     let retrieval_client = match Channel::from_shared(retrieval_addr.clone()) {
         Ok(ep) => {
@@ -2802,8 +3123,7 @@ pub async fn serve(
         }
     };
 
-    let graph_addr =
-        std::env::var("DATAPLANE_GRAPH_ADDR").unwrap_or_else(|_| "http://localhost:50053".into());
+    let graph_addr = dataplane_addr("GRAPH", "http://localhost:50053");
 
     let graph_client = match Channel::from_shared(graph_addr.clone()) {
         Ok(ep) => {
@@ -2820,8 +3140,7 @@ pub async fn serve(
     // Knowledge service typically lives on the same port as retrieval
     // (Data Plane retrieval-engine-rs serves both); separate env var so
     // operators can override if they're split.
-    let knowledge_addr =
-        std::env::var("DATAPLANE_KNOWLEDGE_ADDR").unwrap_or_else(|_| retrieval_addr.clone());
+    let knowledge_addr = dataplane_addr("KNOWLEDGE", &retrieval_addr);
 
     let knowledge_client = match Channel::from_shared(knowledge_addr.clone()) {
         Ok(ep) => {
@@ -2867,6 +3186,7 @@ pub async fn serve(
         knowledge_client,
         letta_memory,
         audit_publisher,
+        auth: Some(auth.clone()),
     };
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -2900,14 +3220,208 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_segments, complete_step_inner, derive_idempotency_hash,
-        finalize_tool_action_inner, pb, reserve_tool_action_inner, resolve_residency,
-        semantic_context_search_status, validate_user_checkpoint, AssemblyInputs,
-        SemanticContextSearchStatus, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES,
-        MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES, STEP_COMPLETED_TYPE_URL,
+        append_letta_memory_rows, assemble_segments, authorize_dataplane, complete_step_inner,
+        derive_idempotency_hash, finalize_tool_action_inner, pb, reserve_tool_action_inner,
+        resolve_dataplane_addr, resolve_residency, semantic_context_search_status,
+        sync_dream_memory_unless_zdr, validate_user_checkpoint, AssemblyInputs,
+        DelegatedDataPlaneBearer, LettaMemoryAdapter, MemoryRetention, SemanticContextSearchStatus,
+        VerifiedIdentity, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
+        MAX_USER_CHECKPOINT_STATE_BYTES, STEP_COMPLETED_TYPE_URL, ZDR_MEMORY_READ_SUPPRESSED,
     };
+    use crate::dreaming::DreamMemoryCandidate;
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
     use tonic::Request;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A Letta adapter whose Auth Core is a mock and whose memory endpoint is
+    /// the discard port. Every adapter surface mints an Auth Core token before
+    /// it touches the bridge, so "did the caller reach the adapter at all?" is
+    /// answerable structurally by counting requests the mock received — no log
+    /// scraping, and no dependence on the bridge being reachable.
+    async fn letta_adapter_with_observable_auth() -> (MockServer, LettaMemoryAdapter) {
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/letta-bridge/internal-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "letta-token",
+                "expiresInSeconds": 300,
+                "audience": "letta-bridge"
+            })))
+            .mount(&auth)
+            .await;
+        let adapter = LettaMemoryAdapter::new_for_test(
+            "http://127.0.0.1:9",
+            &auth.uri(),
+            "session-core",
+            "session-core-test-credential",
+        );
+        (auth, adapter)
+    }
+
+    async fn auth_request_count(auth: &MockServer) -> usize {
+        auth.received_requests()
+            .await
+            .expect("mock server records requests")
+            .len()
+    }
+
+    #[test]
+    fn memory_retention_follows_only_the_issuer_zdr_claim() {
+        assert_eq!(
+            MemoryRetention::of(&VerifiedIdentity::user_for_test_with_zdr(
+                "org-1", "user-1", true
+            )),
+            MemoryRetention::ZeroDataRetention
+        );
+        assert_eq!(
+            MemoryRetention::of(&VerifiedIdentity::user_for_test("org-1", "user-1")),
+            MemoryRetention::Durable
+        );
+        assert!(!MemoryRetention::ZeroDataRetention.permits_durable_memory());
+        assert!(MemoryRetention::Durable.permits_durable_memory());
+    }
+
+    /// Mirrors `auth::issuer_zdr_blocks_every_durable_session_write` at the
+    /// Letta boundary: memory is durable by definition, so a ZDR credential must
+    /// not persist any. Structural — the adapter is never invoked, so its Auth
+    /// Core mock sees zero requests — rather than asserting on a log line.
+    #[tokio::test]
+    async fn zdr_caller_never_reaches_the_durable_letta_write_surface() {
+        let (auth, adapter) = letta_adapter_with_observable_auth().await;
+        let candidates = vec![DreamMemoryCandidate {
+            scope: "user",
+            session_id: None,
+            key: "preference:units".to_owned(),
+            content: "prefers metric units".to_owned(),
+            kind: "preference",
+            confidence: 0.9,
+        }];
+
+        sync_dream_memory_unless_zdr(
+            Some(&adapter),
+            MemoryRetention::of(&VerifiedIdentity::user_for_test_with_zdr(
+                "org-1", "user-1", true,
+            )),
+            "org-1",
+            "user-1",
+            "thread-1",
+            &candidates,
+        )
+        .await;
+        assert_eq!(
+            auth_request_count(&auth).await,
+            0,
+            "ZDR content must never be put on the wire to letta-bridge"
+        );
+
+        sync_dream_memory_unless_zdr(
+            Some(&adapter),
+            MemoryRetention::of(&VerifiedIdentity::user_for_test("org-1", "user-1")),
+            "org-1",
+            "user-1",
+            "thread-1",
+            &candidates,
+        )
+        .await;
+        assert_eq!(
+            auth_request_count(&auth).await,
+            1,
+            "a non-ZDR caller must still persist durable memory"
+        );
+    }
+
+    /// A ZDR turn is denied memory reads as well: a durable memory distils other,
+    /// retained sessions, so injecting one would leak retained content into a
+    /// no-retention context. The skip must surface as a degradation so it is not
+    /// mistaken for "no memories found".
+    #[tokio::test]
+    async fn zdr_caller_reads_no_durable_letta_memory_and_the_skip_stays_observable() {
+        let (auth, adapter) = letta_adapter_with_observable_auth().await;
+        let thread_messages = vec![("user".to_owned(), "what did we agree on?".to_owned())];
+        let mut rows = Vec::new();
+
+        assert_eq!(
+            append_letta_memory_rows(
+                Some(&adapter),
+                MemoryRetention::of(&VerifiedIdentity::user_for_test_with_zdr(
+                    "org-1", "user-1", true,
+                )),
+                Some("org-1"),
+                "thread-1",
+                &thread_messages,
+                &mut rows,
+            )
+            .await,
+            Some(SemanticContextSearchStatus::Degraded(
+                ZDR_MEMORY_READ_SUPPRESSED
+            )),
+            "a suppressed ZDR read must not be reported as an empty result"
+        );
+        assert!(
+            rows.is_empty(),
+            "retained memory must not be injected into a ZDR turn"
+        );
+        assert_eq!(
+            auth_request_count(&auth).await,
+            0,
+            "a ZDR caller must not reach the Letta read surface at all"
+        );
+
+        let status = append_letta_memory_rows(
+            Some(&adapter),
+            MemoryRetention::of(&VerifiedIdentity::user_for_test("org-1", "user-1")),
+            Some("org-1"),
+            "thread-1",
+            &thread_messages,
+            &mut rows,
+        )
+        .await;
+        assert!(
+            matches!(status, Some(SemanticContextSearchStatus::Degraded(reason))
+                if reason != ZDR_MEMORY_READ_SUPPRESSED),
+            "a non-ZDR caller must reach the bridge; here it is merely unreachable, got {status:?}"
+        );
+        assert_eq!(
+            auth_request_count(&auth).await,
+            1,
+            "a non-ZDR caller must still read durable memory"
+        );
+    }
+
+    /// Mirrors model-gateway's `data_plane_grpc_authorization_uses_only_verified_bearer`.
+    /// The Data Plane `authorization` header must be exactly the caller's verified
+    /// delegated credential — never a shared key, a session-core service token, or
+    /// a caller-supplied identity header. `DelegatedDataPlaneBearer` is only
+    /// constructible through `JwtVerifier::delegated_data_plane_bearer`, so this
+    /// also pins that the forwarding path takes no other input.
+    #[test]
+    fn dataplane_grpc_authorization_uses_only_verified_bearer() {
+        let bearer = DelegatedDataPlaneBearer::for_test("signed-user-jwt");
+        let request = authorize_dataplane((), &bearer)
+            .expect("verified bearer should be valid gRPC metadata");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer signed-user-jwt")
+        );
+        // No shared-secret or forged-identity fallbacks may ride along.
+        for forbidden in [
+            "x-api-key",
+            "x-internal-key",
+            "x-user-id",
+            "x-org-id",
+            "x-velion-org-id",
+        ] {
+            assert!(
+                request.metadata().get(forbidden).is_none(),
+                "{forbidden} must never be sent to Data Plane"
+            );
+        }
+    }
 
     #[test]
     fn residency_defaults_to_eu_region() {
@@ -3519,6 +4033,7 @@ mod tests {
             knowledge_client: None,
             letta_memory: None,
             audit_publisher: None,
+            auth: None,
         };
 
         assert_set_run_mode_isolation(&svc, &pool, &run_id, &org, sfx).await;
@@ -4112,6 +4627,7 @@ mod tests {
             knowledge_client: None,
             letta_memory: None,
             audit_publisher: None,
+            auth: None,
         };
         let addr: std::net::SocketAddr = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -4165,5 +4681,44 @@ mod tests {
         ] {
             sqlx::query(q).bind(&org).execute(&pool).await.ok();
         }
+    }
+
+    /// The regression this guards: compose supplies `DATAPLANE_*_URL` (written
+    /// against model-gateway's spelling) while this service historically read
+    /// only `_ADDR`, so every grounding tier fell back to localhost and went
+    /// silently empty. Accepting either spelling is the fix; this pins it.
+    #[test]
+    fn dataplane_addr_accepts_either_spelling_and_ignores_blanks() {
+        let url = Some("http://dpv2-retrieval-engine:50052".to_string());
+        let addr = Some("http://legacy:50052".to_string());
+        let fallback = "http://localhost:50052";
+
+        // Candidates are passed in `[URL, ADDR]` order, so URL wins when both
+        // are set -- matching model-gateway's precedence exactly.
+        assert_eq!(
+            resolve_dataplane_addr(&[url.clone(), addr.clone()], fallback),
+            "http://dpv2-retrieval-engine:50052"
+        );
+
+        // The spelling compose does NOT currently use must still work, so an
+        // operator with the older variable name is not silently ignored.
+        assert_eq!(
+            resolve_dataplane_addr(&[None, addr.clone()], fallback),
+            "http://legacy:50052"
+        );
+
+        // `FOO=` in an env file is unset, not an endpoint. Without this, a blank
+        // URL would shadow a good ADDR and reintroduce the outage.
+        assert_eq!(
+            resolve_dataplane_addr(&[Some("   ".to_string()), addr], fallback),
+            "http://legacy:50052"
+        );
+
+        // Only with nothing configured do we reach the localhost default.
+        assert_eq!(resolve_dataplane_addr(&[None, None], fallback), fallback);
+        assert_eq!(
+            resolve_dataplane_addr(&[Some(String::new()), None], fallback),
+            fallback
+        );
     }
 }

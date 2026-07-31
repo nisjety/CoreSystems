@@ -14,11 +14,19 @@ use tonic::{Request, Status};
 
 const MAX_JWKS_BYTES: usize = 1_048_576;
 const DEFAULT_LEEWAY_SECS: u64 = 30;
+const DEFAULT_DATA_PLANE_AUDIENCE: &str = "data-plane";
+
+/// Metadata key carrying the caller's separately delegated `aud=data-plane`
+/// credential. Mirrors the key Model Gateway and Execution Core already use
+/// (`model-gateway/src/sse.rs`, `execution-core/src/auth.rs`) so one delegation
+/// convention covers every Model Plane hop into Data Plane v2.
+pub const DATA_PLANE_AUTH_METADATA_KEY: &str = "x-data-plane-authorization";
 
 #[derive(Clone)]
 pub struct JwtVerifier {
     issuer: Arc<str>,
     audience: Arc<str>,
+    data_plane_audience: Arc<str>,
     leeway_secs: u64,
     keys: Arc<HashMap<String, DecodingKey>>,
 }
@@ -29,6 +37,7 @@ impl fmt::Debug for JwtVerifier {
             .debug_struct("JwtVerifier")
             .field("issuer", &self.issuer)
             .field("audience", &self.audience)
+            .field("data_plane_audience", &self.data_plane_audience)
             .field("leeway_secs", &self.leeway_secs)
             .field("key_count", &self.keys.len())
             .finish()
@@ -228,6 +237,10 @@ pub(crate) struct AuthConfig {
     pub jwks_url: String,
     pub issuer: String,
     pub audience: String,
+    /// Audience Data Plane v2 enforces on inbound gRPC (`JWT_REQUIRED_AUDIENCE`,
+    /// itself defaulted from `DATA_PLANE_AUTH_AUDIENCE`). Verified locally so a
+    /// delegated credential is bound to the caller before it is forwarded.
+    pub data_plane_audience: String,
     pub leeway_secs: u64,
 }
 
@@ -237,6 +250,8 @@ impl AuthConfig {
             jwks_url: required_env("AUTH_CORE_JWKS_URL")?,
             issuer: required_env("AUTH_CORE_ISSUER")?,
             audience: required_env("SESSION_CORE_AUTH_AUDIENCE")?,
+            data_plane_audience: required_env("DATA_PLANE_AUTH_AUDIENCE")
+                .unwrap_or_else(|_| DEFAULT_DATA_PLANE_AUDIENCE.to_owned()),
             leeway_secs: std::env::var("AUTH_CORE_JWT_LEEWAY_SECS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -280,6 +295,7 @@ impl JwtVerifier {
         Ok(Self {
             issuer: Arc::from(config.issuer),
             audience: Arc::from(config.audience),
+            data_plane_audience: Arc::from(config.data_plane_audience),
             leeway_secs: config.leeway_secs,
             keys: Arc::new(keys),
         })
@@ -288,6 +304,18 @@ impl JwtVerifier {
     #[allow(clippy::result_large_err)]
     pub fn intercept(&self, mut request: Request<()>) -> Result<Request<()>, Status> {
         let token = extract_bearer(&request)?;
+        let identity = self.verify_token(token, self.audience.as_ref())?;
+        request.extensions_mut().insert(identity);
+        Ok(request)
+    }
+
+    /// Verify one Auth Core RS256 credential for an exact audience. Audience is
+    /// an explicit parameter rather than a field read so a token minted for one
+    /// plane hop can never satisfy another: the ingress `aud=session-core` token
+    /// and a delegated `aud=data-plane` token are checked against their own
+    /// audience, and never interchangeably.
+    #[allow(clippy::result_large_err)]
+    fn verify_token(&self, token: &str, audience: &str) -> Result<VerifiedIdentity, Status> {
         let header = jsonwebtoken::decode_header(token)
             .map_err(|_| Status::unauthenticated("invalid caller credential"))?;
         if header.alg != Algorithm::RS256 {
@@ -301,19 +329,105 @@ impl JwtVerifier {
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_required_spec_claims(&["exp", "iat", "nbf", "aud", "iss", "sub"]);
         validation.set_issuer(&[self.issuer.as_ref()]);
-        validation.set_audience(&[self.audience.as_ref()]);
+        validation.set_audience(&[audience]);
         validation.validate_exp = true;
         validation.validate_nbf = true;
         validation.leeway = self.leeway_secs;
         let claims = decode::<Claims>(token, key, &validation)
             .map_err(|_| Status::unauthenticated("invalid caller credential"))?
             .claims;
-        if claims.aud.as_str() != Some(self.audience.as_ref()) {
+        if claims.aud.as_str() != Some(audience) {
             return Err(Status::unauthenticated("invalid caller credential"));
         }
-        request.extensions_mut().insert(validate_identity(claims)?);
-        Ok(request)
+        validate_identity(claims)
     }
+
+    /// Verify the separately delegated Data Plane credential and bind it to the
+    /// already authenticated session-core caller.
+    ///
+    /// `Ok(None)` means the caller delegated nothing. Data Plane grounding is
+    /// opportunistic — context assembly still answers from durable local memory —
+    /// so a missing delegation degrades instead of failing the whole RPC. A
+    /// credential that *is* supplied must verify against `data-plane` and match
+    /// the caller's org, user, and retention posture exactly.
+    ///
+    /// session-core deliberately has no way to mint or self-sign this value. The
+    /// ingress token is not a substitute (wrong audience, and Data Plane would
+    /// reject it), and neither is a service token: Data Plane retrieval enforces
+    /// per-user, private-until-shared authorization from this token's `sub` and
+    /// `org_id`, so anything broader would collapse every user's view into one
+    /// identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Unauthenticated` for a malformed or unverifiable credential and
+    /// `PermissionDenied` when the delegated identity or ZDR posture differs from
+    /// the verified caller.
+    #[allow(clippy::result_large_err)]
+    pub fn delegated_data_plane_bearer<T>(
+        &self,
+        request: &Request<T>,
+        caller: &VerifiedIdentity,
+    ) -> Result<Option<DelegatedDataPlaneBearer>, Status> {
+        let Some(token) = optional_metadata_bearer(request, DATA_PLANE_AUTH_METADATA_KEY)? else {
+            return Ok(None);
+        };
+        let delegated = self.verify_token(token, self.data_plane_audience.as_ref())?;
+        if delegated.org_id() != caller.org_id()
+            || delegated.user_id() != caller.user_id()
+            || delegated.zdr() != caller.zdr()
+        {
+            return Err(Status::permission_denied(
+                "delegated Data Plane identity or retention posture does not match caller",
+            ));
+        }
+        Ok(Some(DelegatedDataPlaneBearer(Arc::from(token))))
+    }
+}
+
+/// Opaque delegated Data Plane credential, verified and identity-bound by
+/// [`JwtVerifier::delegated_data_plane_bearer`]. Constructible only there (plus a
+/// test shim), so no code path can invent one from decoded claims, a caller
+/// header, or a shared internal key.
+#[derive(Clone)]
+pub struct DelegatedDataPlaneBearer(Arc<str>);
+
+impl DelegatedDataPlaneBearer {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+}
+
+impl fmt::Debug for DelegatedDataPlaneBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DelegatedDataPlaneBearer([REDACTED])")
+    }
+}
+
+/// Read an optional `Bearer` credential from a non-standard metadata key.
+/// A present-but-malformed value is an error rather than `None`: a caller that
+/// meant to delegate must never silently fall through to an ungrounded path.
+#[allow(clippy::result_large_err)]
+fn optional_metadata_bearer<'a, T>(
+    request: &'a Request<T>,
+    key: &'static str,
+) -> Result<Option<&'a str>, Status> {
+    let Some(value) = request.metadata().get(key) else {
+        return Ok(None);
+    };
+    value
+        .to_str()
+        .ok()
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
+        .map(Some)
+        .ok_or_else(|| Status::unauthenticated("malformed delegated credential"))
 }
 
 impl tonic::service::Interceptor for JwtVerifier {
@@ -492,10 +606,118 @@ mod tests {
             jwks_url: format!("{}/jwks", server.uri()),
             issuer: "auth-core".to_owned(),
             audience: audience.to_owned(),
+            data_plane_audience: "data-plane".to_owned(),
             leeway_secs: 0,
         })
         .await
         .expect("verifier")
+    }
+
+    fn delegating_request(token: &str) -> Request<()> {
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            DATA_PLANE_AUTH_METADATA_KEY,
+            format!("Bearer {token}").parse().expect("metadata"),
+        );
+        request
+    }
+
+    /// Mirrors model-gateway's `data_plane_grpc_authorization_uses_only_verified_bearer`
+    /// intent at session-core's boundary: the credential forwarded to Data Plane
+    /// v2 may only come from an independently verified, caller-bound delegation.
+    /// A self-signed token, the ingress `aud=session-core` token, or another
+    /// user's/org's `aud=data-plane` token must never yield a bearer.
+    #[tokio::test]
+    async fn delegated_data_plane_bearer_requires_verified_caller_bound_credential() {
+        let verifier = test_verifier("session-core").await;
+        let caller = VerifiedIdentity::user_for_test("org-1", "user-1");
+
+        // No delegation at all → degrade to local memory, never a forged bearer.
+        assert!(verifier
+            .delegated_data_plane_bearer(&Request::new(()), &caller)
+            .expect("absent delegation is not an error")
+            .is_none());
+
+        // Unverifiable or wrong-audience credentials are rejected outright.
+        for token in [
+            "not-a-jwt".to_owned(),
+            // The ingress credential is never reusable for retrieval.
+            sign(&user_claims("session-core"), "key-1"),
+            // Signed by an untrusted key for the right audience.
+            {
+                let foreign = rsa::RsaPrivateKey::new(&mut thread_rng(), 2048).expect("RSA key");
+                let pem = foreign
+                    .to_pkcs8_pem(LineEnding::LF)
+                    .expect("private PEM")
+                    .to_string();
+                let mut header = Header::new(Algorithm::RS256);
+                header.kid = Some("key-1".to_owned());
+                encode(
+                    &header,
+                    &user_claims("data-plane"),
+                    &EncodingKey::from_rsa_pem(pem.as_bytes()).expect("encoding key"),
+                )
+                .expect("JWT")
+            },
+            // Unknown kid cannot silently select a trusted key.
+            sign(&user_claims("data-plane"), "attacker-kid"),
+        ] {
+            assert_eq!(
+                verifier
+                    .delegated_data_plane_bearer(&delegating_request(&token), &caller)
+                    .expect_err("unverifiable delegation must not be forwarded")
+                    .code(),
+                tonic::Code::Unauthenticated
+            );
+        }
+
+        // A genuine Data Plane token for a DIFFERENT identity, org, or retention
+        // posture is verified but refused: forwarding it would let one caller read
+        // another principal's private-until-shared corpus.
+        for mutate in [
+            (|claims: &mut Value| {
+                claims["sub"] = json!("user-2");
+                claims["user_id"] = json!("user-2");
+            }) as fn(&mut Value),
+            |claims: &mut Value| claims["org_id"] = json!("org-2"),
+            |claims: &mut Value| claims["zdr"] = json!(true),
+        ] {
+            let mut claims = user_claims("data-plane");
+            mutate(&mut claims);
+            assert_eq!(
+                verifier
+                    .delegated_data_plane_bearer(&delegating_request(&sign(&claims, "key-1")), &caller)
+                    .expect_err("cross-identity delegation must be refused")
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+
+        // A malformed header is an error, not a silent downgrade to no-grounding.
+        let mut malformed = Request::new(());
+        malformed
+            .metadata_mut()
+            .insert(DATA_PLANE_AUTH_METADATA_KEY, "not-bearer".parse().unwrap());
+        assert_eq!(
+            verifier
+                .delegated_data_plane_bearer(&malformed, &caller)
+                .expect_err("malformed delegation must fail closed")
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        // Only the caller's own verified data-plane credential is forwarded, and
+        // it is forwarded verbatim so Data Plane re-verifies the same bytes.
+        let token = sign(&user_claims("data-plane"), "key-1");
+        let bearer = verifier
+            .delegated_data_plane_bearer(&delegating_request(&token), &caller)
+            .expect("caller-bound delegation verifies")
+            .expect("bearer present");
+        assert_eq!(bearer.as_str(), token);
+        assert_eq!(
+            format!("{bearer:?}"),
+            "DelegatedDataPlaneBearer([REDACTED])"
+        );
     }
 
     #[test]

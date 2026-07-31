@@ -4,8 +4,8 @@
 //! memory with semantic recall and agent-memory backends when configured.
 
 use mp_contracts::model_plane::v1::{
-    memory_service_client::MemoryServiceClient, IndexMemoryRequest, MemoryEntry,
-    MemoryHealthRequest, SearchMemoryRequest,
+    memory_service_client::MemoryServiceClient, DeleteMemoryRequest, IndexMemoryRequest,
+    ListMemoryRequest, MemoryEntry, MemoryHealthRequest, SearchMemoryRequest,
 };
 use serde::Deserialize;
 use std::{
@@ -25,7 +25,30 @@ use tonic::{
 };
 use tracing::{debug, warn};
 
-const LETTA_TIMEOUT: Duration = Duration::from_millis(900);
+/// Default per-call budget for letta-bridge. 900ms was unachievable: a semantic
+/// memory search embeds the query (agent-memory-server calls Azure OpenAI) before
+/// it can do the vector lookup, so the round trip is dominated by an inference
+/// call. Live logs showed agent-memory-server returning `200 OK` while
+/// session-core had already given up -- surfaced as `DEGRADED_LETTA_TIMEOUT` or a
+/// gRPC `Cancelled`, i.e. work paid for and thrown away on every turn.
+///
+/// Env-tunable because the right value depends on embedding-provider latency,
+/// which is deployment-specific.
+const DEFAULT_LETTA_TIMEOUT_MS: u64 = 2_500;
+/// Upper bound so a misconfiguration cannot stall a chat turn indefinitely --
+/// memory is one context tier among several and must never own the turn's
+/// latency.
+const MAX_LETTA_TIMEOUT_MS: u64 = 10_000;
+
+fn letta_timeout() -> Duration {
+    let ms = std::env::var("LETTA_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_LETTA_TIMEOUT_MS)
+        .min(MAX_LETTA_TIMEOUT_MS);
+    Duration::from_millis(ms)
+}
 const AUTH_CORE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTH_CORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(30);
@@ -112,6 +135,24 @@ pub(crate) struct LettaSearchOutcome {
 #[derive(Debug)]
 pub(crate) struct LettaIndexOutcome {
     pub(crate) memory_id: Option<String>,
+    pub(crate) degradation_reason: Option<&'static str>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LettaListOutcome {
+    pub(crate) entries: Vec<MemoryEntry>,
+    pub(crate) degradation_reason: Option<&'static str>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LettaDeleteOutcome {
+    // Not read by the current caller (memory_grpc::delete_memory only cares
+    // whether the semantic-side delete is degraded, since the durable record
+    // is the source of truth for existence) but kept, and exercised by tests,
+    // so a future caller that needs to distinguish "deleted" from "was never
+    // there" does not have to change this outcome's shape.
+    #[allow(dead_code)]
+    pub(crate) deleted: bool,
     pub(crate) degradation_reason: Option<&'static str>,
 }
 
@@ -446,7 +487,7 @@ impl LettaMemoryAdapter {
         };
         let endpoint = Endpoint::from_shared(config.memory_endpoint.clone())?
             .connect_timeout(AUTH_CORE_CONNECT_TIMEOUT)
-            .timeout(LETTA_TIMEOUT);
+            .timeout(letta_timeout());
         let tokens = LettaTokenProvider::new(&config)?;
         debug!(
             addr = %config.memory_endpoint,
@@ -494,7 +535,7 @@ impl LettaMemoryAdapter {
         let Ok(request) = authenticated_request(MemoryHealthRequest {}, bearer) else {
             return LettaReadiness::MetadataRejected;
         };
-        match tokio::time::timeout(LETTA_TIMEOUT, client.health(request)).await {
+        match tokio::time::timeout(letta_timeout(), client.health(request)).await {
             Ok(Ok(response)) => {
                 LettaReadiness::from_bridge_status(response.into_inner().status.trim())
             }
@@ -517,24 +558,48 @@ impl LettaMemoryAdapter {
         }
     }
 
+    fn list_degraded(readiness: LettaReadiness) -> LettaListOutcome {
+        LettaListOutcome {
+            entries: Vec::new(),
+            degradation_reason: Some(readiness.code()),
+        }
+    }
+
+    fn delete_degraded(readiness: LettaReadiness) -> LettaDeleteOutcome {
+        LettaDeleteOutcome {
+            deleted: false,
+            degradation_reason: Some(readiness.code()),
+        }
+    }
+
     pub(crate) async fn index(
         &self,
         org_id: &str,
         thread_id: &str,
         topic: &str,
         content: &str,
+        user_id: Option<&str>,
+        memory_id: Option<&str>,
     ) -> Option<String> {
-        self.index_detailed(org_id, thread_id, topic, content)
+        self.index_detailed(org_id, thread_id, topic, content, user_id, memory_id)
             .await
             .memory_id
     }
 
+    /// `user_id` tags the entry with its owner when it is user-scoped, and
+    /// `memory_id` — when the caller supplies one — is reused verbatim as the
+    /// identifier on the semantic backend, so a later `delete_detailed` with
+    /// that same id removes the same logical memory on both the durable index
+    /// and the semantic store. When `memory_id` is empty the backend assigns
+    /// its own id and the two stores are not correlated.
     pub(crate) async fn index_detailed(
         &self,
         org_id: &str,
         thread_id: &str,
         topic: &str,
         content: &str,
+        user_id: Option<&str>,
+        memory_id: Option<&str>,
     ) -> LettaIndexOutcome {
         let mut client = self.client.clone();
         let token = match self.tokens.token(org_id, &[MEMORY_WRITE_SCOPE]).await {
@@ -556,6 +621,8 @@ impl LettaMemoryAdapter {
                 topic: topic.to_owned(),
                 content: content.to_owned(),
                 org_id: org_id.to_owned(),
+                user_id: user_id.unwrap_or_default().to_owned(),
+                memory_id: memory_id.unwrap_or_default().to_owned(),
             },
             &token,
         ) {
@@ -567,7 +634,7 @@ impl LettaMemoryAdapter {
             }
         };
 
-        match tokio::time::timeout(LETTA_TIMEOUT, client.index_memory(request)).await {
+        match tokio::time::timeout(letta_timeout(), client.index_memory(request)).await {
             Ok(Ok(response)) => {
                 let readiness = self.probe_health(&token).await;
                 self.set_readiness(readiness);
@@ -630,7 +697,7 @@ impl LettaMemoryAdapter {
             }
         };
 
-        match tokio::time::timeout(LETTA_TIMEOUT, client.search_memory(request)).await {
+        match tokio::time::timeout(letta_timeout(), client.search_memory(request)).await {
             Ok(Ok(response)) => {
                 let readiness = self.probe_health(&token).await;
                 self.set_readiness(readiness);
@@ -648,6 +715,129 @@ impl LettaMemoryAdapter {
                 self.set_readiness(LettaReadiness::Timeout);
                 warn!("Letta memory search timed out");
                 Self::search_degraded(LettaReadiness::Timeout)
+            }
+        }
+    }
+
+    /// Lists semantic memory entries owned by a user, across every thread.
+    /// Uses the same `MemoryService` contract as search but is never
+    /// thread-scoped -- see `ListMemoryRequest` in `memory.proto`.
+    pub(crate) async fn list_detailed(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        limit: u32,
+    ) -> LettaListOutcome {
+        let mut client = self.client.clone();
+        let token = match self.tokens.token(org_id, &[MEMORY_READ_SCOPE]).await {
+            Ok(token) => token,
+            Err(error) => {
+                self.set_readiness(LettaReadiness::AuthUnavailable);
+                warn!(
+                    %error,
+                    audience = LETTA_AUDIENCE,
+                    operation = "list",
+                    "Letta memory caller credential unavailable; remaining degraded"
+                );
+                return Self::list_degraded(LettaReadiness::AuthUnavailable);
+            }
+        };
+        let request = match authenticated_request(
+            ListMemoryRequest {
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                limit,
+            },
+            &token,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.set_readiness(LettaReadiness::MetadataRejected);
+                warn!(%error, operation = "list", "Letta caller metadata rejected");
+                return Self::list_degraded(LettaReadiness::MetadataRejected);
+            }
+        };
+
+        match tokio::time::timeout(letta_timeout(), client.list_memory(request)).await {
+            Ok(Ok(response)) => {
+                let readiness = self.probe_health(&token).await;
+                self.set_readiness(readiness);
+                LettaListOutcome {
+                    entries: response.into_inner().entries,
+                    degradation_reason: (!readiness.is_ready()).then_some(readiness.code()),
+                }
+            }
+            Ok(Err(error)) => {
+                self.set_readiness(LettaReadiness::RpcUnavailable);
+                warn!(code = ?error.code(), "Letta memory list degraded");
+                Self::list_degraded(LettaReadiness::RpcUnavailable)
+            }
+            Err(_) => {
+                self.set_readiness(LettaReadiness::Timeout);
+                warn!("Letta memory list timed out");
+                Self::list_degraded(LettaReadiness::Timeout)
+            }
+        }
+    }
+
+    /// Deletes a single semantic memory entry by id. Best-effort: the caller
+    /// (`memory_grpc::delete_memory`) always removes the durable index record
+    /// regardless of this outcome, since the durable record is the source of
+    /// truth for authorization and existence.
+    pub(crate) async fn delete_detailed(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        memory_id: &str,
+    ) -> LettaDeleteOutcome {
+        let mut client = self.client.clone();
+        let token = match self.tokens.token(org_id, &[MEMORY_WRITE_SCOPE]).await {
+            Ok(token) => token,
+            Err(error) => {
+                self.set_readiness(LettaReadiness::AuthUnavailable);
+                warn!(
+                    %error,
+                    audience = LETTA_AUDIENCE,
+                    operation = "delete",
+                    "Letta memory caller credential unavailable; remaining degraded"
+                );
+                return Self::delete_degraded(LettaReadiness::AuthUnavailable);
+            }
+        };
+        let request = match authenticated_request(
+            DeleteMemoryRequest {
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                memory_id: memory_id.to_owned(),
+            },
+            &token,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.set_readiness(LettaReadiness::MetadataRejected);
+                warn!(%error, operation = "delete", "Letta caller metadata rejected");
+                return Self::delete_degraded(LettaReadiness::MetadataRejected);
+            }
+        };
+
+        match tokio::time::timeout(letta_timeout(), client.delete_memory(request)).await {
+            Ok(Ok(response)) => {
+                let readiness = self.probe_health(&token).await;
+                self.set_readiness(readiness);
+                LettaDeleteOutcome {
+                    deleted: response.into_inner().deleted,
+                    degradation_reason: (!readiness.is_ready()).then_some(readiness.code()),
+                }
+            }
+            Ok(Err(error)) => {
+                self.set_readiness(LettaReadiness::RpcUnavailable);
+                warn!(code = ?error.code(), "Letta memory delete degraded");
+                Self::delete_degraded(LettaReadiness::RpcUnavailable)
+            }
+            Err(_) => {
+                self.set_readiness(LettaReadiness::Timeout);
+                warn!("Letta memory delete timed out");
+                Self::delete_degraded(LettaReadiness::Timeout)
             }
         }
     }

@@ -2,13 +2,15 @@
 
 use crate::{
     auth::{identity, VerifiedIdentity},
+    grpc::{MemoryRetention, ZDR_MEMORY_READ_SUPPRESSED, ZDR_MEMORY_WRITE_SUPPRESSED},
     letta_adapter::LettaMemoryAdapter,
 };
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
-    IndexMemoryRequest, IndexMemoryResponse, MemoryEntry, MemoryHealthRequest,
-    MemoryHealthResponse, SearchMemoryRequest, SearchMemoryResponse,
+    DeleteMemoryRequest, DeleteMemoryResponse, IndexMemoryRequest, IndexMemoryResponse,
+    ListMemoryRequest, ListMemoryResponse, MemoryEntry, MemoryHealthRequest, MemoryHealthResponse,
+    SearchMemoryRequest, SearchMemoryResponse,
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -113,6 +115,50 @@ fn authorize_memory_preflight(
     Ok(())
 }
 
+/// Authorization for the user-scoped `ListMemory`/`DeleteMemory` RPCs.
+///
+/// Unlike `authorize_memory_preflight` (the thread-scoped `SearchMemory`/
+/// `IndexMemory` gate, which hard-errors a ZDR caller), a ZDR caller here is
+/// not an authorization failure -- it is a caller who is, by policy, entitled
+/// to call this RPC and always get an empty/no-op answer. Returning `Ok(false)`
+/// tells the handler to skip durable memory entirely and answer with an empty
+/// list or a no-op delete, never a 500, matching the same
+/// `MemoryRetention`-derived posture the context-assembly read path uses.
+#[allow(clippy::result_large_err)]
+fn authorize_user_memory_preflight(
+    caller: &VerifiedIdentity,
+    requested_org: &str,
+    requested_user: &str,
+    service_scope: &str,
+) -> Result<bool, Status> {
+    caller.authorize_org(requested_org)?;
+    if caller.is_service() {
+        caller.require_service_scope(service_scope)?;
+    } else {
+        // A user caller may only ever list/delete their own memories -- this
+        // is the same tenant-isolation class of check as `authorize_thread`,
+        // just without a thread to look an owner up from.
+        caller.authorize_user(requested_user)?;
+    }
+    Ok(MemoryRetention::of(caller).permits_durable_memory())
+}
+
+fn list_response(entries: Vec<MemoryEntry>, degradation_reason: Option<&str>) -> ListMemoryResponse {
+    ListMemoryResponse {
+        entries,
+        degraded: degradation_reason.is_some(),
+        degradation_reason: degradation_reason.unwrap_or_default().to_owned(),
+    }
+}
+
+fn delete_response(deleted: bool, degradation_reason: Option<&str>) -> DeleteMemoryResponse {
+    DeleteMemoryResponse {
+        deleted,
+        degraded: degradation_reason.is_some(),
+        degradation_reason: degradation_reason.unwrap_or_default().to_owned(),
+    }
+}
+
 fn search_response(
     entries: Vec<MemoryEntry>,
     degradation_reason: Option<&str>,
@@ -199,6 +245,7 @@ impl MemoryService for MemoryGrpc {
                     nanos: i32::try_from(row.updated_at.timestamp_subsec_nanos())
                         .unwrap_or(i32::MAX),
                 }),
+                user_id: owner_user_id.clone(),
             })
             .collect();
 
@@ -279,6 +326,16 @@ impl MemoryService for MemoryGrpc {
             return Err(Status::not_found("thread not found for org"));
         }
 
+        // Mirrors dreaming::index_agent_memory's own scope decision (topic
+        // "USER" -> scope "user", owner = the thread's user). Tagging the
+        // semantic copy with an owner only for genuinely user-scoped memories
+        // keeps ListMemory's "what do you remember about me" answer limited
+        // to facts actually about that user, not every org/workspace/policy
+        // fact the user happened to write. memory_id is always threaded
+        // through so a later DeleteMemory removes both copies regardless of
+        // topic.
+        let is_user_scoped = req.topic.trim().eq_ignore_ascii_case("USER");
+        let letta_owner = is_user_scoped.then_some(owner_user_id.as_str());
         let degradation_reason = if let Some(letta) = self.letta.as_ref() {
             letta
                 .index_detailed(
@@ -286,6 +343,8 @@ impl MemoryService for MemoryGrpc {
                     req.thread_id.trim(),
                     &req.topic,
                     &req.content,
+                    letta_owner,
+                    Some(&memory_id),
                 )
                 .await
                 .degradation_reason
@@ -294,6 +353,140 @@ impl MemoryService for MemoryGrpc {
         };
 
         Ok(Response::new(index_response(memory_id, degradation_reason)))
+    }
+
+    async fn list_memory(
+        &self,
+        request: Request<ListMemoryRequest>,
+    ) -> Result<Response<ListMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        let org_id = req.org_id.trim();
+        let user_id = req.user_id.trim();
+        let permits_durable_memory =
+            authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_READ_SCOPE)?;
+
+        if !permits_durable_memory {
+            return Ok(Response::new(list_response(
+                Vec::new(),
+                Some(ZDR_MEMORY_READ_SUPPRESSED),
+            )));
+        }
+
+        let limit = if req.limit == 0 { 100 } else { req.limit };
+
+        let rows = crate::dreaming::list_user_memory(&self.pool, org_id, user_id, i64::from(limit))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut entries: Vec<MemoryEntry> = rows
+            .into_iter()
+            .map(|row| MemoryEntry {
+                memory_id: row.id,
+                thread_id: row.thread_id,
+                topic: row.topic,
+                content: row.content,
+                score: row.score,
+                updated_at: Some(prost_types::Timestamp {
+                    seconds: row.updated_at.timestamp(),
+                    nanos: i32::try_from(row.updated_at.timestamp_subsec_nanos())
+                        .unwrap_or(i32::MAX),
+                }),
+                user_id: user_id.to_owned(),
+            })
+            .collect();
+
+        let mut degradation_reason = self
+            .letta
+            .as_ref()
+            .and_then(|letta| {
+                let snapshot = letta.health_snapshot();
+                (!snapshot.ready).then_some(snapshot.status)
+            })
+            .or_else(|| self.letta.is_none().then_some(LETTA_NOT_CONFIGURED));
+        if let Some(letta) = self.letta.as_ref() {
+            let remaining = limit.saturating_sub(u32::try_from(entries.len()).unwrap_or(u32::MAX));
+            if remaining > 0 {
+                let outcome = letta.list_detailed(org_id, user_id, remaining).await;
+                degradation_reason = outcome.degradation_reason;
+                for entry in outcome.entries {
+                    let content = entry.content.trim();
+                    if content.is_empty()
+                        || entries
+                            .iter()
+                            .any(|existing| existing.content.trim() == content)
+                    {
+                        continue;
+                    }
+                    entries.push(entry);
+                    if entries.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(Response::new(list_response(entries, degradation_reason)))
+    }
+
+    async fn delete_memory(
+        &self,
+        request: Request<DeleteMemoryRequest>,
+    ) -> Result<Response<DeleteMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        if req.memory_id.trim().is_empty() {
+            return Err(Status::invalid_argument("memory_id is required"));
+        }
+        let org_id = req.org_id.trim();
+        let user_id = req.user_id.trim();
+        let memory_id = req.memory_id.trim();
+        let permits_durable_memory =
+            authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_WRITE_SCOPE)?;
+
+        if !permits_durable_memory {
+            return Ok(Response::new(delete_response(
+                false,
+                Some(ZDR_MEMORY_WRITE_SUPPRESSED),
+            )));
+        }
+
+        // Scoped to (org_id, user_id) in the SQL WHERE clause itself (see
+        // dreaming::delete_user_memory), so this can never delete another
+        // user's or another org's memory even if a memory_id were guessed.
+        let deleted = crate::dreaming::delete_user_memory(&self.pool, org_id, user_id, memory_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !deleted {
+            return Err(Status::not_found("memory not found"));
+        }
+
+        // Best-effort: the durable record is already gone and is the source
+        // of truth for existence, so a degraded semantic-side delete does not
+        // fail the RPC -- it is only reported back for observability.
+        let degradation_reason = if let Some(letta) = self.letta.as_ref() {
+            letta
+                .delete_detailed(org_id, user_id, memory_id)
+                .await
+                .degradation_reason
+        } else {
+            None
+        };
+
+        Ok(Response::new(delete_response(true, degradation_reason)))
     }
 
     async fn health(
@@ -350,6 +543,24 @@ mod tests {
             thread_id: "thread-a".to_owned(),
             topic: "MEMORY".to_owned(),
             content: "must not persist".to_owned(),
+            user_id: String::new(),
+            memory_id: String::new(),
+        }
+    }
+
+    fn list_request(org_id: &str, user_id: &str) -> ListMemoryRequest {
+        ListMemoryRequest {
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            limit: 10,
+        }
+    }
+
+    fn delete_request(org_id: &str, user_id: &str, memory_id: &str) -> DeleteMemoryRequest {
+        DeleteMemoryRequest {
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            memory_id: memory_id.to_owned(),
         }
     }
 
@@ -447,6 +658,141 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
         assert_eq!(ownership.calls.load(Ordering::SeqCst), 1);
         assert!(auth.received_requests().await.unwrap().is_empty());
+    }
+
+    /// `ListMemory`/`DeleteMemory` are user-scoped, not thread-scoped, so they
+    /// have no thread ownership lookup to fall back on -- the caller's own
+    /// identity is the only tenant-isolation boundary. This asserts a caller
+    /// can never list or delete another user's or another org's memories, and
+    /// that the rejection happens before any database or Letta call (the
+    /// lazy-connected pool would hang/error on a real query, and the mock
+    /// Auth Core asserts zero requests).
+    #[tokio::test]
+    async fn list_and_delete_memory_reject_another_users_or_orgs_request_before_touching_db_or_letta(
+    ) {
+        let auth = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&auth)
+            .await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-a");
+
+        let cases = [
+            // A user cannot list a different user's memories, even within
+            // their own org.
+            service
+                .list_memory(request(
+                    list_request("org-a", "user-b"),
+                    VerifiedIdentity::user_for_test("org-a", "user-a"),
+                ))
+                .await
+                .unwrap_err(),
+            // Nor a different org's.
+            service
+                .list_memory(request(
+                    list_request("org-b", "user-a"),
+                    VerifiedIdentity::user_for_test("org-a", "user-a"),
+                ))
+                .await
+                .unwrap_err(),
+            // Same for delete: another user's id in the request is rejected
+            // even though the org matches.
+            service
+                .delete_memory(request(
+                    delete_request("org-a", "user-b", "memory-1"),
+                    VerifiedIdentity::user_for_test("org-a", "user-a"),
+                ))
+                .await
+                .unwrap_err(),
+            // A service caller without the required scope is rejected too --
+            // holding *a* service scope is not enough, it must be the right one.
+            service
+                .list_memory(request(
+                    list_request("org-a", "user-a"),
+                    VerifiedIdentity::service_for_test("org-a", &["memory:write"], false),
+                ))
+                .await
+                .unwrap_err(),
+            service
+                .delete_memory(request(
+                    delete_request("org-a", "user-a", "memory-1"),
+                    VerifiedIdentity::service_for_test("org-a", &["memory:read"], false),
+                ))
+                .await
+                .unwrap_err(),
+        ];
+
+        for error in &cases {
+            assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        }
+        assert_eq!(ownership.calls.load(Ordering::SeqCst), 0);
+        assert!(auth.received_requests().await.unwrap().is_empty());
+    }
+
+    /// A ZDR caller calling List/Delete on their own identity is not an error
+    /// -- it is a well-formed request that always gets an empty/no-op answer,
+    /// per `MemoryRetention::permits_durable_memory`'s documented policy for
+    /// this boundary. Neither the database nor Letta is touched.
+    #[tokio::test]
+    async fn list_and_delete_memory_are_noop_not_error_for_a_zdr_caller() {
+        let auth = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&auth)
+            .await;
+        let (service, ownership) = guarded_service(&auth.uri(), "user-a");
+        let zdr_caller = VerifiedIdentity::user_for_test_with_zdr("org-a", "user-a", true);
+
+        let list = service
+            .list_memory(request(list_request("org-a", "user-a"), zdr_caller.clone()))
+            .await
+            .expect("ZDR list is a well-formed empty response, not an error")
+            .into_inner();
+        assert!(list.entries.is_empty());
+        assert!(list.degraded);
+        assert_eq!(list.degradation_reason, "DEGRADED_LETTA_ZDR_READ_SUPPRESSED");
+
+        let delete = service
+            .delete_memory(request(
+                delete_request("org-a", "user-a", "memory-1"),
+                zdr_caller,
+            ))
+            .await
+            .expect("ZDR delete is a well-formed no-op, not an error")
+            .into_inner();
+        assert!(!delete.deleted);
+        assert!(delete.degraded);
+        assert_eq!(
+            delete.degradation_reason,
+            "DEGRADED_LETTA_ZDR_WRITE_SUPPRESSED"
+        );
+
+        assert_eq!(ownership.calls.load(Ordering::SeqCst), 0);
+        assert!(auth.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_and_delete_memory_responses_are_machine_readable() {
+        let list = list_response(Vec::new(), Some("DEGRADED_LETTA_ZDR_READ_SUPPRESSED"));
+        assert!(list.degraded);
+        assert_eq!(list.degradation_reason, "DEGRADED_LETTA_ZDR_READ_SUPPRESSED");
+        assert!(list.entries.is_empty());
+
+        let not_degraded = list_response(Vec::new(), None);
+        assert!(!not_degraded.degraded);
+        assert_eq!(not_degraded.degradation_reason, "");
+
+        let delete = delete_response(true, Some("DEGRADED_LETTA_TIMEOUT"));
+        assert!(delete.deleted);
+        assert!(delete.degraded);
+        assert_eq!(delete.degradation_reason, "DEGRADED_LETTA_TIMEOUT");
+
+        let clean_delete = delete_response(true, None);
+        assert!(clean_delete.deleted);
+        assert!(!clean_delete.degraded);
+        assert_eq!(clean_delete.degradation_reason, "");
     }
 
     #[test]

@@ -25,6 +25,89 @@ use tokio::sync::Mutex;
 /// NATS subject audit-core subscribes (`velion.audit.v1.>`) for model tool calls.
 pub const SUBJECT_MODEL_TOOL_ACTION: &str = "velion.audit.v2.model.session-core.tool_action";
 
+/// Subject family carrying Session Core's flat audit-core bodies.
+const AUDIT_SUBJECT_PREFIX: &str = "velion.audit.v2.model.session-core.";
+
+/// Subject family carrying canonical run-lifecycle `Envelope`s:
+/// `mp.v1.run.<run_id>.event`.
+const RUN_EVENT_SUBJECT_PREFIX: &str = "mp.v1.run.";
+const RUN_EVENT_SUBJECT_SUFFIX: &str = ".event";
+
+/// Delivery route for one outbox row, derived from the row's own `subject`.
+///
+/// Session Core may publish inside exactly these two subject families; a row
+/// naming anything else is refused before it reaches NATS. The two families
+/// carry DIFFERENT wire shapes (a flat audit body vs. a canonical `Envelope`),
+/// so the authority check is per-route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxRoute<'a> {
+    /// `velion.audit.v2.model.session-core.*` — flat audit-core `AuditEvent`.
+    Audit,
+    /// `mp.v1.run.<run_id>.event` — run-lifecycle `Envelope`. Consumed by
+    /// capability-core's session review (the skill-learning trigger) over core
+    /// NATS, and captured by the `MODEL_PLANE_RUN_EVENTS` stream for insight-core.
+    RunEvent { run_id: &'a str },
+}
+
+/// Classify an outbox subject, or `None` when it is outside Session Core's
+/// publish authority.
+#[must_use]
+pub fn classify_outbox_subject(subject: &str) -> Option<OutboxRoute<'_>> {
+    if subject.starts_with(AUDIT_SUBJECT_PREFIX) {
+        return Some(OutboxRoute::Audit);
+    }
+    let run_id = subject
+        .strip_prefix(RUN_EVENT_SUBJECT_PREFIX)?
+        .strip_suffix(RUN_EVENT_SUBJECT_SUFFIX)?;
+    // `mp.v1.run.*.event` is a SINGLE-token wildcard. A run id containing '.'
+    // would resolve to a subject outside the granted scope, so refuse it rather
+    // than let a row widen its own authority.
+    if run_id.is_empty() || run_id.contains('.') {
+        return None;
+    }
+    Some(OutboxRoute::RunEvent { run_id })
+}
+
+/// Verify a claimed row's payload really belongs to that row and to Session Core
+/// before it is published.
+fn check_outbox_authority(
+    route: OutboxRoute<'_>,
+    event_id: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    if payload["event_id"].as_str() != Some(event_id)
+        || payload["producer"].as_str() != Some("session-core")
+    {
+        return Err("outbox payload authority does not match its row".to_owned());
+    }
+    match route {
+        OutboxRoute::Audit => {
+            if payload["plane"].as_str() != Some("model") {
+                return Err("audit payload authority does not match its outbox row".to_owned());
+            }
+        }
+        OutboxRoute::RunEvent { run_id } => {
+            // The subject names the run, so the envelope must name the same run.
+            // This is what stops one run's row being published under another
+            // run's subject.
+            if payload["resource_ref"].as_str() != Some(format!("run:{run_id}").as_str()) {
+                return Err("run event payload does not match its subject run".to_owned());
+            }
+            // Both are required by the consumer's decode; an empty value would
+            // be dropped downstream, so fail loudly here instead.
+            if payload["event_type"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+                || payload["org_id"].as_str().unwrap_or_default().is_empty()
+            {
+                return Err("run event envelope is missing event_type or org_id".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn tool_action_event_id(run_id: &str, step_id: &str, phase: &str) -> String {
     let digest = blake3::hash(format!("{run_id}\0{step_id}\0{phase}").as_bytes());
     format!("tool:session-core:{digest}")
@@ -392,17 +475,10 @@ impl AuditOutbox {
         subject: &str,
         payload: &serde_json::Value,
     ) -> Result<(), String> {
-        if !subject.starts_with("velion.audit.v2.model.session-core.") {
-            return Err(format!(
-                "audit subject {subject:?} is outside session-core authority"
-            ));
-        }
-        if payload["event_id"].as_str() != Some(event_id)
-            || payload["producer"].as_str() != Some("session-core")
-            || payload["plane"].as_str() != Some("model")
-        {
-            return Err("audit payload authority does not match its outbox row".to_owned());
-        }
+        let route = classify_outbox_subject(subject).ok_or_else(|| {
+            format!("outbox subject {subject:?} is outside session-core authority")
+        })?;
+        check_outbox_authority(route, event_id, payload)?;
 
         let mut publisher = self.publisher.lock().await;
         if publisher.is_none() {
@@ -477,6 +553,102 @@ mod tests {
         assert!(grpc_source.contains("finalize_tool_action_inner"));
         assert!(!grpc_source.contains("record_run_terminal(&mut tx, &tool_action"));
         assert!(grpc_source.contains("if req.terminal"));
+    }
+
+    /// The drainer publishes each row's OWN subject, so the route classifier is
+    /// the whole publish-authority boundary. Both families must be admitted —
+    /// before this, the run-event family was refused outright and every
+    /// `RUN_COMPLETED` row would have burned to `terminal_at` after 20 attempts.
+    #[test]
+    fn outbox_routes_admit_audit_and_run_event_families() {
+        assert_eq!(
+            classify_outbox_subject(SUBJECT_MODEL_TOOL_ACTION),
+            Some(OutboxRoute::Audit)
+        );
+        assert_eq!(
+            classify_outbox_subject("mp.v1.run.run-abc.event"),
+            Some(OutboxRoute::RunEvent { run_id: "run-abc" })
+        );
+    }
+
+    #[test]
+    fn outbox_routes_refuse_subjects_outside_session_core_authority() {
+        for subject in [
+            "velion.audit.v2.model.model-gateway.tool_action",
+            "mp.v1.usage.org-1",
+            "mp.v1.run.run-abc.command",
+            "mp.v1.run..event",
+            // A dotted run id would widen a single-token wildcard's scope.
+            "mp.v1.run.run.abc.event",
+            "",
+        ] {
+            assert_eq!(
+                classify_outbox_subject(subject),
+                None,
+                "{subject:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn run_event_authority_requires_matching_row_producer_and_run() {
+        let envelope = serde_json::json!({
+            "event_id": "evt-1",
+            "event_type": "RUN_COMPLETED",
+            "producer": "session-core",
+            "org_id": "org-1",
+            "resource_ref": "run:run-abc",
+        });
+        let route = OutboxRoute::RunEvent { run_id: "run-abc" };
+        assert!(check_outbox_authority(route, "evt-1", &envelope).is_ok());
+        // Row identity mismatch.
+        assert!(check_outbox_authority(route, "evt-other", &envelope).is_err());
+        // Subject names a different run than the envelope.
+        assert!(check_outbox_authority(
+            OutboxRoute::RunEvent { run_id: "run-xyz" },
+            "evt-1",
+            &envelope
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn run_event_authority_rejects_foreign_producer_and_empty_org() {
+        let route = OutboxRoute::RunEvent { run_id: "run-abc" };
+        let foreign = serde_json::json!({
+            "event_id": "evt-1",
+            "event_type": "RUN_COMPLETED",
+            "producer": "model-gateway",
+            "org_id": "org-1",
+            "resource_ref": "run:run-abc",
+        });
+        assert!(check_outbox_authority(route, "evt-1", &foreign).is_err());
+        let orgless = serde_json::json!({
+            "event_id": "evt-1",
+            "event_type": "RUN_COMPLETED",
+            "producer": "session-core",
+            "org_id": "",
+            "resource_ref": "run:run-abc",
+        });
+        assert!(check_outbox_authority(route, "evt-1", &orgless).is_err());
+    }
+
+    /// An audit row still needs the flat body's `plane`, which a run envelope
+    /// does not carry — the two shapes must not be interchangeable.
+    #[test]
+    fn audit_authority_still_requires_the_flat_model_plane_body() {
+        let envelope = serde_json::json!({
+            "event_id": "evt-1",
+            "producer": "session-core",
+            "resource_ref": "run:run-abc",
+        });
+        assert!(check_outbox_authority(OutboxRoute::Audit, "evt-1", &envelope).is_err());
+        let audit = serde_json::json!({
+            "event_id": "evt-1",
+            "producer": "session-core",
+            "plane": "model",
+        });
+        assert!(check_outbox_authority(OutboxRoute::Audit, "evt-1", &audit).is_ok());
     }
 
     #[test]

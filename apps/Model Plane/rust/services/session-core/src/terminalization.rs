@@ -1001,6 +1001,26 @@ async fn apply_managed_terminal_outcome(
             "managed terminal receipt was not persisted",
         ));
     }
+
+    // §1.1 learning loop: announce the completed run on `mp.v1.run.<id>.event`
+    // so capability-core's session review can distil skills from the transcript.
+    // This is the path a PLAIN CHAT turn takes — model-gateway terminalizes a
+    // direct-inference run as `GatewayDirect` through
+    // `ManagedRunLifecycle.RecordTerminalOutcome` — so it is the high-volume
+    // surface, not just the agentic one. Only a genuine completion is announced:
+    // a failure, and the recovery worker's reconciled `outcome_unknown`, are not
+    // learning material. Enqueueing cannot fail the caller by contract; see
+    // `learning_events::enqueue_run_completed`.
+    if matches!(outcome, ManagedOutcome::Completed) && !reconciliation_required {
+        crate::learning_events::enqueue_run_completed(
+            transaction,
+            &obligation.run_id,
+            &receipt_id,
+            now,
+        )
+        .await;
+    }
+
     let step_index = u32::try_from(step_ordinal)
         .map_err(|_| Status::internal("managed terminal step index is invalid"))?;
     Ok(ManagedTerminalReceipt {

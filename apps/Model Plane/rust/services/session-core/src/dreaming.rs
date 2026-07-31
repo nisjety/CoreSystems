@@ -112,7 +112,14 @@ pub(crate) async fn dream_once(
         )
         .await?;
         tx.commit().await?;
-        sync_candidates_to_letta(letta, &message.org_id, &message.thread_id, &candidates).await;
+        sync_candidates_to_letta(
+            letta,
+            &message.org_id,
+            &message.user_id,
+            &message.thread_id,
+            &candidates,
+        )
+        .await;
         processed += 1;
     }
 
@@ -122,6 +129,7 @@ pub(crate) async fn dream_once(
 pub(crate) async fn sync_candidates_to_letta(
     letta: Option<&LettaMemoryAdapter>,
     org_id: &str,
+    user_id: &str,
     thread_id: &str,
     candidates: &[DreamMemoryCandidate],
 ) {
@@ -130,12 +138,22 @@ pub(crate) async fn sync_candidates_to_letta(
     };
 
     for candidate in candidates {
+        // Mirrors persist_candidates' ownership rule: only `scope == "user"`
+        // candidates are tagged with an owner. No memory_id is threaded
+        // through here, so the durable and semantic copies of a
+        // background-dreamed candidate are not id-correlated -- only the
+        // explicit IndexMemory RPC path (memory_grpc::index_memory) gets
+        // that. Acceptable today because background dreaming has not yet
+        // produced any real candidates.
+        let owner = (candidate.scope == "user").then_some(user_id);
         letta
             .index(
                 org_id,
                 thread_id,
                 memory_topic(candidate.scope, candidate.kind),
                 &candidate.content,
+                owner,
+                None,
             )
             .await;
     }
@@ -536,6 +554,71 @@ async fn upsert_agent_memory(
     .fetch_one(&mut **tx)
     .await?;
     Ok(row.0)
+}
+
+/// Lists durable `agent_memory` rows owned directly by a user
+/// (`scope = 'user'`), across every thread. Backs the memory-management
+/// "what do you remember about me" surface: unlike `search_agent_memory` this
+/// is never thread-scoped, since the point is to show memory independent of
+/// which conversation produced it.
+pub(crate) async fn list_user_memory(
+    pool: &PgPool,
+    org_id: &str,
+    owner_user_id: &str,
+    limit: i64,
+) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
+    let limit = limit.clamp(1, 200);
+    let rows = sqlx::query_as::<_, (String, String, String, f64, DateTime<Utc>)>(
+        "SELECT id, kind, content, confidence, updated_at \
+         FROM agent_memory \
+         WHERE org_id = $1 \
+           AND owner = $2 \
+           AND scope = 'user' \
+           AND review_state = 'accepted' \
+           AND (expires_at IS NULL OR expires_at > now()) \
+         ORDER BY updated_at DESC \
+         LIMIT $3",
+    )
+    .bind(org_id)
+    .bind(owner_user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, kind, content, confidence, updated_at)| MemorySearchRow {
+            id,
+            thread_id: String::new(),
+            topic: memory_topic("user", &kind).to_owned(),
+            content,
+            score: memory_score(confidence, 0.0),
+            updated_at,
+        })
+        .collect())
+}
+
+/// Deletes a single `agent_memory` row owned directly by a user
+/// (`scope = 'user'`). Returns whether a row existed and was removed.
+/// `(org_id, owner)` is part of the `WHERE` clause itself, not just checked
+/// after the fact, so a caller can never delete another user's or another
+/// org's memory by guessing an id.
+pub(crate) async fn delete_user_memory(
+    pool: &PgPool,
+    org_id: &str,
+    owner_user_id: &str,
+    memory_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM agent_memory \
+         WHERE id = $1 AND org_id = $2 AND owner = $3 AND scope = 'user'",
+    )
+    .bind(memory_id)
+    .bind(org_id)
+    .bind(owner_user_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
