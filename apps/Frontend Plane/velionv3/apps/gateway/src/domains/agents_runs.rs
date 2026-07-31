@@ -33,6 +33,10 @@ use crate::{
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/agents/runs", get(list_runs))
+        // Declared BEFORE the `:run_id` route: axum matches static segments ahead
+        // of dynamic ones, but keeping the order explicit means a reader does not
+        // have to know that to see why `system` is not swallowed as a run id.
+        .route("/api/v1/agents/runs/system", get(list_system_runs))
         .route("/api/v1/agents/runs/:run_id", get(get_run))
         // Per-org/user rate limiting, ordered like `orchestration.rs`:
         // `require_session` (written last → outer) runs first and inserts
@@ -96,6 +100,68 @@ async fn list_runs(
     let token = model_token(&state, &user, &headers).await;
     let session_token = session_token(&state, &user, &headers).await;
     let url = format!("{}/v1/runs?{}", state.model_gateway_url, query_string);
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+/// Filters for the system-run list. No `thread_id` — that is the whole point:
+/// a cron-fired run lives in a thread its own workload owns, so the thread-scoped
+/// list can never reach it. And no `org_id`: model-gateway derives the tenant from
+/// the verified token's claims.
+#[derive(Debug, Default, Deserialize)]
+struct SystemRunsQuery {
+    status: Option<String>,
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
+/// `GET /api/v1/agents/runs/system` — the org's runs with no human owner.
+///
+/// Read-only by design. System runs are org-readable but mutable solely by the
+/// workload that owns them, so the console must present them without
+/// resume/cancel controls rather than letting those 403.
+async fn list_system_runs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(query): Query<SystemRunsQuery>,
+) -> impl IntoResponse {
+    // Same reason as list_runs: resolving here keeps the authority boundary
+    // explicit and short-circuits a missing org before the upstream hop.
+    let _org_id = authorized_org_id(&state, &user).await;
+
+    let mut params: Vec<(&str, String)> = Vec::new();
+    if let Some(status) = query.status.filter(|v| !v.trim().is_empty()) {
+        params.push(("status", status));
+    }
+    if let Some(after) = query.after.filter(|v| !v.trim().is_empty()) {
+        params.push(("after", after));
+    }
+    if let Some(limit) = query.limit {
+        params.push(("limit", limit.to_string()));
+    }
+    let query_string = params
+        .iter()
+        .map(|(key, value)| format!("{}={}", key, urlencoding::encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = if query_string.is_empty() {
+        format!("{}/v1/runs/system", state.model_gateway_url)
+    } else {
+        format!("{}/v1/runs/system?{}", state.model_gateway_url, query_string)
+    };
     let (status, body) = proxy_model_json_with_session(
         &state,
         Method::GET,

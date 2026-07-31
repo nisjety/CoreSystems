@@ -24,7 +24,8 @@ use mp_contracts::model_plane::v1::{
     ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
     GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
     ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest, ListPlansRequest,
-    ListRunsRequest, ListSpeechVoicesRequest, ListTodosRequest, ListTranslationLanguagesRequest,
+    ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
+    ListTranslationLanguagesRequest,
     McpServer, Plan, PlanState, PlanStep, PlanStepState, RegisterMcpServerRequest,
     ResumeRunRequest, ResumeRunResponse, RunDetail, StreamVideoGenerationContentRequest,
     SubagentLineage, SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState,
@@ -131,6 +132,10 @@ pub fn build_router_with_readiness(
         // history UI). Org-scoped via the verified claims; backed by
         // session-core's RunService.
         .route("/v1/runs", get(list_runs))
+        // Sits beside /v1/runs rather than under it: that route is thread-scoped
+        // and a system run lives in a thread its own workload owns, so no
+        // thread_id a person can supply will ever reach one.
+        .route("/v1/runs/system", get(list_system_runs))
         .route("/v1/runs/:run_id", get(get_run))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
@@ -657,6 +662,15 @@ struct RunsQuery {
     limit: Option<u32>,
 }
 
+/// Query params for `GET /v1/runs/system`. Deliberately has NO `org_id`: the
+/// tenant comes from the verified claims, so it cannot be chosen by the caller.
+#[derive(Debug, Default, Deserialize)]
+struct SystemRunsQuery {
+    status: Option<String>,
+    after: Option<String>,
+    limit: Option<u32>,
+}
+
 async fn list_plans(
     State(state): State<AppState>,
     bearer: VerifiedModelBearer,
@@ -850,6 +864,46 @@ async fn list_runs(
         .list_runs(authenticated_session_request(
             ListRunsRequest {
                 thread_id,
+                status_filter: query.status.unwrap_or_default(),
+                after_run_id: query.after.unwrap_or_default(),
+                limit: query.limit.unwrap_or(0),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "runs": response.runs.iter().map(run_detail_value).collect::<Vec<_>>(),
+        "has_more": response.has_more,
+    })))
+}
+
+/// `GET /v1/runs/system?status&after&limit` — the org's runs with no human owner.
+///
+/// Cron-fired workflows own their runs themselves (session-core's
+/// `SYSTEM_RUN_OWNERS`), and those runs live in threads the same workload owns, so
+/// the thread-scoped list above cannot reach them: they would exist, be fully
+/// authorized, and be invisible. This is the only way to see them.
+///
+/// The org is taken from the VERIFIED claims and never from the query string —
+/// session-core enforces an exact match, so accepting one from the caller would
+/// only turn a cross-tenant attempt into a confusing permission error instead of
+/// refusing it here. Read-only: system runs are org-readable but mutable solely by
+/// the workload that owns them.
+async fn list_system_runs(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<SystemRunsQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let response = state
+        .run_client
+        .clone()
+        .list_system_runs(authenticated_session_request(
+            ListSystemRunsRequest {
+                org_id: claims.org_id.clone(),
                 status_filter: query.status.unwrap_or_default(),
                 after_run_id: query.after.unwrap_or_default(),
                 limit: query.limit.unwrap_or(0),
@@ -2120,6 +2174,7 @@ async fn mcp_register(
         body.transport,
         body.token,
         body.tool_allowlist,
+        body.enabled,
         body.scope,
     )
     .await
@@ -2156,6 +2211,11 @@ async fn resolve_tool_allowlist(url: &str, token: &str, requested: Vec<String>) 
 /// write through to capability-core. Shared by `mcp_register` (direct,
 /// explicit static-token registration) and `mcp_connect` (the
 /// auto-detecting entry point, once discovery finds no OAuth metadata).
+///
+/// `enabled` is honored rather than assumed: a disabled server keeps its
+/// registry row but is filtered out of the agent-facing tool definitions and
+/// refused at call time (see `runtime_registries`), so registering with
+/// `enabled: false` has to actually land as disabled.
 #[allow(clippy::too_many_arguments)]
 async fn register_plain_mcp_server(
     state: &AppState,
@@ -2167,6 +2227,7 @@ async fn register_plain_mcp_server(
     transport: String,
     token: String,
     tool_allowlist: Vec<String>,
+    enabled: bool,
     scope: String,
 ) -> Result<Json<Value>, HttpJsonError> {
     let org_id = claims.org_id.clone();
@@ -2193,7 +2254,7 @@ async fn register_plain_mcp_server(
         transport,
         token,
         tool_allowlist,
-        enabled: true,
+        enabled,
     };
     let resp = crate::runtime_registries::handle_register_mcp_server(
         &state.mcp,
@@ -2628,6 +2689,9 @@ async fn mcp_connect(
                 default_mcp_transport(),
                 body.token,
                 body.tool_allowlist,
+                // The connect flow has no `enabled` knob — auto-detected
+                // servers are registered live, as they always have been.
+                true,
                 body.scope,
             )
             .await
@@ -6680,6 +6744,7 @@ mod run_owner_publish_tests {
         run_service_client::RunServiceClient,
         run_service_server::{RunService, RunServiceServer},
         CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse,
+        ListSystemRunsRequest,
         ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
     };
     use mp_events::publisher::InMemoryPublisher;
@@ -6707,6 +6772,13 @@ mod run_owner_publish_tests {
             _: TonicRequest<ListRunsRequest>,
         ) -> Result<TonicResponse<ListRunsResponse>, Status> {
             Err(Status::unimplemented("list_runs not needed in test"))
+        }
+
+        async fn list_system_runs(
+            &self,
+            _: TonicRequest<ListSystemRunsRequest>,
+        ) -> Result<TonicResponse<ListRunsResponse>, Status> {
+            Err(Status::unimplemented("list_system_runs not needed in test"))
         }
 
         async fn cancel_run(

@@ -112,6 +112,45 @@ export async function listRuns(params: ListRunsParams, signal?: AbortSignal): Pr
   }
 }
 
+export type ListSystemRunsParams = {
+  status?: string
+  /** ULID cursor — return runs strictly older than this id. */
+  after?: string
+  limit?: number
+}
+
+/**
+ * List the org's runs that have no human owner, newest-first.
+ *
+ * Deliberately takes NO threadId. A cron-fired workflow owns its run and the
+ * thread it lives in, so `listRuns` — which is thread-scoped — can never reach
+ * one: the run exists, is fully authorized, and is invisible. This is the only
+ * way to see them.
+ *
+ * Read-only. System runs are org-readable but mutable solely by the workload that
+ * owns them, so the console must not offer resume/cancel for these.
+ */
+export async function listSystemRuns(
+  params: ListSystemRunsParams = {},
+  signal?: AbortSignal,
+): Promise<RunsPage> {
+  const search = new URLSearchParams()
+  if (params.status && params.status.trim()) search.set('status', params.status)
+  if (params.after && params.after.trim()) search.set('after', params.after)
+  if (params.limit != null) search.set('limit', String(params.limit))
+  const query = search.toString()
+
+  const payload = await requestJson<{ runs?: RawRun[]; has_more?: boolean }>(
+    query ? `/api/v1/agents/runs/system?${query}` : '/api/v1/agents/runs/system',
+    { signal },
+  )
+  const list = Array.isArray(payload.runs) ? payload.runs : []
+  return {
+    runs: list.map(normalizeRun).filter((r): r is RunDetail => r !== null),
+    hasMore: payload.has_more === true,
+  }
+}
+
 /** Fetch one run's full detail for the telemetry panel. */
 export async function getRun(runId: string, signal?: AbortSignal): Promise<RunDetail | null> {
   const payload = await requestJson<{ run?: RawRun }>(

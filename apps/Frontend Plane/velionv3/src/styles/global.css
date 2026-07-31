@@ -5410,6 +5410,59 @@ textarea:focus-visible {
   line-height: 1.5;
 }
 
+/* Source tabs on the run-history rail: "this conversation" vs the org's
+   scheduled runs. Two sources rather than one list because a cron-fired run is
+   owned by the workflow that created it and lives in a thread that workflow
+   owns, so it can never appear in a person's thread history. */
+.velion-run-history__tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-bottom: 10px;
+  border-radius: var(--velion-radius-sm, 8px);
+  background: var(--velion-surface-sunken, rgba(0, 0, 0, 0.04));
+}
+
+.velion-run-history__tab {
+  flex: 1;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: calc(var(--velion-radius-sm, 8px) - 2px);
+  background: transparent;
+  color: var(--velion-text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.velion-run-history__tab:hover {
+  color: var(--velion-text-primary);
+}
+
+.velion-run-history__tab--active {
+  background: var(--velion-surface-raised, #fff);
+  color: var(--velion-text-primary);
+  box-shadow: var(--velion-shadow-xs, 0 1px 2px rgba(0, 0, 0, 0.06));
+}
+
+.velion-run-history__tab:focus-visible {
+  outline: 2px solid var(--velion-accent);
+  outline-offset: 1px;
+}
+
+/* States plainly that scheduled runs are read-only, so the absence of
+   resume/cancel reads as intentional rather than broken. */
+.velion-run-history__note {
+  margin: 0 0 10px;
+  color: var(--velion-text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 .velion-run-history__groups {
   display: flex;
   flex-direction: column;

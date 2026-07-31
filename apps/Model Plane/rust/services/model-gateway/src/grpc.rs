@@ -2122,7 +2122,7 @@ mod tests {
         GenerateImageRequest, GenerateImageResponse, GeneratedImage, GetContextAssemblyRequest,
         GetContextAssemblyResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse,
         HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, InferChunk, InferResponse,
-        LanguageAnalysisResult, ListModelsRequest, ListModelsResponse, ListRunsRequest,
+        LanguageAnalysisResult, ListModelsRequest, ListModelsResponse, ListRunsRequest, ListSystemRunsRequest,
         ListRunsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse,
         ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ManagedRunSource,
         ModelInfo, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
@@ -2665,6 +2665,7 @@ mod tests {
         ) -> Result<Response<StartRunResponse>, Status> {
             let req = request.into_inner();
             Ok(Response::new(StartRunResponse {
+                owner_id: String::new(),
                 run_id: format!("run-{}", req.thread_id),
                 created_at: None,
             }))
@@ -2904,6 +2905,13 @@ mod tests {
             _: Request<ListRunsRequest>,
         ) -> Result<Response<ListRunsResponse>, Status> {
             Err(Status::unimplemented("list_runs not needed in test"))
+        }
+
+        async fn list_system_runs(
+            &self,
+            _: Request<ListSystemRunsRequest>,
+        ) -> Result<Response<ListRunsResponse>, Status> {
+            Err(Status::unimplemented("list_system_runs not needed in test"))
         }
 
         async fn cancel_run(

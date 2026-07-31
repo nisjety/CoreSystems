@@ -70,6 +70,7 @@ import {
 import {
   getRun,
   listRuns,
+  listSystemRuns,
   type RunDetail,
 } from '@/shared/api/runs-client'
 import {
@@ -188,14 +189,26 @@ export default function AgentRunConsole() {
   // is additive: the live run continues to drive `state`. `historyTick` bumps
   // after each run settles so a freshly-finished run appears without a reload.
   const [historyTick, setHistoryTick] = createSignal(0)
+  // Which runs the rail lists. 'thread' is this conversation's own history and
+  // needs `state.threadId`, which only exists once the live stream has connected.
+  // 'system' is the org's cron-fired runs: those are owned by the workflow that
+  // created them and live in threads it owns, so no thread_id a person has can
+  // reach them — the org-scoped endpoint is the only way they are visible at all.
+  const [historySource, setHistorySource] = createSignal<'thread' | 'system'>('thread')
   const [runs] = createResource(
     () => {
+      const source = historySource()
+      if (source === 'system') return { source, threadId: null, tick: historyTick() }
       const threadId = state.threadId
       if (!threadId) return null
-      return { threadId, tick: historyTick() }
+      return { source, threadId, tick: historyTick() }
     },
     async (key) => {
-      const page = await listRuns({ threadId: key.threadId, limit: 50 })
+      if (key.source === 'system') {
+        const page = await listSystemRuns({ limit: 50 })
+        return page.runs
+      }
+      const page = await listRuns({ threadId: key.threadId!, limit: 50 })
       return page.runs
     },
   )
@@ -692,7 +705,9 @@ export default function AgentRunConsole() {
               activeRunId={activeRunId()}
               loading={runs.loading}
               runs={runs() ?? []}
+              source={historySource()}
               onSelect={replayRun}
+              onSource={setHistorySource}
             />
           </section>
 
@@ -1540,7 +1555,9 @@ function HistoryRail(props: {
   activeRunId: string | null
   loading: boolean
   runs: RunDetail[]
+  source: 'thread' | 'system'
   onSelect: (run: RunDetail) => void
+  onSource: (source: 'thread' | 'system') => void
 }) {
   const i18n = useI18n()
   const groups = createMemo(() => groupRunsByRecency(i18n, props.runs))
@@ -1554,11 +1571,48 @@ function HistoryRail(props: {
         </Show>
       </div>
 
+      <div class="velion-run-history__tabs" role="tablist" aria-label={i18n.tr('Kilde', 'Source')}>
+        <button
+          type="button"
+          role="tab"
+          class="velion-run-history__tab"
+          classList={{ 'velion-run-history__tab--active': props.source === 'thread' }}
+          aria-selected={props.source === 'thread'}
+          onClick={() => props.onSource('thread')}
+        >
+          {i18n.tr('Denne samtalen', 'This conversation')}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="velion-run-history__tab"
+          classList={{ 'velion-run-history__tab--active': props.source === 'system' }}
+          aria-selected={props.source === 'system'}
+          onClick={() => props.onSource('system')}
+        >
+          {i18n.tr('Planlagte', 'Scheduled')}
+        </button>
+      </div>
+
+      {/* Says so up front rather than letting a resume/cancel click 403: a
+          system run is owned by the workflow that created it, and only that
+          workload may act on it. */}
+      <Show when={props.source === 'system' && props.runs.length > 0}>
+        <p class="velion-run-history__note">
+          {i18n.tr(
+            'Kjøringer startet automatisk. Kun lesing — de styres av arbeidsflyten som eier dem.',
+            'Automatically started runs. Read-only — they are driven by the workflow that owns them.',
+          )}
+        </p>
+      </Show>
+
       <Show
         when={props.runs.length > 0}
         fallback={(
           <p class="velion-run-history__empty">
-            <Show when={props.loading} fallback={i18n.tr('Tidligere kjøringer for denne samtalen vises her.', 'Past runs for this conversation will appear here.')}>
+            <Show when={props.loading} fallback={props.source === 'system'
+              ? i18n.tr('Ingen planlagte kjøringer i organisasjonen ennå.', 'No scheduled runs in this organisation yet.')
+              : i18n.tr('Tidligere kjøringer for denne samtalen vises her.', 'Past runs for this conversation will appear here.')}>
               {i18n.tr('Laster kjøringer …', 'Loading runs…')}
             </Show>
           </p>

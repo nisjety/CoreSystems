@@ -20,7 +20,8 @@ use mp_contracts::model_plane::v1::{
     GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
     GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse,
     LineageEdge, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse,
-    ListRunsRequest, ListRunsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
+    ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ListTodosRequest,
+    ListTodosResponse, OrchestrationEvent,
     OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
     RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, ResolveRunOwnerRequest,
     ResolveRunOwnerResponse, RunDetail, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
@@ -607,6 +608,13 @@ impl RunService for MockRunOwner {
         _: TonicRequest<ListRunsRequest>,
     ) -> Result<Response<ListRunsResponse>, Status> {
         Err(Status::unimplemented("list_runs not needed in test"))
+    }
+
+    async fn list_system_runs(
+        &self,
+        _: TonicRequest<ListSystemRunsRequest>,
+    ) -> Result<Response<ListRunsResponse>, Status> {
+        Err(Status::unimplemented("list_system_runs not needed in test"))
     }
 
     async fn cancel_run(
