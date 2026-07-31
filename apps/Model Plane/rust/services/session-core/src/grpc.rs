@@ -369,6 +369,34 @@ async fn create_thread_inner(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    // Reuse an existing thread with the same session key for the same owner.
+    //
+    // The id is minted here rather than supplied, so a retried create would
+    // otherwise mint a SECOND thread and leak the first — and retries are normal:
+    // a Temporal activity that creates a thread and then fails before its run is
+    // recorded will be retried by the worker. Scoped to (org, owner,
+    // session_key) so it can never hand one tenant's or one person's thread to
+    // another, and skipped entirely for a blank session_key, which carries no
+    // identity to be idempotent on.
+    if !req.session_key.trim().is_empty() {
+        let existing: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3 \
+             ORDER BY id LIMIT 1",
+        )
+        .bind(&req.org_id)
+        .bind(&req.user_id)
+        .bind(&req.session_key)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        if let Some((thread_id,)) = existing {
+            return Ok(Response::new(pb::CreateThreadResponse {
+                thread_id,
+                created_at: None,
+            }));
+        }
+    }
+
     let thread_id = new_ulid();
     let now = Utc::now();
 

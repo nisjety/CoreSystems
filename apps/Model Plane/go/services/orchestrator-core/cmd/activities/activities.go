@@ -290,7 +290,36 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 		a.logger.Warn("downstream unavailable, skipping", "method", "StartRun")
 		return fallback, nil
 	}
-	resp, err := mpv1.NewSessionCoreClient(a.clients.SessionCore).StartRun(ctx, &mpv1.StartRunRequest{
+	client := mpv1.NewSessionCoreClient(a.clients.SessionCore)
+
+	// A run needs a thread, and a system run needs one THIS service owns:
+	// session-core requires the thread's owner to equal the run's owner exactly on
+	// that path, so that an allowlisted workload cannot park a system run inside a
+	// person's thread. The thread id the dispatcher supplies defaults to the run
+	// id and names nothing that exists, so provision one here.
+	//
+	// Keyed on the run id so the create is idempotent: session-core returns the
+	// existing thread for a repeated (org, owner, session_key), which matters
+	// because this activity is retried and a fresh id per attempt would leak a
+	// thread per retry.
+	if strings.TrimSpace(userID) == "" {
+		created, terr := client.CreateThread(ctx, &mpv1.CreateThreadRequest{
+			SessionKey: "system-run/" + runID,
+			OrgId:      orgID,
+		})
+		switch {
+		case terr != nil && status.Code(terr) == codes.Unavailable:
+			a.logger.Warn("SessionCore unavailable", "method", "CreateThread")
+			return fallback, nil
+		case terr != nil:
+			return fallback, fmt.Errorf("provision system thread for %s: %w", runID, terr)
+		default:
+			threadID = created.ThreadId
+			fallback.ThreadID = threadID
+		}
+	}
+
+	resp, err := client.StartRun(ctx, &mpv1.StartRunRequest{
 		ThreadId: threadID,
 		OrgId:    orgID,
 		UserId:   userID,

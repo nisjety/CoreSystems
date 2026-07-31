@@ -28,11 +28,16 @@ type Options struct {
 // the principal's registry ceiling, so asking for less than the ceiling is free,
 // while asking for more is refused outright (403) instead of quietly narrowed.
 //
-//   - session-core `session:write` — StartRunActivity's StartRun. It must be a
-//     write scope AND the credential must not be ZDR: session-core's
-//     authorize_operation refuses any ZDR credential for a non-`:read` scope, so
-//     the principal's retentionByAudience for session-core has to be
-//     `persistent` or every durable run fails its very first activity.
+//   - session-core `session:write` plus `session:runs:system-owner` —
+//     StartRunActivity's StartRun. The write scope must be a write scope AND the
+//     credential must not be ZDR: session-core's authorize_operation refuses any
+//     ZDR credential for a non-`:read` scope, so the principal's
+//     retentionByAudience for session-core has to be `persistent` or every
+//     durable run fails its very first activity. The second scope is what lets
+//     this service own the run it creates — a run row is normally owned by a
+//     person, and a cron-fired workflow has none. It is deliberately separate
+//     from `session:write`: every session writer holds that one, and owning a run
+//     is strictly larger, so session-core requires both.
 //   - inference-core `inference:invoke` — the evaluator-optimizer's generator
 //     and judge legs.
 //   - capability-core `capability:read` + `capability:write` — the skill
@@ -40,7 +45,7 @@ type Options struct {
 //   - letta-bridge `memory:read` + `memory:write` — memory consolidation reads
 //     entries and writes the consolidated summaries back.
 var DefaultScopes = map[string][]string{
-	AudienceSessionCore:    {"session:write"},
+	AudienceSessionCore:    {"session:write", "session:runs:system-owner"},
 	AudienceInferenceCore:  {"inference:invoke"},
 	AudienceCapabilityCore: {"capability:read", "capability:write"},
 	AudienceLettaBridge:    {"memory:read", "memory:write"},

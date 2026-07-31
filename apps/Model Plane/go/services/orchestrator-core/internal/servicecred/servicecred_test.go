@@ -453,3 +453,21 @@ func TestUnaryInterceptor_MintingPreservesInboundTraceHeaders(t *testing.T) {
 		t.Fatalf("authorization = %q", got)
 	}
 }
+
+// The system-owner scope must be REQUESTED at mint time, not merely granted in
+// auth-core's registry. The registry is only a ceiling; a mint request narrows to
+// the scopes asked for, so omitting it here makes session-core answer
+// "service scope required" on every durable run — with the registry looking
+// correctly configured.
+func TestDefaultScopes_SessionCoreRequestsTheSystemOwnerScope(t *testing.T) {
+	scopes := DefaultScopes[AudienceSessionCore]
+	found := false
+	for _, s := range scopes {
+		if s == "session:runs:system-owner" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("session-core scopes = %v, want session:runs:system-owner", scopes)
+	}
+}
