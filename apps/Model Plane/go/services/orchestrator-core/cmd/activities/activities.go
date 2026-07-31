@@ -461,6 +461,27 @@ func (a *Activities) ExecuteStepActivity(ctx context.Context, in StepInput) (Ste
 	return a.executeOneStep(ctx, req, in.StepIndex)
 }
 
+// deterministicSummaryRunes caps the fallback summary. It is a rune count, not a
+// byte count: the previous `summary[:512]` sliced by byte and could split a
+// multi-byte rune, so Norwegian content landing on the boundary wrote invalid
+// UTF-8 into durable memory.
+const deterministicSummaryRunes = 512
+
+// truncateRunes cuts s to at most n runes, never mid-rune.
+func truncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
+}
+
+// summarizeMemoryEntries groups entries by thread and joins them.
+//
+// This is the FALLBACK for [Activities.SummarizeMemoryActivity], not the product:
+// joining entries with newlines is concatenation, not consolidation. It decides
+// which threads exist and gives each one a summary that is better than nothing
+// when inference-core cannot be reached.
 func summarizeMemoryEntries(entries []MemoryEntry) []MemoryEntry {
 	if len(entries) == 0 {
 		return nil
@@ -491,10 +512,7 @@ func summarizeMemoryEntries(entries []MemoryEntry) []MemoryEntry {
 				latest = entry.CreatedAt
 			}
 		}
-		summary := strings.Join(parts, "\n")
-		if len(summary) > 512 {
-			summary = summary[:512]
-		}
+		summary := truncateRunes(strings.Join(parts, "\n"), deterministicSummaryRunes)
 		consolidated = append(consolidated, MemoryEntry{
 			ID:        fmt.Sprintf("%s-consolidated", threadID),
 			OrgID:     orgID,
@@ -573,14 +591,6 @@ func (a *Activities) QueryMemoryEntriesActivity(ctx context.Context, input Memor
 		})
 	}
 	return entries, nil
-}
-
-func (a *Activities) SummarizeMemoryActivity(_ context.Context, input ConsolidationInput) (ConsolidationOutput, error) {
-	consolidated := summarizeMemoryEntries(input.Entries)
-	return ConsolidationOutput{
-		ConsolidatedEntries: consolidated,
-		Summary:             fmt.Sprintf("consolidated %d entries into %d summaries", len(input.Entries), len(consolidated)),
-	}, nil
 }
 
 func (a *Activities) WriteConsolidatedMemoryActivity(ctx context.Context, input WriteMemoryInput) error {
