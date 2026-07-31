@@ -16,6 +16,16 @@ service MemoryService {
   // Index a new memory entry.
   rpc IndexMemory(IndexMemoryRequest) returns (IndexMemoryResponse);
 
+  // List durable memory entries owned by a user, across every thread. Unlike
+  // SearchMemory this is not thread-scoped: it backs a "what do you remember
+  // about me" surface, so the caller supplies a user rather than a thread.
+  rpc ListMemory(ListMemoryRequest) returns (ListMemoryResponse);
+
+  // Delete a single memory entry by id, scoped to the owning user. Removes
+  // both the durable index record and, best-effort, the underlying semantic
+  // memory record.
+  rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
+
   // Health check.
   rpc Health(MemoryHealthRequest) returns (MemoryHealthResponse);
 }
@@ -69,6 +79,10 @@ message MemoryEntry {
 
   // When this entry was last updated.
   google.protobuf.Timestamp updated_at = 6;
+
+  // Owning user, when known. Empty for entries that are not user-scoped
+  // (e.g. org/workspace/policy facts).
+  string user_id = 7;
 }
 
 message IndexMemoryRequest {
@@ -83,6 +97,16 @@ message IndexMemoryRequest {
 
   // Tenant context.
   string org_id = 4;
+
+  // Owning user, when this memory is user-scoped. Empty for org/workspace/
+  // policy facts that have no single owner.
+  string user_id = 5;
+
+  // Caller-supplied identifier to use for this entry. Lets the caller
+  // correlate the same logical memory across the durable index and the
+  // semantic backend so a later DeleteMemory(memory_id) removes both. When
+  // empty the backend assigns its own id.
+  string memory_id = 6;
 }
 
 message IndexMemoryResponse {
@@ -107,4 +131,52 @@ message MemoryHealthResponse {
 
   // Stable machine-readable semantic memory readiness state.
   string memory_status = 3;
+}
+
+message ListMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // Owning user. Required — this RPC is never callable without a target
+  // user, so a caller can never enumerate an entire org's memories.
+  string user_id = 2;
+
+  // Maximum results. Server clamps to a sane upper bound.
+  uint32 limit = 3;
+}
+
+message ListMemoryResponse {
+  // Matching memory entries, most-recently-updated first.
+  repeated MemoryEntry entries = 1;
+
+  // True when the semantic backend could not be reached; index-owned
+  // entries are still returned.
+  bool degraded = 2;
+
+  // Stable machine-readable reason, empty when nothing is degraded.
+  string degradation_reason = 3;
+}
+
+message DeleteMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // Owning user. A caller may only delete their own memories.
+  string user_id = 2;
+
+  // Identifier of the memory entry to delete.
+  string memory_id = 3;
+}
+
+message DeleteMemoryResponse {
+  // True when a durable index record was found and removed.
+  bool deleted = 1;
+
+  // True when the semantic backend delete could not be confirmed. The
+  // index-owned record is still removed; this only reflects the best-effort
+  // downstream cleanup.
+  bool degraded = 2;
+
+  // Stable machine-readable reason, empty when nothing is degraded.
+  string degradation_reason = 3;
 }
