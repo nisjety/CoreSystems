@@ -284,6 +284,13 @@ export default function KnowledgePage() {
   // against an unmounted page.
   let crawlStatusAbort: AbortController | null = null
   onCleanup(() => crawlStatusAbort?.abort())
+  // Tears down the OAuth connect popup poller (interval + focus listener) if the
+  // user navigates away before the popup closes or the window is refocused —
+  // otherwise the 1s interval and the 'focus' handler outlive the unmounted page
+  // and eventually fetch + setState against a disposed scope. handleConnectProvider
+  // assigns its stopPolling here; each connect attempt replaces the previous ref.
+  let connectPollCleanup: (() => void) | null = null
+  onCleanup(() => connectPollCleanup?.())
 
   const visibleKnowledge = createMemo(() => {
     const payload = liveKnowledge()
@@ -542,10 +549,18 @@ export default function KnowledgePage() {
       // `focus` on the main window is the primary, COOP-safe signal (the user
       // switching back after finishing the provider flow); the interval is a
       // fallback for browsers/tabs where the focus event never fires.
+      // A previous abandoned connect attempt may still be polling; stop it
+      // before starting a new one so intervals never accumulate.
+      connectPollCleanup?.()
       const stopPolling = () => {
         window.clearInterval(closePoll)
         window.removeEventListener('focus', onFocus)
+        connectPollCleanup = null
       }
+      // Registered for teardown on unmount (see the onCleanup above), so
+      // navigating away stops the poll immediately instead of letting it
+      // fire against a disposed page.
+      connectPollCleanup = stopPolling
       const onFocus = () => {
         stopPolling()
         void loadKnowledgeWorkspace()
