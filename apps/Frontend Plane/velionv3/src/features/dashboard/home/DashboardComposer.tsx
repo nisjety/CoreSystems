@@ -29,6 +29,7 @@ import {
   Mic,
   Paperclip,
   Pin,
+  Search,
   SlidersHorizontal,
   Sparkles,
   Square,
@@ -2063,11 +2064,26 @@ function HistoryPanel(props: {
   threads: ChatThreadSession[]
   turns: ComposerTurn[]
 }) {
-  const items = createMemo(() => [
+  const [historyQuery, setHistoryQuery] = createSignal('')
+  const allItems = createMemo(() => [
     ...props.threads.map((thread) => threadToHistoryItem(thread, props.i18n)),
     ...props.turns.map((turn) => turnToHistoryItem(turn, props.i18n)),
   ])
-  const groups = createMemo(() => historyGroups(items(), props.i18n))
+  // Filters the ALREADY-LOADED list — the gateway returns up to 80 threads with
+  // their title and preview, and this narrows those. It is a quick-switcher, not
+  // full-text search: message BODIES are not here to match against, and searching
+  // them needs a backend query over `messages.content` (the threads table has no
+  // title/preview column at all — both are derived per query by LATERAL joins).
+  // Scoped honestly in the placeholder so it does not read as a promise of more.
+  const filteredItems = createMemo(() => {
+    const needle = historyQuery().trim().toLowerCase()
+    if (!needle) return allItems()
+    return allItems().filter(
+      (item) =>
+        item.title.toLowerCase().includes(needle) || item.meta.toLowerCase().includes(needle),
+    )
+  })
+  const groups = createMemo(() => historyGroups(filteredItems(), props.i18n))
 
   return (
     <div
@@ -2075,6 +2091,16 @@ function HistoryPanel(props: {
       class="velion-popover velion-popover-up velion-floating-panel velion-floating-panel-sm velion-floating-panel-compact dashboard-composer-floating-panel dashboard-composer-history-panel"
       style={panelPositionStyle(props.position)}
     >
+      <div class="dashboard-composer-history-search">
+        <Search class="size-3.5 shrink-0" strokeWidth={1.7} />
+        <input
+          type="search"
+          value={historyQuery()}
+          onInput={(event) => setHistoryQuery(event.currentTarget.value)}
+          placeholder={props.i18n.tr('Filtrer titler og forhåndsvisninger', 'Filter titles and previews')}
+          aria-label={props.i18n.tr('Filtrer samtaler', 'Filter conversations')}
+        />
+      </div>
       <div class="dashboard-composer-floating-panel__scroll" style={{ 'max-height': `${props.position.maxHeight}px` }}>
         <Show when={props.loading}>
           <div class="velion-menu-row dashboard-composer-history-row dashboard-composer-history-row--loading">
@@ -2085,7 +2111,24 @@ function HistoryPanel(props: {
             </span>
           </div>
         </Show>
-        <Show when={items().length > 0}>
+        {/* A query that matches nothing must say so. Without this the panel just
+            empties, which reads as "history failed to load". */}
+        <Show when={historyQuery().trim() && filteredItems().length === 0 && !props.loading}>
+          <div class="velion-menu-row dashboard-composer-history-row">
+            <span>
+              <span class="velion-menu-label">
+                {props.i18n.tr('Ingen treff', 'No matches')}
+              </span>
+              <span class="velion-menu-meta">
+                {props.i18n.tr(
+                  `Ingen av de ${allItems().length} lastede samtalene matcher.`,
+                  `None of the ${allItems().length} loaded conversations match.`,
+                )}
+              </span>
+            </span>
+          </div>
+        </Show>
+        <Show when={filteredItems().length > 0}>
           <For each={groups()}>
             {(group) => (
               <Show when={group.items.length > 0}>

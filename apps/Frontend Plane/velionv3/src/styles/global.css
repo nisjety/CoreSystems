@@ -7244,6 +7244,31 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
+/* History quick-filter. Sits OUTSIDE the scroll container so it stays visible
+   while the list scrolls under it. */
+.dashboard-composer-history-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  border-block-end: 1px solid var(--velion-border-subtle);
+  color: var(--velion-text-muted);
+}
+
+.dashboard-composer-history-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: var(--velion-text);
+  outline: none;
+}
+
+.dashboard-composer-history-search input::placeholder {
+  color: var(--velion-text-muted);
+}
+
 /* Pin affordance: the row and its pin button are SIBLINGS (a button inside a
    button is invalid HTML), so the wrapper positions the pin over the row's
    trailing edge and reveals it on hover or keyboard focus. */
