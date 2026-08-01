@@ -2102,7 +2102,13 @@ function HistoryPanel(props: {
         />
       </div>
       <div class="dashboard-composer-floating-panel__scroll" style={{ 'max-height': `${props.position.maxHeight}px` }}>
-        <Show when={props.loading}>
+        {/* The spinner is for a COLD load only. `refreshChatHistory` runs on
+            every panel open, so gating the spinner on `props.loading` alone left
+            it pinned above already-rendered results — and above search results,
+            since a filtered view is still a background refresh underneath. Show
+            it only when there is genuinely nothing to display yet; a refresh
+            with data already in hand shows the data, not a spinner. */}
+        <Show when={props.loading && allItems().length === 0}>
           <div class="velion-menu-row dashboard-composer-history-row dashboard-composer-history-row--loading">
             <Loader2 class="size-4 shrink-0 animate-spin" strokeWidth={1.7} />
             <span>
@@ -2113,7 +2119,7 @@ function HistoryPanel(props: {
         </Show>
         {/* A query that matches nothing must say so. Without this the panel just
             empties, which reads as "history failed to load". */}
-        <Show when={historyQuery().trim() && filteredItems().length === 0 && !props.loading}>
+        <Show when={historyQuery().trim() && filteredItems().length === 0}>
           <div class="velion-menu-row dashboard-composer-history-row">
             <span>
               <span class="velion-menu-label">
@@ -2190,7 +2196,7 @@ function HistoryPanel(props: {
             )}
           </For>
         </Show>
-        <Show when={!props.loading && items().length === 0}>
+        <Show when={!props.loading && !historyQuery().trim() && allItems().length === 0}>
           <div class="dashboard-composer-history-empty">
             <MessageSquare class="size-5" strokeWidth={1.5} />
             <p>{props.error ?? props.i18n.tr('Fant ingen samtaler for denne brukeren.', 'No conversations found for this user.')}</p>
