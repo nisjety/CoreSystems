@@ -1,13 +1,19 @@
 # Implementation spec: stream resume (#47) and edit-version navigation (#49p2)
 
-Both features were DESIGNED and then had their first designs **rejected by
-independent adversarial review** for correctness. Both also need **live
-interactive verification** to ship safely (a reconnect for #47, a version
-switcher for #49). This spec records the corrected design and the exact
-constraints, so implementation starts from the fixed version — not a blank page.
+**Status: SHIPPED and live-verified, 2026-08-01.** Both features' first designs
+were rejected by independent adversarial review for correctness (see below for
+what was wrong and how the corrected design avoids it). Once an authenticated
+dev session became available, both were implemented per the corrected design,
+covered by tests, and confirmed live in the browser — including a real,
+previously-undiscovered duplicate-answer bug that building #49 uncovered.
+Commits: `b8aea9bd` (gateway producer), `f1ab0e6b` (SPA reload merge),
+`a8a82665` (version navigation + the bug it uncovered).
 
 These are parity-backlog items #1 (resume) and #8 (edit-versions). See
 `VELION_CHAT_PARITY_BACKLOG.md`.
+
+This document is kept as the design record — the "corrected design" sections
+below are exactly what shipped.
 
 ---
 
@@ -122,17 +128,44 @@ to server state with an **ordinal anchor** (`keep_leading_live_messages`, not
 so ONLY model-gateway's chat read path sees superseded turns and skill-learning
 never does. Not before #1.
 
-### Verification (needs a live session)
-vitest fully covers the state module. The switcher render + swap needs the
-browser: edit/regenerate the last turn, page 1/2/3, confirm each shows the right
-question+answer and that an earlier-turn edit still truncates (does not corrupt).
+### Verification — DONE, live, 2026-08-01
+vitest covers the state module exhaustively (17 cases: snapshot, round-trip,
+boundary disable, thread/anchor invalidation — `chat-versions.test.ts`). Live in
+the browser: regenerated a turn twice and edited the final turn once, producing
+a real 3-version exchange (verified with a non-deterministic prompt — "pick a
+random animal" — specifically to rule out a cache hit making two different
+slots look coincidentally identical, which a first pass with a short factual
+prompt could not rule out). Paged 1/3 → 2/3 → 3/3 and back; each version
+restored its exact question+answer pair and follow-up chips, boundaries
+correctly disabled the arrows. Also confirmed: this uncovered `regenerateLatest`
+was appending a duplicate answer instead of replacing it (present since the
+feature shipped, independent of versioning) — fixed in the same commit
+(`a8a82665`) since the truncation is what makes both the switcher and plain
+regenerate correct.
 
 ---
 
-## Why neither shipped in the 2026-08-01 session
-Both are interactive chat-path features whose first designs were shown to corrupt
-data, and the running deployment had dev-auth bypass OFF with an expired Better
-Auth session — so no interactive verification was possible without entering
-credentials (refused) or enabling an auth bypass on a live deployment
-(inappropriate unprompted). The corrected designs above are ready to implement
-and verify the moment an authenticated dev session is available.
+## #47 verification — DONE
+Two independent proofs, since a live browser reload alone couldn't establish
+whether the exact disconnect-detection code path fired (this dev topology's
+BFF-to-model-gateway proxy may not propagate a browser disconnect to
+model-gateway within an observed generation window — the browser test could
+only prove the *outcome*, not the mechanism):
+
+- **Deterministic Rust test** (`invoke_stream_completes_and_persists_after_the_client_disconnects_mid_stream`,
+  `e2e_invoke_chain_test.rs`): drops the SSE response body's data stream mid-run,
+  which drops the channel's `Receiver` so every subsequent `tx.send` genuinely
+  fails — no wall-clock race. Asserts the run still persists both messages,
+  terminalizes `Completed`, and finishes a full, replayable buffer. This test
+  fails against the pre-fix code (old code would see only the user message
+  persisted and a `Cancelled` terminal outcome).
+- **Live**: sent a 300-word request, reloaded mid-stream (Stopp svar still
+  showing), and the reloaded thread showed the complete answer with no stuck
+  spinner or error — proving the end-to-end outcome the fix exists for.
+
+## Why this took a live session
+Both are interactive chat-path features whose first designs were shown to
+corrupt data, and needed either a live reconnect (#47) or a live version
+switcher (#49) to verify safely — not something a static review can settle.
+The corrected designs above turned out to be exactly what shipped once a real
+session was available.
