@@ -2286,10 +2286,16 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("event: connected"), "{body}");
     assert!(body.contains("event: error"), "{body}");
-    assert!(body.contains("agent_dispatch_unavailable"), "{body}");
+    // `rejected`, not `unavailable`: the dispatch fails while CONSTRUCTING the
+    // authenticated RunAgent request, which is a deterministic local
+    // credential/metadata failure and therefore a confirmed pre-dispatch
+    // rejection rather than an ambiguous remote outage. The two codes are
+    // deliberately distinct — `unavailable` means the run may still be running
+    // somewhere and stays retriable, `rejected` means nothing was dispatched.
+    assert!(body.contains("agent_dispatch_rejected"), "{body}");
     assert!(
         !body.contains("event: done"),
-        "an ambiguous RunAgent dispatch must not be reported as a completed agent run: {body}"
+        "a failed RunAgent dispatch must not be reported as a completed agent run: {body}"
     );
 
     assert_eq!(
@@ -2309,14 +2315,29 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     );
     let prepared_thread_id = prepared_thread_id(&session_handles);
     assert_single_user_message_on_prepared_thread(&session_handles, &prepared_thread_id);
-    assert!(
-        session_handles
-            .terminal_outcome_captures
-            .lock()
-            .unwrap()
-            .is_empty(),
-        "a transport-ambiguous dispatch remains retriable; Gateway must not terminalize it"
+    // The mirror image of the `unavailable` contract. A confirmed pre-dispatch
+    // rejection means nothing is running anywhere, so leaving the prepared run
+    // open would strand it in `running` forever with no worker to finish it.
+    // `unavailable` is the case that must NOT be terminalized.
+    let receipts = session_handles.terminal_outcome_captures.lock().unwrap();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "a confirmed pre-dispatch rejection must close the prepared run, not strand it"
     );
+    let (authorization, receipt) = &receipts[0];
+    assert_eq!(
+        authorization, "Bearer gateway-terminalizer-token",
+        "terminalization must use the scoped workload token, not a user bearer"
+    );
+    assert_eq!(receipt.run_id, format!("managed-run-for-{prepared_thread_id}"));
+    assert_eq!(
+        receipt.source,
+        ManagedRunSource::GatewayAgentDispatchRejected as i32,
+        "the receipt must name the producer that actually failed"
+    );
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed as i32);
+    assert_eq!(receipt.failure_code, "dispatch_rejected");
 }
 
 #[tokio::test]
@@ -2530,23 +2551,31 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
 
     let captured = captured_messages.lock().unwrap();
     let messages = captured.first().expect("infer_stream should be called");
-    assert_eq!(messages.len(), 2);
+    // Three, not two: `temporal_awareness_message()` is inserted unconditionally
+    // at position 0 so the model always knows the real date, which shifts the
+    // context-assembly block to index 1. Asserting the temporal message's
+    // presence rather than tolerating it, so a future change that drops it fails
+    // here instead of silently letting the model answer time-sensitive questions
+    // from its training snapshot.
+    assert_eq!(messages.len(), 3);
     assert_eq!(messages[0].0, "system");
-    assert!(messages[0].1.contains("Velion context assembly"));
-    assert!(messages[0].1.contains("[thread]"));
-    assert!(messages[0].1.contains("Model Plane owns reasoning"));
-    assert!(messages[0].1.contains("[episodic]"));
-    assert!(messages[0].1.contains("[redacted-email]"));
-    assert!(messages[0].1.contains("[retrieval]"));
-    assert!(messages[0].1.contains("Data Plane retrieval"));
-    assert!(messages[0].1.contains("[knowledge]"));
-    assert!(messages[0].1.contains("LLM wiki entry"));
-    assert!(messages[0].1.contains("[graph]"));
-    assert!(messages[0].1.contains("GraphRAG"));
-    assert!(!messages[0].1.contains("[prompt]"));
-    assert!(!messages[0].1.contains("ima@example.com"));
+    assert!(messages[0].1.contains("Today's real date is"));
+    assert_eq!(messages[1].0, "system");
+    assert!(messages[1].1.contains("Velion context assembly"));
+    assert!(messages[1].1.contains("[thread]"));
+    assert!(messages[1].1.contains("Model Plane owns reasoning"));
+    assert!(messages[1].1.contains("[episodic]"));
+    assert!(messages[1].1.contains("[redacted-email]"));
+    assert!(messages[1].1.contains("[retrieval]"));
+    assert!(messages[1].1.contains("Data Plane retrieval"));
+    assert!(messages[1].1.contains("[knowledge]"));
+    assert!(messages[1].1.contains("LLM wiki entry"));
+    assert!(messages[1].1.contains("[graph]"));
+    assert!(messages[1].1.contains("GraphRAG"));
+    assert!(!messages[1].1.contains("[prompt]"));
+    assert!(!messages[1].1.contains("ima@example.com"));
     assert_eq!(
-        messages[1],
+        messages[2],
         (
             "user".to_owned(),
             "contact [redacted-email] about context".to_owned()
@@ -2563,7 +2592,8 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
     let context_requests = session_handles.context_assembly_requests.lock().unwrap();
     assert_eq!(context_requests.len(), 1);
     assert_eq!(context_requests[0].0, "thread-assembly");
-    assert_eq!(context_requests[0].1, "run-for-thread-assembly");
+    // Managed-run lifecycle: the assembly is requested for the managed run id.
+    assert_eq!(context_requests[0].1, "managed-run-for-thread-assembly");
     assert!(context_requests[0].2 >= 512);
 }
 
@@ -2630,7 +2660,7 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
         .header(AUTHORIZATION, "Bearer dev")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            r#"{"content":"kan du finne ut hva navnet mitt betyr?","model":"m","thread_id":"thread-name-memory","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
+            r#"{"content":"kan du i dag finne ut hva navnet mitt betyr?","model":"m","thread_id":"thread-name-memory","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
         ))
         .unwrap();
     let search_resp = app.oneshot(search_req).await.unwrap();
@@ -2644,21 +2674,23 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
     // A Search-enabled turn (`features: ["tools"]` + web_search) makes TWO model
     // calls: the forced web_search injects results, then the remaining built-in
     // agent tools (`fetch_url`, `knowledge_search`) are still advertised, so
-    // `run_tool_rounds` performs one unary infer (the model declines here)
-    // before the final streaming answer. With the preceding plain turn that is
-    // 3 captured infer requests in total. The tool-round infer and the final
-    // stream see the same messages, so `captured.last()` carries the full
-    // grounded context asserted below.
-    assert_eq!(captured.len(), 3);
-    let search_messages = captured.last().expect("search answer should infer");
+    // The exact call count is deliberately NOT asserted. Thread-title and
+    // follow-up generation are inference calls too, so the total moves whenever
+    // an unrelated feature adds one — and `captured.last()` is one of those
+    // rather than the answer. Find the prompt carrying the grounded tool context,
+    // which is what this test is actually about.
+    let search_messages = captured
+        .iter()
+        .find(|set| set.iter().any(|(_, c)| c.contains("Current request:")))
+        .expect("an inference call should have carried the forced-search context");
     assert!(search_messages
         .iter()
         .any(|(role, content)| { role == "user" && content.contains("mitt navn er ima") }));
     assert!(search_messages.iter().any(|(role, content)| {
-        role == "user" && content.contains("kan du finne ut hva navnet mitt betyr?")
+        role == "user" && content.contains("finne ut hva navnet mitt betyr?")
     }));
     assert!(search_messages.iter().any(|(_, content)| {
-        content.contains("Current request: kan du finne ut hva navnet mitt betyr?")
+        content.contains("Current request: kan du i dag finne ut hva navnet mitt betyr?")
     }));
     assert!(search_messages.iter().any(|(_, content)| {
         content.contains("do not ask for information already present in the conversation")
@@ -2724,7 +2756,7 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
         .header(AUTHORIZATION, "Bearer dev")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            r#"{"content":"Claude Opus 4.8 official","model":"m","thread_id":"thread-browse-flag","features":["citations"],"browse_web":true}"#,
+            r#"{"content":"latest Claude Opus 4.8 official","model":"m","thread_id":"thread-browse-flag","features":["citations"],"browse_web":true}"#,
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -2735,17 +2767,23 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
     assert!(body.contains("https://www.anthropic.com/claude/opus"));
 
     let captured = captured_messages.lock().unwrap();
-    let messages = captured.last().expect("search answer should infer");
-    assert!(messages
+    // NOT `captured.last()`: thread-title and follow-up generation are inference
+    // calls too, so the final captured prompt is one of those rather than the
+    // answer's. Find the prompt that carries the tool results — that is the one
+    // this test is about.
+    let messages = captured
         .iter()
-        .any(|(_, content)| content.contains("web_search →")));
+        .find(|set| set.iter().any(|(_, c)| c.contains("web_search →")))
+        .expect("an inference call should have carried the web_search results");
     assert!(messages
         .iter()
         .any(|(_, content)| content.contains("Claude Opus 4.8")));
 
     let reservations = session_handles.reserve_tool_action_captures.lock().unwrap();
     assert_eq!(reservations.len(), 1);
-    assert_eq!(reservations[0].run_id, "run-for-thread-browse-flag");
+    // The managed-run lifecycle owns this run, so the reservation carries the
+    // managed id rather than the plain one.
+    assert_eq!(reservations[0].run_id, "managed-run-for-thread-browse-flag");
     assert_eq!(reservations[0].tool, "web_search");
     assert!(reservations[0].action_id.starts_with("inline-"));
     let finalizations = session_handles
@@ -2811,7 +2849,7 @@ async fn invoke_stream_opens_the_response_before_the_tool_phase_finishes() {
         .header(AUTHORIZATION, "Bearer dev")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            r#"{"content":"slow lookup","model":"m","thread_id":"thread-early-open","features":["citations"],"browse_web":true}"#,
+            r#"{"content":"latest slow lookup","model":"m","thread_id":"thread-early-open","features":["citations"],"browse_web":true}"#,
         ))
         .unwrap();
 
@@ -2892,7 +2930,7 @@ async fn invoke_stream_fails_closed_when_tool_audit_intent_cannot_be_persisted()
         .header(AUTHORIZATION, "Bearer dev")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            r#"{"content":"search for audited result","model":"m","thread_id":"thread-audit-down","features":["citations"],"browse_web":true}"#,
+            r#"{"content":"latest price for audited result","model":"m","thread_id":"thread-audit-down","features":["citations"],"browse_web":true}"#,
         ))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
@@ -2967,7 +3005,7 @@ async fn invoke_stream_leaves_a_durable_reservation_when_tool_audit_finalization
         .header(AUTHORIZATION, "Bearer dev")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            r#"{"content":"search for audited result","model":"m","thread_id":"thread-audit-finalize-down","features":["citations"],"browse_web":true}"#,
+            r#"{"content":"latest price for audited result","model":"m","thread_id":"thread-audit-finalize-down","features":["citations"],"browse_web":true}"#,
         ))
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
@@ -3090,7 +3128,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
         .header(AUTHORIZATION, "Bearer dev")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(
-            r#"{"content":"kan du gi meg svaret på model plane og hva den er?","model":"m","thread_id":"thread-sequence","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
+            r#"{"content":"kan du gi meg nyeste svaret på model plane og hva den er?","model":"m","thread_id":"thread-sequence","features":["tools","citations"],"tools":[{"name":"web_search","description":"Search the web","parameters_json":"{\"type\":\"object\"}"}]}"#,
         ))
         .unwrap();
     let search_resp = app.clone().oneshot(search_req).await.unwrap();
@@ -3143,16 +3181,24 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     assert!(followup_body.contains("event: done"));
 
     let captured = captured_messages.lock().unwrap();
-    // Each Search-enabled turn makes two model calls (forced web_search → unary
-    // `run_tool_rounds` infer offering fetch_url/knowledge_search → final
-    // stream). The two search turns therefore contribute 4 captured infer
-    // requests; the image turn never reaches inference. captured[0]/[1] are the
-    // first search turn's tool-round + stream, [2]/[3] the follow-up's.
-    assert_eq!(captured.len(), 4);
-    assert!(captured[0].iter().any(|(_, content)| {
-        content.contains("Tool results") && content.contains("https://velion.test/model-plane")
-    }));
-    let followup_messages = captured.last().unwrap();
+    // Not an exact count: title and follow-up generation add inference calls, so
+    // the total shifts with unrelated features. What matters is that the search
+    // turn's tool results reached a prompt, and that the image turn's artifact
+    // reached a later one.
+    assert!(
+        captured.iter().any(|set| set.iter().any(|(_, content)| {
+            content.contains("Tool results") && content.contains("https://velion.test/model-plane")
+        })),
+        "the forced search results should have reached an inference prompt",
+    );
+    let followup_messages = captured
+        .iter()
+        .find(|set| {
+            set.iter().any(|(role, content)| {
+                role == "assistant" && content.contains("I generated an image artifact")
+            })
+        })
+        .expect("the image artifact should have reached a later prompt");
     assert!(followup_messages.iter().any(|(role, content)| {
         role == "assistant"
             && content
@@ -3161,16 +3207,19 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     assert!(followup_messages.iter().any(|(role, content)| {
         role == "system" && content.contains("the assistant already generated an image artifact")
     }));
-    // The follow-up also carries the web_search tool, so the Search gate forces
-    // a fresh web lookup for it too: its messages now include their own forced
-    // "Tool results" context, appended AFTER the user's follow-up question (so
-    // that context block, not the question, is the final message handed to
-    // inference).
-    assert!(followup_messages
-        .iter()
-        .any(|(_, content)| content.contains("Tool results")));
+    // The follow-up ("lag et bilde av det") no longer forces a web search, and
+    // should not: it is an image request with nothing time-sensitive in it, and
+    // the Search gate now asks whether the answer could be stale rather than
+    // searching on every tool-enabled turn. Under the old always-force behaviour
+    // this turn ran a pointless web lookup before generating a picture.
+    assert!(
+        !followup_messages
+            .iter()
+            .any(|(_, content)| content.contains("Tool results")),
+        "an image request should not drag a forced web search along with it",
+    );
     assert!(followup_messages.iter().any(|(role, content)| {
-        role == "user" && content.contains("kan du gi meg svaret på model plane")
+        role == "user" && content.contains("svaret på model plane")
     }));
     assert!(followup_messages.iter().any(|(role, content)| {
         role == "user" && content.contains("hva snakket vi om, og lagde vi et bilde?")
@@ -3179,7 +3228,10 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
         .last()
         .expect("follow-up turn should infer");
     assert_eq!(last.0.as_str(), "user");
-    assert!(last.1.contains("Tool results"));
+    // The current question is what the model must answer last. It used to be a
+    // "Tool results" block because every tool-enabled turn forced a search;
+    // with the staleness gate the prompt ends on the question itself.
+    assert_eq!(last.1, "hva snakket vi om, og lagde vi et bilde?");
     drop(captured);
 
     let appended = session_handles.append_captures.lock().unwrap();

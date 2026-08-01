@@ -57,12 +57,54 @@ fn authenticated_server_contracts_are_additive_and_fail_closed() {
     }
 }
 
+const COMPOSE_PRODUCTION: &str =
+    include_str!("../../../../deploy/docker-compose.production.yml");
+
+/// The gRPC compatibility ports may be probed locally, but must never be
+/// reachable from off the machine.
+///
+/// This used to demand they be unpublished outright. They have been published
+/// on loopback for local probing since the secure-MVP gates landed, so the old
+/// assertion had drifted into asserting something the deployment stopped doing
+/// — which is worse than no assertion, because a stale red test gets muted
+/// rather than read.
+///
+/// The two halves below are the invariant that actually matters:
+///   * dev may publish them, but only bound to 127.0.0.1. A bare `9090:9090`
+///     binds 0.0.0.0 and puts a business gRPC surface on the network.
+///   * production must publish nothing, so a loopback exception in dev cannot
+///     ride along into a deployed environment.
 #[test]
-fn disabled_grpc_ports_are_not_published_to_the_host() {
+fn grpc_compatibility_ports_are_loopback_only_and_absent_in_production() {
     for port in ["9090:9090", "9092:9092", "9093:9093"] {
+        for line in COMPOSE.lines() {
+            let line = line.trim();
+            if !line.starts_with('-') || !line.contains(port) {
+                continue;
+            }
+            assert!(
+                line.contains(&format!("127.0.0.1:{port}")),
+                "gRPC port {port} must be bound to loopback, not published on every \
+                 interface: {line}"
+            );
+        }
+    }
+
+    for service in ["model-gateway", "inference-core", "execution-core"] {
+        let rest = COMPOSE_PRODUCTION
+            .split(&format!("\n  {service}:\n"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{service} must be present in the production overlay"));
+        // Stop at the next service key — a line indented by exactly two spaces.
+        // Splitting on the literal "\n  " would cut at the block's own deeper
+        // indentation and make this assert nothing.
+        let resets = rest
+            .lines()
+            .take_while(|line| line.starts_with("    ") || line.trim().is_empty())
+            .any(|line| line.trim() == "ports: !reset []");
         assert!(
-            !COMPOSE.contains(port),
-            "disabled gRPC port {port} must remain unpublished"
+            resets,
+            "{service} must publish no host ports in production"
         );
     }
 }
