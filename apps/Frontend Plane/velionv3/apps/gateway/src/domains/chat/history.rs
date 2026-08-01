@@ -58,6 +58,18 @@ struct ChatThreadSummary {
     title: String,
     preview: String,
     updated_at: String,
+    /// Whether the user pinned this thread to the top of the sidebar.
+    ///
+    /// Lives in THIS index rather than in session-core. That is not a shortcut:
+    /// this index is already the cross-device home for presentation state — it
+    /// is Dragonfly write-through, keyed per (org, user), with a 90-day TTL, and
+    /// it already owns the AI-generated title that session-core does not know
+    /// about. A pin is presentation, so it belongs beside the title.
+    ///
+    /// `#[serde(default)]` so an index written before pins existed decodes as
+    /// unpinned instead of failing the whole listing.
+    #[serde(default)]
+    pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +87,12 @@ struct ChatThreadTranscript {
 pub(super) struct SaveThreadRequest {
     #[serde(default)]
     title: Option<String>,
+    /// Absent means "leave the pin as it is", which is why this is an Option
+    /// rather than a bool: the SPA saves a thread on every turn to refresh the
+    /// title and preview, and a bare `false` default would silently unpin on
+    /// the next message.
+    #[serde(default)]
+    pinned: Option<bool>,
     #[serde(default)]
     preview: Option<String>,
     #[serde(default)]
@@ -183,7 +201,24 @@ pub(super) async fn save_thread(
         .await
         .into_iter()
         .find(|item| item.thread_id == thread_id);
-    let updated_at = normalize_timestamp(body.updated_at.as_deref(), &now);
+    // A pin is metadata, not activity. Without this, toggling a pin sent no
+    // `updated_at` and fell through to `now`, so pinning a month-old thread
+    // relabelled it as touched today — misreporting the conversation's last
+    // activity in the sidebar and in every recency sort downstream. When the
+    // request changes nothing a reader would call content, keep the stored
+    // timestamp.
+    let metadata_only = body.title.is_none()
+        && body.preview.is_none()
+        && body.turns.is_none()
+        && body.task_steps.is_none()
+        && body.updated_at.is_none();
+    let updated_at = if metadata_only {
+        existing
+            .as_ref()
+            .map_or_else(|| now.clone(), |item| item.updated_at.clone())
+    } else {
+        normalize_timestamp(body.updated_at.as_deref(), &now)
+    };
     let session = ChatThreadSummary {
         thread_id: thread_id.clone(),
         title: normalize_display_text(
@@ -201,12 +236,15 @@ pub(super) async fn save_thread(
             MAX_PREVIEW_LEN,
         ),
         updated_at: updated_at.clone(),
+        pinned: body
+            .pinned
+            .unwrap_or_else(|| existing.as_ref().is_some_and(|item| item.pinned)),
     };
 
     let mut sessions = read_index(&state, &scope).await;
     sessions.retain(|item| item.thread_id != thread_id);
     sessions.push(session.clone());
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sort_pinned_first(&mut sessions);
     sessions.truncate(MAX_THREADS);
     write_value(
         &state,
@@ -372,7 +410,27 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         title: normalize_display_text(Some(&item.title), "Velion Chat", MAX_TITLE_LEN),
         preview: normalize_display_text(Some(&item.preview), "", MAX_PREVIEW_LEN),
         updated_at,
+        // session-core has no pin concept, so a durable entry is always
+        // unpinned. `merge_thread_indexes` must therefore never let a durable
+        // entry overwrite a cached pin — see the OR there.
+        pinned: false,
     })
+}
+
+/// Order the index for the sidebar: pinned threads first, then by recency.
+///
+/// This must run BEFORE any `truncate(MAX_THREADS)`. Sorting by `updated_at`
+/// alone and then cutting at the cap destroyed pins: an old pinned thread sorted
+/// to the bottom, fell outside the cap, and the truncated list was written
+/// straight back to the index — losing both the pin and the thread. The same bug
+/// existed client-side in `chat-thread-history.ts` and is fixed there too.
+fn sort_pinned_first(sessions: &mut [ChatThreadSummary]) {
+    sessions.sort_by(|left, right| {
+        right
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+    });
 }
 
 fn merge_thread_indexes(
@@ -380,7 +438,13 @@ fn merge_thread_indexes(
     durable: Vec<ChatThreadSummary>,
 ) -> Vec<ChatThreadSummary> {
     let mut sessions: Vec<ChatThreadSummary> = Vec::new();
-    for item in durable.into_iter().chain(cached) {
+    // CACHED first: the SPA's saved snapshot owns presentation (its title may
+    // be the AI-generated thread summary), while session-core's durable
+    // summary auto-titles threads with the raw first message. Durable entries
+    // still contribute threads the SPA never snapshotted, fill empty fields,
+    // and advance `updated_at`. With durable first, every listing clobbered a
+    // generated title back to the echoed question.
+    for item in cached.into_iter().chain(durable) {
         if item.thread_id.trim().is_empty() {
             continue;
         }
@@ -394,6 +458,10 @@ fn merge_thread_indexes(
             if existing.preview.trim().is_empty() {
                 existing.preview = item.preview;
             }
+            // OR, never assign: `durable_to_summary` always reports `false`,
+            // so assigning would unpin every thread on each listing that
+            // reaches session-core.
+            existing.pinned = existing.pinned || item.pinned;
             if item.updated_at > existing.updated_at {
                 existing.updated_at = item.updated_at;
             }
@@ -401,7 +469,7 @@ fn merge_thread_indexes(
             sessions.push(item);
         }
     }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sort_pinned_first(&mut sessions);
     sessions.truncate(MAX_THREADS);
     sessions
 }
@@ -506,4 +574,126 @@ fn bad_request(message: &'static str) -> Response {
         Json(error("invalid_request", message)),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_thread_indexes, sort_pinned_first, ChatThreadSummary, MAX_THREADS};
+
+    fn summary(thread_id: &str, title: &str, preview: &str, updated_at: &str) -> ChatThreadSummary {
+        ChatThreadSummary {
+            thread_id: thread_id.to_owned(),
+            title: title.to_owned(),
+            preview: preview.to_owned(),
+            updated_at: updated_at.to_owned(),
+            pinned: false,
+        }
+    }
+
+    fn pinned(thread_id: &str, updated_at: &str) -> ChatThreadSummary {
+        ChatThreadSummary {
+            pinned: true,
+            ..summary(thread_id, "pinned thread", "", updated_at)
+        }
+    }
+
+    /// The data-loss bug this ordering exists to prevent: an OLD pinned thread
+    /// sorted to the bottom by recency, cut by the cap, and the truncated list
+    /// written back — losing the pin and the thread together.
+    #[test]
+    fn an_old_pinned_thread_survives_the_cap() {
+        let mut sessions: Vec<ChatThreadSummary> = (0..MAX_THREADS)
+            .map(|index| summary(&format!("t{index}"), "recent", "", &format!("2026-08-01T10:{index:02}:00Z")))
+            .collect();
+        sessions.push(pinned("old-but-pinned", "2020-01-01T00:00:00Z"));
+
+        sort_pinned_first(&mut sessions);
+        sessions.truncate(MAX_THREADS);
+
+        assert_eq!(sessions[0].thread_id, "old-but-pinned", "pinned must sort first");
+        assert!(
+            sessions.iter().any(|item| item.thread_id == "old-but-pinned"),
+            "a pinned thread must never be truncated away"
+        );
+        assert_eq!(sessions.len(), MAX_THREADS);
+    }
+
+    /// Within each group, recency still decides.
+    #[test]
+    fn recency_orders_within_the_pinned_and_unpinned_groups() {
+        let mut sessions = vec![
+            summary("older", "a", "", "2026-01-01T00:00:00Z"),
+            pinned("pin-older", "2020-01-01T00:00:00Z"),
+            summary("newer", "b", "", "2026-08-01T00:00:00Z"),
+            pinned("pin-newer", "2026-07-01T00:00:00Z"),
+        ];
+        sort_pinned_first(&mut sessions);
+        let order: Vec<&str> = sessions.iter().map(|item| item.thread_id.as_str()).collect();
+        assert_eq!(order, ["pin-newer", "pin-older", "newer", "older"]);
+    }
+
+    /// session-core has no pin concept, so every durable entry reports
+    /// `pinned: false`. Merging must never let that unpin a cached pin.
+    #[test]
+    fn a_durable_listing_cannot_unpin_a_pinned_thread() {
+        let cached = vec![pinned("t1", "2026-08-01T00:00:00Z")];
+        let durable = vec![summary("t1", "raw first message", "preview", "2026-08-02T00:00:00Z")];
+
+        let merged = merge_thread_indexes(cached, durable);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].pinned, "a durable refresh must not clear the pin");
+        // And the durable entry still advances recency, as it did before.
+        assert_eq!(merged[0].updated_at, "2026-08-02T00:00:00Z");
+    }
+
+    #[test]
+    fn cached_snapshot_title_wins_over_durable_auto_title() {
+        let cached = vec![summary(
+            "t1",
+            "Oslo: Norges kulturelle hovedstad",
+            "answer preview",
+            "2026-07-29T21:40:53+00:00",
+        )];
+        let durable = vec![summary(
+            "t1",
+            "Hva er hovedstaden i Norge, og hva er byen mest kjent for?",
+            "answer preview",
+            "2026-07-29T21:41:19+00:00",
+        )];
+        let merged = merge_thread_indexes(cached, durable);
+        assert_eq!(merged.len(), 1);
+        // The SPA snapshot's (possibly AI-generated) title survives listing…
+        assert_eq!(merged[0].title, "Oslo: Norges kulturelle hovedstad");
+        // …while durable activity still advances the timestamp.
+        assert_eq!(merged[0].updated_at, "2026-07-29T21:41:19+00:00");
+    }
+
+    #[test]
+    fn durable_threads_still_appear_and_fill_placeholder_fields() {
+        let cached = vec![summary(
+            "t1",
+            "Velion Chat",
+            "",
+            "2026-07-29T10:00:00+00:00",
+        )];
+        let durable = vec![
+            summary(
+                "t1",
+                "Real question",
+                "real preview",
+                "2026-07-29T09:00:00+00:00",
+            ),
+            summary("t2", "Durable only", "p", "2026-07-29T11:00:00+00:00"),
+        ];
+        let merged = merge_thread_indexes(cached, durable);
+        assert_eq!(merged.len(), 2);
+        // Sorted by activity: t2 (11:00) ahead of t1 (10:00).
+        assert_eq!(merged[0].thread_id, "t2");
+        assert_eq!(merged[0].title, "Durable only");
+        // Placeholder cached fields are filled from the durable summary.
+        assert_eq!(merged[1].title, "Real question");
+        assert_eq!(merged[1].preview, "real preview");
+        assert_eq!(merged[1].updated_at, "2026-07-29T10:00:00+00:00");
+    }
 }

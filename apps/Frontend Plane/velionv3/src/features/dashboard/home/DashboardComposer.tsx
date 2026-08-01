@@ -28,6 +28,7 @@ import {
   Minimize2,
   Mic,
   Paperclip,
+  Pin,
   SlidersHorizontal,
   Sparkles,
   Square,
@@ -59,6 +60,7 @@ import {
   isExpensiveModel,
   listChatThreads,
   listModels,
+  saveChatThreadSnapshot,
   velionModeById,
   VELION_BALANCE_MODE_ID,
   VELION_MODES,
@@ -113,6 +115,8 @@ type HistoryPanelItem = {
   threadId?: string
   title: string
   updatedAt: string
+  /** Undefined for a live in-composer turn, which has no thread to pin yet. */
+  pinned?: boolean
 }
 
 type ComposerSettings = {
@@ -745,6 +749,21 @@ export function DashboardComposer(props: {
     } finally {
       if (requestSeq === historyRequestSeq) setHistoryLoading(false)
     }
+  }
+
+  // Pin/unpin is server-owned (the gateway thread index), so it follows the
+  // user across devices. Optimistic locally, then re-read: a failed save must
+  // not leave the sidebar claiming a pin the server does not have.
+  const toggleThreadPin = async (threadId: string, pinned: boolean) => {
+    setHistoryThreads((threads) =>
+      threads.map((thread) => (thread.threadId === threadId ? { ...thread, pinned } : thread)),
+    )
+    try {
+      await saveChatThreadSnapshot(threadId, { pinned })
+    } catch {
+      setHistoryError(i18n.tr('Kunne ikke feste samtalen.', 'Could not pin the conversation.'))
+    }
+    await refreshChatHistory()
   }
 
   const openChatThread = (threadId: string) => {
@@ -1499,6 +1518,7 @@ export function DashboardComposer(props: {
             turns={turns()}
             onClose={() => setHistoryOpen(false)}
             onThreadSelect={openChatThread}
+            onTogglePin={toggleThreadPin}
           />
         </Portal>
       </Show>
@@ -2038,6 +2058,7 @@ function HistoryPanel(props: {
   loading: boolean
   onClose: () => void
   onThreadSelect: (threadId: string) => void
+  onTogglePin: (threadId: string, pinned: boolean) => void
   position: PanelPosition
   threads: ChatThreadSession[]
   turns: ComposerTurn[]
@@ -2072,20 +2093,53 @@ function HistoryPanel(props: {
                   <p class="dashboard-composer-history-group-label">{group.label}</p>
                   <For each={group.items}>
                     {(item) => (
-                      <button
-                        type="button"
-                        onClick={() => item.threadId ? props.onThreadSelect(item.threadId) : props.onClose()}
-                        class="velion-menu-row dashboard-composer-history-row"
-                      >
-                        <MessageSquare class="size-4 shrink-0" strokeWidth={1.7} />
-                        <span>
-                          <span class="velion-menu-label">{item.title || props.i18n.tr('Uten tittel', 'Untitled')}</span>
-                          <span class="velion-menu-meta">{item.meta}</span>
-                        </span>
-                        <span class="velion-menu-meta dashboard-composer-history-row__time">
-                          {formatHistoryItemTime(item, group.isToday)}
-                        </span>
-                      </button>
+                      <div class="dashboard-composer-history-row-wrap">
+                        <button
+                          type="button"
+                          onClick={() => item.threadId ? props.onThreadSelect(item.threadId) : props.onClose()}
+                          class="velion-menu-row dashboard-composer-history-row"
+                        >
+                          <Show
+                            when={item.pinned}
+                            fallback={<MessageSquare class="size-4 shrink-0" strokeWidth={1.7} />}
+                          >
+                            <Pin class="size-4 shrink-0" strokeWidth={1.7} />
+                          </Show>
+                          <span>
+                            <span class="velion-menu-label">{item.title || props.i18n.tr('Uten tittel', 'Untitled')}</span>
+                            <span class="velion-menu-meta">{item.meta}</span>
+                          </span>
+                          <span class="velion-menu-meta dashboard-composer-history-row__time">
+                            {formatHistoryItemTime(item, group.isToday)}
+                          </span>
+                        </button>
+                        {/* A SIBLING, not nested: a button inside a button is
+                            invalid HTML and the inner click never fires. Only
+                            rendered for real threads — a live composer turn has
+                            no thread id to pin yet. */}
+                        <Show when={item.threadId}>
+                          {(threadId) => (
+                            <button
+                              type="button"
+                              class="dashboard-composer-history-pin"
+                              aria-pressed={item.pinned === true}
+                              title={
+                                item.pinned
+                                  ? props.i18n.tr('Løsne samtalen', 'Unpin conversation')
+                                  : props.i18n.tr('Fest samtalen øverst', 'Pin conversation to the top')
+                              }
+                              aria-label={
+                                item.pinned
+                                  ? `${props.i18n.tr('Løsne', 'Unpin')}: ${item.title}`
+                                  : `${props.i18n.tr('Fest', 'Pin')}: ${item.title}`
+                              }
+                              onClick={() => props.onTogglePin(threadId(), item.pinned !== true)}
+                            >
+                              <Pin class="size-3.5" strokeWidth={1.7} />
+                            </button>
+                          )}
+                        </Show>
+                      </div>
                     )}
                   </For>
                 </div>
@@ -2397,6 +2451,7 @@ function threadToHistoryItem(thread: ChatThreadSession, i18n: ReturnType<typeof 
     threadId: thread.threadId,
     title: thread.title || i18n.tr('Uten tittel', 'Untitled'),
     updatedAt: thread.updatedAt,
+    pinned: thread.pinned,
   }
 }
 

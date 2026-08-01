@@ -162,8 +162,32 @@ describe('chat-client server thread history', () => {
         title: 'Server saved chat',
         preview: 'Last answer',
         updatedAt: '2026-06-17T10:00:00.000Z',
+        // Absent from the payload -> false. A gateway index written before pins
+        // existed must decode as unpinned, not fail the whole listing.
+        pinned: false,
       },
     ])
+  })
+
+  it('reads a server-owned pin, and treats anything non-true as unpinned', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          sessions: [
+            { threadId: 't1', title: 'pinned', preview: '', updatedAt: '2026-06-17T10:00:00.000Z', pinned: true },
+            { threadId: 't2', title: 'truthy string', preview: '', updatedAt: '2026-06-17T10:00:00.000Z', pinned: 'yes' },
+            { threadId: 't3', title: 'absent', preview: '', updatedAt: '2026-06-17T10:00:00.000Z' },
+          ],
+        }),
+        { headers: { 'Content-Type': 'application/json' }, status: 200 },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const sessions = await listChatThreads()
+
+    // Strict `=== true`: a truthy non-boolean must not be read as a pin.
+    expect(sessions.map((session) => session.pinned)).toEqual([true, false, false])
   })
 
   it('saves a transcript snapshot to the thread endpoint', async () => {

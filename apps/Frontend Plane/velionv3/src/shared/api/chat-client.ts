@@ -138,6 +138,12 @@ export type ChatThreadSession = {
   threadId: string
   title: string
   updatedAt: string
+  /**
+   * Whether the user pinned this thread. Server-owned so a pin follows the user
+   * across devices, and defaults to false for an index written before pins
+   * existed.
+   */
+  pinned: boolean
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -153,6 +159,12 @@ export type SaveChatThreadSnapshotRequest = {
   title?: string
   turns?: unknown[]
   updatedAt?: string
+  /**
+   * OMIT to leave the pin untouched. The SPA saves a snapshot on every turn to
+   * refresh title/preview, so sending `false` by default would silently unpin
+   * the thread on the user's next message.
+   */
+  pinned?: boolean
 }
 
 export type ModelModality = 'chat' | 'image' | 'video' | 'audio' | 'embedding' | 'other'
@@ -600,6 +612,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     title,
     preview: str(item.preview) ?? '',
     updatedAt: normalizeIsoTimestamp(str(item.updatedAt) ?? str(item.updated_at)),
+    pinned: item.pinned === true,
   }
 }
 
