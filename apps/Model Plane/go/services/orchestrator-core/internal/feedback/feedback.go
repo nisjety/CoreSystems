@@ -15,10 +15,13 @@ package feedback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/quality"
 )
 
 // Canonical rating vocabulary. model-gateway normalises every client
@@ -28,6 +31,18 @@ const (
 	RatingGood       = "good"
 	RatingAcceptable = "acceptable"
 	RatingPoor       = "poor"
+)
+
+// Rating sources. A stated judgement and a behavioural inference are different
+// kinds of evidence, and conflating them is how a regenerate ends up counting as
+// a thumbs-down.
+const (
+	// SourceExplicit is an operator or chat user stating a judgement.
+	SourceExplicit = "explicit"
+	// SourceImplicit is inferred from behaviour — a regenerate, a re-ask, a
+	// stated correction in the next message. Weighted far below explicit by
+	// the quality policy, and never treated as truth.
+	SourceImplicit = "implicit"
 )
 
 // ErrUnknownRating is returned for a rating outside the canonical vocabulary.
@@ -71,6 +86,21 @@ type Rating struct {
 	ToScope   string
 	// Rating must be one of the canonical tokens.
 	Rating string
+	// Source is [SourceExplicit] or [SourceImplicit]. An empty value normalises
+	// to explicit, so every rating recorded before this field existed keeps its
+	// full weight rather than being silently discounted.
+	Source string
+	// SignalKind is which detector fired for an implicit rating (regenerate,
+	// near_duplicate, …). Empty for explicit ratings. Part of the store's key, so
+	// two different kinds on one turn are two samples while the same kind twice
+	// stays one.
+	SignalKind string
+	// SignalStrength is the detector's confidence for an implicit rating, 0..=1.
+	// Ignored for explicit ratings, which are always a full sample. A missing or
+	// out-of-range value normalises to 1.0 — an implicit signal that forgot to
+	// say how sure it was is still discounted by the source weight, and guessing
+	// lower would silently hide evidence.
+	SignalStrength float64
 	// Note is optional free text from the rating UI.
 	Note      string
 	CreatedAt time.Time
@@ -95,9 +125,26 @@ type Store interface {
 	// Candidates returns skill-attached ratings with at least minSamples
 	// distinct raters whose good-ratio meets threshold, score descending.
 	Candidates(ctx context.Context, minSamples int, threshold float64) ([]Candidate, error)
+	// Quarantine returns skills whose evidence has fallen below the quality
+	// policy's demotion bar, worst-first.
+	//
+	// Separate from Candidates rather than one method returning both: promotion
+	// and demotion have different callers, different blast-radius rules, and
+	// different consequences for getting it wrong. Fusing them would make it
+	// easy to apply a promotion cap to a demotion or vice versa.
+	Quarantine(ctx context.Context) ([]QuarantineCandidate, error)
 	// Durable reports whether ratings survive a restart. Used to log honestly
 	// at startup instead of pretending an in-memory store is a store.
 	Durable() bool
+}
+
+// QuarantineCandidate is a skill the policy says should stop being injected.
+type QuarantineCandidate struct {
+	OrgID   string
+	SkillID string
+	// Score is the full verdict, carried so an operator can see the evidence
+	// behind the decision rather than just its outcome.
+	Score quality.Score
 }
 
 // Normalize validates and fills in a rating, returning the value to persist.
@@ -109,6 +156,23 @@ func Normalize(r Rating) (Rating, error) {
 	r.FromScope = strings.TrimSpace(r.FromScope)
 	r.ToScope = strings.TrimSpace(r.ToScope)
 	r.Rating = strings.ToLower(strings.TrimSpace(r.Rating))
+	r.Source = strings.ToLower(strings.TrimSpace(r.Source))
+	r.SignalKind = strings.ToLower(strings.TrimSpace(r.SignalKind))
+	if r.Source == "" {
+		r.Source = SourceExplicit
+	}
+	if r.Source != SourceExplicit && r.Source != SourceImplicit {
+		return Rating{}, fmt.Errorf("feedback: unknown rating source %q", r.Source)
+	}
+	if r.Source == SourceExplicit {
+		// An explicit rating has no detector, so it can carry no kind. Clearing
+		// rather than rejecting: a caller that sets both is confused, not hostile,
+		// and the kind is what would corrupt the key.
+		r.SignalKind = ""
+		r.SignalStrength = 1
+	} else if r.SignalStrength <= 0 || r.SignalStrength > 1 {
+		r.SignalStrength = 1
+	}
 	if r.OrgID == "" {
 		return Rating{}, errors.New("feedback: org_id is required")
 	}
@@ -133,7 +197,8 @@ type memoryKey struct {
 }
 
 type memoryValue struct {
-	fromScope, toScope, rating string
+	fromScope, toScope, rating, source string
+	strength                           float64
 }
 
 // MemoryStore is a non-durable Store. Ratings are lost on restart, so it must
@@ -165,12 +230,42 @@ func (s *MemoryStore) Record(_ context.Context, r Rating) error {
 		fromScope: clean.FromScope,
 		toScope:   clean.ToScope,
 		rating:    clean.Rating,
+		source:    clean.Source,
+		strength:  clean.SignalStrength,
 	}
 	return nil
 }
 
+// groupKey identifies one aggregation bucket. Package-scoped because both the
+// promotion and the demotion read model group the same way, and two copies would
+// be two chances to group differently.
+type groupKey struct {
+	orgID, skillID, fromScope, toScope string
+}
+
+// aggregate accumulates one skill's evidence, keeping explicit and implicit
+// apart so the quality policy — not this file — decides how to weigh them.
 type aggregate struct {
-	good, total int
+	evidence quality.Evidence
+}
+
+// add folds one recorded rating in.
+func (a *aggregate) add(rating string, source string, strength float64) {
+	good, err := scoreWeight(rating)
+	if err != nil {
+		return
+	}
+	if source == SourceImplicit {
+		// Implicit evidence is only ever negative: there is no behavioural
+		// signal for satisfaction, and counting one would make silence a vote.
+		a.evidence.ImplicitBadWeight += strength
+		return
+	}
+	if good {
+		a.evidence.ExplicitGood++
+		return
+	}
+	a.evidence.ExplicitBad++
 }
 
 // Candidates aggregates skill-attached ratings. Run-only ratings (SkillID "")
@@ -179,9 +274,6 @@ func (s *MemoryStore) Candidates(_ context.Context, minSamples int, threshold fl
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	type groupKey struct {
-		orgID, skillID, fromScope, toScope string
-	}
 	groups := make(map[groupKey]*aggregate)
 	for key, value := range s.ratings {
 		if key.skillID == "" {
@@ -193,19 +285,23 @@ func (s *MemoryStore) Candidates(_ context.Context, minSamples int, threshold fl
 			agg = &aggregate{}
 			groups[gk] = agg
 		}
-		agg.total++
-		if good, err := scoreWeight(value.rating); err == nil && good {
-			agg.good++
-		}
+		agg.add(value.rating, value.source, value.strength)
 	}
 
 	out := make([]Candidate, 0, len(groups))
 	for gk, agg := range groups {
-		if agg.total < minSamples {
+		score := quality.Evaluate(agg.evidence)
+		// The caller's threshold still governs promotion — an operator's
+		// configured bar is not this package's to override. What changed is WHAT
+		// it is compared against: the Wilson lower bound rather than the raw
+		// ratio, so a 1-of-1 skill can no longer present as perfect. The
+		// consequence is deliberate and worth knowing: promotion now needs
+		// volume as well as agreement, so a 9-of-10 skill is not promotable at
+		// 0.8 until it has roughly thirty samples.
+		if score.WeightedTotal < float64(minSamples) {
 			continue
 		}
-		score := float64(agg.good) / float64(agg.total)
-		if score < threshold {
+		if score.LowerBound < threshold {
 			continue
 		}
 		out = append(out, Candidate{
@@ -213,13 +309,66 @@ func (s *MemoryStore) Candidates(_ context.Context, minSamples int, threshold fl
 			SkillID:   gk.skillID,
 			FromScope: gk.fromScope,
 			ToScope:   gk.toScope,
-			Good:      agg.good,
-			Total:     agg.total,
-			Score:     score,
+			Good:      agg.evidence.ExplicitGood,
+			Total:     agg.evidence.ExplicitGood + agg.evidence.ExplicitBad,
+			Score:     score.LowerBound,
 		})
 	}
 	sortCandidates(out)
 	return out, nil
+}
+
+// Quarantine applies the quality policy's demotion rule to every skill-attached
+// group.
+//
+// Run-level rows (skill_id "") are skipped: quarantining is an action on a skill,
+// and a run's rating with no matched skill names nothing to act on.
+func (s *MemoryStore) Quarantine(_ context.Context) ([]QuarantineCandidate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	groups := make(map[groupKey]*aggregate)
+	for key, value := range s.ratings {
+		if key.skillID == "" {
+			continue
+		}
+		gk := groupKey{key.orgID, key.skillID, value.fromScope, value.toScope}
+		agg, ok := groups[gk]
+		if !ok {
+			agg = &aggregate{}
+			groups[gk] = agg
+		}
+		agg.add(value.rating, value.source, value.strength)
+	}
+
+	out := make([]QuarantineCandidate, 0)
+	for gk, agg := range groups {
+		score := quality.Evaluate(agg.evidence)
+		if quality.Decide(quality.StateActive, score) != quality.DecisionQuarantine {
+			continue
+		}
+		out = append(out, QuarantineCandidate{
+			OrgID:   gk.orgID,
+			SkillID: gk.skillID,
+			Score:   score,
+		})
+	}
+	sortQuarantine(out)
+	return out, nil
+}
+
+// sortQuarantine orders worst-first, ties by org/skill, so the sweep cap always
+// stops the most clearly broken skills and two runs agree.
+func sortQuarantine(out []QuarantineCandidate) {
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score.LowerBound != out[j].Score.LowerBound {
+			return out[i].Score.LowerBound < out[j].Score.LowerBound
+		}
+		if out[i].OrgID != out[j].OrgID {
+			return out[i].OrgID < out[j].OrgID
+		}
+		return out[i].SkillID < out[j].SkillID
+	})
 }
 
 // sortCandidates orders by score descending, then org/skill for determinism.

@@ -1009,6 +1009,13 @@ impl SessionCore for MockSessionCore {
         Err(Status::unimplemented("compact_now not needed in this test"))
     }
 
+    async fn set_agent_skill_enabled(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::SetAgentSkillEnabledRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::SetAgentSkillEnabledResponse>, Status> {
+        Err(Status::unimplemented("set_agent_skill_enabled not needed in test"))
+    }
+
     async fn upsert_agent_skill(
         &self,
         _: TReq<mp_contracts::model_plane::v1::UpsertAgentSkillRequest>,

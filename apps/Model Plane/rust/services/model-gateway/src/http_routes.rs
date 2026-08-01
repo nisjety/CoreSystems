@@ -5387,6 +5387,22 @@ pub struct InvokeRequest {
     /// its tool set, whether or not the Search toggle is also on.
     #[serde(default, alias = "deepResearch")]
     pub deep_research: bool,
+    /// The client asked to regenerate the previous answer rather than send a new
+    /// message.
+    ///
+    /// Client-declared because the server cannot infer it: a regenerate arrives
+    /// as an ordinary turn carrying the same question. It is only ever WEAK
+    /// evidence of dissatisfaction (a regenerate often means "another style"),
+    /// and it is weighted accordingly downstream — so a client asserting it
+    /// cannot do more than nudge one skill's score.
+    #[serde(default, alias = "regenerate")]
+    pub regenerated: bool,
+    /// The client resubmitted an EDITED version of the previous question.
+    ///
+    /// Also client-declared, and for the same reason: the edit happened in the
+    /// composer and never reached the server as a distinct action.
+    #[serde(default, alias = "editResubmit")]
+    pub edited_resubmit: bool,
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
     #[serde(default)]

@@ -201,6 +201,143 @@ pub fn record_chat_turn(
     );
 }
 
+/// The previous turn in one conversation, for implicit-dissatisfaction detection.
+///
+/// Separate from [`ChatTurnRecord`] and keyed differently on purpose. That map is
+/// `request_id → turn`, which answers "what was this turn?" for a rating that
+/// names a turn. This one is `(org, user, thread) → last turn`, which answers
+/// "what came just before?" — the question a detector asks, and one the request
+/// id cannot answer because the client does not know the previous turn's id.
+#[derive(Clone, Debug)]
+pub struct PreviousTurn {
+    /// What the user asked last time.
+    pub message: String,
+    /// The run that ANSWERED it. Signals attach here, not to the new turn: the
+    /// user is unhappy with the previous answer, and pointing the evidence at the
+    /// turn that expressed the complaint would blame the wrong run.
+    pub run_id: String,
+    /// The skills injected into that previous turn — the ones that actually
+    /// steered the answer being complained about.
+    pub skill_ids: Vec<String>,
+    /// How long ago it was.
+    pub elapsed: Duration,
+}
+
+struct PreviousEntry {
+    message: String,
+    run_id: String,
+    skill_ids: Vec<String>,
+    at: Instant,
+}
+
+/// How long a previous turn is retained.
+///
+/// Much shorter than [`TURN_TTL`]: this only feeds a near-duplicate window
+/// measured in minutes, so holding conversations for a day would be memory spent
+/// on data no detector will look at.
+const PREVIOUS_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Longest user message retained for comparison. A re-ask is a question, not a
+/// pasted document, and retaining unbounded turn text would make this map a
+/// content store.
+const MAX_PREVIOUS_MESSAGE_BYTES: usize = 4096;
+
+/// `(org, user, thread)` → the previous turn.
+#[derive(Clone, Default)]
+pub struct PreviousTurnRegistry {
+    inner: Arc<DashMap<String, PreviousEntry>>,
+}
+
+impl PreviousTurnRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { inner: Arc::new(DashMap::new()) }
+    }
+
+    /// Read the previous turn, then replace it with this one.
+    ///
+    /// One operation because every caller wants both and doing them separately
+    /// invites a path that reads without advancing — which would compare every
+    /// future turn against the same stale message forever.
+    pub fn swap(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        message: &str,
+        run_id: &str,
+        skill_ids: Vec<String>,
+    ) -> Option<PreviousTurn> {
+        let key = Self::key(org_id, user_id, thread_id)?;
+        let now = Instant::now();
+        self.purge_expired(now);
+
+        let previous = self.inner.get(&key).and_then(|entry| {
+            let elapsed = now.saturating_duration_since(entry.at);
+            (elapsed <= PREVIOUS_TTL).then(|| PreviousTurn {
+                message: entry.message.clone(),
+                run_id: entry.run_id.clone(),
+                skill_ids: entry.skill_ids.clone(),
+                elapsed,
+            })
+        });
+
+        // Fail closed on capacity exactly like `record`: never evict a live
+        // conversation to admit a new one.
+        if self.inner.len() >= MAX_ENTRIES && !self.inner.contains_key(&key) {
+            return previous;
+        }
+        self.inner.insert(
+            key,
+            PreviousEntry {
+                message: truncate_bytes(message, MAX_PREVIOUS_MESSAGE_BYTES),
+                run_id: run_id.to_owned(),
+                skill_ids,
+                at: now,
+            },
+        );
+        previous
+    }
+
+    /// A key only exists when all three parts do. A conversation without a
+    /// thread has no "previous turn" to speak of.
+    fn key(org_id: &str, user_id: &str, thread_id: &str) -> Option<String> {
+        let (org, user, thread) = (org_id.trim(), user_id.trim(), thread_id.trim());
+        if org.is_empty() || user.is_empty() || thread.is_empty() {
+            return None;
+        }
+        Some(format!("{org}\u{1f}{user}\u{1f}{thread}"))
+    }
+
+    fn purge_expired(&self, now: Instant) {
+        self.inner
+            .retain(|_, entry| now.saturating_duration_since(entry.at) <= PREVIOUS_TTL);
+    }
+
+    #[must_use]
+    pub fn tracked(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+/// Process-wide previous-turn registry.
+pub fn previous_turns() -> &'static PreviousTurnRegistry {
+    static GLOBAL: OnceLock<PreviousTurnRegistry> = OnceLock::new();
+    GLOBAL.get_or_init(PreviousTurnRegistry::new)
+}
+
+/// Truncate on a char boundary so a multi-byte rune is never split.
+fn truncate_bytes(value: &str, max: usize) -> String {
+    if value.len() <= max {
+        return value.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 /// Ids of the skills `fetch_skill_context` would inject for this turn. Mirrors
 /// its filter (non-empty body) so the recorded set is exactly the injected set.
 fn injected_skill_ids(

@@ -2123,6 +2123,7 @@ mod tests {
         GetContextAssemblyResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse,
         HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, InferChunk, InferResponse,
         LanguageAnalysisResult, ListModelsRequest, ListModelsResponse, ListRunsRequest, ListSystemRunsRequest,
+        SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse,
         ListRunsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse,
         ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ManagedRunSource,
         ModelInfo, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
@@ -2724,6 +2725,13 @@ mod tests {
             _: Request<CompactNowRequest>,
         ) -> Result<Response<CompactNowResponse>, Status> {
             Err(Status::unimplemented("compact_now not needed in test"))
+        }
+
+        async fn set_agent_skill_enabled(
+            &self,
+            _: Request<SetAgentSkillEnabledRequest>,
+        ) -> Result<Response<SetAgentSkillEnabledResponse>, Status> {
+            Err(Status::unimplemented("set_agent_skill_enabled not needed in test"))
         }
 
         async fn upsert_agent_skill(

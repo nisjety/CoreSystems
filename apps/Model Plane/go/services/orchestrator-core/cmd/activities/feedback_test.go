@@ -2,6 +2,7 @@ package activities
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
@@ -14,7 +15,16 @@ import (
 func TestAggregateFeedbackActivity_ReadsDurableStore(t *testing.T) {
 	ctx := context.Background()
 	store := feedback.NewMemoryStore()
-	for i, user := range []string{"u1", "u2", "u3", "u4", "u5"} {
+	// 30 good + 1 poor. The raw ratio (0.97) is not what promotes it — the
+	// Wilson lower bound is, and that needs VOLUME as well as agreement. The
+	// four-of-five sample this test used to carry has a bound of ~0.38 and no
+	// longer clears 0.8, which is the intended behaviour change rather than a
+	// regression: ten-ish samples is thin evidence however good the ratio looks.
+	users := make([]string, 0, 31)
+	for i := range 31 {
+		users = append(users, "u"+strconv.Itoa(i))
+	}
+	for i, user := range users {
 		r := feedback.Rating{
 			OrgID:     "org-1",
 			UserID:    user,
@@ -24,8 +34,8 @@ func TestAggregateFeedbackActivity_ReadsDurableStore(t *testing.T) {
 			ToScope:   "workspace",
 			Rating:    feedback.RatingGood,
 		}
-		if i == 4 {
-			r.Rating = feedback.RatingPoor // 4/5 = 0.8
+		if i == 30 {
+			r.Rating = feedback.RatingPoor
 		}
 		if err := store.Record(ctx, r); err != nil {
 			t.Fatalf("record: %v", err)
@@ -43,7 +53,7 @@ func TestAggregateFeedbackActivity_ReadsDurableStore(t *testing.T) {
 		t.Fatalf("expected 1 candidate, got %+v", out.Candidates)
 	}
 	got := out.Candidates[0]
-	if got.SkillID != "cap.skill.summarize" || got.Good != 4 || got.Total != 5 {
+	if got.SkillID != "cap.skill.summarize" || got.Good != 30 || got.Total != 31 {
 		t.Fatalf("unexpected candidate: %+v", got)
 	}
 	if got.OrgID != "org-1" {

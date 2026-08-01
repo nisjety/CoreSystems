@@ -868,6 +868,22 @@ pub async fn invoke_stream_sse(
         &req.content,
         MAX_INJECTED_SKILLS,
     );
+    // Implicit dissatisfaction: did this turn signal that the PREVIOUS answer
+    // missed? Runs here because everything it needs is resolved — verified
+    // org/user, the thread, and the skills recorded for this turn just above —
+    // and because it must read the previous-turn slot before overwriting it.
+    //
+    // Advisory and infallible, exactly like the recording above: a failure costs
+    // one weak learning signal, never the user's turn.
+    publish_implicit_dissatisfaction(
+        &state,
+        &req,
+        &req_id,
+        &org_id,
+        &user_id,
+        &session_run.run_id,
+        &session_run.thread_id,
+    );
     if !skill_context.is_empty() {
         let joined = skill_context.join("\n\n");
         let insert_at = messages
@@ -4969,6 +4985,81 @@ impl EnumName for SubagentRole {
     fn as_str_name(&self) -> &'static str {
         self.as_str_name()
     }
+}
+
+
+/// Detect and publish implicit dissatisfaction with the PREVIOUS turn.
+///
+/// Detection is synchronous and pure — string work against an in-process map.
+/// The PUBLISH is spawned rather than awaited, and that is the important part:
+/// this runs BEFORE the response stream opens, so awaiting a bus round-trip here
+/// would put NATS latency in front of every chat turn and a stalled bus would
+/// stall answers. A learning signal must never be able to do that.
+///
+/// Best-effort in every other direction too: no previous turn, no signal, a ZDR
+/// request or a failing publisher all end in doing nothing.
+#[allow(clippy::too_many_arguments)] // request context, mirrors record_chat_turn
+fn publish_implicit_dissatisfaction(
+    state: &crate::state::AppState,
+    req: &crate::http_routes::InvokeRequest,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    thread_id: &str,
+) {
+    use crate::dissatisfaction::{classify, TurnContext};
+
+    // Reading the previous turn also REPLACES it with this one, in one
+    // operation. Splitting them would allow a path that reads without advancing,
+    // which would compare every later turn against the same stale message.
+    let skill_ids = crate::chat_turn_registry::global()
+        .lookup(request_id)
+        .map(|record| record.skill_ids)
+        .unwrap_or_default();
+    let Some(previous) = crate::chat_turn_registry::previous_turns().swap(
+        org_id,
+        user_id,
+        thread_id,
+        &req.content,
+        run_id,
+        skill_ids,
+    ) else {
+        return;
+    };
+
+    let signals = classify(&TurnContext {
+        message: &req.content,
+        previous_message: Some(previous.message.as_str()),
+        since_previous: Some(previous.elapsed),
+        regenerated: req.regenerated,
+        edited_resubmit: req.edited_resubmit,
+    });
+    if signals.is_empty() {
+        return;
+    }
+
+    let envelopes =
+        crate::implicit_feedback::envelopes_for(&signals, &previous, org_id, user_id, req.zdr);
+    if envelopes.is_empty() {
+        return;
+    }
+    let publisher = state.publisher.clone();
+    let run_id = previous.run_id.clone();
+    tokio::spawn(async move {
+        for envelope in envelopes {
+            if let Err(error) = publisher
+                .publish(crate::implicit_feedback::FEEDBACK_SUBJECT, &envelope)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    run_id = %run_id,
+                    "implicit dissatisfaction signal not published"
+                );
+            }
+        }
+    });
 }
 
 #[cfg(test)]

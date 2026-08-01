@@ -145,6 +145,8 @@ mod tests {
 
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
+            regenerated: false,
+            edited_resubmit: false,
             content: content.to_owned(),
             model: model.map(str::to_owned),
             session_key: None,

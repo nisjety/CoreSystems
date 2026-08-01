@@ -38,9 +38,12 @@ func TestThumbsUpRaisesTheScoreAndNeverLowersIt(t *testing.T) {
 	if err := s.Record(ctx, rating("org-1", "run-2", "user-2", "skill.x", RatingPoor)); err != nil {
 		t.Fatalf("record poor: %v", err)
 	}
+	// The score is the Wilson 95% LOWER BOUND, not the raw ratio, so 1-good-of-2
+	// scores far below 0.5. What this test pins is the DIRECTION — a thumbs-up
+	// must never lower it — which is the wire break it was written for.
 	before := scoreOf(t, s, "skill.x")
-	if before != 0.5 {
-		t.Fatalf("baseline score = %v, want 0.5", before)
+	if before <= 0 || before >= 0.5 {
+		t.Fatalf("baseline bound = %v, want a value below the 0.5 raw ratio", before)
 	}
 
 	// A thumbs-up (already normalised to "good" by model-gateway) must RAISE it.
@@ -99,14 +102,27 @@ func TestCandidatesHonourThresholdAndSampleFloor(t *testing.T) {
 	// 1/1 → too few samples.
 	mustRecord(t, s, rating("org-1", "run-new", "user-0", "skill.new", RatingGood))
 
+	// 9-of-10 no longer clears 0.8, and that is the point of the change: its
+	// Wilson lower bound is ~0.60, because ten samples is thin evidence however
+	// good the ratio looks. Promotion now needs volume as well as agreement.
+	if got, err := s.Candidates(ctx, 5, 0.8); err != nil {
+		t.Fatalf("candidates: %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("9/10 should not promote at 0.8 on ten samples, got %+v", got)
+	}
+
+	// Give the same skill real volume and it promotes.
+	for i := 10; i < 40; i++ {
+		mustRecord(t, s, rating("org-1", "run-good-"+itoa(i), "user-"+itoa(i), "skill.good", RatingGood))
+	}
 	got, err := s.Candidates(ctx, 5, 0.8)
 	if err != nil {
 		t.Fatalf("candidates: %v", err)
 	}
 	if len(got) != 1 {
-		t.Fatalf("expected 1 candidate, got %d: %+v", len(got), got)
+		t.Fatalf("expected 1 candidate after volume accumulated, got %d: %+v", len(got), got)
 	}
-	if got[0].SkillID != "skill.good" || got[0].Good != 9 || got[0].Total != 10 {
+	if got[0].SkillID != "skill.good" {
 		t.Fatalf("unexpected candidate: %+v", got[0])
 	}
 	if got[0].OrgID != "org-1" {

@@ -26,6 +26,13 @@ type FeedbackPromotionOutput struct {
 	Evaluated int      `json:"evaluated"`
 	Promoted  []string `json:"promoted"`
 	Skipped   []string `json:"skipped"`
+	// Quarantined are skills the quality policy stopped injecting this sweep.
+	Quarantined []string `json:"quarantined"`
+	// QuarantineWithheld is how many further quarantines the per-sweep cap held
+	// back. Surfaced in the output, not just the log: a non-zero value means more
+	// skills were below the bar than one sweep may stop, which is the signature
+	// of a systemic problem rather than a few bad skills.
+	QuarantineWithheld int `json:"quarantine_withheld"`
 }
 
 // FeedbackPromotionWorkflow closes the feedback → skill-promotion loop
@@ -92,6 +99,29 @@ func FeedbackPromotionWorkflow(ctx workflow.Context, input FeedbackPromotionInpu
 			out.Skipped = append(out.Skipped, cand.SkillID)
 		}
 	}
+
+	// Demotion runs in the same sweep as promotion, AFTER it.
+	//
+	// Same sweep because the two read the same evidence and splitting them into
+	// separate schedules would let a skill be promoted by one job while the other
+	// was about to quarantine it. After, because promotion is the reversible,
+	// lower-consequence half: if the demotion pass fails, the sweep still did
+	// something useful rather than nothing.
+	var quarantine activities.QuarantineSweepOutput
+	if qerr := workflow.ExecuteActivity(actCtx, "QuarantineSweepActivity").Get(ctx, &quarantine); qerr != nil {
+		// Never fatal to the workflow. Failing the whole sweep because the
+		// demotion half could not reach session-core would also discard the
+		// promotions that already succeeded.
+		logger.Error("quarantine sweep failed", "error", qerr)
+	} else if quarantine.Evaluated > 0 {
+		logger.Info("quarantine sweep completed",
+			"evaluated", quarantine.Evaluated,
+			"quarantined", len(quarantine.Quarantined),
+			"failed", len(quarantine.Failed),
+			"withheld", quarantine.Withheld)
+	}
+	out.Quarantined = quarantine.Quarantined
+	out.QuarantineWithheld = quarantine.Withheld
 
 	logger.Info("FeedbackPromotionWorkflow completed",
 		"evaluated", out.Evaluated,

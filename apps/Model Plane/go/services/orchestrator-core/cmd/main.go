@@ -137,6 +137,7 @@ func main() {
 	w.RegisterActivity(a.RunPromotionGateActivity)
 	w.RegisterActivity(a.UpdateRegistryActivity)
 	w.RegisterActivity(a.AggregateFeedbackActivity)
+	w.RegisterActivity(a.QuarantineSweepActivity)
 	w.RegisterActivity(a.EvaluatorOptimizerActivity)
 	w.RegisterActivity(a.InferModelActivity)
 	w.RegisterActivity(a.PublishEvalRoundActivity)
@@ -217,20 +218,30 @@ func main() {
 					ToScope   string   `json:"to_scope"`
 					Rating    string   `json:"rating"`
 					Note      string   `json:"note"`
+					// Implicit signals ride the same subject so they are read on
+					// day one, but they are stored and weighted separately. An
+					// absent Source normalises to explicit, so every rating
+					// published before these fields existed keeps its full weight.
+					Source         string  `json:"source"`
+					SignalKind     string  `json:"signal_kind"`
+					SignalStrength float64 `json:"signal_strength"`
 				}
 				if perr := json.Unmarshal(env.Payload, &p); perr != nil {
 					slog.Error("feedback payload decode failed", "subject", subj, "error", perr)
 					return
 				}
 				base := feedback.Rating{
-					OrgID:     env.OrgID,
-					UserID:    env.UserID,
-					RunID:     p.RunID,
-					FromScope: p.FromScope,
-					ToScope:   p.ToScope,
-					Rating:    p.Rating,
-					Note:      p.Note,
-					CreatedAt: env.Ts,
+					OrgID:          env.OrgID,
+					UserID:         env.UserID,
+					RunID:          p.RunID,
+					FromScope:      p.FromScope,
+					ToScope:        p.ToScope,
+					Rating:         p.Rating,
+					Note:           p.Note,
+					Source:         p.Source,
+					SignalKind:     p.SignalKind,
+					SignalStrength: p.SignalStrength,
+					CreatedAt:      env.Ts,
 				}
 				// Row 1 is always the run-level rating (skill_id ""), so a chat
 				// turn with no matched skill is still recorded rather than

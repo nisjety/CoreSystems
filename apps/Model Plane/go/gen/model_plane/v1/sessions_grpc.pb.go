@@ -19,21 +19,22 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionCore_CreateThread_FullMethodName       = "/model_plane.v1.SessionCore/CreateThread"
-	SessionCore_AppendMessage_FullMethodName      = "/model_plane.v1.SessionCore/AppendMessage"
-	SessionCore_StartRun_FullMethodName           = "/model_plane.v1.SessionCore/StartRun"
-	SessionCore_CompleteStep_FullMethodName       = "/model_plane.v1.SessionCore/CompleteStep"
-	SessionCore_ReserveToolAction_FullMethodName  = "/model_plane.v1.SessionCore/ReserveToolAction"
-	SessionCore_FinalizeToolAction_FullMethodName = "/model_plane.v1.SessionCore/FinalizeToolAction"
-	SessionCore_SaveCheckpoint_FullMethodName     = "/model_plane.v1.SessionCore/SaveCheckpoint"
-	SessionCore_ReplayThread_FullMethodName       = "/model_plane.v1.SessionCore/ReplayThread"
-	SessionCore_GetContextAssembly_FullMethodName = "/model_plane.v1.SessionCore/GetContextAssembly"
-	SessionCore_CompactNow_FullMethodName         = "/model_plane.v1.SessionCore/CompactNow"
-	SessionCore_UpsertAgentSkill_FullMethodName   = "/model_plane.v1.SessionCore/UpsertAgentSkill"
-	SessionCore_ListAgentSkills_FullMethodName    = "/model_plane.v1.SessionCore/ListAgentSkills"
-	SessionCore_ListConversation_FullMethodName   = "/model_plane.v1.SessionCore/ListConversation"
-	SessionCore_ListThreads_FullMethodName        = "/model_plane.v1.SessionCore/ListThreads"
-	SessionCore_SetRunMode_FullMethodName         = "/model_plane.v1.SessionCore/SetRunMode"
+	SessionCore_CreateThread_FullMethodName         = "/model_plane.v1.SessionCore/CreateThread"
+	SessionCore_AppendMessage_FullMethodName        = "/model_plane.v1.SessionCore/AppendMessage"
+	SessionCore_StartRun_FullMethodName             = "/model_plane.v1.SessionCore/StartRun"
+	SessionCore_CompleteStep_FullMethodName         = "/model_plane.v1.SessionCore/CompleteStep"
+	SessionCore_ReserveToolAction_FullMethodName    = "/model_plane.v1.SessionCore/ReserveToolAction"
+	SessionCore_FinalizeToolAction_FullMethodName   = "/model_plane.v1.SessionCore/FinalizeToolAction"
+	SessionCore_SaveCheckpoint_FullMethodName       = "/model_plane.v1.SessionCore/SaveCheckpoint"
+	SessionCore_ReplayThread_FullMethodName         = "/model_plane.v1.SessionCore/ReplayThread"
+	SessionCore_GetContextAssembly_FullMethodName   = "/model_plane.v1.SessionCore/GetContextAssembly"
+	SessionCore_CompactNow_FullMethodName           = "/model_plane.v1.SessionCore/CompactNow"
+	SessionCore_UpsertAgentSkill_FullMethodName     = "/model_plane.v1.SessionCore/UpsertAgentSkill"
+	SessionCore_ListAgentSkills_FullMethodName      = "/model_plane.v1.SessionCore/ListAgentSkills"
+	SessionCore_SetAgentSkillEnabled_FullMethodName = "/model_plane.v1.SessionCore/SetAgentSkillEnabled"
+	SessionCore_ListConversation_FullMethodName     = "/model_plane.v1.SessionCore/ListConversation"
+	SessionCore_ListThreads_FullMethodName          = "/model_plane.v1.SessionCore/ListThreads"
+	SessionCore_SetRunMode_FullMethodName           = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
 // SessionCoreClient is the client API for SessionCore service.
@@ -80,6 +81,14 @@ type SessionCoreClient interface {
 	// read back here so they become usable in inference, not just stored.
 	// Org-scoped — only the caller's org's skills are returned.
 	ListAgentSkills(ctx context.Context, in *ListAgentSkillsRequest, opts ...grpc.CallOption) (*ListAgentSkillsResponse, error)
+	// SetAgentSkillEnabled — flip one skill's injection switch by id.
+	//
+	// UpsertAgentSkill cannot do this: it is keyed by (org_id, name) and upserts
+	// the WHOLE skill, so calling it with only `enabled` would blank the content,
+	// triggers and restrictions of the skill it was meant to pause. The quality
+	// policy needs to stop injecting a skill without destroying it, which is
+	// precisely what that would do.
+	SetAgentSkillEnabled(ctx context.Context, in *SetAgentSkillEnabledRequest, opts ...grpc.CallOption) (*SetAgentSkillEnabledResponse, error)
 	// List a thread's conversation messages in order (the durable transcript
 	// source for the G7 learning review). Distinct from the gateway's in-memory
 	// ListThreadMessages cache — this reads the session-core system-of-record.
@@ -233,6 +242,16 @@ func (c *sessionCoreClient) ListAgentSkills(ctx context.Context, in *ListAgentSk
 	return out, nil
 }
 
+func (c *sessionCoreClient) SetAgentSkillEnabled(ctx context.Context, in *SetAgentSkillEnabledRequest, opts ...grpc.CallOption) (*SetAgentSkillEnabledResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetAgentSkillEnabledResponse)
+	err := c.cc.Invoke(ctx, SessionCore_SetAgentSkillEnabled_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionCoreClient) ListConversation(ctx context.Context, in *ListConversationRequest, opts ...grpc.CallOption) (*ListConversationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListConversationResponse)
@@ -307,6 +326,14 @@ type SessionCoreServer interface {
 	// read back here so they become usable in inference, not just stored.
 	// Org-scoped — only the caller's org's skills are returned.
 	ListAgentSkills(context.Context, *ListAgentSkillsRequest) (*ListAgentSkillsResponse, error)
+	// SetAgentSkillEnabled — flip one skill's injection switch by id.
+	//
+	// UpsertAgentSkill cannot do this: it is keyed by (org_id, name) and upserts
+	// the WHOLE skill, so calling it with only `enabled` would blank the content,
+	// triggers and restrictions of the skill it was meant to pause. The quality
+	// policy needs to stop injecting a skill without destroying it, which is
+	// precisely what that would do.
+	SetAgentSkillEnabled(context.Context, *SetAgentSkillEnabledRequest) (*SetAgentSkillEnabledResponse, error)
 	// List a thread's conversation messages in order (the durable transcript
 	// source for the G7 learning review). Distinct from the gateway's in-memory
 	// ListThreadMessages cache — this reads the session-core system-of-record.
@@ -366,6 +393,9 @@ func (UnimplementedSessionCoreServer) UpsertAgentSkill(context.Context, *UpsertA
 }
 func (UnimplementedSessionCoreServer) ListAgentSkills(context.Context, *ListAgentSkillsRequest) (*ListAgentSkillsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListAgentSkills not implemented")
+}
+func (UnimplementedSessionCoreServer) SetAgentSkillEnabled(context.Context, *SetAgentSkillEnabledRequest) (*SetAgentSkillEnabledResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetAgentSkillEnabled not implemented")
 }
 func (UnimplementedSessionCoreServer) ListConversation(context.Context, *ListConversationRequest) (*ListConversationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListConversation not implemented")
@@ -606,6 +636,24 @@ func _SessionCore_ListAgentSkills_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_SetAgentSkillEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetAgentSkillEnabledRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).SetAgentSkillEnabled(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_SetAgentSkillEnabled_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).SetAgentSkillEnabled(ctx, req.(*SetAgentSkillEnabledRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionCore_ListConversation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListConversationRequest)
 	if err := dec(in); err != nil {
@@ -710,6 +758,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListAgentSkills",
 			Handler:    _SessionCore_ListAgentSkills_Handler,
+		},
+		{
+			MethodName: "SetAgentSkillEnabled",
+			Handler:    _SessionCore_SetAgentSkillEnabled_Handler,
 		},
 		{
 			MethodName: "ListConversation",

@@ -59,6 +59,15 @@ service SessionCore {
   // Org-scoped — only the caller's org's skills are returned.
   rpc ListAgentSkills(ListAgentSkillsRequest) returns (ListAgentSkillsResponse);
 
+  // SetAgentSkillEnabled — flip one skill's injection switch by id.
+  //
+  // UpsertAgentSkill cannot do this: it is keyed by (org_id, name) and upserts
+  // the WHOLE skill, so calling it with only `enabled` would blank the content,
+  // triggers and restrictions of the skill it was meant to pause. The quality
+  // policy needs to stop injecting a skill without destroying it, which is
+  // precisely what that would do.
+  rpc SetAgentSkillEnabled(SetAgentSkillEnabledRequest) returns (SetAgentSkillEnabledResponse);
+
   // List a thread's conversation messages in order (the durable transcript
   // source for the G7 learning review). Distinct from the gateway's in-memory
   // ListThreadMessages cache — this reads the session-core system-of-record.
@@ -445,6 +454,33 @@ message CompactNowResponse {
 }
 
 // --- UpsertAgentSkill (G7 learning loop) ---
+
+message SetAgentSkillEnabledRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+
+  // Skill to flip, by id — not by name. A quarantine decision is made about a
+  // specific row, and names are only unique per org, so an id keeps the sweep
+  // and the mutation talking about the same thing.
+  string skill_id = 2;
+
+  // False pauses injection; true resumes it. Nothing else about the skill
+  // changes, which is the whole point of this RPC existing.
+  bool enabled = 3;
+
+  // Why, for the audit trail. The quality sweep records the bound that drove the
+  // decision so an operator can see it without re-deriving the evidence.
+  string reason = 4;
+}
+
+message SetAgentSkillEnabledResponse {
+  // False when no such skill exists in this org — reported rather than raised so
+  // a sweep over slightly stale candidates is not a hard failure.
+  bool updated = 1;
+
+  // The skill's enabled state after the call.
+  bool enabled = 2;
+}
 
 message UpsertAgentSkillRequest {
   string org_id = 1;

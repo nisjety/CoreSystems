@@ -2097,6 +2097,68 @@ impl SessionCore for SessionService {
     // DB: a background_review upsert never overwrites a user-authored skill
     // (the `WHERE` guard on the conflict), surfaced as `skipped_protected`
     // rather than an error so the loop yields gracefully to the human.
+    /// Flip one skill's injection switch without touching anything else.
+    ///
+    /// `upsert_agent_skill` is keyed by (org_id, name) and rewrites the whole
+    /// row, so using it to pause a skill would blank the content and triggers it
+    /// was meant to preserve. The quality policy needs a reversible pause, and a
+    /// destructive one would make quarantine unrecoverable — which is the single
+    /// property that policy is built around not having.
+    async fn set_agent_skill_enabled(
+        &self,
+        request: Request<pb::SetAgentSkillEnabledRequest>,
+    ) -> Result<Response<pb::SetAgentSkillEnabledResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::SetAgentSkillEnabledResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:skills:write")?;
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.skill_id.trim().is_empty() {
+                return Err(Status::invalid_argument("org_id and skill_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+
+            // org_id in the predicate as well as the id: a skill id is a ULID and
+            // therefore unguessable, but tenant scoping must never rest on
+            // unguessability.
+            let updated: Option<(bool,)> = sqlx::query_as(
+                "UPDATE agent_skills SET enabled = $1, updated_at = now() \
+                 WHERE id = $2 AND org_id = $3 RETURNING enabled",
+            )
+            .bind(req.enabled)
+            .bind(&req.skill_id)
+            .bind(&req.org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+
+            let Some((enabled,)) = updated else {
+                // Not found is reported, not raised: a sweep acts on candidates
+                // computed a moment earlier, and a skill deleted in between is a
+                // race to report rather than a failure to retry.
+                return Ok(Response::new(pb::SetAgentSkillEnabledResponse {
+                    updated: false,
+                    enabled: false,
+                }));
+            };
+            tracing::info!(
+                skill_id = %req.skill_id,
+                org_id = %req.org_id,
+                enabled,
+                reason = %req.reason,
+                actor = %caller.principal_id(),
+                "agent skill injection switch changed"
+            );
+            Ok(Response::new(pb::SetAgentSkillEnabledResponse {
+                updated: true,
+                enabled,
+            }))
+        }
+        .await;
+        record_metrics("set_agent_skill_enabled", started, result.is_ok());
+        result
+    }
+
     async fn upsert_agent_skill(
         &self,
         request: Request<pb::UpsertAgentSkillRequest>,
