@@ -1061,6 +1061,24 @@ services:
       GENERATION_MODEL: ${AGENT_MEMORY_GENERATION_MODEL:-gpt-4o-mini}
       FAST_MODEL: ${AGENT_MEMORY_FAST_MODEL:-gpt-4o-mini}
       EMBEDDING_MODEL: ${AGENT_MEMORY_EMBEDDING_MODEL:-text-embedding-3-small}
+      # The vector index dimension, stated EXPLICITLY because the server cannot
+      # infer it for an Azure-prefixed model and silently guesses wrong.
+      #
+      # agent-memory-server looks the embedding model up in its MODEL_CONFIGS
+      # table, which is keyed WITHOUT a provider prefix ("text-embedding-3-large").
+      # With EMBEDDING_MODEL=azure/text-embedding-3-large the lookup misses and it
+      # falls back to redisvl_vector_dimensions, whose default is 1536 — while the
+      # LiteLLM client passes dimensions=None and gets the model's native 3072.
+      # Every write then failed to index with "blob size 12288 (expected 6144)",
+      # leaving num_docs 0 and semantic recall permanently dead. The server does
+      # NOT self-heal: it calls index.create(overwrite=False) on boot and logs
+      # "Index already exists, not overwriting".
+      #
+      # Must match the dimension of AGENT_MEMORY_EMBEDDING_MODEL: 3072 for
+      # text-embedding-3-large, 1536 for -3-small/-ada-002. Changing it requires
+      # rebuilding the index (`agent-memory rebuild-index`) — see the runbook note
+      # in the README; an existing index keeps its old dimension forever.
+      REDISVL_VECTOR_DIMENSIONS: ${AGENT_MEMORY_VECTOR_DIMENSIONS:-3072}
       # OpenAI path
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-}
