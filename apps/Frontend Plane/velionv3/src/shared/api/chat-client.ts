@@ -51,6 +51,18 @@ export type ChatInvokeRequest = {
    * for Approve/Reject in chat). Adds the `agentic` feature family.
    */
   planMode?: boolean
+  /**
+   * This turn is a REGENERATE of the previous answer, not a new question.
+   *
+   * Client-declared because the server cannot infer it: a regenerate arrives as
+   * an ordinary turn carrying the same text. model-gateway feeds it to the
+   * implicit-dissatisfaction classifier, where it is deliberately WEAK evidence
+   * — a regenerate often just means "give me another style" — so asserting it
+   * can only nudge one skill's score, never condemn it.
+   */
+  regenerated?: boolean
+  /** This turn is an EDITED resubmit of the previous question. Same reasoning. */
+  editResubmit?: boolean
 }
 
 // ── SSE events (mapped from model-gateway's real event names) ────────────────
@@ -306,6 +318,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     features: [...features],
     tools,
     zdr: request.zdr ?? false,
+    // Snake_case on the wire; model-gateway also accepts the camelCase aliases
+    // (http_routes.rs `alias = "regenerate"` / `alias = "editResubmit"`), but
+    // matching the rest of this body keeps one convention.
+    regenerated: request.regenerated ?? false,
+    edited_resubmit: request.editResubmit ?? false,
   }
 }
 

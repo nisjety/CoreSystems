@@ -181,6 +181,16 @@ pub struct TurnContext<'a> {
 pub fn classify(context: &TurnContext<'_>) -> Vec<Signal> {
     let mut signals = Vec::new();
 
+    // A client-declared action supersedes the inference of the same thing. Both
+    // a regenerate and an edited resubmit send back a near-identical question,
+    // so `is_near_duplicate` fires on them by construction — counting both
+    // would charge one click twice (0.3 + 0.5 instead of 0.3), and at
+    // ImplicitWeight 0.25 that is 0.2 of a weighted sample against a demotion
+    // budget of 3.0, so ~15 regenerates could quarantine a skill instead of ~40.
+    //
+    // The near-duplicate detector exists to catch the user who re-asks by
+    // retyping, which is exactly the case where no explicit flag arrives.
+    let declared = context.regenerated || context.edited_resubmit;
     if context.regenerated {
         signals.push(Signal::of(SignalKind::Regenerate));
     }
@@ -190,7 +200,7 @@ pub fn classify(context: &TurnContext<'_>) -> Vec<Signal> {
     if is_correction(context.message) {
         signals.push(Signal::of(SignalKind::Correction));
     }
-    if is_near_duplicate(context) {
+    if !declared && is_near_duplicate(context) {
         signals.push(Signal::of(SignalKind::NearDuplicate));
     }
     signals
@@ -290,6 +300,50 @@ fn similarity(a: &[String], b: &[String]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// One regenerate click must be ONE sample. A regenerate resends the same
+    /// question, so the near-duplicate detector fires on it too; counting both
+    /// charged a single click 0.3 + 0.5, and at ImplicitWeight 0.25 that is 0.2
+    /// of a weighted sample against a demotion budget of 3.0 — making ~15 clicks
+    /// enough to quarantine a skill the policy budgeted ~40 for.
+    #[test]
+    fn a_declared_regenerate_is_not_also_counted_as_a_near_duplicate() {
+        let context = TurnContext {
+            message: "hva er saldoen paa konto 1920",
+            previous_message: Some("hva er saldoen paa konto 1920"),
+            since_previous: Some(Duration::from_secs(5)),
+            regenerated: true,
+            edited_resubmit: false,
+        };
+        let kinds: Vec<SignalKind> = classify(&context).iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, vec![SignalKind::Regenerate], "{kinds:?}");
+    }
+
+    /// Same suppression for an edited resubmit, near-identical by definition.
+    #[test]
+    fn a_declared_edit_resubmit_is_not_also_counted_as_a_near_duplicate() {
+        let context = TurnContext {
+            message: "hva er saldoen paa konto 1920 i dag",
+            previous_message: Some("hva er saldoen paa konto 1920"),
+            since_previous: Some(Duration::from_secs(5)),
+            regenerated: false,
+            edited_resubmit: true,
+        };
+        let kinds: Vec<SignalKind> = classify(&context).iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, vec![SignalKind::EditResubmit], "{kinds:?}");
+    }
+
+    /// The detector must still catch the user who re-asks by RETYPING — the case
+    /// it exists for, where no flag arrives.
+    #[test]
+    fn an_undeclared_retype_is_still_a_near_duplicate() {
+        let kinds: Vec<SignalKind> =
+            classify(&reask("hva er saldoen paa konto 1920", "hva er saldoen paa konto 1920", 5))
+                .iter()
+                .map(|s| s.kind)
+                .collect();
+        assert!(kinds.contains(&SignalKind::NearDuplicate), "{kinds:?}");
+    }
     use super::*;
 
     fn ctx<'a>(message: &'a str) -> TurnContext<'a> {

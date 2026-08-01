@@ -776,6 +776,8 @@ export function useChatController() {
           actions: options.actions,
           planMode: planMode(),
           zdr: options.zdr,
+          regenerated: options.regenerated,
+          editResubmit: options.editResubmit,
         },
         {
           onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel, runId }) => {
@@ -1164,6 +1166,10 @@ export function useChatController() {
       // ZDR — the thread-level lock, not the (possibly since-toggled)
       // composer state, decides.
       zdr: isTemporaryThread(state.threadId),
+      // Tells the server this is a replacement, not a new question. It is the
+      // only way model-gateway can know: the text is identical. This is what
+      // activates SignalKind::Regenerate in the implicit-feedback loop.
+      regenerated: true,
     })
   }
 
@@ -1185,6 +1191,10 @@ export function useChatController() {
       tools: original.tools,
       // Same thread-level ZDR lock as `regenerateLatest`.
       zdr: isTemporaryThread(state.threadId),
+      // The edit happened in the composer and never reached the server as a
+      // distinct action, so it has to be declared. Activates
+      // SignalKind::EditResubmit.
+      editResubmit: true,
     })
   }
 

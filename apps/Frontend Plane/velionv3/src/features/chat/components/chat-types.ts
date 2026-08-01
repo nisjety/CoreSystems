@@ -266,6 +266,19 @@ export type SendOptions = {
    * server snapshot, no title/follow-up generation.
    */
   zdr?: boolean
+  /**
+   * This send is a REGENERATE of the previous answer, or an EDITED resubmit of
+   * the previous question.
+   *
+   * Declared here because only the client knows: both arrive at the server as an
+   * ordinary turn carrying (near-)identical text. model-gateway feeds them to
+   * the implicit-dissatisfaction classifier, which is what turns a regenerate
+   * click into a weak negative signal against the skills that served the answer
+   * being replaced. Without these the two strongest behavioural signals the
+   * classifier defines are unreachable.
+   */
+  regenerated?: boolean
+  editResubmit?: boolean
 }
 
 export type EvidenceSource = (Citation & { kind: 'web' }) | ChatGroundingSource
