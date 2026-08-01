@@ -40,6 +40,104 @@ fn cache_io_allowed(zdr: bool) -> bool {
     !zdr
 }
 
+/// Whether a finished turn may be cached, and whether a cached answer may be
+/// served for it.
+///
+/// # Staleness is not the reason — replay fidelity is
+///
+/// The obvious rule would be "never cache a turn that used live data". It is
+/// also unnecessary here, and understanding why keeps the next reader from
+/// tightening this into uselessness: the cache key is the FULLY ASSEMBLED
+/// prompt, and a tool result or a retrieved passage is *in* that prompt. Change
+/// the ERP number and the prompt changes, so the key changes, so the old answer
+/// is unreachable. Nothing can go stale behind a key that contains it.
+///
+/// What a cached answer genuinely cannot reproduce is everything that was NOT
+/// answer text. A grounded turn also emitted `citation` events; a tool turn also
+/// emitted `tool_call` and `tool_result` events. This cache stores one string,
+/// so replaying it would hand the user the same prose stripped of its sources
+/// and its visible work — claims with no citations, which is worse than a
+/// slower answer.
+///
+/// So the exclusions are:
+///
+///   * **turns that emitted citations** (knowledge-base or web) — the sources
+///     would be lost;
+///   * **tool turns** — the tool timeline would be lost;
+///   * **structured-output turns**, whose schema lives on the request rather
+///     than in the messages and therefore is NOT in the key. Two different
+///     schemas over identical messages would collide. Excluded rather than
+///     keyed, because such calls are machine one-offs nobody re-asks;
+///   * **ZDR turns**, which must leave nothing behind at all.
+///
+/// Notably absent: context-assembly grounding. Assembled Data Plane context is
+/// prompt text and emits no event of its own, so a text-only replay of it is
+/// faithful — and being in the key, it cannot be stale either. Gating on it
+/// instead made the cache store nothing at all in any deployment with Data
+/// Plane wired up, which is how the distinction above was found.
+///
+/// What is left is the case this cache is for: a plain question, answered from
+/// the model and the conversation, asked again. The prompt carries today's date
+/// (the temporal-awareness system message), so entries fall out of reach on
+/// their own even before the TTL.
+// Four independent yes/no exclusions. An enum would force them to be mutually
+// exclusive, and a turn can easily trip two at once.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TurnCacheability {
+    pub zdr: bool,
+    /// The turn emitted `tool_call`/`tool_result` events.
+    pub used_tools: bool,
+    /// The turn emitted `citation` events (knowledge-base or web).
+    pub emitted_citations: bool,
+    pub structured_output: bool,
+}
+
+impl TurnCacheability {
+    /// True only when every exclusion above is clear.
+    #[must_use]
+    pub const fn is_cacheable(self) -> bool {
+        !self.zdr && !self.used_tools && !self.emitted_citations && !self.structured_output
+    }
+}
+
+/// Who a cached answer belongs to.
+///
+/// `user_id` is part of the identity, not a nice-to-have. The exact-match
+/// backend is *incidentally* user-safe today — per-user memory is injected into
+/// the prompt, so two users produce different keys — but that is a property of
+/// what happens to be in the prompt rather than a guarantee, and it does not
+/// hold at all for the similarity-matching backends: two colleagues in one org
+/// asking near-identical questions match each other above the threshold, and
+/// one of them gets an answer built from the other's memories.
+///
+/// Scoping by user makes the guarantee explicit and backend-independent. The
+/// cost is a lower hit rate on genuinely shared questions, which is the correct
+/// trade for a per-user assistant.
+#[derive(Clone, Copy, Debug)]
+pub struct CacheScope<'a> {
+    pub org_id: &'a str,
+    pub user_id: &'a str,
+    pub model: &'a str,
+}
+
+impl CacheScope<'_> {
+    /// The scope as ordered attributes for backends that filter rather than key.
+    fn attributes(self) -> BTreeMap<&'static str, String> {
+        let mut attributes = BTreeMap::new();
+        if !self.org_id.is_empty() {
+            attributes.insert("org_id", self.org_id.to_owned());
+        }
+        if !self.user_id.is_empty() {
+            attributes.insert("user_id", self.user_id.to_owned());
+        }
+        if !self.model.is_empty() {
+            attributes.insert("model", self.model.to_owned());
+        }
+        attributes
+    }
+}
+
 /// Returns the process-global semantic cache, lazily initialized from the
 /// environment. `None` means no cache is configured — callers proceed straight
 /// to inference.
@@ -84,47 +182,41 @@ impl SemanticCache {
 
     /// Look up a cached response for `prompt`, scoped to org + model. A miss or
     /// any error yields `None` so the caller falls through to inference.
-    pub async fn lookup(
-        &self,
-        prompt: &str,
-        org_id: &str,
-        model: &str,
-        zdr: bool,
-    ) -> Option<String> {
+    pub async fn lookup(&self, prompt: &str, scope: CacheScope<'_>, zdr: bool) -> Option<String> {
         if !cache_io_allowed(zdr) {
             return None;
         }
         match self {
-            Self::Managed(c) => c.lookup(prompt, org_id, model).await,
-            Self::DataPlane(c) => c.lookup(prompt, org_id, model).await,
-            Self::Local(c) => c.lookup(prompt, org_id, model).await,
+            Self::Managed(c) => c.lookup(prompt, scope).await,
+            Self::DataPlane(c) => c.lookup(prompt, scope).await,
+            Self::Local(c) => c.lookup(prompt, scope).await,
             Self::Layered { exact, semantic } => {
                 // Fast path: a local Dragonfly exact-match hit.
-                if let Some(hit) = exact.lookup(prompt, org_id, model).await {
+                if let Some(hit) = exact.lookup(prompt, scope).await {
                     return Some(hit);
                 }
                 // Fallback: a semantic (vector) hit from Data Plane v2. Warm the
                 // exact tier so a repeat of this exact prompt stays a local hit.
-                let hit = semantic.lookup(prompt, org_id, model).await?;
-                exact.store(prompt, org_id, model, &hit).await;
+                let hit = semantic.lookup(prompt, scope).await?;
+                exact.store(prompt, scope, &hit).await;
                 Some(hit)
             }
         }
     }
 
     /// Store a prompt/response pair for future hits. Best-effort; never panics.
-    pub async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str, zdr: bool) {
+    pub async fn store(&self, prompt: &str, scope: CacheScope<'_>, response: &str, zdr: bool) {
         if !cache_io_allowed(zdr) {
             return;
         }
         match self {
-            Self::Managed(c) => c.store(prompt, org_id, model, response).await,
-            Self::DataPlane(c) => c.store(prompt, org_id, model, response).await,
-            Self::Local(c) => c.store(prompt, org_id, model, response).await,
+            Self::Managed(c) => c.store(prompt, scope, response).await,
+            Self::DataPlane(c) => c.store(prompt, scope, response).await,
+            Self::Local(c) => c.store(prompt, scope, response).await,
             Self::Layered { exact, semantic } => {
                 // Populate both tiers so future exact AND near-duplicate prompts hit.
-                exact.store(prompt, org_id, model, response).await;
-                semantic.store(prompt, org_id, model, response).await;
+                exact.store(prompt, scope, response).await;
+                semantic.store(prompt, scope, response).await;
             }
         }
     }
@@ -177,25 +269,36 @@ impl DragonflyCache {
             .cloned()
     }
 
-    /// Cache key: `org_id` + `model` are exact path segments (so they never
-    /// collide across tenants/models); only the (potentially large) prompt is
-    /// hashed, with its byte length appended as a cheap second discriminator
-    /// against the already-negligible 64-bit hash-collision chance.
-    fn key(prompt: &str, org_id: &str, model: &str) -> String {
+    /// Cache key: org, user and model are exact path segments (so they never
+    /// collide across tenants, people or models); only the (potentially large)
+    /// prompt is hashed, with its byte length appended as a cheap second
+    /// discriminator against the already-negligible 64-bit hash-collision
+    /// chance.
+    ///
+    /// The user segment is LENGTH-PREFIXED (`7#user-ab`) rather than written
+    /// plain or replaced by a placeholder when blank. Any placeholder is a value
+    /// some real user id could also be — a first attempt used `-`, and the test
+    /// below immediately found that a user literally named `-` would then share
+    /// a key with an unscoped one. A length prefix cannot collide.
+    fn key(prompt: &str, scope: CacheScope<'_>) -> String {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         prompt.hash(&mut hasher);
         let digest = hasher.finish();
         format!(
-            "{CACHE_KEY_PREFIX}{org_id}:{model}:{digest:016x}:{}",
+            "{CACHE_KEY_PREFIX}{}:{}#{}:{}:{digest:016x}:{}",
+            scope.org_id,
+            scope.user_id.len(),
+            scope.user_id,
+            scope.model,
             prompt.len()
         )
     }
 
-    async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+    async fn lookup(&self, prompt: &str, scope: CacheScope<'_>) -> Option<String> {
         use redis::AsyncCommands;
         let mut conn = self.manager().await?;
-        let key = Self::key(prompt, org_id, model);
+        let key = Self::key(prompt, scope);
         match conn.get::<_, Option<String>>(&key).await {
             Ok(value) => value.filter(|v| !v.is_empty()),
             Err(error) => {
@@ -205,7 +308,7 @@ impl DragonflyCache {
         }
     }
 
-    async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+    async fn store(&self, prompt: &str, scope: CacheScope<'_>, response: &str) {
         use redis::AsyncCommands;
         if response.is_empty() {
             return;
@@ -213,7 +316,7 @@ impl DragonflyCache {
         let Some(mut conn) = self.manager().await else {
             return;
         };
-        let key = Self::key(prompt, org_id, model);
+        let key = Self::key(prompt, scope);
         let result: redis::RedisResult<()> = conn.set_ex(&key, response, self.ttl_secs).await;
         if let Err(error) = result {
             tracing::debug!(%error, "semantic cache set failed");
@@ -246,9 +349,14 @@ impl DataPlaneCache {
         None
     }
 
-    async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+    async fn lookup(&self, prompt: &str, scope: CacheScope<'_>) -> Option<String> {
         let url = format!("{}/v1/cache/semantic/search", self.base_url);
-        let payload = serde_json::json!({ "org_id": org_id, "model": model, "prompt": prompt });
+        let payload = serde_json::json!({
+            "org_id": scope.org_id,
+            "user_id": scope.user_id,
+            "model": scope.model,
+            "prompt": prompt,
+        });
         let bytes = serde_json::to_vec(&payload).ok()?;
         let request = self
             .http
@@ -272,14 +380,15 @@ impl DataPlaneCache {
             .map(str::to_owned)
     }
 
-    async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+    async fn store(&self, prompt: &str, scope: CacheScope<'_>, response: &str) {
         if response.is_empty() {
             return;
         }
         let url = format!("{}/v1/cache/semantic/store", self.base_url);
         let payload = serde_json::json!({
-            "org_id": org_id,
-            "model": model,
+            "org_id": scope.org_id,
+            "user_id": scope.user_id,
+            "model": scope.model,
             "prompt": prompt,
             "response": response,
         });
@@ -355,25 +464,14 @@ impl LangCacheClient {
         })
     }
 
-    fn attrs(org_id: &str, model: &str) -> BTreeMap<&'static str, String> {
-        let mut m = BTreeMap::new();
-        if !org_id.is_empty() {
-            m.insert("org_id", org_id.to_owned());
-        }
-        if !model.is_empty() {
-            m.insert("model", model.to_owned());
-        }
-        m
-    }
-
     /// Look up a cached response for `prompt`, scoped to org + model. Returns the
     /// cached text on a hit; any miss or error yields `None` so the caller falls
     /// through to inference.
-    pub async fn lookup(&self, prompt: &str, org_id: &str, model: &str) -> Option<String> {
+    pub async fn lookup(&self, prompt: &str, scope: CacheScope<'_>) -> Option<String> {
         let body = SearchRequest {
             prompt,
             similarity_threshold: self.threshold,
-            attributes: Self::attrs(org_id, model),
+            attributes: scope.attributes(),
         };
         let url = format!(
             "{}/v1/caches/{}/entries/search",
@@ -403,14 +501,14 @@ impl LangCacheClient {
 
     /// Store a prompt/response pair for future semantically-similar prompts.
     /// Best-effort: errors are logged, never propagated.
-    pub async fn store(&self, prompt: &str, org_id: &str, model: &str, response: &str) {
+    pub async fn store(&self, prompt: &str, scope: CacheScope<'_>, response: &str) {
         if response.is_empty() {
             return;
         }
         let body = StoreRequest {
             prompt,
             response,
-            attributes: Self::attrs(org_id, model),
+            attributes: scope.attributes(),
         };
         let url = format!("{}/v1/caches/{}/entries", self.base_url, self.cache_id);
         let Ok(bytes) = serde_json::to_vec(&body) else {
@@ -493,27 +591,112 @@ mod tests {
         assert!(parse_entries(b"   ").is_none());
     }
 
+    /// The failure this policy exists to prevent: replaying answer TEXT for a
+    /// turn that also emitted citations or a tool timeline, leaving the user
+    /// with claims and no sources.
+    fn test_scope() -> CacheScope<'static> {
+        CacheScope {
+            org_id: "org-1",
+            user_id: "user-1",
+            model: "model-x",
+        }
+    }
+
+    #[test]
+    fn a_turn_whose_answer_came_from_outside_the_prompt_is_never_cached() {
+        for exclusion in [
+            TurnCacheability {
+                used_tools: true,
+                ..TurnCacheability::default()
+            },
+            TurnCacheability {
+                emitted_citations: true,
+                ..TurnCacheability::default()
+            },
+            TurnCacheability {
+                structured_output: true,
+                ..TurnCacheability::default()
+            },
+            TurnCacheability {
+                zdr: true,
+                ..TurnCacheability::default()
+            },
+        ] {
+            assert!(
+                !exclusion.is_cacheable(),
+                "{exclusion:?} must not be cacheable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_conversational_turn_is_cacheable() {
+        assert!(TurnCacheability::default().is_cacheable());
+    }
+
+    /// The leak this scoping exists to prevent: two colleagues in one org, one
+    /// served an answer built from the other's memories.
+    #[test]
+    fn two_users_in_one_org_never_share_a_cache_key() {
+        let scope = |user| CacheScope {
+            org_id: "org-1",
+            user_id: user,
+            model: "m",
+        };
+        assert_ne!(
+            DragonflyCache::key("hello", scope("user-a")),
+            DragonflyCache::key("hello", scope("user-b")),
+        );
+        // A blank user must not collide with a named one either.
+        assert_ne!(
+            DragonflyCache::key("hello", scope("")),
+            DragonflyCache::key("hello", scope("-")),
+        );
+        let attributes = scope("user-a").attributes();
+        assert_eq!(
+            attributes.get("user_id").map(String::as_str),
+            Some("user-a")
+        );
+    }
+
     #[test]
     fn cache_key_is_scoped_stable_and_collision_guarded() {
-        let key = DragonflyCache::key("hello", "org-1", "m");
-        assert_eq!(key, DragonflyCache::key("hello", "org-1", "m"), "stable");
+        let scope = CacheScope {
+            org_id: "org-1",
+            user_id: "user-1",
+            model: "m",
+        };
+        let key = DragonflyCache::key("hello", scope);
+        assert_eq!(key, DragonflyCache::key("hello", scope), "stable");
         assert!(
-            key.starts_with("mp:gw:cache:org-1:m:"),
-            "namespaced by org + model"
+            key.starts_with("mp:gw:cache:org-1:6#user-1:m:"),
+            "namespaced by org + user + model"
         );
         assert_ne!(
             key,
-            DragonflyCache::key("hello", "org-2", "m"),
+            DragonflyCache::key(
+                "hello",
+                CacheScope {
+                    org_id: "org-2",
+                    ..scope
+                }
+            ),
             "org-scoped"
         );
         assert_ne!(
             key,
-            DragonflyCache::key("hello", "org-1", "m2"),
+            DragonflyCache::key(
+                "hello",
+                CacheScope {
+                    model: "m2",
+                    ..scope
+                }
+            ),
             "model-scoped"
         );
         assert_ne!(
             key,
-            DragonflyCache::key("HELLO", "org-1", "m"),
+            DragonflyCache::key("HELLO", scope),
             "prompt is case-sensitive"
         );
         assert!(key.ends_with(":5"), "byte-length discriminator appended");
@@ -541,7 +724,7 @@ mod tests {
             .await;
 
         let client = test_client(server.uri());
-        let hit = client.lookup("hello", "org-1", "model-x").await;
+        let hit = client.lookup("hello", test_scope()).await;
         assert_eq!(hit.as_deref(), Some("cached answer"));
     }
 
@@ -558,7 +741,7 @@ mod tests {
             .await;
 
         let client = test_client(server.uri());
-        assert!(client.lookup("hello", "org-1", "model-x").await.is_none());
+        assert!(client.lookup("hello", test_scope()).await.is_none());
     }
 
     #[tokio::test]
@@ -575,7 +758,7 @@ mod tests {
             .await;
 
         let client = test_client(server.uri());
-        client.store("hello", "org-1", "model-x", "fresh").await;
+        client.store("hello", test_scope(), "fresh").await;
         // MockServer verifies the expected POST on drop.
     }
 }

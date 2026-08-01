@@ -354,6 +354,7 @@ async fn try_serve_from_cache(
     run: &session_flow::SessionRun,
     request_id: &str,
     org_id: &str,
+    user_id: &str,
     model: &str,
     content: &str,
     zdr: bool,
@@ -361,7 +362,12 @@ async fn try_serve_from_cache(
     let Some(cache) = crate::langcache::global() else {
         return Ok(None);
     };
-    let Some(cached) = cache.lookup(content, org_id, model, zdr).await else {
+    let scope = crate::langcache::CacheScope {
+        org_id,
+        user_id,
+        model,
+    };
+    let Some(cached) = cache.lookup(content, scope, zdr).await else {
         return Ok(None);
     };
     if !zdr {
@@ -541,6 +547,7 @@ impl ModelGateway for GatewayService {
             &session_run,
             &request_id,
             &org_id,
+            user_id,
             &model,
             &content,
             req.zdr,
@@ -614,7 +621,16 @@ impl ModelGateway for GatewayService {
         // the cache. Best-effort: never fails the request.
         if let Some(cache) = crate::langcache::global() {
             cache
-                .store(&content, &org_id, &model, &infer.content, req.zdr)
+                .store(
+                    &content,
+                    crate::langcache::CacheScope {
+                        org_id: &org_id,
+                        user_id: &user_id,
+                        model: &model,
+                    },
+                    &infer.content,
+                    req.zdr,
+                )
                 .await;
         }
 
@@ -740,7 +756,12 @@ impl ModelGateway for GatewayService {
         // response as a single terminal chunk, record the assistant turn, and
         // skip inference-core entirely.
         if let Some(cache) = crate::langcache::global() {
-            if let Some(cached) = cache.lookup(&content, &org_id, &model, req.zdr).await {
+            let scope = crate::langcache::CacheScope {
+                org_id: &org_id,
+                user_id: &user_id,
+                model: &model,
+            };
+            if let Some(cached) = cache.lookup(&content, scope, req.zdr).await {
                 if !req.zdr {
                     if let Err(error) = session_flow::append_assistant_message_with_token(
                         &self.state,
@@ -831,6 +852,7 @@ impl ModelGateway for GatewayService {
         // Captured for the post-stream semantic-cache write.
         let cache_content = content.clone();
         let cache_org = org_id.clone();
+        let cache_user = user_id.to_owned();
         let cache_model = model.clone();
         let cache_zdr = req.zdr;
         let session_bearer = identity.session_bearer()?.to_owned();
@@ -1001,8 +1023,11 @@ impl ModelGateway for GatewayService {
                 cache
                     .store(
                         &cache_content,
-                        &cache_org,
-                        &cache_model,
+                        crate::langcache::CacheScope {
+                            org_id: &cache_org,
+                            user_id: &cache_user,
+                            model: &cache_model,
+                        },
                         &assistant_output,
                         cache_zdr,
                     )
@@ -3055,14 +3080,6 @@ mod tests {
             .await
             .expect("connect runs");
         RunServiceClient::new(channel)
-    }
-
-    async fn test_service<S>(inference_service: S) -> (GatewayService, Arc<DynPublisher>)
-    where
-        S: InferenceCore,
-    {
-        let (service, publisher, _) = test_service_with_lifecycle(inference_service).await;
-        (service, publisher)
     }
 
     async fn test_service_with_lifecycle<S>(

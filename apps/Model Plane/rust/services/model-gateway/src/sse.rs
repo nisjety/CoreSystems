@@ -1312,6 +1312,82 @@ pub async fn invoke_stream_sse(
             ..Default::default()
         };
 
+        // Cache-augmented generation. The key is the FULLY ASSEMBLED prompt —
+        // history, injected memory, the date-stamped temporal message, the lot —
+        // scoped to (org, user, model), so a hit means the model would have seen
+        // byte-identical input. Only turns whose answer is reproducible from that
+        // prompt are eligible; see `TurnCacheability` for why a tool or grounded
+        // turn is not.
+        //
+        // This lives here rather than earlier on purpose: the durable run is
+        // already prepared and heartbeating, so a cache hit takes the same
+        // terminalization path as a real answer and cannot strand a run.
+        let cacheability = crate::langcache::TurnCacheability {
+            zdr: effective_zdr,
+            used_tools: turn_evidence.tool_successes > 0 || turn_evidence.tool_failures > 0,
+            // Citations, not `is_some()`. `grounding` is `Some` whenever the
+            // turn ASKED for grounding, retrieved or not, so testing presence
+            // marked every ordinary chat turn ineligible and the cache stored
+            // nothing at all. What disqualifies a turn is evidence that can go
+            // stale underneath it — which is citations, the same signal the
+            // confidence scorer counts.
+            // Citations EMITTED, not grounding requested. `grounding` is `Some`
+            // whenever the turn asked for grounding, retrieved or not, and
+            // `assembly_supplied_grounding` is true on nearly every turn in a
+            // deployment with Data Plane wired up — gating on either made the
+            // cache store nothing at all, which is how this was found.
+            //
+            // Assembled context is prompt text with no event of its own, so a
+            // text-only replay of it is faithful. Citations are not: they went
+            // out as `citation` events this cache cannot reproduce.
+            emitted_citations: turn_evidence.web_citations > 0
+                || grounding
+                    .as_ref()
+                    .is_some_and(|grounding| !grounding.citations.is_empty()),
+            structured_output: !grpc_req.structured_output_schema.is_empty(),
+        };
+        let cache_scope_prompt = cacheability
+            .is_cacheable()
+            .then(|| render_cache_prompt(&grpc_req.messages));
+        // Which exclusion fired, at debug. Without this a cache that never
+        // stores anything is indistinguishable from a cache that is switched
+        // off, and both look like "no hits".
+        tracing::debug!(
+            request_id = %req_id,
+            cacheable = cache_scope_prompt.is_some(),
+            zdr = cacheability.zdr,
+            used_tools = cacheability.used_tools,
+            emitted_citations = cacheability.emitted_citations,
+            structured_output = cacheability.structured_output,
+            "response-cache eligibility"
+        );
+        if let (Some(prompt), Some(cache)) =
+            (cache_scope_prompt.as_deref(), crate::langcache::global())
+        {
+            let scope = crate::langcache::CacheScope {
+                org_id: &org_clone,
+                user_id: &user_clone,
+                model: &answer_model,
+            };
+            if let Some(cached) = cache.lookup(prompt, scope, effective_zdr).await {
+                tracing::info!(request_id = %req_id, "invoke_stream served from the response cache");
+                serve_cached_answer(
+                    &tx,
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                    &req_id,
+                    &features,
+                    &answer_model,
+                    &cached,
+                    start,
+                )
+                .await;
+                cancels.finish(&req_id);
+                return;
+            }
+        }
+
         // Prompt-too-long recovery: twelve rounds of up to 8k-char tool results
         // can outgrow the provider's input limit. Shed the oldest history and
         // retry instead of handing the user a hard error — bounded, because a
@@ -1673,6 +1749,29 @@ pub async fn invoke_stream_sse(
                     };
                     if usage_event.should_emit(&features) {
                         let _ = tx.send(Ok(usage_event.to_sse(&req_id))).await;
+                    }
+
+                    // Store the finished answer under the same key the lookup
+                    // used. `cache_prompt` is `Some` only when the turn passed
+                    // every `TurnCacheability` exclusion, so a tool or grounded
+                    // turn cannot be written here by accident.
+                    if let (Some(prompt), Some(cache)) =
+                        (cache_scope_prompt.as_deref(), crate::langcache::global())
+                    {
+                        if !assistant_output.trim().is_empty() {
+                            cache
+                                .store(
+                                    prompt,
+                                    crate::langcache::CacheScope {
+                                        org_id: &org_clone,
+                                        user_id: &user_clone,
+                                        model: &answer_model,
+                                    },
+                                    &assistant_output,
+                                    effective_zdr,
+                                )
+                                .await;
+                        }
                     }
 
                     // AI thread title (ChatGPT-style): on the thread's FIRST
@@ -2904,6 +3003,125 @@ fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
         content,
         name: String::new(),
     })
+}
+/// Canonical rendering of an assembled prompt, used as the cache key's body.
+///
+/// Role-labelled and newline-separated rather than JSON: two message lists that
+/// differ only in a field the model never sees must produce the same key, and
+/// two that differ in a single character must not. Everything the model reads —
+/// system prompts, injected memory, thread history, the date-stamped temporal
+/// message, and the current question — is in here, which is what makes a hit
+/// mean "the model would have seen byte-identical input".
+fn render_cache_prompt(messages: &[ChatMessage]) -> String {
+    let mut rendered = String::new();
+    for message in messages {
+        rendered.push_str(&message.role);
+        rendered.push('\u{1f}');
+        rendered.push_str(&message.content);
+        rendered.push('\u{1e}');
+    }
+    rendered
+}
+
+/// Emit a cached answer as if it had just been generated.
+///
+/// It takes the same durable path as a real answer — persist the assistant turn,
+/// then terminalize the prepared run — because the run was already prepared and
+/// is already heartbeating by the time the cache is consulted. Returning early
+/// without those two steps would leave it `running` forever with no worker.
+///
+/// Usage is reported with zero tokens and the real elapsed time. That is the
+/// truth: no tokens were bought, and the latency is what the user waited.
+#[allow(clippy::too_many_arguments)] // one cohesive emission, mirrors run_infer_fallback
+async fn serve_cached_answer(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    session_bearer: &VerifiedModelBearer,
+    request_id: &str,
+    features: &[String],
+    model: &str,
+    cached: &str,
+    start: std::time::Instant,
+) {
+    // One chunk, not a fake token-by-token replay: the answer already exists, and
+    // pretending to generate it would be theatre the client cannot distinguish
+    // from a real stream.
+    let chunk = SseChunk {
+        request_id: request_id.to_owned(),
+        delta: cached.to_owned(),
+        done: false,
+        model_used: model.to_owned(),
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let data = serde_json::to_string(&chunk).unwrap_or_default();
+    let _ = tx
+        .send(Ok(Event::default().id("0").event("chunk").data(data)))
+        .await;
+
+    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+        state,
+        &run.thread_id,
+        cached,
+        session_bearer,
+    )
+    .await
+    {
+        tracing::warn!(%error, request_id = %request_id, "failed to persist a cached assistant message");
+    }
+    if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
+        state,
+        run,
+        crate::session_flow::DirectInferenceTerminal::Completed,
+        session_bearer,
+    )
+    .await
+    {
+        tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize a cache-served run");
+        let event = crate::sse_events::ChatEvent::Error {
+            code: "session_terminalization_failed".to_owned(),
+            message: "Unable to finalize the chat run.".to_owned(),
+            retryable: true,
+        };
+        let _ = tx.send(Ok(event.to_sse(request_id))).await;
+        return;
+    }
+
+    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let usage = crate::sse_events::ChatEvent::Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: Some(0.0),
+        latency_ms,
+        // A cached answer is exactly as good as it was when it was generated,
+        // and it only got here because the turn had no external evidence to go
+        // stale. Score it the way an ungrounded answer of this length scores,
+        // rather than inventing a bonus or a penalty for having been cached.
+        confidence: crate::confidence::score(
+            cached,
+            0,
+            u32::try_from(answer_token_budget()).unwrap_or(0),
+            crate::confidence::Evidence::default(),
+        ),
+    };
+    if usage.should_emit(features) {
+        let _ = tx.send(Ok(usage.to_sse(request_id))).await;
+    }
+    let done = SseChunk {
+        request_id: request_id.to_owned(),
+        delta: String::new(),
+        done: true,
+        model_used: model.to_owned(),
+        // Zero on purpose, and true: a cache hit buys no tokens. A client
+        // summing usage across a thread should see this turn cost nothing.
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let data = serde_json::to_string(&done).unwrap_or_default();
+    let _ = tx
+        .send(Ok(Event::default().id("1").event("done").data(data)))
+        .await;
 }
 
 /// Fallback used when `InferStream` is unavailable: call the (working)
