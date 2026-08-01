@@ -16,6 +16,8 @@
 > described elsewhere in this doc and in `FRONTEND_PLANE_ROADMAP.md` — that is a
 > different vector and was not re-verified in this pass.
 
+> **2026-08-01 correction (chat engine + two live gates closed).** §1.2's "one live probe settles it" and §2 item 2's "verify with a real inference call" are done: this session drove real, streaming chat end-to-end for **hours** against the running stack (live Azure providers, tool loop, GraphRAG-fused retrieval) — not a smoke test, direct interactive use. This is a manual proof, not a CI gate — §1.2's "smoke test in CI" done-enough-gate item remains open. Two chat-parity gaps also shipped and were live-verified: **resumable streams** (a disconnect no longer cancels the run — the producer detaches, keeps generating, persists, and finishes the resume buffer, so a reconnect replays the complete answer) and **edit/regenerate version navigation** (a client-side 1/N switcher over an exchange's prior answers), the latter surfacing and fixing a real standing bug where Regenerate silently appended a duplicate answer instead of replacing it. §1.2's "Semantic memory degraded (`DEGRADED_SEMANTIC_UNVERIFIED`)" line is also stale — fixed (an embedding-dimension mismatch was silently zeroing every search; readiness now correctly reports degraded only when the backend has never returned a hit). ZDR is more precisely scoped than §1.2's "may block external inference" framing: the interactive-retention-policy exception §6.9 already resolved on 2026-07-21 is a different gap from the one that remains — enforcement is complete and verified across all 6 Velion-side durable boundaries, and the sole open piece is **provider attestation** (a contract-plus-operator-flip, not code); see `apps/Model Plane/docs/ZDR.md`. Full detail on the two shipped features: `apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md`. New artifact: a 10-harness competitor study (Claude Code, Codex, OpenCode, ChatGPT, Perplexity, Manus, Hermes, OpenClaw, Pi + expert consensus) — `apps/Model Plane/docs/VELION_CHAT_PARITY_BACKLOG.md`. This note certifies only Model Plane chat-engine liveness and the two shipped features — it does not re-verify IDOR, RLS, insight-core wiring, credential rollout, image provenance, or anything else in §2/§3, which stand as last audited.
+
 **Date:** 2026-07-20
 **Method:** Full read of all 26 listed docs (6 parallel research streams), code-level audit of velionv3 (routes, feature folders, API clients, all ~49 gateway domains), live competitor research (11 companies), and a 4-perspective council (pragmatic CTO, security/compliance, product/GTM, delivery-risk) on sequencing. No code was changed. This is an audit, not a promise.
 
@@ -25,7 +27,19 @@
 
 ## 0. The one-paragraph truth
 
-Velion v3's frontend is much realer than the team's own anxiety suggests: **9 of 11 surfaces are genuinely wired to real gateway domains with a documented honesty contract** (neutral empty states, self-labeled previews, no fabricated numbers). The backends are deep, well-tested, and honestly self-audited in source. **Runtime correction (verified live 2026-07-20):** the docs' 2026-07-13 "hot path down / Docker stopped" claims are stale — `docker ps` shows **94 containers up, zero unhealthy/restarting**, including model-gateway, inference-core, all of Quarry, shipping-core, velion-gateway-rs, and the SPA; the Lagring volume has 116 GiB free. The stack was repaired around 2026-07-16/17 and the plane docs were never updated. What remains true regardless of green health: **image provenance is unproven** (no SHA tags / `/version` endpoints, so runtime cannot be correlated to the hardened source — the repeated stale-image finding), health checks are shallow (July audits documented green health over a broken gRPC path), the credential rollout ritual is undone, and one confirmed cross-tenant IDOR (`x-velion-org-id`, 17+ call sites) is open. **The gap between Velion and a demoable product is not features. It is deployment *discipline* (provenance + deep smoke tests), one security fix, and scope discipline.** The docs' own ~72 % "production-real" figure is a June number; treat dated correction banners as layers and verify runtime claims against the live host, in both directions.
+Velion v3 is an organization intelligence-and-action workbench, not only a customer-support assistant. Its product loop connects company documents and systems, Norwegian public-data context, websites and web evidence to a durable knowledge layer; lets people and agents search, reason, call tools, and prepare work; and keeps consequential execution observable and approval-aware. **9 of 11 frontend surfaces are genuinely wired to real gateway domains with a documented honesty contract** (neutral empty states, self-labeled previews, no fabricated numbers), while the underlying planes provide deeper retrieval, graph, ingestion, agent, inbox, ticket, social, and contextual-data capabilities. The support inbox is a concrete wedge, not the category. Channel Plane external agents and meeting intelligence expand the same substrate in the future, but are docs-only today. **Runtime correction (verified live 2026-07-20):** the docs' 2026-07-13 "hot path down / Docker stopped" claims are stale — `docker ps` shows **94 containers up, zero unhealthy/restarting**, including model-gateway, inference-core, all of Quarry, shipping-core, velion-gateway-rs, and the SPA; the Lagring volume has 116 GiB free. What remains true regardless of green health: **image provenance is unproven** (no SHA tags / `/version` endpoints, so runtime cannot be correlated to the hardened source), health checks are shallow, the credential rollout ritual is undone, and production promotion still needs deep smoke tests, tenant/security evidence, ZDR decisions, and scope discipline. Treat the docs' ~72% "production-real" figure as dated and verify runtime claims against the live host in both directions.
+
+### 0.1 Product model correction — 2026-07-22
+
+Velion has five connected capability layers:
+
+1. **Sources** — company documents, connected systems, websites, web evidence, Norwegian public data, and future sources such as meetings and public conversations.
+2. **Knowledge and context** — hybrid retrieval, GraphRAG, wiki, citations, source traces, entity resolution, change monitoring, and bounded live lookups.
+3. **Reasoning and action** — chat, search, research, agents, browser actions, tool calls, MCP, plugins, and system integrations.
+4. **Governance** — permissions, policies, cost controls, approval gates, audit, retention, residency, and reversibility.
+5. **Work surfaces** — dashboard, chat, knowledge, inbox, tickets, agent runs, social, studio, insights, and future external channels.
+
+The core loop is **connect → understand → search → decide → act → approve → audit**. Customer support is one complete proof workflow for this loop, not the definition of the product.
 
 ---
 
@@ -55,7 +69,7 @@ Velion v3's frontend is much realer than the team's own anxiety suggests: **9 of
 
 ### 1.2 Home Dashboard (AI composer / Search / Crawl) + Chat page — UI done, engine not plugged in
 
-**Vision:** ChatGPT + Claude + Manus + Perplexity combined; own Google-class search; agentic crawl with in-app browser.
+**Vision:** an organization intelligence workbench that combines internal knowledge, Norwegian public-data context, web search, agentic research, crawling, and approved system actions.
 
 **What verifiably exists**
 - Composer (`DashboardComposer.tsx`, part of the 22-file / ~11.9k-LOC dashboard feature): streaming chat, thread history, voice dictation (`audio-client`), live model catalog from `/api/v1/models`, composer settings, tools opt-in.
@@ -65,11 +79,11 @@ Velion v3's frontend is much realer than the team's own anxiety suggests: **9 of
 - Backend truth: the Model Plane agent loop is **real, not nomenclature** — `execute_step` dispatches shell, browser_agent, subagents, web_search/knowledge_search, shipping, social, provider actions, MCP proxy; server-side HITL pauses risky tools *before* execution.
 
 **Honest gaps**
-- **Engine status (corrected 2026-07-20):** model-gateway and inference-core containers are up and healthy (the 2026-07-13 "absent listener" finding is stale). Still unproven: that a real chat turn succeeds end-to-end on the *current* images — one live probe settles it.
-- **All-ZDR posture may block external inference** — the 2026-07-16 doc said every configured provider gets skipped (`FailedPrecondition`) under the all-ZDR default. Whether the running config carries an exception needs verification; the underlying *policy decision* (which ZDR tier the pilot runs on) is still unmade either way.
+- **Engine status (corrected 2026-08-01):** model-gateway and inference-core are up, healthy, and **proven live** — this is no longer a probe-it-yourself gate. A real chat turn was driven end-to-end for hours (streaming, live Azure providers, tool loop, GraphRAG-fused retrieval) during the 2026-08-01 session. Still open: a CI-gated smoke test (this was a manual/interactive proof, not an automated one).
+- **All-ZDR posture:** resolved on 2026-07-21 (§6.9) — the undocumented interactive-retention-policy exception is removed, `zdr:false` is the real default, resolved live per org. A *separate*, still-open gap: no provider is currently attested for ZDR (`AZURE_OPENAI_ZDR_CONFIRMED` defaults false, azure-anthropic has no attestation knob), so a user who explicitly requests ZDR (per-turn toggle or org-wide switch) is correctly refused rather than silently downgraded — see `apps/Model Plane/docs/ZDR.md` for the exact gap and the path to closing it.
 - Post-approval continuation is a named P0: an approved risky action has no restartable dispatcher/receipt — HITL can pause but resuming is not durable.
 - Search quality: SearXNG effectiveness is **unproven**; "full Google" is not a 3-dev goal — a good grounded answer engine over web + own KB is.
-- Semantic memory degraded (`DEGRADED_SEMANTIC_UNVERIFIED`); cost ledger in-memory; MCP execution disabled for MVP; Visma integration is vaporware in-product (zero source matches).
+- ~~Semantic memory degraded (`DEGRADED_SEMANTIC_UNVERIFIED`)~~ **fixed 2026-08-01** — root cause was an embedding-dimension mismatch (config silently defaulted to 1536 while embeddings are 3072) that zeroed every search; readiness now correctly distinguishes a genuinely-empty index from a healthy one. Cost ledger in-memory; MCP execution disabled for MVP; Visma integration is vaporware in-product (zero source matches).
 - ChatPage.tsx 3,685 lines / DashboardComposer.tsx 2,349 lines — maintainability debt against your own 800-line rule.
 
 **Competitor bar (ChatGPT/Perplexity/Chatbase):** streaming grounded chat with citations ✅ in source; time-to-value (crawl → useful answer < 15 min) is the Chatbase bar and is achievable with what exists; "combined ChatGPT+Claude+Manus+Perplexity" is **not** the pilot bar — grounded Norwegian answers with sources is.
@@ -163,6 +177,22 @@ Velion v3's frontend is much realer than the team's own anxiety suggests: **9 of
 
 **Done-enough gate:** already good enough for closed demo. Pilot gate: the 2-3 providers your wedge needs (email + website crawl) connect self-serve without a dev.
 
+### 1.7a Norwegian public-data context — deployed bounded lookup layer
+
+**What verifiably exists**
+- `information-core` is a real Application Plane service for bounded, read-only, provenance-bearing contextual lookups rather than a second knowledge corpus or ERP runtime.
+- The rebuilt local artifact verified Kartverket address/property location, SSB metadata, Entur journeys, Storting representatives, Norges Bank SDMX, MET weather, Statens vegvesen traffic/NVDB, NVE warnings, Riksantikvaren features, and Miljødirektoratet observations.
+- Responses carry a canonical source envelope with provider, dataset, source URL, retrieval time, quality/status and coverage semantics. This allows Velion to distinguish measured, forecast, partial, stale, unavailable, and source-only results.
+- These sources can enrich search, agent runs, logistics, property/context preflight, regulatory research, market intelligence, and Norwegian company work without being confused with the organization's private knowledge.
+
+**Honest gaps**
+- Lovdata, DATEX II, and Frost remain source-only until provider credentials are provisioned and live acceptance passes.
+- eInnsyn, full Matrikkel/Grunnbok, Folkeregisteret, Maskinporten/Altinn data, closed AIS, and other restricted datasets require explicit purpose, authorization, legal basis, retention, and delegation decisions.
+- Durable feeds, versioned corpora, and recurring catalog/source ingestion belong in Ingestion/Data Plane, not in the bounded lookup service.
+- The July audit found stale or over-broad assumptions around Bring tracking, Kartverket, Lovdata, eInnsyn, Doffin, and Frost; product claims must use the current `deployed_verified`, `source_only`, `blocked`, and `discovery` states.
+
+**Done-enough gate:** each source is independently feature-flagged, source-attributed, bounded, rate-limited, tenant-safe, ZDR/GDPR-reviewed, and consumed through a named product workflow rather than exposed as an unqualified list of APIs.
+
 ---
 
 ### 1.8 Agents — real runs console, fake builder; the biggest honesty gap in the product
@@ -212,6 +242,12 @@ Velion v3's frontend is much realer than the team's own anxiety suggests: **9 of
 
 Restated for the sorted list: no code, no route, no client, no backend. Everything under 1.5's SEO gate applies. Rename the ambition, not the ingestions page: the crawler page is a crawler page; a future "AI-visibility" page is a new product bet.
 
+### 1.12 External agents and meeting intelligence — future source/distribution layers
+
+**Channel Plane** is docs-only. Its future role is to deploy Velion agents into websites, Shopify, WooCommerce, WordPress, and other public channels, bootstrap visitor identity, run external conversations, and route handoffs into the internal inbox. No current Channel Plane services, APIs, migrations, or tests exist.
+
+**Meeting intelligence** is also docs-only. The intended design treats a meeting as another source type: transcript segments become Data Plane documents, slides/keyframes become visual evidence, people/decisions/action items become graph entities, and Model Plane reasoning can produce minutes and approved follow-up actions. Capture, self-hosted ASR/diarization, and sovereign visual embedding remain future work; the concept reuses existing planes rather than creating a separate meeting product.
+
 ---
 
 ## 2. Cross-cutting blockers — why nothing demos *today*
@@ -219,7 +255,7 @@ Restated for the sorted list: no code, no route, no client, no backend. Everythi
 These block **every** feature above and are the actual roadmap. *(Corrected 2026-07-20 against the live host — items 2 and 3 as originally doc-claimed were stale.)*
 
 1. **Deployment-reality gap → now a *provenance* gap (still the #1 item).** The stack IS up (94 healthy containers, model-gateway + inference-core + Quarry included), but nothing proves the running images match the hardened source — no SHA tags, no `/version` endpoints, no rollback artifacts, and July showed health can stay green over a broken path. Fix: git-SHA image tags, `/version` endpoints, CI that builds+deploys the slice from main, deep smoke tests (one real chat turn, one real retrieval, one real inbox send — not port checks). Until then, "healthy" is a claim, not evidence.
-2. **~~Model Plane hot path down~~ RESOLVED at container level (up 25h+ as of 2026-07-20).** Remaining: verify with a real inference call, and *decide* the ZDR posture — the 2026-07-16 doc said all-ZDR config skips every external provider; whether the running config has an exception needs one live probe, not archaeology.
+2. **~~Model Plane hot path down~~ RESOLVED, now fully proven (2026-08-01).** Container-level resolution (2026-07-20) plus a real live inference call (2026-08-01 — hours of streaming chat, tool loop, GraphRAG retrieval). The ZDR posture question is also resolved (§6.9, 2026-07-21): `zdr:false` is the real default, no undocumented exception. The one remaining ZDR item is provider attestation, not policy — see `apps/Model Plane/docs/ZDR.md`.
 3. **~~Ingestion host dead~~ RESOLVED.** Docker up, all Quarry/imports/integration workers running, 116 GiB free on Lagring. Keep a disk-usage alert; the 278 GiB Docker image that caused the July outage is still the standing risk.
 4. **Credential rollout.** Control (58 creds + 10 files preflight) and Data plane scoped-broker provisioning are operator-owned tasks nobody has run. For one demo environment: consolidate/pre-seed (you already proved zero-rotation recreate for Control on 2026-07-17) rather than doing the full production ritual.
 5. **Cross-tenant IDOR + observe-mode auth.** One fix at the BFF chokepoint (derive org from session, never from header) covers the demo; RLS activation + enforce-mode + negative-test suite in CI is the pilot gate.
@@ -468,6 +504,24 @@ Ran the audit-before-implementing discipline this doc itself prescribed. Result:
 **Open — structural, real but not urgent:**
 - **CI does not actually gate any cross-tenant test today.** The workflows that would run them point at nonexistent paths (`services/user-service/**`, `services/org-service/**` don't exist in this repo) or live in a nested `.github/workflows/` folder GitHub Actions never reads (only repo-root `.github/workflows/` executes). Tests are real and pass locally; nothing blocks a merge on them yet.
 - **Bonus find, unrelated to this pass**: `documents-api-go`'s idempotent-create path has a real bug — a repeated create with the same idempotency key returns the *second* title instead of reusing the first row. Reproduced twice against real Postgres, confirmed pre-existing (untouched by today's diff). Worth a follow-up fix.
+
+## 6.10 Chat-engine verification + two chat-parity features (2026-08-01)
+
+Independent pass, not a continuation of the same session as §6.7-6.9. Scope: verify the Model Plane hot path live (the standing gate §1.2/§2 had left open since 2026-07-20), then implement and live-verify two named chat-parity gaps from the competitive backlog.
+
+**Verified live, not just by inspection:**
+- Real, sustained interactive chat against the running stack: streaming answers via live Azure providers, tool loop, GraphRAG-fused retrieval, over multiple hours. This is the "one live probe" every prior pass (§1.2, §2 item 2) deferred to a human — it is now done, manually, not yet as a CI gate.
+- Zero Data Retention re-confirmed at the precision this doc's ZDR mentions lacked: enforcement is complete and verified across all 6 Velion-side durable boundaries (session-core threads/messages, Dreaming/agent-memory extraction, response cache, implicit feedback, provider-side prompt cache, NATS/audit envelopes). The sole remaining gap is provider attestation (`AZURE_OPENAI_ZDR_CONFIRMED` / an Anthropic equivalent) — a signed-contract-plus-operator-flip task, not an engineering one. Full detail and a step-by-step production-readiness guide: `apps/Model Plane/docs/ZDR.md`.
+
+**Shipped and live-verified (both were designed in an earlier pass, rejected on first design by adversarial review for data-corruption risk, and implemented from the corrected design once a live session became available — see `apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md`):**
+- **Resumable streams.** The gateway producer used to treat a client disconnect (closed tab, reload, network drop) identically to a deliberate cancel — the run terminalized `Cancelled`, the answer never persisted, and a reconnect found nothing to replay. It now detaches instead: generation continues, the assistant message persists, and the run terminalizes `Completed`, so a reconnect replays the complete answer. Verified two ways: a deterministic Rust test that drops the SSE receiver mid-stream (fails against the pre-fix code) and a live browser test (reload mid-generation → full answer, no stuck spinner).
+- **Edit/regenerate version navigation.** A client-only 1/N switcher over the final exchange's prior answers — session-lifetime, not persisted, so a nested version tree (the flaw that sank the first design) is structurally impossible. Live-verified with a non-deterministic prompt (paged through 3 real versions, each restoring its exact question+answer pair). Building it surfaced a real, previously-undiscovered bug: Regenerate had been silently *appending* a duplicate answer instead of replacing it since the feature shipped — fixed in the same change.
+
+**New artifact — competitor research, not yet acted on beyond the above two items:** a 10-harness study (Claude Code, Codex, OpenCode, ChatGPT, Perplexity, Manus, Hermes, OpenClaw, Pi + expert consensus) produced a ranked chat-parity backlog. Top 5: server-authoritative sessions + resume (of which resumable streams above is the first slice), a gateway hook/permission layer, skills-as-files, citation chips + a quality gate, subagent fan-out. `apps/Model Plane/docs/VELION_CHAT_PARITY_BACKLOG.md`.
+
+**Also fixed this session, adjacent to the chat engine:** agent-memory semantic recall (an embedding-dimension mismatch was silently zeroing every search — §1.2's "Semantic memory degraded" line is now stale, see above) and the Auth Core service-principal registry reconciled to the live fleet (14/14, no drift — relevant to this doc's credential-rollout concern in §2 item 4, though the broader rollout ritual itself was not re-run).
+
+**Explicitly not touched by this pass:** IDOR/RLS/tenancy depth, insight-core wiring, Agents builder, Social live-proof, image provenance/SHA tags, credential rollout ritual, CI gating. All of §1-§6.9 stands as last verified on the dates given.
 
 ## 7. Appendix
 
