@@ -311,6 +311,40 @@ if [[ "$DRY_RUN" == "false" ]]; then
   acquire_lock
 fi
 
+# REFUSE to bootstrap over a fleet whose env files are missing.
+#
+# `ensure_secret` mints a fresh value whenever it cannot READ an existing one, so
+# an absent env file is indistinguishable from "no secret yet" — and this script
+# then silently ROTATES credentials the running fleet is still authenticating
+# with. Measured on a live deployment: with apps/{Control,Ingestion,Application}
+# Plane/.env absent, a dry run reported 24 values it would (re)configure,
+# including INTERNAL_API_KEY across six planes and VELION_NATS_TOKEN across four.
+# Applying that would have broken cross-plane auth fleet-wide with no error, only
+# 401s appearing minutes later.
+#
+# So: creating a MISSING env file is only safe on a genuinely new machine. If any
+# plane is already running, the operator must say so explicitly.
+missing_env_files=()
+for env_file in "${ENV_FILES[@]}"; do
+  [[ -f "$env_file" ]] || missing_env_files+=("$env_file")
+done
+if (( ${#missing_env_files[@]} > 0 )) && [[ "${ALLOW_CREATING_ENV_FILES:-false}" != "true" ]]; then
+  log "REFUSING to run: ${#missing_env_files[@]} env file(s) do not exist."
+  for env_file in "${missing_env_files[@]}"; do
+    log "  missing: ${env_file#"$CORE_ROOT/"}"
+  done
+  log ""
+  log "Creating them mints NEW secrets for every value they should already hold,"
+  log "which rotates credentials a running fleet still authenticates with."
+  log ""
+  log "If this is a fresh machine with nothing deployed, re-run with:"
+  log "  ALLOW_CREATING_ENV_FILES=true $0 $*"
+  log "Otherwise restore the env files first (each plane's"
+  log ".env.generated-secrets is loaded last by compose and wins), then re-run"
+  log "with --dry-run and require ZERO 'would configure' lines before applying."
+  exit 1
+fi
+
 for env_file in "${ENV_FILES[@]}"; do
   ensure_env_file "$env_file"
 done
@@ -405,6 +439,21 @@ execution_core_service_key="$(ensure_secret "$MODEL_ENV" EXECUTION_CORE_SERVICE_
 # inference-core reads Velion's routing policy from session-core in the
 # background; this credential lets it mint an aud=session-core service token.
 inference_routing_key="$(ensure_secret "$MODEL_ENV" INFERENCE_ROUTING_SERVICE_API_KEY)"
+# session-core mints aud=letta-bridge for durable memory and aud=inference-core
+# for Dreaming's LLM extraction.
+session_core_service_key="$(ensure_secret "$MODEL_ENV" SESSION_CORE_SERVICE_API_KEY)"
+# capability-core reads session skills, invokes inference for distillation, and
+# starts orchestration workflows.
+capability_core_key="$(ensure_secret "$MODEL_ENV" CAPABILITY_CORE_SERVICE_API_KEY)"
+# orchestrator-core's Temporal activities call four downstream audiences.
+orchestrator_core_key="$(ensure_secret "$MODEL_ENV" ORCHESTRATOR_CORE_SERVICE_API_KEY)"
+# Data Plane callers of the Model Plane embedding hop. Compose maps three
+# DIFFERENT plane-level variables onto the same container variable
+# (MODEL_PLANE_INFERENCE_SERVICE_API_KEY) for retrieval-engine, embedding-engine
+# and graph-index respectively — retrieval-engine reuses its control-policy key,
+# so only these two need their own.
+graph_index_key="$(ensure_secret "$DATA_ENV" MODEL_PLANE_INFERENCE_SERVICE_API_KEY)"
+embedding_engine_key="$(ensure_secret "$DATA_ENV" MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY)"
 
 # Application and Frontend consumers.
 ensure_secret "$APPLICATION_ENV" APPLICATION_NATS_TOKEN >/dev/null
@@ -432,9 +481,14 @@ sync_value NOTIFICATION_GATEWAY_SERVICE_TOKEN "$notification_gateway_token" "$FR
 conversation_email_ingest_token="$(ensure_secret "$APPLICATION_ENV" CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN)"
 sync_value CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN "$conversation_email_ingest_token" "$INGESTION_ENV"
 ensure_secret "$APPLICATION_ENV" CONVERSATION_CORE_INGEST_SERVICE_TOKEN >/dev/null
-# conversation-core authenticates to integration-corev2 with integration's own
-# service key; Application->integration internal calls use the fleet internal key.
-sync_value CONVERSATION_INTEGRATION_SERVICE_API_KEY "$integration_service_key" "$APPLICATION_ENV"
+# conversation-core gets its OWN Auth Core credential. It used to be aliased to
+# integration-corev2's key here, which meant one leaked secret granted BOTH
+# identities — confirmed live by SHA-256 fingerprint before this was split. The
+# credential is only ever exchanged at Auth Core's internal-token route
+# (conversation-core-go internal/integration/client.go), never validated by
+# integration-corev2 directly, so the two are independent by construction.
+conversation_core_key="$(ensure_secret "$APPLICATION_ENV" CONVERSATION_CORE_SERVICE_API_KEY)"
+sync_value CONVERSATION_INTEGRATION_SERVICE_API_KEY "$conversation_core_key" "$APPLICATION_ENV"
 sync_value INTEGRATION_INTERNAL_API_KEY "$internal_api_key" "$APPLICATION_ENV"
 
 # Conversation provider-write attestation (Ed25519): conversation-core signs
@@ -445,87 +499,188 @@ ensure_ed25519_attestation_key
 # Deployment-owned registry. Each identity has its own credential and bounded
 # audience/scopes; allowAnyOrg permits internal workers to serve newly-created
 # tenants without trusting a caller-supplied identity or widening scopes.
+# Deployment-owned registry. Each identity has its own credential and bounded
+# audience/scopes; allowAnyOrg permits internal workers to serve newly-created
+# tenants without trusting a caller-supplied identity or widening scopes.
+#
+# Reconciled 2026-08-01 against the LIVE 14-principal registry. Auth Core's
+# parseRegistry throws on the FIRST bad entry and runs PER REQUEST, so one
+# malformed entry 503s every service-token mint fleet-wide while /health stays
+# green. Two invariants it enforces, both easy to break by hand:
+#   * the union of scopesByAudience MUST exactly equal the flat `scopes` array;
+#   * retentionByAudience MUST have a key for every audience, valued only
+#     'zdr' or 'persistent'.
+# retention is issuer-determined and inference-core treats it as a FLOOR:
+# 'persistent' permits provider-side retention, 'zdr' forbids it.
+#
+# All 14 live principals are seeded. graph-index and embedding-engine reach the
+# Model Plane embedding hop with their own credentials from $DATA_ENV; the three
+# Data Plane services share the container variable NAME
+# (MODEL_PLANE_INFERENCE_SERVICE_API_KEY) but compose sources it from three
+# different plane-level variables, so the values are independent.
 principal_registry="$(jq -cn \
   --arg retrieval "$control_policy_key" \
   --arg imports "$imports_service_key" \
-  --arg shipping "$shipping_service_key" \
   --arg model "$model_ingestion_key" \
   --arg quarry "$quarry_service_key" \
   --arg model_gateway "$model_gateway_service_key" \
   --arg execution_core "$execution_core_service_key" \
   --arg inference_routing "$inference_routing_key" \
-  --arg integration "$integration_service_key" \
+  --arg session_core "$session_core_service_key" \
+  --arg capability_core "$capability_core_key" \
+  --arg orchestrator_core "$orchestrator_core_key" \
+  --arg conversation_core "$conversation_core_key" \
+  --arg graph_index "$graph_index_key" \
+  --arg embedding_engine "$embedding_engine_key" \
   --arg finspo "$finspo_service_key" \
   '{
     "retrieval-engine": {
       credential: $retrieval,
-      audiences: ["control-policy"],
+      audiences: ["control-policy", "inference-core"],
       orgIds: [],
       allowAnyOrg: true,
-      scopes: ["data:authorization:decide"]
+      scopes: ["data:authorization:decide", "inference:invoke"],
+      scopesByAudience: {
+        "control-policy": ["data:authorization:decide"],
+        "inference-core": ["inference:invoke"]
+      },
+      retentionByAudience: { "control-policy": "zdr", "inference-core": "persistent" }
     },
     "imports-core": {
       credential: $imports,
       audiences: ["data-plane"],
       orgIds: [],
       allowAnyOrg: true,
-      scopes: ["documents:write"]
-    },
-    "shipping-core": {
-      credential: $shipping,
-      audiences: ["data-plane"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["documents:write"]
+      scopes: ["documents:write"],
+      scopesByAudience: { "data-plane": ["documents:write"] },
+      retentionByAudience: { "data-plane": "persistent" }
     },
     "model-execution": {
       credential: $model,
       audiences: ["ingestion"],
       orgIds: [],
       allowAnyOrg: true,
-      scopes: ["integration:read", "integration:write", "shipping:read", "shipping:write"]
+      scopes: ["integration:read", "shipping:read"],
+      scopesByAudience: { "ingestion": ["integration:read", "shipping:read"] },
+      retentionByAudience: { "ingestion": "zdr" }
+    },
+    "conversation-core": {
+      credential: $conversation_core,
+      audiences: ["ingestion"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["integration:read", "integration:write"],
+      scopesByAudience: { "ingestion": ["integration:read", "integration:write"] },
+      retentionByAudience: { "ingestion": "zdr" }
     },
     "quarry-edge": {
       credential: $quarry,
-      audiences: ["data-plane", "model-gateway"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["documents:write", "data:read", "models:invoke"]
-    },
-    "model-gateway": {
-      credential: $model_gateway,
-      audiences: ["quarry"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["scrape:read", "search:read"]
-    },
-    "execution-core": {
-      credential: $execution_core,
-      audiences: ["quarry"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["browser:execute", "search:read", "extract:read", "scrape:write"]
-    },
-    "integration-corev2": {
-      credential: $integration,
       audiences: ["data-plane"],
       orgIds: [],
       allowAnyOrg: true,
-      scopes: ["documents:write"]
+      scopes: ["data:read", "documents:write", "org:data:read_all"],
+      scopesByAudience: { "data-plane": ["data:read", "documents:write", "org:data:read_all"] },
+      retentionByAudience: { "data-plane": "persistent" }
+    },
+    "model-gateway": {
+      credential: $model_gateway,
+      audiences: ["session-core", "quarry"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["scrape:read", "search:read", "session:heartbeat", "session:terminalize"],
+      scopesByAudience: {
+        "session-core": ["session:heartbeat", "session:terminalize"],
+        "quarry": ["scrape:read", "search:read"]
+      },
+      retentionByAudience: { "session-core": "zdr", "quarry": "zdr" }
+    },
+    "execution-core": {
+      credential: $execution_core,
+      audiences: ["capability-core", "session-core", "quarry"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["browser:execute", "capability:health:global:write", "capability:read", "scrape:write", "session:heartbeat", "session:terminalize"],
+      scopesByAudience: {
+        "capability-core": ["capability:read", "capability:health:global:write"],
+        "session-core": ["session:heartbeat", "session:terminalize"],
+        "quarry": ["browser:execute", "scrape:write"]
+      },
+      retentionByAudience: { "capability-core": "persistent", "session-core": "zdr", "quarry": "zdr" }
     },
     "finspo-core": {
       credential: $finspo,
       audiences: ["data-plane"],
       orgIds: [],
       allowAnyOrg: true,
-      scopes: ["documents:write"]
+      scopes: ["documents:write"],
+      scopesByAudience: { "data-plane": ["documents:write"] },
+      retentionByAudience: { "data-plane": "persistent" }
     },
     "inference-core": {
       credential: $inference_routing,
       audiences: ["session-core"],
       orgIds: [],
       allowAnyOrg: true,
-      scopes: ["routing:read"]
+      scopes: ["routing:read"],
+      scopesByAudience: { "session-core": ["routing:read"] },
+      retentionByAudience: { "session-core": "zdr" }
+    },
+    "session-core": {
+      credential: $session_core,
+      audiences: ["letta-bridge", "inference-core"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["inference:invoke", "memory:read", "memory:write"],
+      scopesByAudience: {
+        "letta-bridge": ["memory:read", "memory:write"],
+        "inference-core": ["inference:invoke"]
+      },
+      retentionByAudience: { "letta-bridge": "persistent", "inference-core": "persistent" }
+    },
+    "capability-core": {
+      credential: $capability_core,
+      audiences: ["session-core", "inference-core", "orchestrator-core"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["inference:invoke", "orchestration:workflow:start", "orchestration:workflow:start:global", "session:read", "session:skills:write"],
+      scopesByAudience: {
+        "session-core": ["session:read", "session:skills:write"],
+        "inference-core": ["inference:invoke"],
+        "orchestrator-core": ["orchestration:workflow:start", "orchestration:workflow:start:global"]
+      },
+      retentionByAudience: { "session-core": "persistent", "inference-core": "zdr", "orchestrator-core": "persistent" }
+    },
+    "orchestrator-core": {
+      credential: $orchestrator_core,
+      audiences: ["session-core", "inference-core", "capability-core", "letta-bridge"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["capability:read", "capability:write", "inference:invoke", "memory:read", "memory:write", "session:runs:system-owner", "session:write"],
+      scopesByAudience: {
+        "session-core": ["session:write", "session:runs:system-owner"],
+        "inference-core": ["inference:invoke"],
+        "capability-core": ["capability:read", "capability:write"],
+        "letta-bridge": ["memory:read", "memory:write"]
+      },
+      retentionByAudience: { "session-core": "persistent", "inference-core": "persistent", "capability-core": "persistent", "letta-bridge": "persistent" }
+    },
+    "graph-index": {
+      credential: $graph_index,
+      audiences: ["inference-core"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["inference:invoke"],
+      scopesByAudience: { "inference-core": ["inference:invoke"] },
+      retentionByAudience: { "inference-core": "persistent" }
+    },
+    "embedding-engine": {
+      credential: $embedding_engine,
+      audiences: ["inference-core"],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ["inference:invoke"],
+      scopesByAudience: { "inference-core": ["inference:invoke"] },
+      retentionByAudience: { "inference-core": "persistent" }
     }
   }')"
 upsert_env "$CONTROL_ENV" PLANE_SERVICE_PRINCIPALS_JSON "$principal_registry"

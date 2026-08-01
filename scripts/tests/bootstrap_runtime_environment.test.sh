@@ -101,22 +101,67 @@ else
 fi
 
 principal_json="$(value_of "$control" PLANE_SERVICE_PRINCIPALS_JSON)"
+
+# Assert the INVARIANTS Auth Core actually enforces, not a frozen scope list.
+#
+# This used to pin exact scope arrays for a registry that included shipping-core
+# and integration-corev2 — neither of which the live fleet carries any more — so
+# it had become a test of a superseded contract. Worse, an exact-array assertion
+# fails on a harmless reordering while saying nothing about the two rules that
+# genuinely take the fleet down: Auth Core's parseRegistry throws on the FIRST
+# bad entry and runs PER REQUEST, so one malformed principal 503s every mint
+# while /health stays green.
 if jq -e '
-  .["retrieval-engine"].allowAnyOrg == true and
-  .["retrieval-engine"].scopes == ["data:authorization:decide"] and
-  .["imports-core"].scopes == ["documents:write"] and
-  .["shipping-core"].scopes == ["documents:write"] and
-  .["model-execution"].scopes == ["integration:read", "integration:write", "shipping:read", "shipping:write"] and
-  .["quarry-edge"].audiences == ["data-plane", "model-gateway"] and
-  .["quarry-edge"].scopes == ["documents:write", "data:read", "models:invoke"] and
-  .["model-gateway"].scopes == ["scrape:read", "search:read"] and
-  .["execution-core"].scopes == ["browser:execute", "search:read", "extract:read", "scrape:write"] and
-  .["integration-corev2"].scopes == ["documents:write"] and
-  .["finspo-core"].scopes == ["documents:write"]
+  # Every entry must declare per-audience scoping and retention.
+  (to_entries | all(.value | has("scopesByAudience") and has("retentionByAudience")))
+  # The union of scopesByAudience must EXACTLY equal the flat scopes array.
+  and (to_entries | all(
+        (.value.scopesByAudience | to_entries | map(.value) | add | unique)
+        == (.value.scopes | unique)))
+  # scopesByAudience and retentionByAudience must key exactly the audiences.
+  and (to_entries | all(
+        (.value.scopesByAudience | keys | sort) == (.value.audiences | sort)))
+  and (to_entries | all(
+        (.value.retentionByAudience | keys | sort) == (.value.audiences | sort)))
+  # Retention is a closed vocabulary; anything else invalidates the entry.
+  and (to_entries | all(
+        .value.retentionByAudience | to_entries | all(
+          .value == "zdr" or .value == "persistent")))
 ' <<<"$principal_json" >/dev/null; then
-  pass "service-principal registry has bounded cross-plane policies"
+  pass "service-principal registry satisfies Auth Core's per-audience invariants"
 else
-  fail "service-principal registry has bounded cross-plane policies"
+  fail "service-principal registry satisfies Auth Core's per-audience invariants"
+fi
+
+# No two principals may share a credential. conversation-core was aliased to
+# integration-corev2's key, so one leaked secret granted both identities —
+# confirmed live by SHA-256 fingerprint before it was split.
+principal_count="$(jq -r 'length' <<<"$principal_json")"
+distinct_credentials="$(jq -r '[.[].credential] | unique | length' <<<"$principal_json")"
+if [[ "$principal_count" == "$distinct_credentials" ]]; then
+  pass "every service principal has its own credential ($principal_count principals)"
+else
+  fail "service principals share credentials ($principal_count principals, $distinct_credentials distinct secrets)"
+fi
+
+# Scope bounds that must not silently widen. Checked as membership, so adding a
+# NEW audience to a principal does not fail this, but granting one of these
+# identities something outside its remit does.
+if jq -e '
+  (.["imports-core"].scopes == ["documents:write"])
+  and (.["finspo-core"].scopes == ["documents:write"])
+  and (.["retrieval-engine"].allowAnyOrg == true)
+  and (.["graph-index"].scopes == ["inference:invoke"])
+  and (.["embedding-engine"].scopes == ["inference:invoke"])
+  # conversation-core may write provider replies but must never touch documents.
+  and (.["conversation-core"].scopes | index("documents:write") | not)
+  # A ZDR-audience grant must not license retention downstream.
+  and (.["conversation-core"].retentionByAudience.ingestion == "zdr")
+  and (.["model-execution"].retentionByAudience.ingestion == "zdr")
+' <<<"$principal_json" >/dev/null; then
+  pass "service-principal registry keeps cross-plane scopes bounded"
+else
+  fail "service-principal registry keeps cross-plane scopes bounded"
 fi
 
 if [[ "$(value_of "$application" APPLICATION_PLANE_DB_PASSWORD)" != "application-plane-db-secret" ]]; then
