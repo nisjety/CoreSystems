@@ -1873,10 +1873,34 @@ function RealtimeVoiceModal(props: {
     close()
   }
 
-  onCleanup(() => stop())
+  let dialogRef: HTMLDialogElement | undefined
+  onCleanup(() => {
+    stop()
+    // Close the native modal so it leaves the top layer cleanly on unmount.
+    dialogRef?.close()
+  })
 
   return (
-    <dialog open class="realtime-voice-modal" aria-label={props.i18n.tr('Stemmemodus', 'Voice mode')} data-dashboard-modal="true">
+    <dialog
+      // Use the native modal (showModal) instead of the static `open` attribute
+      // so the browser provides Escape-to-close, focus trapping, and an inert
+      // backdrop — none of which a plain `<dialog open>` receives. Routing the
+      // `cancel` event (Escape) through close() also stops the recogniser and
+      // clears the transcript, matching the scrim/X buttons.
+      ref={(el) => {
+        dialogRef = el
+        queueMicrotask(() => {
+          if (!el.open) el.showModal()
+        })
+      }}
+      class="realtime-voice-modal"
+      aria-label={props.i18n.tr('Stemmemodus', 'Voice mode')}
+      data-dashboard-modal="true"
+      on:cancel={(event) => {
+        event.preventDefault()
+        close()
+      }}
+    >
       <button type="button" aria-label={props.i18n.tr('Lukk stemmebakgrunn', 'Dismiss voice backdrop')} class="realtime-voice-modal__scrim" onClick={close} />
       <div class="realtime-voice-modal__panel velion-panel-in">
         <div class="realtime-voice-modal__header">

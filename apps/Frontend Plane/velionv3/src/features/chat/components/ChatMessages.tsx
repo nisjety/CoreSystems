@@ -284,7 +284,15 @@ export function UserMessage(props: {
         fallback={(
           <div class="velion-chat-edit-box">
             <textarea
-              autofocus
+              // Focus imperatively after the branch mounts rather than relying
+              // on the `autofocus` attribute, which is unreliable for a
+              // dynamically-inserted element (fires only for the first candidate
+              // and only when nothing else is focused). Caret to the end so the
+              // agent can adjust the message immediately.
+              ref={(el) => queueMicrotask(() => {
+                el.focus()
+                el.setSelectionRange(el.value.length, el.value.length)
+              })}
               value={draft()}
               rows={Math.min(10, Math.max(2, draft().split('\n').length))}
               onInput={(event) => setDraft(event.currentTarget.value)}

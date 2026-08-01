@@ -181,13 +181,14 @@ export default function ChatPage() {
                 */}
                 <Show when={feedbackNotice()}>
                   {(message) => (
-                    <div
+                    <button
+                      type="button"
                       class="velion-chat-error"
                       role="status"
                       onClick={dismissFeedbackNotice}
                     >
                       {message()}
-                    </div>
+                    </button>
                   )}
                 </Show>
               </div>
@@ -204,8 +205,20 @@ export default function ChatPage() {
           </Match>
         </Switch>
 
-        <Show when={hasMessages() && activeTab() === 'chat'}>
-          <div class="velion-chat-composer-dock">
+        {/*
+          Keep the composer mounted for the whole conversation and merely hide
+          it on non-chat tabs. Unmounting it on every tab switch disposed the
+          DashboardComposer instance, silently discarding its local state —
+          attached files (whose preview URLs its onCleanup revokes), the picked
+          model, slash-actions — so returning to Chat lost the attachment and
+          reset the model to the default. display:none preserves that state
+          while taking no layout space, matching the previous hidden result.
+        */}
+        <Show when={hasMessages()}>
+          <div
+            class="velion-chat-composer-dock"
+            style={{ display: activeTab() === 'chat' ? undefined : 'none' }}
+          >
             <Show when={showScrollDown()}>
               <button
                 type="button"
