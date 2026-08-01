@@ -3474,6 +3474,7 @@ mod tests {
             content: "prefers metric units".to_owned(),
             kind: "preference",
             confidence: 0.9,
+            inferred: false,
         }];
 
         sync_dream_memory_unless_zdr(

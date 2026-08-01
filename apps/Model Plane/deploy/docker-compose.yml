@@ -436,8 +436,16 @@ services:
       # Dedicated short-lived service-principal credentials for the optional
       # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
       # session-core fails startup closed unless all three are configured.
+      # The same credential mints the aud=inference-core token the Dreaming
+      # extraction loop presents; Auth Core scopes the two audiences separately.
       SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:-session-core}
       SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:-}
+      # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
+      # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
+      # the deterministic phrase matcher alone.
+      INFERENCE_CORE_ADDR: ${INFERENCE_CORE_ADDR:-http://model-plane-inference-core-1:9092}
+      DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-1}
+      DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
       # P0.4 residency: region stamped onto every run record at StartRun.

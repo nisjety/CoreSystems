@@ -12,6 +12,7 @@ mod approval_delivery;
 mod audit_publisher;
 mod auth;
 mod compaction;
+mod dream_extractor;
 mod dreaming;
 mod finetune_grpc;
 mod gdpr;
@@ -28,6 +29,7 @@ mod orchestration_nats;
 mod orchestration_store;
 mod routing_policy_grpc;
 mod run_service_grpc;
+mod service_token;
 mod store;
 mod terminalization;
 

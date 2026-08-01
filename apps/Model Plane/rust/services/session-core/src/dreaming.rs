@@ -1,9 +1,18 @@
 //! Dreaming Core memory consolidation primitives.
 //!
-//! This first slice is intentionally deterministic: it only records explicit
-//! facts/preferences/artifacts from the transcript. LLM-assisted consolidation
-//! can build on the same `agent_memory` rows and `dream_runs` ledger.
+//! Two extractors run over the same transcript and their results are merged:
+//!
+//!   * a deterministic phrase matcher ([`extract_memory_candidates`]) that
+//!     recognises explicit instructions — "husk at ...", "jeg heter ...";
+//!   * [`crate::dream_extractor`], which asks a model what in the window is
+//!     worth keeping.
+//!
+//! The matcher is the floor. It wins any key collision, and it is all that runs
+//! when extraction is unconfigured or inference is down, so the loop degrades to
+//! its previous behaviour rather than stopping. Both write the same
+//! `agent_memory` rows through the same `dream_runs` ledger.
 
+use crate::dream_extractor::{DreamExtractor, WindowMessage, LLM_SOURCE_LINK};
 use crate::letta_adapter::LettaMemoryAdapter;
 use chrono::{DateTime, Utc};
 use metrics::{counter, histogram};
@@ -15,6 +24,14 @@ use tracing::{info, warn};
 
 pub(crate) const AGENT_MEMORY_CONTEXT_LIMIT: i64 = 24;
 
+/// How much already-consolidated history to prepend to an extraction window.
+///
+/// Pending messages alone are not enough context on an ongoing thread: after
+/// the first cycle only the newest turns are pending, and "yes, that team" says
+/// nothing without what came before. Bounded tightly because this is read on
+/// every thread of every cycle.
+const EXTRACTION_CONTEXT_MESSAGES: i64 = 6;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DreamMemoryCandidate {
     pub scope: &'static str,
@@ -23,6 +40,13 @@ pub(crate) struct DreamMemoryCandidate {
     pub content: String,
     pub kind: &'static str,
     pub confidence: f64,
+    /// True when a model inferred this rather than the user stating it.
+    ///
+    /// Carried into `source_links` as [`LLM_SOURCE_LINK`] so the row's
+    /// provenance survives into the memory-management surface: a user looking
+    /// at "what do you remember about me" can tell what they asked Velion to
+    /// remember from what it decided to remember, and delete the latter.
+    pub inferred: bool,
 }
 
 #[derive(Debug)]
@@ -54,14 +78,20 @@ pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyh
         .and_then(|s| s.parse().ok())
         .unwrap_or(100i64)
         .clamp(1, 1_000);
+    let extractor = DreamExtractor::from_env();
     let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    info!(interval_secs, batch_size, "Dreaming Core loop started");
+    info!(
+        interval_secs,
+        batch_size,
+        llm_extraction = extractor.is_some(),
+        "Dreaming Core loop started"
+    );
 
     loop {
         tick.tick().await;
         let start = Instant::now();
-        match dream_once(&pool, letta.as_ref(), batch_size).await {
+        match dream_once(&pool, letta.as_ref(), extractor.as_ref(), batch_size).await {
             Ok(processed) => {
                 counter!("mp_session_dream_runs_total", "status" => "ok").increment(1);
                 histogram!("mp_session_dream_duration_seconds")
@@ -83,47 +113,133 @@ pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyh
 pub(crate) async fn dream_once(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
+    extractor: Option<&DreamExtractor>,
     limit: i64,
 ) -> anyhow::Result<i64> {
     let messages = load_pending_messages(pool, limit).await?;
     let mut processed = 0i64;
 
-    for message in messages {
-        let candidates =
-            extract_memory_candidates(&message.role, &message.content, &message.thread_id);
-        let mut tx = pool.begin().await?;
-        let saved = persist_candidates(
-            &mut tx,
-            &message.org_id,
-            &message.user_id,
-            &message.thread_id,
-            &message.message_id,
-            &candidates,
-        )
-        .await?;
-        record_dream_run(
-            &mut tx,
-            &message.org_id,
-            &message.thread_id,
-            "background_scan",
-            i64::try_from(candidates.len()).unwrap_or(i64::MAX),
-            saved,
-            Some(&message.message_id),
-        )
-        .await?;
-        tx.commit().await?;
-        sync_candidates_to_letta(
-            letta,
-            &message.org_id,
-            &message.user_id,
-            &message.thread_id,
-            &candidates,
-        )
-        .await;
-        processed += 1;
+    // Grouped by thread because extraction needs a conversation, not a line.
+    // The ledger stays per-message — every message still gets its `dream_runs`
+    // row, so the pending query is unchanged and a partial cycle resumes
+    // exactly where it stopped.
+    for group in group_by_thread(messages) {
+        let Some(last) = group.last() else { continue };
+        let org_id = last.org_id.clone();
+        let thread_id = last.thread_id.clone();
+
+        // Attached to the newest message of the group: that is the turn whose
+        // arrival justified re-reading the window, and source_links should point
+        // at it rather than at whichever message happened to sort first.
+        let extracted = match extractor {
+            Some(extractor) => {
+                let window = extraction_window(pool, &thread_id, &group).await;
+                extractor.extract(&org_id, &thread_id, &window).await
+            }
+            None => Vec::new(),
+        };
+        let anchor_message_id = last.message_id.clone();
+
+        for message in &group {
+            let mut candidates =
+                extract_memory_candidates(&message.role, &message.content, &message.thread_id);
+            if message.message_id == anchor_message_id {
+                merge_extracted(&mut candidates, &extracted);
+            }
+
+            let mut tx = pool.begin().await?;
+            let saved = persist_candidates(
+                &mut tx,
+                &message.org_id,
+                &message.user_id,
+                &message.thread_id,
+                &message.message_id,
+                &candidates,
+            )
+            .await?;
+            record_dream_run(
+                &mut tx,
+                &message.org_id,
+                &message.thread_id,
+                "background_scan",
+                i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+                saved,
+                Some(&message.message_id),
+            )
+            .await?;
+            tx.commit().await?;
+            sync_candidates_to_letta(
+                letta,
+                &message.org_id,
+                &message.user_id,
+                &message.thread_id,
+                &candidates,
+            )
+            .await;
+            processed += 1;
+        }
     }
 
     Ok(processed)
+}
+
+/// Partition pending messages by thread, preserving the load order within each.
+fn group_by_thread(messages: Vec<PendingMessage>) -> Vec<Vec<PendingMessage>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<PendingMessage>> =
+        std::collections::HashMap::new();
+    for message in messages {
+        let thread_id = message.thread_id.clone();
+        if !groups.contains_key(&thread_id) {
+            order.push(thread_id.clone());
+        }
+        groups.entry(thread_id).or_default().push(message);
+    }
+    order
+        .into_iter()
+        .filter_map(|thread_id| groups.remove(&thread_id))
+        .collect()
+}
+
+/// The pending messages preceded by a little already-consolidated history.
+///
+/// A read failure costs the window its context, not the extraction: the pending
+/// messages alone are still worth reading.
+async fn extraction_window(
+    pool: &PgPool,
+    thread_id: &str,
+    pending: &[PendingMessage],
+) -> Vec<WindowMessage> {
+    let oldest_pending = pending.first().map(|message| message.message_id.as_str());
+    let mut window = match load_preceding_context(pool, thread_id, oldest_pending).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, %thread_id, "dreaming could not read prior thread context");
+            Vec::new()
+        }
+    };
+    window.extend(pending.iter().map(|message| WindowMessage {
+        role: message.role.clone(),
+        content: message.content.clone(),
+    }));
+    window
+}
+
+/// Fold extracted candidates into the deterministic ones.
+///
+/// The matcher wins any key collision. "husk at X" is an instruction to obey
+/// exactly; the model's reading of the same sentence is an inference, and an
+/// inference must never displace what someone actually asked for.
+fn merge_extracted(candidates: &mut Vec<DreamMemoryCandidate>, extracted: &[DreamMemoryCandidate]) {
+    for candidate in extracted {
+        if candidates
+            .iter()
+            .any(|existing| existing.key == candidate.key)
+        {
+            continue;
+        }
+        candidates.push(candidate.clone());
+    }
 }
 
 pub(crate) async fn sync_candidates_to_letta(
@@ -189,13 +305,23 @@ pub(crate) async fn persist_candidates(
         return Ok(0);
     }
 
-    let source_links = vec![
+    let base_source_links = vec![
         format!("thread:{thread_id}"),
         format!("message:{message_id}"),
     ];
     let mut saved = 0i64;
 
     for candidate in candidates {
+        // The upsert REPLACES source_links rather than appending, so the marker
+        // has to be rebuilt per candidate: a re-extraction that dropped it would
+        // silently relabel an inferred memory as a stated one.
+        let source_links = if candidate.inferred {
+            let mut links = base_source_links.clone();
+            links.push(LLM_SOURCE_LINK.to_owned());
+            links
+        } else {
+            base_source_links.clone()
+        };
         let owner = if candidate.scope == "user" {
             user_id
         } else {
@@ -268,6 +394,42 @@ async fn load_pending_messages(
                 user_id,
             },
         )
+        .collect())
+}
+
+/// The last few already-consolidated turns of a thread, oldest first.
+///
+/// Ordered DESC then reversed so the LIMIT keeps the messages nearest the
+/// pending window; ordering ASC with a LIMIT would return the thread's opening
+/// turns instead, which is the least useful context available.
+async fn load_preceding_context(
+    pool: &PgPool,
+    thread_id: &str,
+    before_message_id: Option<&str>,
+) -> Result<Vec<WindowMessage>, sqlx::Error> {
+    let Some(before_message_id) = before_message_id else {
+        return Ok(Vec::new());
+    };
+    let mut rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT m.role, m.content \
+         FROM messages m \
+         WHERE m.thread_id = $1 \
+           AND m.role IN ('user', 'assistant') \
+           AND (m.created_at, m.sequence) < ( \
+             SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
+           ) \
+         ORDER BY m.created_at DESC, m.sequence DESC \
+         LIMIT $3",
+    )
+    .bind(thread_id)
+    .bind(before_message_id)
+    .bind(EXTRACTION_CONTEXT_MESSAGES)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
+    Ok(rows
+        .into_iter()
+        .map(|(role, content)| WindowMessage { role, content })
         .collect())
 }
 
@@ -474,6 +636,9 @@ pub(crate) async fn index_agent_memory(
         content: collapse_whitespace(content),
         kind,
         confidence: 0.9,
+        // A manual index call is a person choosing to store something, which is
+        // the strongest provenance there is.
+        inferred: false,
     };
 
     let mut tx = pool.begin().await?;
@@ -641,6 +806,7 @@ fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
             content: format!("User's name is {}.", title_name(&name)),
             kind: "fact",
             confidence: 0.98,
+            inferred: false,
         });
     }
 
@@ -657,6 +823,7 @@ fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
             content: format!("User prefers {}.", trim_sentence_end(&preference)),
             kind: "preference",
             confidence: 0.86,
+            inferred: false,
         });
     }
 
@@ -672,6 +839,7 @@ fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
             ),
             kind: "fact",
             confidence: 0.88,
+            inferred: false,
         });
     }
 
@@ -702,6 +870,7 @@ fn extract_assistant_candidates(content: &str, thread_id: &str) -> Vec<DreamMemo
         ),
         kind: "artifact_summary",
         confidence: 0.9,
+        inferred: false,
     }]
 }
 
@@ -890,5 +1059,102 @@ mod tests {
         assert_eq!(candidates[0].scope, "thread");
         assert_eq!(candidates[0].session_id.as_deref(), Some("thread-1"));
         assert_eq!(candidates[0].key, "thread:last_image_artifact");
+    }
+
+    fn pending(thread_id: &str, message_id: &str) -> PendingMessage {
+        PendingMessage {
+            message_id: message_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            role: "user".to_owned(),
+            content: "hei".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+        }
+    }
+
+    /// Extraction reads a conversation, so a cycle that interleaves two threads
+    /// must not hand the model a window mixing both.
+    #[test]
+    fn pending_messages_are_grouped_per_thread_in_load_order() {
+        let groups = group_by_thread(vec![
+            pending("thread-a", "m1"),
+            pending("thread-b", "m2"),
+            pending("thread-a", "m3"),
+            pending("thread-b", "m4"),
+            pending("thread-a", "m5"),
+        ]);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0][0].thread_id, "thread-a");
+        let ids: Vec<&str> = groups[0]
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["m1", "m3", "m5"],
+            "order within a thread must survive"
+        );
+        assert_eq!(groups[1].len(), 2);
+        assert_eq!(groups[1][0].thread_id, "thread-b");
+    }
+
+    /// The phrase matcher is a floor. A model reading "husk at ..." must not be
+    /// able to replace what the user literally asked to be remembered.
+    #[test]
+    fn a_stated_memory_always_beats_an_inferred_one_on_the_same_key() {
+        let mut stated = vec![DreamMemoryCandidate {
+            scope: "user",
+            session_id: None,
+            key: "user:name".to_owned(),
+            content: "User's name is Ima.".to_owned(),
+            kind: "fact",
+            confidence: 0.98,
+            inferred: false,
+        }];
+        let extracted = vec![
+            DreamMemoryCandidate {
+                scope: "user",
+                session_id: None,
+                key: "user:name".to_owned(),
+                content: "User's name is someone else.".to_owned(),
+                kind: "fact",
+                confidence: 0.85,
+                inferred: true,
+            },
+            DreamMemoryCandidate {
+                scope: "user",
+                session_id: None,
+                key: "user:llm:employer".to_owned(),
+                content: "User works at Aquatiq.".to_owned(),
+                kind: "fact",
+                confidence: 0.8,
+                inferred: true,
+            },
+        ];
+
+        merge_extracted(&mut stated, &extracted);
+
+        assert_eq!(stated.len(), 2, "the new slot should still be added");
+        assert_eq!(stated[0].content, "User's name is Ima.");
+        assert!(!stated[0].inferred);
+        assert_eq!(stated[1].key, "user:llm:employer");
+        assert!(stated[1].inferred);
+    }
+
+    /// Provenance has to be rebuilt on every write: the upsert REPLACES
+    /// `source_links`, so a re-extraction that dropped the marker would quietly
+    /// relabel an inferred memory as a stated one.
+    #[test]
+    fn only_inferred_candidates_carry_the_extractor_marker() {
+        let source = include_str!("dreaming.rs");
+        assert!(
+            source.contains("links.push(LLM_SOURCE_LINK.to_owned());"),
+            "inferred rows must be tagged in source_links"
+        );
+        assert!(
+            source.contains("if candidate.inferred {"),
+            "the marker must be conditional on provenance, not added to every row"
+        );
     }
 }
