@@ -390,9 +390,13 @@ func TestSummarizeMemoryActivity(t *testing.T) {
 	// Pure local logic — no gRPC connection required.
 	a := activities.NewActivities(testLogger(), &grpcclient.Clients{})
 
+	// ThreadID is now REQUIRED for an entry to be consolidatable: an entry that
+	// cannot be attributed to a conversation is dropped rather than merged into
+	// a shared bucket with other users' memories. This fixture previously omitted
+	// it and passed only because of that bucket.
 	entries := []activities.MemoryEntry{
-		{ID: "e1", Content: "first fact", CreatedAt: time.Now()},
-		{ID: "e2", Content: "second fact", CreatedAt: time.Now()},
+		{ID: "e1", ThreadID: "thread-1", Content: "first fact", CreatedAt: time.Now()},
+		{ID: "e2", ThreadID: "thread-1", Content: "second fact", CreatedAt: time.Now()},
 	}
 
 	t.Run("returns consolidated output", func(t *testing.T) {
@@ -403,6 +407,17 @@ func TestSummarizeMemoryActivity(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEmpty(t, out.Summary)
 		assert.NotEmpty(t, out.ConsolidatedEntries)
+	})
+
+	t.Run("an entry with no thread is not consolidatable", func(t *testing.T) {
+		out, err := a.SummarizeMemoryActivity(
+			context.Background(),
+			activities.ConsolidationInput{
+				Entries: []activities.MemoryEntry{{ID: "orphan", Content: "unattributable", CreatedAt: time.Now()}},
+			},
+		)
+		require.NoError(t, err)
+		assert.Empty(t, out.ConsolidatedEntries, "an unattributable memory must not be summarised into a shared row")
 	})
 
 	t.Run("empty entries returns empty output", func(t *testing.T) {

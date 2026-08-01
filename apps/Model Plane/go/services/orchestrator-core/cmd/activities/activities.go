@@ -491,7 +491,22 @@ func summarizeMemoryEntries(entries []MemoryEntry) []MemoryEntry {
 	for _, entry := range entries {
 		threadID := entry.ThreadID
 		if threadID == "" {
-			threadID = "unknown"
+			// DROP, never bucket under a shared placeholder.
+			//
+			// This used to collapse every thread-less memory into one "unknown"
+			// group, render them into ONE prompt, and write the blended summary
+			// back as a single row owned by nobody. Because the search this feeds
+			// is org-wide (QueryMemoryEntriesActivity passes no thread and no
+			// user), that made this a cross-USER memory blender: one tenant's
+			// employees would have had their private memories summarised together
+			// and re-indexed as a shared fact.
+			//
+			// It never fired only because the vector index returns zero rows
+			// today (dimension mismatch). Fixing that index without this guard
+			// would have switched the blender on. A memory we cannot attribute to
+			// a conversation is not consolidatable — skipping it loses nothing
+			// that was safe to keep.
+			continue
 		}
 		if _, ok := byThread[threadID]; !ok {
 			threadOrder = append(threadOrder, threadID)

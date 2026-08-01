@@ -208,7 +208,14 @@ func groupByThread(entries []MemoryEntry) map[string][]MemoryEntry {
 	for _, entry := range entries {
 		threadID := entry.ThreadID
 		if threadID == "" {
-			threadID = "unknown"
+			// Dropped, matching summarizeMemoryEntries. The doc comment above is
+			// load-bearing: these two groupings MUST agree, so a placeholder
+			// bucket here while the other drops would silently attribute a
+			// blended summary to entries that were never summarised.
+			//
+			// See the long note at the sibling site for why a shared "unknown"
+			// bucket was a cross-user memory blender waiting on a working index.
+			continue
 		}
 		byThread[threadID] = append(byThread[threadID], entry)
 	}

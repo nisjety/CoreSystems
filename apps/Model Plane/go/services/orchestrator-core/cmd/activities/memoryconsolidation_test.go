@@ -122,9 +122,22 @@ func TestGroupByThreadMatchesTheDeterministicGrouping(t *testing.T) {
 			t.Fatalf("group %q has no source entries; the two groupings disagree", g.ThreadID)
 		}
 	}
-	// An empty thread id must land in the same bucket on both sides.
-	if len(byThread["unknown"]) != 1 {
-		t.Fatalf("blank thread id was not normalised to \"unknown\": %v", byThread)
+	// An unattributable entry is DROPPED by both groupings, not bucketed under a
+	// shared placeholder. This assertion is inverted from what it was: the old
+	// "unknown" bucket collapsed every thread-less memory from every USER in the
+	// org into one prompt and wrote the blended result back as a single row owned
+	// by nobody. The search that feeds this is org-wide, so that was a cross-user
+	// memory blender waiting for the vector index to start returning rows.
+	if _, present := byThread["unknown"]; present {
+		t.Fatalf("a blank thread id must be dropped, not bucketed: %v", byThread)
+	}
+	if len(byThread) != 2 {
+		t.Fatalf("expected only the two real threads, got %v", byThread)
+	}
+	for _, g := range grouped {
+		if g.ThreadID == "" || g.ThreadID == "unknown" {
+			t.Fatalf("summarize produced an unattributable group: %q", g.ThreadID)
+		}
 	}
 }
 
