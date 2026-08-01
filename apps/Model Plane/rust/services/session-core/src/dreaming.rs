@@ -49,6 +49,45 @@ pub(crate) struct DreamMemoryCandidate {
     pub inferred: bool,
 }
 
+/// How a memory came to exist.
+///
+/// Three-valued on purpose. A bool would force pre-provenance rows into one of
+/// the two real answers, and the wrong one is worse than none: presenting an
+/// unknown row as "you told me this" is exactly the claim a user would rely on
+/// when deciding whether to keep it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryProvenance {
+    /// Written before provenance was recorded. Render as neither.
+    Unknown,
+    /// The user's own words — an explicit `save_memory` tool call, or a phrase
+    /// the deterministic matcher recognised ("husk at ...").
+    Stated,
+    /// A model's reading of a conversation.
+    Inferred,
+}
+
+impl MemoryProvenance {
+    /// Classify a stored row.
+    ///
+    /// `source_links` is authoritative and needs no migration: the column is
+    /// `TEXT[] NOT NULL DEFAULT '{}'`, so it is never NULL, only empty. Deriving
+    /// from the `key` namespace instead would be one fewer column to select and
+    /// one more thing to break the day a namespace is renamed.
+    pub(crate) fn classify(source_links: &[String]) -> Self {
+        if source_links.iter().any(|link| link == LLM_SOURCE_LINK) {
+            return Self::Inferred;
+        }
+        // `tool:save_memory` is a user asking, in as many words, to store this.
+        if source_links.iter().any(|link| link == "tool:save_memory") {
+            return Self::Stated;
+        }
+        // Everything the phrase matcher wrote carries only thread/message links.
+        // Those rows ARE stated, but so is anything older, and we cannot tell
+        // them apart — so they stay Unknown rather than being claimed as either.
+        Self::Unknown
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct MemorySearchRow {
     pub id: String,
@@ -57,6 +96,7 @@ pub(crate) struct MemorySearchRow {
     pub content: String,
     pub score: f32,
     pub updated_at: DateTime<Utc>,
+    pub provenance: MemoryProvenance,
 }
 
 struct PendingMessage {
@@ -589,6 +629,12 @@ pub(crate) async fn search_agent_memory(
                         session_id
                     },
                     topic: memory_topic(&scope, &kind).to_owned(),
+                    // Search does not select source_links, so it reports
+                    // Unknown rather than guessing. Provenance exists for the
+                    // memory-management surface, which lists rather than
+                    // searches; a relevance hit is not the place a user decides
+                    // what to keep.
+                    provenance: MemoryProvenance::Unknown,
                     content,
                     score: memory_score(confidence, exact_bonus),
                     updated_at,
@@ -733,8 +779,8 @@ pub(crate) async fn list_user_memory(
     limit: i64,
 ) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
     let limit = limit.clamp(1, 200);
-    let rows = sqlx::query_as::<_, (String, String, String, f64, DateTime<Utc>)>(
-        "SELECT id, kind, content, confidence, updated_at \
+    let rows = sqlx::query_as::<_, (String, String, String, f64, DateTime<Utc>, Vec<String>)>(
+        "SELECT id, kind, content, confidence, updated_at, source_links \
          FROM agent_memory \
          WHERE org_id = $1 \
            AND owner = $2 \
@@ -752,9 +798,10 @@ pub(crate) async fn list_user_memory(
 
     Ok(rows
         .into_iter()
-        .map(|(id, kind, content, confidence, updated_at)| MemorySearchRow {
+        .map(|(id, kind, content, confidence, updated_at, source_links)| MemorySearchRow {
             id,
             thread_id: String::new(),
+            provenance: MemoryProvenance::classify(&source_links),
             topic: memory_topic("user", &kind).to_owned(),
             content,
             score: memory_score(confidence, 0.0),

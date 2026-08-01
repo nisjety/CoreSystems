@@ -246,6 +246,7 @@ impl MemoryService for MemoryGrpc {
                         .unwrap_or(i32::MAX),
                 }),
                 user_id: owner_user_id.clone(),
+                provenance: memory_provenance(row.provenance) as i32,
             })
             .collect();
 
@@ -399,6 +400,7 @@ impl MemoryService for MemoryGrpc {
                         .unwrap_or(i32::MAX),
                 }),
                 user_id: user_id.to_owned(),
+                provenance: memory_provenance(row.provenance) as i32,
             })
             .collect();
 
@@ -495,6 +497,19 @@ impl MemoryService for MemoryGrpc {
     ) -> Result<Response<MemoryHealthResponse>, Status> {
         let _caller = identity(&request)?;
         Ok(Response::new(health_response(self.letta.as_ref())))
+    }
+}
+
+
+/// Map the store's provenance onto the wire enum.
+///
+/// Explicit rather than `#[repr]`-coupled so a future variant cannot silently
+/// acquire a wrong tag.
+fn memory_provenance(provenance: crate::dreaming::MemoryProvenance) -> mp_contracts::model_plane::v1::MemoryProvenance {
+    match provenance {
+        crate::dreaming::MemoryProvenance::Unknown => mp_contracts::model_plane::v1::MemoryProvenance::Unspecified,
+        crate::dreaming::MemoryProvenance::Stated => mp_contracts::model_plane::v1::MemoryProvenance::Stated,
+        crate::dreaming::MemoryProvenance::Inferred => mp_contracts::model_plane::v1::MemoryProvenance::Inferred,
     }
 }
 

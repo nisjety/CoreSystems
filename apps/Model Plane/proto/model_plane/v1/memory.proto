@@ -83,6 +83,30 @@ message MemoryEntry {
   // Owning user, when known. Empty for entries that are not user-scoped
   // (e.g. org/workspace/policy facts).
   string user_id = 7;
+
+  // How this memory came to exist, so a person reading "what do you remember
+  // about me" can tell what they ASKED Velion to remember from what Velion
+  // decided to remember on its own.
+  //
+  // Three-valued rather than a bool: "stated" covers both an explicit
+  // save-memory tool call and a phrase the deterministic matcher recognised
+  // ("husk at ..."), which are equally the user's own words; "inferred" is a
+  // model's reading of a conversation; "unknown" is an older row written before
+  // provenance was recorded, and must not be presented as either.
+  MemoryProvenance provenance = 8;
+}
+
+// MemoryProvenance — who decided a memory was worth keeping.
+enum MemoryProvenance {
+  // Not recorded. Pre-provenance rows land here; never render these as stated.
+  MEMORY_PROVENANCE_UNSPECIFIED = 0;
+
+  // The user said it, or asked for it to be saved.
+  MEMORY_PROVENANCE_STATED = 1;
+
+  // A model inferred it from a conversation. Auto-accepted, but this is the
+  // class a user is most likely to want to delete.
+  MEMORY_PROVENANCE_INFERRED = 2;
 }
 
 message IndexMemoryRequest {

@@ -32,11 +32,44 @@ describe('listMemories', () => {
     expect(init?.method ?? 'GET').toBe('GET')
     expect(result).toEqual({
       memories: [
-        { memoryId: 'mem_1', topic: 'USER', content: 'prefers dark mode', updatedAt: '2026-07-29T10:00:00Z' },
+        {
+          memoryId: 'mem_1',
+          topic: 'USER',
+          content: 'prefers dark mode',
+          updatedAt: '2026-07-29T10:00:00Z',
+          // No `provenance` in the payload -> 'unknown'. An older gateway that
+          // does not send the field must NOT have its rows read as stated.
+          provenance: 'unknown',
+        },
       ],
       degraded: false,
       degradationReason: '',
     })
+  })
+
+  it('maps provenance, and refuses to guess for anything unrecognised', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        memories: [
+          { memory_id: 'm1', provenance: 'inferred' },
+          { memory_id: 'm2', provenance: 'stated' },
+          { memory_id: 'm3', provenance: 'somethingNew' },
+          { memory_id: 'm4' },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await listMemories()
+
+    expect(result.memories.map((entry) => entry.provenance)).toEqual([
+      'inferred',
+      'stated',
+      // A provenance this client does not know is 'unknown', never a real
+      // value — the badge must not claim the user said something.
+      'unknown',
+      'unknown',
+    ])
   })
 
   it('drops entries with no memory id and surfaces the degraded flag/reason', async () => {

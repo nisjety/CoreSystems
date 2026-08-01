@@ -6,11 +6,21 @@ import { requestJson } from './http'
  * thread — never scoped to the conversation the caller happens to have
  * open). Fronted by model-gateway `/v1/memories`.
  */
+/**
+ * How a memory came to exist.
+ *
+ * `'unknown'` is a real answer, not a placeholder: rows written before
+ * provenance was recorded cannot be attributed, and showing them as `'stated'`
+ * would tell the user they said something they may not have.
+ */
+export type MemoryProvenance = 'stated' | 'inferred' | 'unknown'
+
 export interface MemoryEntry {
   memoryId: string
   topic: string
   content: string
   updatedAt: string
+  provenance: MemoryProvenance
 }
 
 export interface ListMemoriesResult {
@@ -33,6 +43,7 @@ interface ListMemoriesResponse {
     content?: string
     updated_at?: string
     updatedAt?: string
+    provenance?: string
   }>
   degraded?: boolean
   degradation_reason?: string
@@ -47,6 +58,10 @@ function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[numb
     topic: raw.topic ?? '',
     content: raw.content ?? '',
     updatedAt: raw.updated_at ?? raw.updatedAt ?? '',
+    // Anything unrecognised — including a field an older gateway does not send
+    // at all — is 'unknown'. Never default to a real value.
+    provenance:
+      raw.provenance === 'stated' || raw.provenance === 'inferred' ? raw.provenance : 'unknown',
   }
 }
 

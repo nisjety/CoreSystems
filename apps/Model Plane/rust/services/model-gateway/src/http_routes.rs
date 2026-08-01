@@ -5779,12 +5779,33 @@ struct ListMemoriesQuery {
     limit: Option<u32>,
 }
 
+/// Render session-core's provenance enum as a stable public string.
+///
+/// An UNRECOGNISED tag maps to "unknown", not to a default of either real value:
+/// a newer session-core adding a third provenance must degrade to "we are not
+/// sure" rather than silently claiming the user said something.
+fn memory_provenance_label(tag: i32) -> &'static str {
+    match mp_contracts::model_plane::v1::MemoryProvenance::try_from(tag) {
+        Ok(mp_contracts::model_plane::v1::MemoryProvenance::Stated) => "stated",
+        Ok(mp_contracts::model_plane::v1::MemoryProvenance::Inferred) => "inferred",
+        _ => "unknown",
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct MemorySummaryResponse {
     memory_id: String,
     topic: String,
     content: String,
     updated_at: String,
+    /// "stated" | "inferred" | "unknown" — how this memory came to exist.
+    ///
+    /// A string rather than the raw enum tag so the SPA never has to know
+    /// protobuf numbering, and three-valued rather than a bool so a row written
+    /// before provenance was recorded is not presented as either. Naming an
+    /// unknown row "stated" would be the one wrong answer: it is the claim a
+    /// user would rely on when deciding whether to keep it.
+    provenance: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -5831,6 +5852,7 @@ async fn list_memories(
             topic: entry.topic,
             content: entry.content,
             updated_at: timestamp_to_rfc3339(entry.updated_at),
+            provenance: memory_provenance_label(entry.provenance),
         })
         .collect();
 

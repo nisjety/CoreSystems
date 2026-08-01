@@ -1,6 +1,11 @@
 import { Loader2, Trash2 } from 'lucide-solid'
 import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
-import { deleteMemory, listMemories, type MemoryEntry } from '@/shared/api/memory-client'
+import {
+  deleteMemory,
+  listMemories,
+  type MemoryEntry,
+  type MemoryProvenance,
+} from '@/shared/api/memory-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
 
@@ -26,6 +31,23 @@ function formatUpdatedAt(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
   return date.toLocaleString('nb-NO', { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+/**
+ * The provenance badge, or `null` when there is nothing honest to say.
+ *
+ * Only `inferred` gets a chip. That asymmetry is the point: it marks the rows a
+ * user did NOT ask for, which is what they are here to review. Badging `stated`
+ * too would bury the distinction in noise, and badging `unknown` would draw
+ * attention to a row about which we can say nothing useful.
+ */
+function provenanceLabel(
+  provenance: MemoryProvenance,
+  i18n: ReturnType<typeof useI18n>,
+): string | null {
+  return provenance === 'inferred'
+    ? i18n.tr('Utledet av Velion', 'Inferred by Velion')
+    : null
 }
 
 function topicLabel(topic: string, i18n: ReturnType<typeof useI18n>): string {
@@ -142,7 +164,20 @@ export function MemorySection() {
                       {entry.content}{' '}
                       <span class="velion-trust-chip" aria-label={topicLabel(entry.topic, i18n)}>
                         {topicLabel(entry.topic, i18n)}
-                      </span>
+                      </span>{' '}
+                      <Show when={provenanceLabel(entry.provenance, i18n)}>
+                        {(label) => (
+                          <span
+                            class="velion-trust-chip"
+                            aria-label={i18n.tr(
+                              'Dette husket Velion av seg selv – du ba ikke om det',
+                              'Velion remembered this on its own – you did not ask it to',
+                            )}
+                          >
+                            {label()}
+                          </span>
+                        )}
+                      </Show>
                     </p>
                     <span>
                       {i18n.tr('Sist oppdatert', 'Last updated')}: {formatUpdatedAt(entry.updatedAt)}
