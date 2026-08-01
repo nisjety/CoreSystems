@@ -55,6 +55,7 @@ import { selectChatThread } from '@/features/chat/lib/chat-thread-history'
 import { writePendingChatLaunch } from '@/features/chat/lib/pending-chat-launch'
 import {
   groupChatModels,
+  hasZeroRetentionModel,
   isExpensiveModel,
   listChatThreads,
   listModels,
@@ -385,6 +386,18 @@ export function DashboardComposer(props: {
   // Chat-capable models grouped by family/provider. Non-chat modalities
   // (image/video/embeddings/transcribe) are filtered out by `groupChatModels`.
   const chatModelGroups = createMemo<ModelGroup[]>(() => groupChatModels(models() ?? []))
+  // Temporary chat is only offerable if some deployment is ATTESTED zero-retention.
+  // inference-core fails a ZDR request closed — it skips every provider whose
+  // `supports_zdr` is false — so without an attested one the toggle produces a
+  // turn that always dies with "The ephemeral inference request failed". The
+  // catalogue already carries the answer per model; this reads it instead of
+  // letting the user discover it by spending a message.
+  //
+  // `undefined` while the resource is still loading, so a slow catalogue does
+  // not flash the control into a disabled state and back.
+  const zeroRetentionAvailable = createMemo<boolean | undefined>(() =>
+    models.loading || models() === undefined ? undefined : hasZeroRetentionModel(models() ?? []),
+  )
   const flatChatModels = createMemo<ModelInfo[]>(() =>
     chatModelGroups().flatMap((group) => group.models),
   )
@@ -413,6 +426,11 @@ export function DashboardComposer(props: {
   // synthetic click, so the memo itself also refuses to report anything but
   // `true` while locked rather than relying on `disabled` alone.
   const temporaryChat = createMemo(() => props.temporaryChatLocked || (props.temporaryChat ?? false))
+  // Locked (already inside a temporary thread) still wins: that control is
+  // disabled because the choice is settled, not because it is unavailable.
+  const temporaryChatUnavailable = createMemo(
+    () => !props.temporaryChatLocked && zeroRetentionAvailable() === false,
+  )
   const hasEntityOverlay = createMemo(() => entities().length > 0)
   const [textareaExpanded, setTextareaExpanded] = createSignal(false)
   const [hasOverflow, setHasOverflow] = createSignal(false)
@@ -1224,11 +1242,18 @@ export function DashboardComposer(props: {
           <Show when={props.onTemporaryChatChange}>
             <ComposerIconButton
               active={temporaryChat()}
-              disabled={props.temporaryChatLocked}
-              label={i18n.tr(
-                'Midlertidig samtale – ingen historikk, ingen minne',
-                'Temporary chat – no history, no memory',
-              )}
+              disabled={props.temporaryChatLocked || temporaryChatUnavailable()}
+              label={
+                temporaryChatUnavailable()
+                  ? i18n.tr(
+                      'Midlertidig samtale er utilgjengelig – ingen av modellene i katalogen er attestert for null datalagring',
+                      'Temporary chat is unavailable – no model in the catalogue is attested for zero data retention',
+                    )
+                  : i18n.tr(
+                      'Midlertidig samtale – ingen historikk, ingen minne',
+                      'Temporary chat – no history, no memory',
+                    )
+              }
               onClick={() => props.onTemporaryChatChange?.(!temporaryChat())}
               variant="chip"
             >

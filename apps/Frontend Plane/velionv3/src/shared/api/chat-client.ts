@@ -36,6 +36,8 @@ export type ChatInvokeRequest = {
   features?: string[]
   generateImage?: boolean
   browseWeb?: boolean
+  /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
+  deepResearch?: boolean
   attachments?: ChatAttachment[]
   /** Explicit tool definitions (advanced); usually derived from actions/browseWeb. */
   tools?: ChatToolSpec[]
@@ -295,6 +297,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // the feature set and nothing server-side could tell a planning run from an
     // executing one.
     plan_mode: request.planMode ?? false,
+    // Deep research is its OWN field, not just `browse_web`. "Dyp research"
+    // used to set only browseWeb, so it was indistinguishable from a plain
+    // Search turn — the same failure planMode had. The gateway keys the
+    // multi-round research pipeline off this flag.
+    deep_research: request.deepResearch ?? false,
     attachments: request.attachments ?? [],
     features: [...features],
     tools,
@@ -704,6 +711,34 @@ export async function listModels(): Promise<ModelInfo[]> {
       }
     })
     .filter((model) => model.id.length > 0)
+}
+
+/**
+ * The per-model capability flag inference-core emits for a deployment whose
+ * zero-retention contract an operator has explicitly attested.
+ *
+ * It is NOT derived from the region or the provider brand. `feature_flags()` in
+ * inference-core only adds it when `supports_zdr` is true, which for Azure
+ * OpenAI means the operator set `AZURE_OPENAI_ZDR_CONFIRMED`, and which the
+ * Anthropic provider currently never sets.
+ */
+export const ZERO_RETENTION_CAPABILITY = 'zdr'
+
+/**
+ * Whether ANY catalogue model can serve a no-retention turn.
+ *
+ * This exists because the alternative is worse than no feature: inference-core
+ * fails a ZDR request CLOSED, skipping every provider that is not attested, so
+ * offering the temporary-chat toggle against an unattested fleet produces a
+ * turn that always dies. Asking the catalogue lets the UI say so before the
+ * user spends a message finding out.
+ *
+ * An EMPTY catalogue returns false. That is deliberate: `listModels()` swallows
+ * a gateway outage into `[]`, and in that state we know nothing about provider
+ * attestation — offering a mode that fails closed downstream is the wrong guess.
+ */
+export function hasZeroRetentionModel(models: readonly ModelInfo[]): boolean {
+  return models.some((model) => model.capabilities?.includes(ZERO_RETENTION_CAPABILITY) ?? false)
 }
 
 /** Patterns that mark a model as expensive enough to warrant a deliberate pick. */

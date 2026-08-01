@@ -1376,10 +1376,14 @@ pub async fn invoke_stream_sse(
                     &session_state,
                     &session_run_for_terminal,
                     &session_bearer,
+                    &inference_bearer,
                     &req_id,
+                    &org_clone,
                     &features,
                     &answer_model,
+                    &title_user_content,
                     &cached,
+                    is_first_exchange,
                     start,
                 )
                 .await;
@@ -2334,7 +2338,12 @@ async fn load_recent_thread_messages(
             ),
         )
         .await
-        .unwrap_or_default();
+        // A timeout and a provider error are the same outcome here — no summary
+        // — and compaction is best-effort by contract, so both collapse to
+        // `None` and take the truncation fallback.
+        .map_err(|_| ())
+        .and_then(|result| result.map_err(|_| ()))
+        .ok();
         if summary.is_none() {
             tracing::warn!(
                 %thread_id,
@@ -3038,10 +3047,14 @@ async fn serve_cached_answer(
     state: &AppState,
     run: &crate::session_flow::SessionRun,
     session_bearer: &VerifiedModelBearer,
+    inference_bearer: &VerifiedInferenceBearer,
     request_id: &str,
+    org_id: &str,
     features: &[String],
     model: &str,
+    user_content: &str,
     cached: &str,
+    is_first_exchange: bool,
     start: std::time::Instant,
 ) {
     // One chunk, not a fake token-by-token replay: the answer already exists, and
@@ -3108,6 +3121,37 @@ async fn serve_cached_answer(
     if usage.should_emit(features) {
         let _ = tx.send(Ok(usage.to_sse(request_id))).await;
     }
+
+    // A cached turn must be the same TURN, not just the same text. The first
+    // version of this returned right after `usage`, which silently dropped the
+    // thread title and the follow-up chips on exactly the repeat-question path
+    // the cache exists to speed up — the answer arrived faster and the
+    // conversation got worse. Both are cheap non-streaming calls with the same
+    // swallow-on-failure posture as the live path, and neither is cached
+    // itself, so they are regenerated here rather than stored.
+    if is_first_exchange {
+        if let Some(title) = generate_thread_title(
+            state,
+            request_id,
+            org_id,
+            user_content,
+            cached,
+            inference_bearer,
+        )
+        .await
+        {
+            let event = crate::sse_events::ChatEvent::Title { title };
+            let _ = tx.send(Ok(event.to_sse(request_id))).await;
+        }
+    }
+    let suggestions =
+        generate_follow_ups(state, request_id, org_id, user_content, cached, inference_bearer)
+            .await;
+    if !suggestions.is_empty() {
+        let event = crate::sse_events::ChatEvent::FollowUps { suggestions };
+        let _ = tx.send(Ok(event.to_sse(request_id))).await;
+    }
+
     let done = SseChunk {
         request_id: request_id.to_owned(),
         delta: String::new(),
@@ -3712,7 +3756,7 @@ async fn direct_infer(
     content: &str,
     zdr: bool,
     inference_bearer: &VerifiedInferenceBearer,
-) -> Option<String> {
+) -> Result<String, tonic::Status> {
     let mut client = state.inference_client.clone();
     client
         .infer(authenticated_inference_request(
@@ -3738,8 +3782,7 @@ async fn direct_infer(
             inference_bearer,
         ))
         .await
-        .ok()
-        .map(|r| r.into_inner().content)
+        .map(|response| response.into_inner().content)
 }
 
 /// Model for the thread-title summarization: a **pinned** cheap non-reasoning
@@ -4131,7 +4174,7 @@ async fn zdr_direct_stream(
     grounding: Option<crate::retrieval::Grounding>,
     inference_bearer: VerifiedInferenceBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let Some(answer) = direct_infer(
+    let answer = match direct_infer(
         &state,
         &request_id,
         &org_id,
@@ -4141,13 +4184,42 @@ async fn zdr_direct_stream(
         &inference_bearer,
     )
     .await
-    else {
-        return error_stream(
-            &request_id,
-            "zdr_inference_failed",
-            "The ephemeral inference request failed",
-            true,
-        );
+    {
+        Ok(answer) => answer,
+        // `FailedPrecondition` is the ZDR attestation gate, not an outage:
+        // inference-core skipped every provider because none has an
+        // independently verified zero-retention contract, and it says so in the
+        // status message. That used to be flattened into "The ephemeral
+        // inference request failed" with `retryable: true`, so the user retried
+        // a mode that could never work and had no way to learn why. Surface the
+        // real reason, and mark it NOT retryable — nothing about waiting
+        // changes whether a deployment is attested.
+        Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+            tracing::warn!(
+                request_id = %request_id,
+                reason = status.message(),
+                "temporary chat refused: no provider deployment is attested for zero data retention"
+            );
+            return error_stream(
+                &request_id,
+                "zdr_unavailable",
+                "Temporary chat is unavailable: no model deployment is attested for zero                  data retention. An operator must confirm a no-retention contract before                  this mode can be used.",
+                false,
+            );
+        }
+        Err(status) => {
+            tracing::warn!(
+                request_id = %request_id,
+                code = ?status.code(),
+                "ephemeral inference failed"
+            );
+            return error_stream(
+                &request_id,
+                "zdr_inference_failed",
+                "The ephemeral inference request failed",
+                true,
+            );
+        }
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
