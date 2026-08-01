@@ -93,6 +93,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::knowledge::router(state.clone()))
         .merge(domains::leads::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
+        .merge(domains::memory::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
         .merge(domains::navbar::router(state.clone()))
         .merge(domains::notifications::router(state.clone()))

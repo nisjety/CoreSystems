@@ -21,6 +21,7 @@ pub mod integrations;
 pub mod knowledge;
 pub mod leads;
 pub mod mcp;
+pub mod memory;
 pub mod monitoring;
 pub mod navbar;
 pub mod notifications;

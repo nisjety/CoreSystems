@@ -183,9 +183,16 @@ export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): Chat
     // server-session resync would silently unpin every pinned thread.
     const matchingStored = stored.find((candidate) => candidate.threadId === item.threadId)
     collected.push(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored))
-    if (collected.length >= maxThreadHistoryItems) break
   }
-  const next = sortByUpdatedAtDesc(collected)
+  // Sort BEFORE truncating, exactly as `upsertChatThreadHistory` already does.
+  // Truncating first — which this used to do, breaking out of the loop at the
+  // cap in raw server order — silently destroyed pins: the gateway returns up
+  // to 80 threads, `sortByUpdatedAtDesc` puts pinned ones first, and a user
+  // with more than 40 threads who pinned an old one had it cut before the sort
+  // could ever rescue it. Because the truncated list is then written straight
+  // back to storage, the pin AND the thread were gone from the sidebar for good
+  // on the next resync.
+  const next = sortByUpdatedAtDesc(collected).slice(0, maxThreadHistoryItems)
 
   writeClientJson(CHAT_THREAD_HISTORY_KEY, next)
   dispatchClientEvent(CHAT_THREAD_HISTORY_CHANGED_EVENT, { sessions: next })
