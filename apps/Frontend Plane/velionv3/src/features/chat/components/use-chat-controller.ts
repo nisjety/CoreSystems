@@ -368,9 +368,21 @@ export function useChatController() {
   let threadLoadSequence = 0
 
   const loadThread = async (threadId: string) => {
+    // Switching threads must tear down the previously-selected thread's
+    // in-flight stream/resume and reset the shared view machine. Left running,
+    // that stream's terminal handlers keep mutating the store after
+    // `state.threadId` has moved on — landing a fallback-retry answer, a stale
+    // error banner, or a stuck 'streaming' status (which permanently disables
+    // the composer) on the thread the user just opened. The abort is also what
+    // makes the fallback-retry unreachable: an aborted SSE returns without
+    // calling `onError` (see readSseStream), so the retry branch never fires.
+    // Clearing status/error mirrors what the new-chat path (`resetChatState`)
+    // already does; the thread-select path needs it too.
+    abortController?.abort()
+    abortController = undefined
     const seq = ++threadLoadSequence
     hydratingThreadId = threadId
-    setState('threadId', threadId)
+    setState({ threadId, status: 'idle', error: null })
     const localCached = readChatThreadTranscript(threadId)
     const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
     if (seq !== threadLoadSequence) return
@@ -751,6 +763,16 @@ export function useChatController() {
     setState('status', 'streaming')
     setState('error', null)
 
+    // Once the user switches to another thread mid-flight this send no longer
+    // owns the shared status/error machine, so its terminal handlers must not
+    // write global state onto the now-visible thread. loadThread aborts us on
+    // switch, but an aborted SSE resolves as a normal close (readSseStream
+    // swallows AbortError), so the finaliser below still runs — this keeps its
+    // global writes scoped to the thread this send belongs to. `activeThreadId`
+    // tracks the server's real id after the onConnected swap, so it stays the
+    // canonical owner check for the whole turn.
+    const ownsMachine = () => state.threadId === activeThreadId
+
     let settled = false
     const captureRequestId = (requestId?: string) => {
       if (!requestId) return
@@ -937,10 +959,24 @@ export function useChatController() {
             stopStreaming(undefined)
             markOpenSteps('done', 'Completed.', assistantId)
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
-            setState('status', 'idle')
-            writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
+            // Skip the shared machine + snapshot if the user has since opened
+            // another thread — state.turns is now that thread's, so a snapshot
+            // here would write the wrong turns and the status flip would clobber
+            // the visible thread.
+            if (ownsMachine()) {
+              setState('status', 'idle')
+              writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
+            }
           },
           onError: ({ message }) => {
+            // Thread switched away mid-stream: loadThread already aborted us and
+            // reset the shared machine for the new thread, so finalise nothing
+            // here (a global error/status write or a fallback retry would land
+            // on the wrong thread).
+            if (!ownsMachine()) {
+              settled = true
+              return
+            }
             // Graceful model fallback: a pinned model (or Velion intent mode)
             // whose provider is unavailable fails the whole turn. Retry once with
             // an empty model → inference-core resolves Velion Balance / a working
@@ -971,11 +1007,20 @@ export function useChatController() {
         stopStreaming(undefined)
         markOpenSteps('done', 'Completed.', assistantId)
         addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
-        setState('status', 'idle')
-        writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
+        // Same ownership guard as onDone: an aborted stream (e.g. a thread
+        // switch) lands here with `!settled`, and must not flip the visible
+        // thread's status or snapshot the wrong turns.
+        if (ownsMachine()) {
+          setState('status', 'idle')
+          writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
+        }
       }
     } catch {
       stopStreaming(controller.signal.aborted ? 'stopped' : 'error')
+      // If the user switched threads, this send no longer owns the shared
+      // machine — settle its own turn's flag above but never write global
+      // status/error or a snapshot onto the now-visible thread.
+      if (!ownsMachine()) return
       if (controller.signal.aborted) {
         markOpenSteps('stopped', 'Stopped by the user.', assistantId)
         setState('status', 'idle')
