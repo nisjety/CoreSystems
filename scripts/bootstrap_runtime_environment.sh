@@ -447,6 +447,28 @@ session_core_service_key="$(ensure_secret "$MODEL_ENV" SESSION_CORE_SERVICE_API_
 capability_core_key="$(ensure_secret "$MODEL_ENV" CAPABILITY_CORE_SERVICE_API_KEY)"
 # orchestrator-core's Temporal activities call four downstream audiences.
 orchestrator_core_key="$(ensure_secret "$MODEL_ENV" ORCHESTRATOR_CORE_SERVICE_API_KEY)"
+# Model Plane NATS principal passwords. nats.conf interpolates the SAME variable
+# on both the server and the client side (deploy/nats.conf `password: $VAR`), so
+# a generated value matches by construction. Idempotent: existing values are
+# reused, so a live fleet is never rotated. Nothing else in the checked-in
+# provisioning produced these, so a fresh machine's compose refused to start.
+ensure_secret "$MODEL_ENV" MODEL_GATEWAY_NATS_PASSWORD >/dev/null
+ensure_secret "$MODEL_ENV" MODEL_SESSION_CORE_NATS_PASSWORD >/dev/null
+ensure_secret "$MODEL_ENV" MODEL_CAPABILITY_CORE_NATS_PASSWORD >/dev/null
+ensure_secret "$MODEL_ENV" MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD >/dev/null
+ensure_secret "$MODEL_ENV" MODEL_TOOL_COMPLETION_NATS_PASSWORD >/dev/null
+ensure_secret "$MODEL_ENV" MODEL_COST_CORE_NATS_PASSWORD >/dev/null
+# The two Application->Model cross-plane NATS identities. Held in the Model env
+# because that is where nats.conf authorizes them; synced to Application below.
+model_convex_nats="$(ensure_secret "$MODEL_ENV" APPLICATION_CONVEX_MODEL_NATS_PASSWORD)"
+model_insight_nats="$(ensure_secret "$MODEL_ENV" APPLICATION_INSIGHT_MODEL_NATS_PASSWORD)"
+sync_value APPLICATION_CONVEX_MODEL_NATS_PASSWORD "$model_convex_nats" "$APPLICATION_ENV"
+sync_value APPLICATION_INSIGHT_MODEL_NATS_PASSWORD "$model_insight_nats" "$APPLICATION_ENV"
+# Opaque high-entropy secret for managed-run start identities (never a user token).
+ensure_secret "$MODEL_ENV" MODEL_GATEWAY_MANAGED_START_KEY_SECRET >/dev/null
+# Auth Core JWKS endpoint the Model Plane verifies signed audience tokens against.
+# A route, not a secret — derived like AUTH_CORE_ISSUER already is.
+ensure_value "$MODEL_ENV" AUTH_CORE_JWKS_URL "http://auth-core:3011/api/convex-auth/jwks" >/dev/null
 # Data Plane callers of the Model Plane embedding hop. Compose maps three
 # DIFFERENT plane-level variables onto the same container variable
 # (MODEL_PLANE_INFERENCE_SERVICE_API_KEY) for retrieval-engine, embedding-engine
@@ -490,6 +512,12 @@ ensure_secret "$APPLICATION_ENV" CONVERSATION_CORE_INGEST_SERVICE_TOKEN >/dev/nu
 conversation_core_key="$(ensure_secret "$APPLICATION_ENV" CONVERSATION_CORE_SERVICE_API_KEY)"
 sync_value CONVERSATION_INTEGRATION_SERVICE_API_KEY "$conversation_core_key" "$APPLICATION_ENV"
 sync_value INTEGRATION_INTERNAL_API_KEY "$internal_api_key" "$APPLICATION_ENV"
+# Application-plane secrets nothing else generated: the Ingestion->Application
+# publisher NATS identity and the Convex control-projection key.
+ensure_secret "$APPLICATION_ENV" APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD >/dev/null
+sync_value APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD \
+  "$(dotenv_get "$APPLICATION_ENV" APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD)" "$INGESTION_ENV"
+ensure_secret "$APPLICATION_ENV" APPLICATION_CONVEX_CONTROL_PROJECTION_KEY >/dev/null
 
 # Conversation provider-write attestation (Ed25519): conversation-core signs
 # provider-write receipts; integration-corev2 verifies them at runtime.

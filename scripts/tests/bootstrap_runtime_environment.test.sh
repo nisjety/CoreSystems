@@ -18,19 +18,57 @@ assert_equal() {
   if [[ "$expected" == "$actual" ]]; then pass "$description"; else fail "$description"; fi
 }
 
+# Variables provisioned OUTSIDE the central bootstrap, so this test must not
+# treat their absence from the bootstrap fixture as a gap.
+#
+# The fleet is provisioned in two layers: this central bootstrap owns
+# cross-plane shared credentials and the Auth Core principal registry, while
+# each plane's run-*.sh generates that plane's own NATS/GDPR/DB/service-token
+# secrets (see the `required_credentials` arrays and `set_if_missing` calls
+# there). The fixture only runs the central bootstrap, so without this the test
+# reported ~100 per-plane-runner-owned variables as "missing" — testing a
+# contract the system never claimed. This set is parsed from the actual runner
+# scripts, so it cannot silently drift from them.
+runner_provisioned_vars() {
+  {
+    # set_if_missing VAR ...
+    grep -rhoE 'set_if_missing[[:space:]]+[A-Z][A-Z0-9_]{3,}' "$REPO_ROOT"/apps/*/scripts/run-*.sh 2>/dev/null \
+      | grep -oE '[A-Z][A-Z0-9_]{3,}'
+    # ensure_secret/ensure_value/ensure_env "$X" VAR  (second all-caps token)
+    grep -rhoE 'ensure_(secret|value|env)[^\n]*' "$REPO_ROOT"/apps/*/scripts/run-*.sh 2>/dev/null \
+      | grep -oE '[A-Z][A-Z0-9_]{4,}'
+    # required_credentials=( ... ) / required_generated=( ... ) array bodies
+    awk '/required_(credentials|generated|env|secrets)[[:space:]]*(\+?=)?[[:space:]]*\(/,/\)/' \
+      "$REPO_ROOT"/apps/*/scripts/run-*.sh 2>/dev/null | grep -oE '[A-Z][A-Z0-9_]{4,}'
+  } | sort -u
+}
+
+# Build provenance is supplied by CI or the per-plane runners' set_if_missing,
+# never minted by the bootstrap — a git SHA is not a secret to generate.
+CI_PROVENANCE_VARS=$'BUILD_DATE\nSOURCE_REVISION'
+
 assert_compose_required_vars() {
   local description="$1" compose_file="$2" fixture_env="$3" key value
-  local missing=()
+  local -a missing=()
+  local runner_vars ci_vars
+  runner_vars="$(runner_provisioned_vars)"
+  ci_vars="$CI_PROVENANCE_VARS"
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
     value="$(value_of "$fixture_env" "$key")"
     [[ -n "$value" ]] || value="$(value_of "$FIXTURE/.env" "$key")"
-    [[ -n "$value" ]] || missing+=("$key")
+    # Satisfied if the central bootstrap produced it, a per-plane runner owns
+    # it, or it is CI-supplied provenance.
+    if [[ -z "$value" ]] \
+      && ! grep -qxF "$key" <<<"$runner_vars" \
+      && ! grep -qxF "$key" <<<"$ci_vars"; then
+      missing+=("$key")
+    fi
   done < <(grep -oE '\$\{[A-Z][A-Z0-9_]*:\?' "$compose_file" | sed -E 's/^\$\{([^:]+):\?$/\1/' | sort -u)
   if (( ${#missing[@]} == 0 )); then
     pass "$description"
   else
-    printf 'missing required vars for %s: %s\n' "$description" "${missing[*]}" >&2
+    printf 'unprovisioned required vars for %s: %s\n' "$description" "${missing[*]}" >&2
     fail "$description"
   fi
 }
