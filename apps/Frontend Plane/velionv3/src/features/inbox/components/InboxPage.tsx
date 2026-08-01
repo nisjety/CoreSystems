@@ -435,7 +435,16 @@ export default function InboxPage() {
     if (!current) return
     const requestOrgId = orgId()
     const requestGeneration = orgGeneration
-    const isCurrentRequest = () => requestOrgId === orgId() && requestGeneration === orgGeneration
+    // Selection guard: snapshot the current conversation's request epoch so a
+    // result that resolves after the agent has opened a different conversation
+    // (or the route/org changed) is dropped instead of writing onto the newly
+    // selected one — e.g. an AI draft, a status/tag patch, or a sent reply
+    // landing on the wrong customer. loadTicketDetails bumps detailRequestVersion
+    // on every selection change; these in-conversation actions only read it.
+    const requestVersion = detailRequestVersion
+    const isCurrentRequest = () => requestOrgId === orgId()
+      && requestGeneration === orgGeneration
+      && requestVersion === detailRequestVersion
 
     try {
       let updated: LiveTicket = current
@@ -508,7 +517,16 @@ export default function InboxPage() {
     if (!body || !ticket || replySending()) return
     const requestOrgId = orgId()
     const requestGeneration = orgGeneration
-    const isCurrentRequest = () => requestOrgId === orgId() && requestGeneration === orgGeneration
+    // Selection guard: snapshot the current conversation's request epoch so a
+    // result that resolves after the agent has opened a different conversation
+    // (or the route/org changed) is dropped instead of writing onto the newly
+    // selected one — e.g. an AI draft, a status/tag patch, or a sent reply
+    // landing on the wrong customer. loadTicketDetails bumps detailRequestVersion
+    // on every selection change; these in-conversation actions only read it.
+    const requestVersion = detailRequestVersion
+    const isCurrentRequest = () => requestOrgId === orgId()
+      && requestGeneration === orgGeneration
+      && requestVersion === detailRequestVersion
     const pending = pendingReplyIntent()
     const intent = pending
       && pending.conversationId === ticket.conversationId
@@ -558,7 +576,16 @@ export default function InboxPage() {
     if (!ticket || !orgId() || suggesting()) return
     const requestOrgId = orgId()
     const requestGeneration = orgGeneration
-    const isCurrentRequest = () => requestOrgId === orgId() && requestGeneration === orgGeneration
+    // Selection guard: snapshot the current conversation's request epoch so a
+    // result that resolves after the agent has opened a different conversation
+    // (or the route/org changed) is dropped instead of writing onto the newly
+    // selected one — e.g. an AI draft, a status/tag patch, or a sent reply
+    // landing on the wrong customer. loadTicketDetails bumps detailRequestVersion
+    // on every selection change; these in-conversation actions only read it.
+    const requestVersion = detailRequestVersion
+    const isCurrentRequest = () => requestOrgId === orgId()
+      && requestGeneration === orgGeneration
+      && requestVersion === detailRequestVersion
     setSuggesting(true)
     try {
       const messages = articles().map((a) => ({
@@ -583,7 +610,16 @@ export default function InboxPage() {
     if (!ticket || !orgId()) return
     const requestOrgId = orgId()
     const requestGeneration = orgGeneration
-    const isCurrentRequest = () => requestOrgId === orgId() && requestGeneration === orgGeneration
+    // Selection guard: snapshot the current conversation's request epoch so a
+    // result that resolves after the agent has opened a different conversation
+    // (or the route/org changed) is dropped instead of writing onto the newly
+    // selected one — e.g. an AI draft, a status/tag patch, or a sent reply
+    // landing on the wrong customer. loadTicketDetails bumps detailRequestVersion
+    // on every selection change; these in-conversation actions only read it.
+    const requestVersion = detailRequestVersion
+    const isCurrentRequest = () => requestOrgId === orgId()
+      && requestGeneration === orgGeneration
+      && requestVersion === detailRequestVersion
     setNotice(null)
     try {
       const latestArticle = [...articles()].reverse().find((article) => !article.internal)
@@ -610,7 +646,16 @@ export default function InboxPage() {
     if (!ticket || !orgId()) return
     const requestOrgId = orgId()
     const requestGeneration = orgGeneration
-    const isCurrentRequest = () => requestOrgId === orgId() && requestGeneration === orgGeneration
+    // Selection guard: snapshot the current conversation's request epoch so a
+    // result that resolves after the agent has opened a different conversation
+    // (or the route/org changed) is dropped instead of writing onto the newly
+    // selected one — e.g. an AI draft, a status/tag patch, or a sent reply
+    // landing on the wrong customer. loadTicketDetails bumps detailRequestVersion
+    // on every selection change; these in-conversation actions only read it.
+    const requestVersion = detailRequestVersion
+    const isCurrentRequest = () => requestOrgId === orgId()
+      && requestGeneration === orgGeneration
+      && requestVersion === detailRequestVersion
     if (ticket.supportTicket) {
       navigate(`/tickets?ticketId=${ticket.supportTicket.id}`)
       return
