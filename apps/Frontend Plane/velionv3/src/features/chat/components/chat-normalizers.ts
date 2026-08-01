@@ -184,7 +184,7 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
   const usedCachedIds = new Set<string>()
   const roleOffsets: Record<ChatTurn['role'], number> = { assistant: 0, user: 0 }
 
-  return serverTurns.map((serverTurn) => {
+  const merged = serverTurns.map((serverTurn) => {
     const roleIndex = roleOffsets[serverTurn.role]
     roleOffsets[serverTurn.role] += 1
     const cachedTurn = selectCachedTurnForServerTurn(serverTurn, cachedTurns, usedCachedIds, roleIndex)
@@ -198,7 +198,11 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       model: serverTurn.model ?? cachedTurn.model,
       modelUsed: serverTurn.modelUsed ?? cachedTurn.modelUsed,
       requestId: serverTurn.requestId ?? cachedTurn.requestId,
-      status: serverTurn.status ?? cachedTurn.status,
+      // A server-persisted assistant message is by definition COMPLETE
+      // (session-core stores it once, at stream end), so a cached in-flight
+      // 'waiting' must never leak onto it — it would render a finished
+      // answer as an eternal spinner. Terminal cached statuses still carry.
+      status: serverTurn.status ?? (cachedTurn.status === 'waiting' ? undefined : cachedTurn.status),
       inputTokens: serverTurn.inputTokens ?? cachedTurn.inputTokens,
       outputTokens: serverTurn.outputTokens ?? cachedTurn.outputTokens,
       latencyMs: serverTurn.latencyMs ?? cachedTurn.latencyMs,
@@ -214,6 +218,28 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       attachments: serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
     }
   })
+
+  // Resumable tail (chat-parity §3b): a reload mid-answer leaves the waiting
+  // assistant turn ONLY in the cache — the server persists the assistant
+  // message at stream end, so mapping over serverTurns alone silently drops
+  // it, and the resume path (`maybeResumeStream`) never sees a waiting turn to
+  // reattach to. Carry that one turn over: strictly the LAST cached turn, an
+  // assistant still 'waiting', unconsumed by the merge above, and holding the
+  // requestId the resume endpoint needs (no requestId → nothing to resume →
+  // appending would render an unsettleable spinner). Its user question is
+  // already in serverTurns: the gateway persists the user message during
+  // prepare, before any requestId exists.
+  const tail = cachedTurns.at(-1)
+  if (
+    tail &&
+    tail.role === 'assistant' &&
+    tail.status === 'waiting' &&
+    tail.requestId &&
+    !usedCachedIds.has(tail.id)
+  ) {
+    return [...merged, tail]
+  }
+  return merged
 }
 
 export function metadataArray<T>(serverItems: T[] | undefined, cachedItems: T[] | undefined): T[] | undefined {

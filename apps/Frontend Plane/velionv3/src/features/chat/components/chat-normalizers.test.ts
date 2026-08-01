@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { humanizeToolName, missingSearchResultStep, readBrowseWebPreference, summarizeToolArgs } from './chat-normalizers'
+import { humanizeToolName, mergeServerTurnsWithCachedMetadata, missingSearchResultStep, readBrowseWebPreference, summarizeToolArgs } from './chat-normalizers'
+import type { ChatTurn } from './chat-types'
 
 describe('summarizeToolArgs', () => {
   it('returns an empty string for null / undefined / empty inputs', () => {
@@ -98,5 +99,75 @@ describe('missingSearchResultStep', () => {
     expect(missingSearchResultStep({ ...waitingSearchStep, status: 'done' }, 'done')).toBeNull()
     expect(missingSearchResultStep({ ...waitingSearchStep, id: 'asst-1:answer' }, 'done')).toBeNull()
     expect(missingSearchResultStep(waitingSearchStep, 'stopped')).toBeNull()
+  })
+})
+
+describe('mergeServerTurnsWithCachedMetadata (resumable tail, §3b)', () => {
+  const turn = (over: Partial<ChatTurn>): ChatTurn => ({
+    id: 'id',
+    role: 'user',
+    content: 'q',
+    createdAt: '',
+    streaming: false,
+    tools: [],
+    attachments: [],
+    ...over,
+  })
+
+  it('carries the cache-only trailing waiting assistant turn so resume can reattach', () => {
+    // Reload mid-answer: the server persisted the user turn (prepare) but the
+    // assistant message only lands at stream end — it exists ONLY in the cache.
+    const server = [turn({ id: 'u1', content: 'question' })]
+    const cached = [
+      turn({ id: 'u1', content: 'question' }),
+      turn({ id: 'a1', role: 'assistant', content: 'partial ans', status: 'waiting', requestId: 'req_9' }),
+    ]
+    const merged = mergeServerTurnsWithCachedMetadata(server, cached)
+    expect(merged).toHaveLength(2)
+    expect(merged.at(-1)).toMatchObject({ id: 'a1', status: 'waiting', requestId: 'req_9' })
+  })
+
+  it('does NOT carry a waiting tail without a requestId — nothing to resume, would spin forever', () => {
+    const server = [turn({ id: 'u1' })]
+    const cached = [turn({ id: 'u1' }), turn({ id: 'a1', role: 'assistant', status: 'waiting' })]
+    expect(mergeServerTurnsWithCachedMetadata(server, cached)).toHaveLength(1)
+  })
+
+  it('does NOT carry a settled tail — only an in-flight answer is resumable', () => {
+    const server = [turn({ id: 'u1' })]
+    const cached = [turn({ id: 'u1' }), turn({ id: 'a1', role: 'assistant', status: 'stopped', requestId: 'req_9' })]
+    expect(mergeServerTurnsWithCachedMetadata(server, cached)).toHaveLength(1)
+  })
+
+  it('does NOT duplicate the tail once the server has the completed answer', () => {
+    // The drain finished while the client was away: the assistant message is
+    // now server-persisted, so the cached waiting turn is consumed as its
+    // metadata source — and its stale in-flight status must not leak onto the
+    // completed turn (a persisted assistant message is complete by contract).
+    const server = [
+      turn({ id: 'u1', content: 'question' }),
+      turn({ id: 'srv-a1', role: 'assistant', content: 'the full answer' }),
+    ]
+    const cached = [
+      turn({ id: 'u1', content: 'question' }),
+      turn({ id: 'a1', role: 'assistant', content: 'partial ans', status: 'waiting', requestId: 'req_9' }),
+    ]
+    const merged = mergeServerTurnsWithCachedMetadata(server, cached)
+    expect(merged).toHaveLength(2)
+    expect(merged.at(1)?.status).toBeUndefined()
+    expect(merged.at(1)?.requestId).toBe('req_9')
+    expect(merged.at(1)?.content).toBe('the full answer')
+  })
+
+  it('still carries a terminal cached status onto a status-less server turn', () => {
+    const server = [
+      turn({ id: 'u1' }),
+      turn({ id: 'srv-a1', role: 'assistant', content: 'answer' }),
+    ]
+    const cached = [
+      turn({ id: 'u1' }),
+      turn({ id: 'a1', role: 'assistant', content: 'answer', status: 'stopped' }),
+    ]
+    expect(mergeServerTurnsWithCachedMetadata(server, cached).at(1)?.status).toBe('stopped')
   })
 })
