@@ -2,9 +2,13 @@
 
 > **Production-readiness correction — 2026-07-13.** The 2026-07-10 “live” sections below are historical, not a current release certificate. Model Plane `model-gateway:9090` and `inference-core:9092` are absent while HTTP health remains green, so default inference/chat, tools that depend on inference, and Data Plane query embedding are currently unavailable. Live cost/session/capability boundaries remain unauthenticated, semantic memory search is down, and no Velion Visma runtime integration exists. Significant authenticated/tenant-scoped source fixes, exact audience issuance, and the ordinary invoke caller graph pass source tests but are not deployed; approval/browser/Letta/background callers, a verified ZDR provider route, compatibility, and rollback gates remain incomplete. See [MODEL_PLANE_STATUS.md](apps/Model%20Plane/MODEL_PLANE_STATUS.md) and the [2026-07-13 audit](apps/Model%20Plane/docs/core-research/plane-audit-2026-07-13.md).
 
+> **Product model correction — 2026-07-22.** Velion is broader than customer support. The support inbox is a concrete wedge and proof workflow, not the category. Velion is an organization intelligence-and-action platform: it connects internal knowledge, Norwegian public-data context, web evidence, business systems, agents, tools, and governed execution in one workbench. External customer-facing agents through Channel Plane and meeting intelligence are future source/distribution capabilities, not current runtime claims.
+
+> **Status update — 2026-08-01.** The 2026-07-13 note above is itself now historical and must not be read as current: `model-gateway` and `inference-core` are **up and live**, not absent — this session drove real, streaming chat end-to-end (live Azure providers, tool loop, GraphRAG-fused retrieval) for hours against the running stack. Two chat-parity gaps closed this session: **resumable streams** (`#47`) — a client disconnect (closed tab, reload, network drop) no longer cancels the run; the producer detaches and keeps generating, persists the assistant message, and finishes the resume buffer, so a reconnect replays the complete answer instead of a stuck or truncated one — and **edit/regenerate version navigation** (`#49`), a client-side 1/N switcher over the final exchange's prior answers. Building the latter also surfaced and fixed a real, previously-undiscovered bug: Regenerate had been *appending* a duplicate answer instead of replacing it since the feature shipped. Both are live-verified, not just source-reviewed; see `apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md`. Zero Data Retention is now precisely documented (not just "partial"): enforcement is complete and verified across all 6 Velion-side durable boundaries (session-core threads/messages, Dreaming/agent-memory, response cache, implicit feedback, provider-side prompt cache, NATS/audit envelopes) — the ONE remaining gap is provider attestation (`AZURE_OPENAI_ZDR_CONFIRMED` / an Anthropic equivalent), which is a signed-contract-plus-operator-flip task, not an engineering gap; see `apps/Model Plane/docs/ZDR.md`. Also since 2026-07-22: agent-memory semantic recall was fixed (an embedding-dimension mismatch silently zeroed every search), the Auth Core service-principal registry was reconciled to the live fleet (14/14, no drift), and a 10-harness competitor study (Claude Code, Codex, OpenCode, ChatGPT, Perplexity, Manus, Hermes, OpenClaw, Pi, plus expert consensus) produced a ranked chat-parity backlog — see `apps/Model Plane/docs/VELION_CHAT_PARITY_BACKLOG.md`. This note does not re-certify anything below it that this session did not touch (IDOR, RLS, insight-core wiring, etc.) — those stand as last verified.
+
 **The Norwegian AI workbench that turns grounded intelligence into approved action.**
 
-Velion is both a product and the AI worker at its center: an EU/Norway-first, source-grounded, observable, and governed autonomous agent for customer support and knowledge work. It is designed to extract data, monitor change, build briefs, route work through an inbox, and publish, with a human approving every consequential step. Grounding, approvals, residency, and retention are runtime properties that must be verified per request; they are not implied by the presence of a backend service. Velion is delivered as a single workbench — chat, search, knowledge, inbox, agent runs, insights, and a trust center — built on the **CoreSystem** multi-plane platform, with a Norwegian-native spine (Brreg/Enhetsregisteret resolution, Bokmål, EU model routing) at its core.
+Velion is both a product and the AI worker at its center: an EU/Norway-first, source-grounded, observable, and governed AI workbench for work across an organization. It connects company knowledge and business systems with Norwegian public data, web research, search, agents, tools, monitoring, inboxes, tickets, social operations, and briefs. A human can inspect and approve consequential actions before they are sent, published, changed, or stored. Grounding, approvals, residency, and retention are runtime properties that must be verified per request; they are not implied by the presence of a backend service. Velion is delivered as a single workbench built on the **CoreSystem** multi-plane platform, with customer support as one useful wedge rather than the product definition.
 
 ## Historical live status — 2026-07-10
 
@@ -42,7 +46,7 @@ Velion's defensible position rests on the intersection of five things almost no 
 
 - **Approvable execution.** Inline Approve/Reject gates on every risky tool call. Relevance offers only a coarse "Paused"; most competitors gate nothing. This is the governance moat.
 - **Cost-awareness as an up-front control.** The Budget/Balance/Genius intent layer chooses the model *before* it runs, downgrading under budget pressure. Relevance shows credits *after*; Chatbase/Zapier make you pick a raw model.
-- **Deeper grounding.** Data Plane v2 GraphRAG + wiki + dense/sparse vectors + source-traces, versus "add a URL."
+- **Deeper grounding.** Data Plane v2 GraphRAG + wiki + dense/sparse vectors + visual/multimodal embeddings + source-traces, versus "add a URL."
 - **Owned browse + act.** Quarry executes real `browser_action`/`observation` timeline events under policy.
 - **EU/Norway residency + ZDR + audit — *with* actions.** ayfie/Mimir have the home-turf advantage but cannot *act*.
 
@@ -56,6 +60,18 @@ GTM leads **commercially** with the Norwegian wedge — Brreg-grounded intellige
 4. **The observable, approvable, cost-aware, grounded agent-runner** — a category where Velion is ahead of point competitors.
 
 **Target customer:** Norwegian and EU enterprises and SMBs. The proof story is one end-to-end demo — *Brreg resolution → monitor → brief → approve → act-in-region* — put in front of a Norwegian design partner. Lighthouse dogfood customer: AQUATIQ AS.
+
+### Product capability model
+
+Velion should be understood as five connected layers:
+
+1. **Sources** — company documents, connected systems, websites, web evidence, Norwegian public data, and eventually channels such as meetings.
+2. **Knowledge and context** — retrieval, GraphRAG, wiki, citations, source traces, entity resolution, and bounded live lookups.
+3. **Reasoning and action** — chat, search, research, agents, tool calls, browser actions, MCP, plugins, and integrations.
+4. **Governance** — permissions, policies, cost controls, approval gates, audit, retention, residency, and reversibility.
+5. **Work surfaces** — dashboard, chat, knowledge, inbox, tickets, agent runs, social, studio, insights, and eventually externally deployed agents.
+
+The core loop is **connect → understand → search → decide → act → approve → audit**. Customer support is one complete example of this loop; it is not the only one.
 
 ---
 
@@ -71,14 +87,20 @@ Capabilities are modeled as a **typed action registry** (`velionv3/src/shared/ac
 
 ### Knowledge & ingestion
 
-- **Knowledge base** *(live)* — a rich `LiveKnowledgePayload` fans out across documents, integrations, finspo, graph, retrieval, and Quarry; documents flow into Data Plane v2 retrieval/graph and an LLM wiki.
-- **Website crawl & scrape** *(live)* — `/v1/map` discover → page-picker selection → durable `/v1/batch` with run-events SSE; **private-by-default** with selective ingest. Scrape-preview is hardened against bot-walls and timeouts.
-- **Imports & connectors** *(live, subset)* — Slack, Gmail, Notion, SharePoint, OneDrive, Outlook via integration-corev2; SharePoint also via finspo-core Graph delta-sync.
+- **Knowledge base** *(live)* — a rich `LiveKnowledgePayload` fans out across documents, integrations, finspo, graph, retrieval, and Quarry; documents flow into Data Plane v2 retrieval/graph and an LLM wiki. The relationship graph (Graf tab) is an interactive 3D force-graph — the same battle-tested WebGL engine (with Canvas-2D fallback) the onboarding flow uses, not a bespoke layout — so entity clusters stay readable as the graph grows instead of piling nodes into an illegible mass.
+- **Website crawl & scrape** *(live)* — `/v1/map` discover → page-picker selection → durable `/v1/batch` with run-events SSE; **private-by-default** with selective ingest. Scrape-preview is hardened against bot-walls and timeouts. Content extraction is DOM-based readability — ARIA-landmark-aware (not just tag-name matching) with a responsive-duplicate collapse pass — so modern component-framework sites with no semantic `<nav>`/`<main>` and CSS-only mobile/desktop dual-rendering still yield clean chunks instead of nav-menu clutter, duplicated sections, and raw CDN image URLs.
+- **Visual / multimodal grounding** *(live)* — every successfully-ingested page, crawled or uploaded, is rendered to an image by Quarry's own headless Chromium (no external browser API/Browserbase dependency), stored content-addressably, and embedded via Cohere Embed v4 into a dedicated Qdrant collection that hybrid retrieval fuses in (`w_visual`) alongside BM25/dense/rerank. Governed by the same Zero Data Retention gate as text: a ZDR request is never rasterized, stored, or embedded.
+- **Imports & connectors** *(live, subset)* — Slack, Gmail, Notion, OneDrive, Outlook via integration-corev2.
+- **SharePoint (Microsoft 365)** *(live)* — finspo-core's Graph delta-sync captures real document **content**, not just metadata, into Data Plane v2. A source scopes to a whole document library, a single subfolder via a drill-down picker, or a site's Pages as its own source kind (Pages has no delta feed, so it does a full re-list pass, extracting `canvasLayout` text web parts to plain text).
 
 ### Search & browse
 
 - **Web search** *(live)* — Quarry-v2 SmartSearchRouter behind the gateway: web (with Exa-style filters — topic, time-range, include/exclude domains, exact-match), find-similar, images, video (SearXNG), answer-with-citations (SSE), did-you-mean + related queries + entity knowledge panel.
 - **Precision layer** *(live)* — Model-Plane LLM rerank with query-relevant highlights (degrade-safe), and autoprompt query rewriting for research/comparative intents.
+
+### Norwegian public-data context
+
+`information-core` adds a bounded, provenance-bearing Norwegian context layer for live read-only lookups. The locally verified tranche includes Kartverket address/property location, SSB metadata, Entur journeys, Storting representatives, Norges Bank series, MET weather, Statens vegvesen traffic/NVDB, NVE warnings, Riksantikvaren features, and Miljødirektoratet observations. News, weather, traffic, and address context can enrich ordinary work and agent runs without pretending to be company knowledge. Lovdata, DATEX II, Frost, eInnsyn, full Matrikkel/Grunnbok, Folkeregisteret, Maskinporten/Altinn data, and other restricted sources remain credentialed, source-only, blocked, or post-MVP according to their access and privacy requirements. See the [Norway data-source completion](apps/Application%20Plane/information-core/docs/norway-data-sources-completion-2026-07-21.md) and [audit](apps/Application%20Plane/information-core/docs/norway-data-sources-roadmap-audit-2026-07-20.md).
 
 ### Autonomous agent runs — with HITL approval & cost-awareness
 
@@ -96,6 +118,11 @@ Capabilities are modeled as a **typed action registry** (`velionv3/src/shared/ac
 - **Monitoring / change-watch** *(live)* — Quarry-v2 versioned change detection: check, latest, history, schedules, with changed-paragraph diff highlights.
 - **Leads / Brreg lead builder** *(live, gated)* — filtered Enhetsregisteret search, enrichment, governed `build_list`, saved org-scoped lists, CSV export; **company data only, never natural-person PII**; metered, audited, entitlement-gated. *(End-to-end use requires the "leads" billing entitlement.)*
 
+### External agents and meeting intelligence
+
+- **Channel Plane** *(docs-only future)* — the intended runtime for deploying Velion agents to websites, Shopify, WooCommerce, WordPress, and other external channels, with visitor identity, public conversations, handoff, and monitoring inside the Velion workspace. No Channel Plane runtime exists today.
+- **Meeting intelligence** *(docs-only future)* — meetings are intended to become another source type: self-hosted transcription, diarized transcript documents, slide/keyframe evidence, graph entities, minutes, and approved follow-up actions. It reuses Ingestion, Data, Model, and Application Plane contracts; it is not a separate deployed product today.
+
 ---
 
 ## Where it works
@@ -111,7 +138,7 @@ SPA routes: `/chat`, `/inbox`, `/tickets`, `/knowledge` (+ `/shared`), `/ingesti
 
 ### Integrations & connectors
 
-Slack, Gmail, Notion, SharePoint, OneDrive, Outlook (live); SharePoint also via finspo Graph delta-sync. Providers are returned dynamically by integration-core, not hardcoded. *(Zendesk connector is roadmap.)*
+Slack, Gmail, Notion, OneDrive, Outlook (live) via integration-corev2; **SharePoint (live, content-capturing)** via finspo-core Graph delta-sync — whole-library, single-folder, or site-Pages scope. Providers are returned dynamically by integration-core, not hardcoded. *(Zendesk connector is roadmap.)*
 
 ### Norwegian-market fit
 
@@ -119,6 +146,7 @@ Slack, Gmail, Notion, SharePoint, OneDrive, Outlook (live); SharePoint also via 
 - **Non-PII lead-builder** (leads-core) — company-only, metered, audited.
 - **Bokmål UI** *(partial)* — `i18n/no.ts` is the single-source-of-truth seam; strings migrate incrementally.
 - **EU model routing** — Azure OpenAI Sweden Central default.
+- **Norwegian public-data context** — bounded, source-attributed lookups across official Norwegian providers, with restricted and credentialed sources kept behind explicit access gates.
 
 ---
 
@@ -130,7 +158,7 @@ CoreSystem is a multi-plane monorepo with **downward-flowing authority.** Each p
 Authority root for identity, users, orgs, billing, sessions, audit, quotas, and entitlements. Services: auth-core (NestJS JWT/session/token authority), user-core, org-core, billing-core, session-core, audit-core.
 
 ### Data Plane v2 — *durable knowledge*
-The **only** owner of documents, chunks, embeddings, retrieval, GraphRAG, LLM wiki, and source traces. Services: documents-api-go, index-engine-rs, embedding-engine-rs, retrieval-engine-rs (hybrid BM25 + dense + rerank), graph-index-rs, wiki-store-go, data-orchestrator-go, data-quality-go, quickwit-adapter-rs.
+The **only** owner of documents, chunks, embeddings, retrieval, GraphRAG, LLM wiki, and source traces. Services: documents-api-go, index-engine-rs, embedding-engine-rs (text + visual/Cohere Embed v4), retrieval-engine-rs (hybrid BM25 + dense + rerank + visual fusion), graph-index-rs, wiki-store-go, data-orchestrator-go, data-quality-go, quickwit-adapter-rs.
 
 ### Ingestion Plane — *evidence capture*
 Captures evidence and persists durable knowledge **only through Data Plane contracts.** Quarry-v2 is the source of truth: quarry-edge, quarry-runtime, quarry-browser (CDP action runtime), quarry-control, quarry-orchestrator (Temporal). Plus imports-core, integration-corev2, finspo-core, autocomplete-core.
@@ -138,14 +166,14 @@ Captures evidence and persists durable knowledge **only through Data Plane contr
 ### Model Plane — *reasoning & execution*
 Owns reasoning, sessions/runs, inference, the execution loop, capabilities, sandboxes, browser grants, and cost. Rust: model-gateway, session-core, inference-core, execution-core. Go: orchestrator-core (Temporal), capability-core, sandbox-manager, browser-broker, cost-core, bridge-core.
 
-### Application Plane — *realtime & collaboration*
-Owns collaborative/realtime workspace projections and notifications only — **not** identity, billing, knowledge, ingestion, or reasoning. Convex stack, affine-core/runtime, conversation-core-go, information-core, notification-core, leads-core.
+### Application Plane — *realtime, context & collaboration*
+Owns collaborative/realtime workspace projections, notifications, bounded contextual lookups, conversations, social, and leads — **not** identity, billing, durable knowledge, ingestion, or reasoning. Convex stack, affine-core/runtime, conversation-core-go, information-core, notification-core, leads-core, insight-core, and social-core.
 
 ### Frontend Plane — *Velion + BFF seam*
 Velion v3 is a SolidJS SPA whose **only** path to the planes is the Rust BFF gateway (`velionv3/apps/gateway`, deployed as velion-gateway-rs). The gateway exposes ~50 per-plane domain modules (auth, chat, knowledge, ingestions, agents, leads, ownership, privacy, billing, search, orgs, settings, social, insights, monitoring, mcp, finetune, …) plus the onboarding flow, normalizes everything to typed envelopes, and **must never leak upstream secrets or raw OAuth tokens.**
 
-### Channel Plane — *docs-only*
-Reserved for future external-agent deployment (adapter-core, widget-core, public visitor runtime). **No runtime exists today — the plane is documentation only; do not build against it.**
+### Channel Plane — *docs-only future*
+Reserved for future external-agent deployment (adapter-core, widget-core, public visitor runtime, and channel adapters). **No runtime exists today — the plane is documentation only; do not market or build against it as if deployed.**
 
 ### Tech stack by job
 
@@ -178,7 +206,7 @@ This is the strongest part of the story, and the one held to the strictest hones
 
 ### Zero Data Retention (partial at model layer)
 
-The inference cache correctly skips reads and writes for `req.zdr`, and current gateway/inference source makes issuer-required ZDR monotonic for unary/SSE infer/embed. That is not end-to-end ZDR: session replay classification, compaction, memory, traces, tool I/O, Data Plane grounding, external bridges, provider eligibility, and non-infer/embed modality contracts remain unproved or incomplete. A request whose issuer requires ZDR must not be described as ZDR if Velion retains run history/content under ordinary retention. Only the Azure OpenAI Sweden Central path is presently classified ZDR+EEA; no compliant live end-to-end proof exists.
+The inference cache correctly skips reads and writes for `req.zdr`, and current gateway/inference source makes issuer-required ZDR monotonic for unary/SSE infer/embed. That is not end-to-end ZDR: session replay classification, compaction, memory, traces, tool I/O, Data Plane grounding, external bridges, provider eligibility, and non-infer/embed modality contracts remain unproved or incomplete. A request whose issuer requires ZDR must not be described as ZDR if Velion retains run history/content under ordinary retention. Only the Azure OpenAI Sweden Central path is presently classified ZDR+EEA; no compliant live end-to-end proof exists. The newer visual-RAG page-image arm follows the same discipline — rendering, CAS write, and embed-event emission are all skipped outright when the request is ZDR — one more modality correctly gated, not a closure of the broader gap above.
 
 ### In-infra / 0-SaaS search (partial)
 
@@ -240,7 +268,7 @@ Velion is **real, not a demo.** Reality score: **~72% production-real (backend p
 
 | Status | Capability / control |
 |---|---|
-| **Live** | Source-grounded chat; shared inbox + HITL ai-actions queue; ticketing; knowledge base + ingestion; private-by-default Quarry crawl; web search (rerank, highlights, autoprompt, find-similar, did-you-mean, entity panel, video); multi-tool agent loop + Agent Run Console + approvable HITL gate; Budget/Balance/Genius selection + cost-core budget; AI-personalized onboarding + Brreg verification; Brreg company_lookup; monitoring/change-watch; EU residency (Sweden Central) + residency stamp; non-EU TTS gated off; model-layer ZDR; erasure primitives (now called); audit incl. cross-plane tool_action; org-axis isolation; privacy data-classification; in-app Trust Center + SSO + 2FA; gateway rate-limiting; social publishing; router-policy + fine-tune; per-user ownership substrate |
+| **Live** | Source-grounded chat; shared inbox + HITL ai-actions queue; ticketing; knowledge base + ingestion (clean DOM-based readability extraction; visual/multimodal grounding via Cohere Embed v4, local Chromium render, ZDR-gated; 3D relationship graph); SharePoint real-content sync with whole-library/folder/site-Pages scoping; private-by-default Quarry crawl; web search (rerank, highlights, autoprompt, find-similar, did-you-mean, entity panel, video); multi-tool agent loop + Agent Run Console + approvable HITL gate; Budget/Balance/Genius selection + cost-core budget; AI-personalized onboarding + Brreg verification; Brreg company_lookup; monitoring/change-watch; EU residency (Sweden Central) + residency stamp; non-EU TTS gated off; model-layer ZDR; erasure primitives (now called); audit incl. cross-plane tool_action; org-axis isolation; privacy data-classification; in-app Trust Center + SSO + 2FA; gateway rate-limiting; social publishing; router-policy + fine-tune; per-user ownership substrate |
 | **Partial** | Customer-facing chatbot deploy (config only, no live widget); deeper multi-step run engine (MVP dispatch live); leads (end-to-end needs the billing entitlement); insights (honest-empty until data accrues); scrape anti-bot infra; Norway-East residency; ZDR across all vendors; in-infra-first search (config, not hard gate); cross-plane erasure fan-out; customer-facing DSAR intake; RLS backstop (inert/gated); private-until-shared as a *claimable* guarantee; CSP enforcing; Bokmål coverage; ZDR/GDPR-metadata propagation; Trust Center retention column |
 | **Roadmap** | Embeddable end-customer chat widget (`/embed`); Brreg-seeded lead/list builder as the net-new monetization bet; real WorkflowBuilder persistence/execution; multi-tenant X-Org-ID fully consulted across all cores; "0-SaaS / no-egress" hard toggle; retention sweeps for non-audit stores; Zendesk connector; **public Trust Center**; **third-party certifications** (SOC 2 Type II, ISO 27001, ISO/IEC 42001, EU AI Act assessment) + independent pentest |
 | **Docs-only** | Channel Plane runtime (adapter-core, widget-core, public visitor conversation runtime); compliance documentation pack (drafted, counsel-review pending) |
