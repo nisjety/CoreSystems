@@ -60,6 +60,8 @@ export default function ChatPage() {
     regenerateLatest,
     editAndResubmit,
     branchAt,
+    finalExchangeVersion,
+    selectExchangeVersion,
     startNewChat,
     state,
     activeTab,
@@ -166,6 +168,11 @@ export default function ChatPage() {
                         }
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
+                        // The version switcher only ever applies to the trailing
+                        // assistant turn — chat-versions.ts guards versioning to
+                        // the final exchange, so no other turn can have one.
+                        version={index() === state.turns.length - 1 ? finalExchangeVersion() : null}
+                        onSelectVersion={selectExchangeVersion}
                       />
                     </>
                   )}

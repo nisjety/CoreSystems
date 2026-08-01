@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Brain,
   Check,
+  ChevronLeft,
   ChevronRight,
   Copy,
   Download,
@@ -78,6 +79,7 @@ import {
   PRIMARY_PROMPTS,
   TOOL_LABELS,
 } from './chat-types'
+import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 
 export function MessageBlock(props: {
   copied: boolean
@@ -90,6 +92,9 @@ export function MessageBlock(props: {
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   onSelectFollowUp?: (text: string) => void
   onViewSteps: () => void
+  /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
+  version?: VersionBadge | null
+  onSelectVersion?: (target: number) => void
 }) {
   return (
     <Show when={props.message.role === 'assistant'} fallback={<UserMessage {...props} />}>
@@ -108,6 +113,8 @@ export function AssistantMessage(props: {
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   onSelectFollowUp?: (text: string) => void
   onViewSteps: () => void
+  version?: VersionBadge | null
+  onSelectVersion?: (target: number) => void
 }) {
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
 
@@ -229,6 +236,33 @@ export function AssistantMessage(props: {
             >
               <ThumbsDown size={14} />
             </MessageAction>
+            <Show when={props.version}>
+              {(version) => (
+                <div class="velion-chat-version-switcher" role="group" aria-label="Answer version">
+                  <button
+                    type="button"
+                    class="velion-chat-version-switcher__arrow"
+                    disabled={version().current <= 1}
+                    aria-label="Previous version"
+                    onClick={() => props.onSelectVersion?.(version().current - 2)}
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span class="velion-chat-version-switcher__label">
+                    {version().current}/{version().total}
+                  </span>
+                  <button
+                    type="button"
+                    class="velion-chat-version-switcher__arrow"
+                    disabled={version().current >= version().total}
+                    aria-label="Next version"
+                    onClick={() => props.onSelectVersion?.(version().current)}
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              )}
+            </Show>
             <MessageAction label="Regenerate" onClick={props.onRegenerate}>
               <RefreshCw size={14} />
             </MessageAction>

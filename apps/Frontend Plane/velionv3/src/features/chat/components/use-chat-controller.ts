@@ -7,7 +7,15 @@ import {
 } from 'solid-js'
 import {
   createStore,
+  unwrap,
 } from 'solid-js/store'
+import {
+  beginNewVersion,
+  lastUserIndex,
+  selectVersion,
+  versionBadge,
+  type ExchangeVersionState,
+} from '@/features/chat/lib/chat-versions'
 import {
   CHAT_ACTIVE_THREAD_CHANGED_EVENT,
   clearActiveChatThreadId,
@@ -163,6 +171,13 @@ export function useChatController() {
    * failed, and a rejected thumbs-up says nothing about the answer.
    */
   const [feedbackNotice, setFeedbackNotice] = createSignal<string | null>(null)
+  /**
+   * Edit/regenerate version navigation (chat-parity §8 / "#49 part 2") —
+   * client-only, session-lifetime, guarded to the final exchange. See
+   * `chat-versions.ts` for why: nothing here is persisted, so a nested version
+   * tree (the first design's fatal flaw) is structurally impossible.
+   */
+  const [versionState, setVersionState] = createSignal<ExchangeVersionState | null>(null)
   /** Chat split view: whether the live agent panel is folded to its rail. */
   const [runPanelCollapsed, setRunPanelCollapsed] = createSignal(readChatRunPanelCollapsed())
   const toggleRunPanel = () => {
@@ -383,6 +398,10 @@ export function useChatController() {
     const seq = ++threadLoadSequence
     hydratingThreadId = threadId
     setState({ threadId, status: 'idle', error: null })
+    // Versions are guarded by threadId anyway (chat-versions.ts), but clear
+    // eagerly rather than leave stale siblings from the old thread reachable
+    // until the next regenerate/edit happens to overwrite them.
+    setVersionState(null)
     const localCached = readChatThreadTranscript(threadId)
     const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
     if (seq !== threadLoadSequence) return
@@ -466,8 +485,10 @@ export function useChatController() {
    * a `Last-Event-Id` cursor, so `resumeStream` is called without one — plus
    * the final `done` chunk if the run already finished. Nothing else: no
    * tool/citation/usage/title/follow-up replay, the buffer only ever held
-   * plain text. The turn's content is reset to empty first so the full
-   * replay does not duplicate onto whatever partial text was already cached.
+   * plain text. The turn's content is reset when the FIRST replayed delta
+   * arrives — not upfront — so the full replay does not duplicate onto the
+   * cached partial text, while a resume that never yields a delta (404 past
+   * the buffer TTL, dead connection) settles with that partial text intact.
    *
    * Best-effort: a 404 (`stream not resumable` — the run genuinely finished
    * outside the buffer's TTL, or never existed) or any other resume failure
@@ -486,13 +507,19 @@ export function useChatController() {
       58,
     )
 
-    setState('turns', (t) => t.id === assistantId, { content: '', streaming: true, status: 'waiting' })
+    // Keep the cached partial text until the replay actually starts: the
+    // buffer replays from seq 0, so content is cleared on the FIRST delta
+    // (below) to avoid duplication — but a resume that 404s (buffer expired)
+    // or dies before any delta then settles with the partial text intact
+    // instead of wiping a visible answer down to an empty stopped bubble.
+    setState('turns', (t) => t.id === assistantId, { streaming: true, status: 'waiting' })
 
     const controller = new AbortController()
     abortController = controller
     setState('status', 'streaming')
 
     let settled = false
+    let replayStarted = false
     const stopStreaming = (status?: ChatTurn['status']) => {
       if (!isActiveThread()) return
       setState('turns', (t) => t.id === assistantId, 'streaming', false)
@@ -504,6 +531,12 @@ export function useChatController() {
       {
         onMessage: ({ content: delta }) => {
           if (!isActiveThread()) return
+          if (!replayStarted) {
+            // First replayed delta: the buffer replays from the start of the
+            // answer, so drop the cached partial text now (and only now).
+            replayStarted = true
+            setState('turns', (t) => t.id === assistantId, 'content', '')
+          }
           upsertTaskStep(createTurnStep(assistantId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
           setState('turns', (t) => t.id === assistantId, 'content', (prev) => prev + delta)
         },
@@ -564,6 +597,7 @@ export function useChatController() {
     })
     setInput('')
     setActiveTab('chat')
+    setVersionState(null)
     // Each fresh chat starts with Temporary Chat off — a user re-enables it
     // deliberately per conversation rather than it silently staying on.
     setTemporaryChat(false)
@@ -1197,8 +1231,18 @@ export function useChatController() {
 
   const regenerateLatest = () => {
     if (isStreaming()) return
-    const lastUser = [...state.turns].reverse().find((turn) => turn.role === 'user')
+    const anchorIndex = lastUserIndex(state.turns)
+    if (anchorIndex < 0) return
+    const lastUser = state.turns[anchorIndex]
     if (!lastUser) return
+    // Snapshot the outgoing exchange as a version BEFORE truncating it away —
+    // see chat-versions.ts. Must run before the slice below, which is itself
+    // the fix for a real bug this uncovered: `sendContent` with
+    // `appendUser: false` only ever APPENDS the new assistant turn, so
+    // without this truncation the old answer stayed visible forever and a
+    // second, separate answer piled up underneath it.
+    setVersionState((prev) => beginNewVersion(prev, unwrap(state.turns), state.threadId))
+    setState('turns', (turns) => turns.slice(0, anchorIndex + 1))
     setState('branchCount', (count) => count + 1)
     void sendContent(lastUser.content, lastUser.model, {
       appendUser: false,
@@ -1225,6 +1269,16 @@ export function useChatController() {
     if (!original || original.role !== 'user' || !next) return
     abortController?.abort()
     const attachments = await toStreamAttachments(original.attachments)
+    if (index === lastUserIndex(state.turns)) {
+      // Editing the FINAL exchange: snapshot it as a version before it's
+      // truncated away, same as regenerateLatest. Editing an EARLIER turn
+      // truncates everything after it (below) and replaces it wholesale —
+      // that path is deliberately NOT versioned (chat-versions.ts: nesting
+      // would be possible past this point, which the design rules out).
+      setVersionState((prev) => beginNewVersion(prev, unwrap(state.turns), state.threadId))
+    } else {
+      setVersionState(null)
+    }
     setState('turns', (turns) => turns.slice(0, index))
     setState('status', 'idle')
     await sendContent(next, original.model, {
@@ -1256,6 +1310,7 @@ export function useChatController() {
     setState('requestId', null)
     setState('branchCount', 0)
     setState('taskSteps', [])
+    setVersionState(null)
     if (sourceWasTemporary) {
       // The branch copies a temporary thread's own content into a new thread
       // id — it must inherit the ZDR marking, or the calls below would
@@ -1267,6 +1322,17 @@ export function useChatController() {
       setActiveChatThreadId(nextThreadId)
     }
     setActiveTab('chat')
+  }
+
+  /** Derived n/N badge for the final exchange, or `null` when it must not render. */
+  const finalExchangeVersion = createMemo(() => versionBadge(versionState(), state.turns, state.threadId))
+
+  /** Swap the displayed version of the final exchange to logical position `target` (0-based). */
+  const selectExchangeVersion = (target: number) => {
+    const result = selectVersion(versionState(), unwrap(state.turns), state.threadId, target)
+    if (!result) return
+    setVersionState(result.state)
+    setState('turns', result.turns)
   }
 
   const startNewChat = () => {
@@ -1324,6 +1390,8 @@ export function useChatController() {
     regenerateLatest,
     editAndResubmit,
     branchAt,
+    finalExchangeVersion,
+    selectExchangeVersion,
     startNewChat,
     state,
     activeTab,

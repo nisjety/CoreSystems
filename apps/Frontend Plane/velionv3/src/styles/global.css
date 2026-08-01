@@ -22985,6 +22985,44 @@ textarea:focus-visible {
   color: var(--velion-a-earth);
 }
 
+.velion-chat-version-switcher {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 2px;
+  color: var(--velion-text-subtle);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.velion-chat-version-switcher__arrow {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.velion-chat-version-switcher__arrow:hover:not(:disabled) {
+  background: var(--velion-surface-soft);
+  color: var(--velion-j-text);
+}
+
+.velion-chat-version-switcher__arrow:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.velion-chat-version-switcher__label {
+  min-width: 32px;
+  text-align: center;
+}
+
 .velion-chat-menu {
   position: relative;
 }
