@@ -30,10 +30,15 @@ def client():
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ANN001, D103
     if live_enabled() and RESULTS:
+        # parents[5] is the repo root, not parents[4]. This file lives at
+        # apps/Model Plane/python/eval-lab-py/tests/conftest.py, so [4] is
+        # `apps/` — which has no docs/eval-reports, meaning every live report
+        # was written into a directory nobody reads.
+        repo_root = Path(__file__).resolve().parents[5]
         reports_dir = Path(
             os.environ.get(
                 "EVAL_REPORTS_DIR",
-                str(Path(__file__).resolve().parents[4] / "docs" / "eval-reports"),
+                str(repo_root / "docs" / "eval-reports"),
             )
         )
         path = write_report(RESULTS, reports_dir)

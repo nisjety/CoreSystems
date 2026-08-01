@@ -1,0 +1,82 @@
+name: Eval Lab (Python) CI
+
+# The eval harness at apps/Model Plane/python/eval-lab-py had no CI of any kind:
+# there were no Python workflows in this repository at all. So the regression
+# suite that exists to catch quality drift could itself drift, and nothing would
+# say so.
+#
+# This job runs ONLY the credential-free half. `make selftest` (see the
+# harness's Makefile) covers case-schema validation and the metric runners
+# against fixtures; the 12 live tests self-skip unless `EVAL_LIVE=1` plus a
+# reachable model-gateway and INTERNAL_API_KEY are present, so no provider
+# credential, no compose fleet and no network egress are needed here. Total
+# runtime is well under a second.
+#
+# Deliberately NOT run in CI: the live eval path (`make eval`). It drives real
+# provider inference through the compose fleet and writes a dated report to
+# docs/eval-reports/. That belongs on a schedule against a deployed
+# environment, not on every push, because it costs money and its result depends
+# on provider availability rather than on the diff.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Model Plane/python/eval-lab-py/**'
+      - '.github/workflows/eval-lab.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Model Plane/python/eval-lab-py/**'
+      - '.github/workflows/eval-lab.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Model Plane/python/eval-lab-py'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Plain pip on purpose. The harness previously declared `mp-events` via a
+      # `[tool.uv.sources]` path entry, which pip cannot resolve — so any
+      # non-uv install failed outright. Installing with pip here is what keeps
+      # that class of breakage from coming back silently.
+      - name: Install the harness
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # No EVAL_LIVE, so the live cases skip themselves. Asserting the
+      # credential-free count rather than just "exit 0" — a suite that silently
+      # skipped EVERYTHING would otherwise be indistinguishable from a passing
+      # one, which is the exact failure this job exists to prevent.
+      - name: Selftest (offline, no credentials)
+        run: |
+          python -m pytest tests/ -q --junit-xml=eval-selftest.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('eval-selftest.xml').getroot()
+          case = suite if suite.tag == 'testsuite' else suite.find('testsuite')
+          total = int(case.get('tests', 0))
+          skipped = int(case.get('skipped', 0))
+          ran = total - skipped
+          print(f'ran {ran} offline case(s) of {total} collected ({skipped} live cases skipped)')
+          assert ran >= 10, f'expected the offline suite to actually run; only {ran} case(s) did'
+          PY
+
+      - name: Upload the selftest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-selftest-report
+          path: 'apps/Model Plane/python/eval-lab-py/eval-selftest.xml'
+          if-no-files-found: warn
