@@ -2218,6 +2218,116 @@ async fn invoke_stream_never_presents_or_replays_done_before_terminal_receipt() 
     );
 }
 
+/// chat-parity §3b (resume): a client disconnect must NOT cancel the run. The
+/// producer used to treat any `tx.send` failure identically to a deliberate
+/// cancel (`cancelled = true; break`), so a reader dropping mid-stream — a
+/// closed tab, a reload — silently truncated the answer and never persisted it
+/// or finished the resume buffer, exactly like the naive "detach, don't
+/// cancel" design an earlier review rejected for conflating the two signals.
+///
+/// Dropping the response body's data stream here drops the `mpsc::Receiver`
+/// backing the SSE channel, so every subsequent `tx.send` in the producer
+/// really does fail — deterministically reproducing a disconnect without any
+/// wall-clock race. `MockOk::default()`'s two chunks ("hel" not-done, "lo"
+/// done) still have to flow through the persist + terminalize + buffer-finish
+/// tail after that: this asserts they do.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_completes_and_persists_after_the_client_disconnects_mid_stream() {
+    use futures::StreamExt as _;
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, publisher) = make_state(client, session_client).await;
+    let stream_buffers = state.stream_buffers.clone();
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"content":"hi","model":"m"}"#))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut frames = resp.into_body().into_data_stream();
+    let first = frames
+        .next()
+        .await
+        .expect("an SSE frame")
+        .expect("a readable SSE frame");
+    let first = String::from_utf8(first.to_vec()).unwrap();
+    assert!(first.contains("event: connected"), "{first}");
+    let request_id = first
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|value| {
+            value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .expect("connected SSE event must expose its request id");
+
+    // The client goes away right here — never reads the "hel"/"lo" chunks or
+    // the terminal `done`. Dropping `frames` drops the response body, which
+    // drops the channel's Receiver.
+    drop(frames);
+
+    // The producer runs in a spawned task independent of the response body's
+    // lifetime, so give it a beat to reach its terminal branch. MockOk's mock
+    // stream has no artificial delay, so this is generous, not a tight race.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let thread_id = prepared_thread_id(&session_handles);
+    let appended = session_handles.append_captures.lock().unwrap();
+    assert_eq!(
+        appended.as_slice(),
+        [
+            ("user".to_owned(), thread_id.clone()),
+            ("assistant".to_owned(), thread_id),
+        ],
+        "the assistant answer must persist even though nobody was listening for it"
+    );
+    drop(appended);
+
+    assert_direct_terminal_for_prepared_run(
+        &session_handles,
+        TerminalOutcome::Completed,
+        "",
+        "a disconnected client must still see its run terminalize Completed, not Cancelled",
+    );
+
+    let replay = stream_buffers.replay_after(&request_id, None).await;
+    assert!(replay.found, "the disconnected run must still be resumable");
+    let full: String = replay.deltas.iter().map(|d| d.delta.as_str()).collect();
+    assert_eq!(
+        full, "hello",
+        "every delta must have buffered even though the reader was gone"
+    );
+    assert!(
+        replay.done.is_some(),
+        "the buffer must be finished so a reconnect replays a real done, not a stalled spinner"
+    );
+
+    let drained = publisher.drain();
+    assert!(
+        drained
+            .iter()
+            .any(|(subject, _)| subject == "mp.v1.stream.closed"),
+        "terminal-success telemetry must still fire for a disconnected-but-completed run"
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn invoke_stream_terminalizes_prepared_run_when_grounding_bearer_is_missing() {

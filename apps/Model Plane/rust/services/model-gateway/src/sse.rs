@@ -1495,6 +1495,15 @@ pub async fn invoke_stream_sse(
         let mut assistant_output = String::new();
         let mut terminal_assigned = false;
         let mut cancelled = false;
+        // chat-parity §3b (resume): a client disconnect (tab closed, network
+        // drop, reload) is NOT a cancel. When `tx.send` first fails we flip
+        // this to false and KEEP draining the provider stream — deltas keep
+        // buffering into `stream_buffers`, the assistant message still
+        // persists, and the run terminalizes on its real outcome (Completed) —
+        // so `invoke_resume` can replay the finished answer on reconnect. A
+        // deliberate cancel arrives via `cancel_flag` (the cancel registry)
+        // and is checked every iteration, so cancel keeps working mid-drain.
+        let mut client_connected = true;
         let mut failure_code = "inference_stream_ended_without_terminal";
         let mut heartbeat =
             tokio::time::interval(crate::session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);
@@ -1563,16 +1572,22 @@ pub async fn invoke_stream_sse(
                     // Buffer the delta for resumability before sending so a
                     // reconnect never races ahead of what we retained.
                     stream_buffers.append(&req_id, seq, &chunk.delta).await;
-                    if tx
-                        .send(Ok(Event::default()
-                            .id(seq.to_string())
-                            .event("chunk")
-                            .data(data)))
-                        .await
-                        .is_err()
+                    if client_connected
+                        && tx
+                            .send(Ok(Event::default()
+                                .id(seq.to_string())
+                                .event("chunk")
+                                .data(data)))
+                            .await
+                            .is_err()
                     {
-                        cancelled = true;
-                        break;
+                        // Receiver dropped — detach, don't cancel (see
+                        // `client_connected` above). Generation continues.
+                        client_connected = false;
+                        tracing::info!(
+                            request_id = %req_id,
+                            "client disconnected mid-stream; detaching and finishing for resume"
+                        );
                     }
                     seq += 1;
                 }
@@ -1589,16 +1604,17 @@ pub async fn invoke_stream_sse(
                         };
                         let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                         stream_buffers.append(&req_id, seq, &chunk.delta).await;
-                        if tx
-                            .send(Ok(Event::default()
-                                .id(seq.to_string())
-                                .event("chunk")
-                                .data(data)))
-                            .await
-                            .is_err()
-                        {
-                            cancelled = true;
-                            break;
+                        if client_connected {
+                            // Ignore a send failure: this is the last delta
+                            // before the terminal work (persist, terminalize
+                            // Completed, buffer finish), which must run for
+                            // resume regardless of client connectivity.
+                            let _ = tx
+                                .send(Ok(Event::default()
+                                    .id(seq.to_string())
+                                    .event("chunk")
+                                    .data(data)))
+                                .await;
                         }
                         seq += 1;
                     }
@@ -3565,8 +3581,9 @@ pub async fn invoke_resume_sse(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let req_id = request_id.clone();
+    let buffers = state.stream_buffers.clone();
     tokio::spawn(async move {
-        for delta in replay.deltas {
+        let send_delta = |delta: crate::stream_buffer::BufferedDelta| {
             let chunk = SseChunk {
                 request_id: req_id.clone(),
                 delta: delta.delta,
@@ -3576,14 +3593,12 @@ pub async fn invoke_resume_sse(
                 output_tokens: 0,
             };
             let data = serde_json::to_string(&chunk).unwrap_or_default();
-            let _ = tx
-                .send(Ok(Event::default()
-                    .id(delta.seq.to_string())
-                    .event("chunk")
-                    .data(data)))
-                .await;
-        }
-        if let Some(done) = replay.done {
+            tx.send(Ok(Event::default()
+                .id(delta.seq.to_string())
+                .event("chunk")
+                .data(data)))
+        };
+        let send_done = |done: crate::stream_buffer::StreamDone| {
             let chunk = SseChunk {
                 request_id: req_id.clone(),
                 delta: String::new(),
@@ -3593,12 +3608,56 @@ pub async fn invoke_resume_sse(
                 output_tokens: done.output_tokens,
             };
             let data = serde_json::to_string(&chunk).unwrap_or_default();
-            let _ = tx
-                .send(Ok(Event::default()
-                    .id(done.seq.to_string())
-                    .event("done")
-                    .data(data)))
-                .await;
+            tx.send(Ok(Event::default()
+                .id(done.seq.to_string())
+                .event("done")
+                .data(data)))
+        };
+
+        // Highest seq forwarded so far — the cursor for the tail below.
+        let mut cursor = after_seq;
+        for delta in replay.deltas {
+            cursor = Some(cursor.map_or(delta.seq, |c| c.max(delta.seq)));
+            if send_delta(delta).await.is_err() {
+                return;
+            }
+        }
+        if let Some(done) = replay.done {
+            let _ = send_done(done).await;
+            return;
+        }
+
+        // The original stream has not finished: the producer detached from a
+        // disconnected client and is still draining the provider (see
+        // `client_connected` in the invoke producer). TAIL the buffer until
+        // the terminal `done` lands, so a reload mid-answer picks the stream
+        // back up live instead of settling a partial answer as stopped.
+        // Bounded: a producer that dies without `finish` (gateway restart)
+        // stops appending, and the inactivity window below closes the tail —
+        // the client then settles the turn exactly as before this tail existed.
+        const TAIL_POLL: std::time::Duration = std::time::Duration::from_millis(300);
+        const TAIL_INACTIVITY_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+        let mut last_progress = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(TAIL_POLL).await;
+            if tx.is_closed() {
+                return; // client went away again; the next resume replays from its cursor
+            }
+            let tail = buffers.replay_after(&req_id, cursor).await;
+            for delta in tail.deltas {
+                cursor = Some(cursor.map_or(delta.seq, |c| c.max(delta.seq)));
+                last_progress = std::time::Instant::now();
+                if send_delta(delta).await.is_err() {
+                    return;
+                }
+            }
+            if let Some(done) = tail.done {
+                let _ = send_done(done).await;
+                return;
+            }
+            if last_progress.elapsed() >= TAIL_INACTIVITY_LIMIT {
+                return;
+            }
         }
     });
 
