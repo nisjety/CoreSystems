@@ -110,6 +110,63 @@ today's audit — not speculative roadmap items, actual named bugs:
    `cap.command.shell`/`cap.command.sandbox` (code interpreter/canvas) — an
    operator/admin action, not code; the self-attestation heartbeat already
    works and is just waiting on this.
+5. **Social calendar's clock is frozen in June 2026, live right now** (found
+   2026-08-02, `velion-feature-map.md` §1.6): every draft a user creates
+   today gets silently scheduled about two months in the past, and the
+   calendar never shows the real current day. One-line fix (default to
+   `new Date()`), but it is actively corrupting data for anyone using the
+   Social calendar until fixed — treat as urgent, not just "found this week."
+6. **2FA step-up password renders in plaintext** (found 2026-08-02,
+   `velion-feature-map.md` §1.7): a security-relevant regression, fix before
+   any demo that touches 2FA.
+7. **The registry's one irreversible, approval-gated action has no approval
+   gate in practice** (found 2026-08-02, `velion-feature-map.md` §1.6):
+   `social.publish_post` (`risk: high, requiresApproval: true, reversible:
+   false`) is bypassed entirely by the human UI, which calls the raw REST
+   route directly with no `approvalId`. The same "UI operation wired outside
+   its action contract" pattern recurs at least 3 times now (ticketing,
+   social, and — see below — the chat Brreg tool with a different failure
+   mode): **this is a systemic pattern, not three unrelated bugs.** Worth a
+   single fix at the pattern level — e.g. a lint rule or a runtime assertion
+   that a `LIVE_ACTIONS` entry marked `requiresApproval` cannot be reached by
+   a code path that skips `executeAction` — rather than three point patches.
+8. **Chat's auto-attached Brreg tool silently loses its parameter schema**
+   (found 2026-08-02, `velion-feature-map.md` §1.2): a one-character id
+   mismatch (`_` vs `.`) between the tool declaration and the action
+   registry. One-line fix, but currently active in production every time the
+   auto-attach keyword fires.
+9. **Onboarding has zero runtime validation at any API boundary** (found
+   2026-08-02) — every gateway response (Brreg search, crawl SSE packets,
+   checkout, plan recommendation) is trusted via a bare type cast, directly
+   contradicting this project's own "validate all external data at system
+   boundaries with Zod" rule. Compounding this, `OnboardingPage.tsx` (1,096
+   lines: org creation, crawl, connector OAuth, checkout, session
+   finalization all in one orchestrator) has almost no test coverage for its
+   actual logic — one test covers one guard clause. Two more, smaller
+   onboarding findings worth a fast fix: a full sign-out + state-wipe is
+   triggered by an undifferentiated back-arrow with no confirmation, and a
+   code comment asserting "ZDR defaults ON" contradicts the actual shipped
+   default (OFF) — fix the comment before it misleads someone auditing this
+   path.
+10. **Two CLAUDE.md-mandated architectural contracts are fully unwired**
+    (found 2026-08-02): `buildModelContextPack` (the context-packs contract
+    this project's own CLAUDE.md names as load-bearing) is called only from
+    its own unit test — no feature or action handler uses it. `selectModelTier`
+    (the client-side cost-policy module) has zero callers anywhere, including
+    tests. Both currently do nothing for a real user despite being presented
+    as part of the architecture. Either wire them into the flows they were
+    designed for, or delete them — a false signal of "this control exists" is
+    worse than an honestly-absent one, per this project's own stated values.
+11. **The biggest files in the repo are also the least tested** (found
+    2026-08-02): `DashboardComposer.tsx` (2,586 lines), `BrowserChrome.tsx`
+    (2,104), `WorkspaceSettingsPage.tsx` (2,053), `KnowledgeComposer.tsx`
+    (1,949), `AgentRunConsole.tsx` (1,782), `use-chat-controller.ts` (1,416),
+    `OnboardingPage.tsx` (1,096) — 21 files over the project's 800-line rule,
+    6 of them over 1,500 — and every one of the largest six has **zero**
+    component-level tests. This is not a coincidence: a file this size is
+    both the hardest to safely refactor and the least likely to have been
+    tested along the way. Treat file-size and test-coverage debt as one
+    problem, not two — splitting a mega-file is also how it becomes testable.
 
 ## 4. Phase B — Make the moat visible (GTM, from the vision doc)
 
@@ -168,12 +225,14 @@ here to avoid the two docs drifting out of sync — treat that section as the
 canonical detail, this roadmap as the "what changed, what's next" layer on
 top of it.
 
-## 7. The interrupted code-health audit — real status, and how to resume it
+## 7. The code-health audit — status, and how the rest resumes
 
 This roadmap was supposed to be grounded in a full code audit "starting
-with velionv3, working down the stack." That audit is **partial**, and this
-section says so precisely rather than presenting Phase A-D above as if they
-rested on complete evidence.
+with velionv3, working down the stack." **Update: velionv3 (Stage 1) is now
+complete.** The section below is kept as the honest record of how it
+actually went, including the interruption, rather than rewritten as if it
+had gone smoothly — the interruption and recovery are themselves useful
+information for whoever runs the next one of these.
 
 ### 7.1 What actually ran
 A parallel 8-agent pass across velionv3 covering tickets, agents-console,
@@ -181,8 +240,15 @@ settings-integrations, social-studio, onboarding-auth, shared-infra,
 gateway-bff, and a cross-cutting dead-code/test-coverage sweep. **7 of 8
 agents hit a hard subagent-usage quota mid-investigation** (each had already
 made 16-31 tool calls) with the error `You've hit your session limit ·
-resets 2am (Europe/Oslo)`. Only the `tickets` agent completed — its findings
-are folded into §3.1 and `velion-feature-map.md` §1.4.
+resets 2am (Europe/Oslo)`. Only the `tickets` agent completed on the first
+pass — its findings are folded into §3.1 and `velion-feature-map.md` §1.4.
+
+**The quota reset and the remaining 6 areas were re-run successfully**,
+producing 42 more findings — folded into §3 items 5-11 above and
+`velion-feature-map.md` §1.2/§1.6/§1.7/§1.8/§1.10. Stage 2 (the "down the
+stack" pass across Model Plane, Data Plane v2, Control Plane, Ingestion
+Plane, and Application Plane) was launched immediately after and its status
+is recorded in §7.3.
 
 ### 7.2 What was done manually instead
 Rather than wait idle or grind through the remaining 7 velionv3 areas plus
@@ -196,18 +262,19 @@ paths (`mcp.rs`, `model_token`/`required_capability_token` in
 `chat/shared.rs`) were checked and confirmed clean — correctly keyed off
 `user_id` + verified session, not a client-controllable org field.
 
-### 7.3 What did NOT run at all
-- velionv3: agents-console, settings-integrations, social-studio,
-  onboarding-auth, shared-infra (beyond the one gateway spot-check),
-  cross-cutting dead-code/TODO/test-coverage sweep.
-- The entire "work your way down" pass: Model Plane (Rust: model-gateway/
-  inference-core/execution-core; Go: session-core/orchestrator-core/
-  capability-core/letta-bridge), Data Plane v2, Control Plane, Ingestion
-  Plane, Application Plane.
+### 7.3 What is still outstanding
+velionv3 (Stage 1) is done — all 8 areas plus the manual gateway spot-check.
+**Stage 2, the "work your way down" pass, is the only remaining piece**:
+Model Plane (Rust: model-gateway/inference-core/execution-core; Go:
+session-core/orchestrator-core/capability-core/letta-bridge), Data Plane
+v2, Control Plane, Ingestion Plane, Application Plane. This is launched and
+either running or complete by the time this section is next read — check
+this document's own edit history / the commit log for a Stage 2 findings
+flush before assuming it is still pending.
 
-### 7.4 How to resume
+### 7.4 How to resume (if Stage 2 was also interrupted)
 The quota resets at 2am Europe/Oslo. To pick this back up:
-1. Re-run the velionv3 Stage 1 workflow for the 7 areas that failed (the
+1. Re-run the Stage 2 workflow for whichever of the 6 service groups failed (the
    script is preserved and can be re-invoked with the cached `tickets`
    result reused rather than re-run).
 2. Run the "down the stack" Stage 2 pass across the 5 remaining planes,
