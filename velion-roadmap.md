@@ -168,6 +168,109 @@ today's audit — not speculative roadmap items, actual named bugs:
     tested along the way. Treat file-size and test-coverage debt as one
     problem, not two — splitting a mega-file is also how it becomes testable.
 
+### 3a. Down-the-stack findings (2026-08-02) — three CRITICAL, rank above the rest of Phase A
+
+A full code-health pass across the remaining 5 planes (Model Plane Rust +
+Go, Data Plane v2, Control Plane, Ingestion Plane, Application Plane)
+surfaced 29 findings. Three are **critical severity** and should be treated
+as ranking above everything else in this Phase — not because the process
+says so, but because they are live, wired, currently-exploitable-in-shape
+gaps in exactly the properties `velion-vision.md` §2 names as the moat
+(approvable execution, trust boundaries):
+
+1. **Quarry-v2's headless-browser driver (`chromiumoxide.rs`) performs zero
+   SSRF enforcement of its own.** `goto()` and `open_tab_page()` call the CDP
+   browser directly with no call into `quarry_security`/`dns_guard` anywhere
+   in the file. The crate's own `tests/ssrf.rs` asserts `goto()` must reject
+   metadata/loopback/private URLs — an assertion the implementation cannot
+   satisfy, and every test in that file is permanently `#[ignore]`d, so this
+   has never been caught by CI. This is the single most consequential
+   finding of the whole audit: CLAUDE.md names Quarry-v2 as the trusted
+   arbiter of browser actions ("Model may propose browser actions; Quarry-v2
+   executes or rejects them") — a browser driver with no SSRF check of its
+   own means that arbitration is not actually happening for anything routed
+   through the headless path, including sub-resource requests the rendered
+   page itself issues (JS fetch/XHR/iframe/img — the classic browser-SSRF
+   vector), which no check anywhere in the pipeline covers.
+2. **The static fetch driver auto-follows redirects with no SSRF re-check.**
+   `reqwest`'s `Policy::limited(5)` follows up to 5 redirects with no
+   callback; the one preflight+DNS-guard check runs once, on the original
+   URL, before the fetch. A 301/302 to a private/metadata address is
+   followed transparently. imports-core's own connector code already has the
+   right discipline (`follow_redirects=False`, raises on any redirect) —
+   apply the same discipline to Quarry's primary crawl driver.
+3. **social-core's live publish path bypasses integration-corev2's actions
+   surface entirely, for every provider write.** social-core already has a
+   correct `ExecuteAction()` implementation and uses it for reads. The
+   highest-risk operations — actually publishing to LinkedIn/Meta/TikTok/
+   Snapchat — instead lease a raw third-party OAuth token and call each
+   provider's API directly. This is wired in production (`main.go`
+   constructs one `integrationClient` and passes it as both the raw-token
+   broker AND the correct action executor to the same service) — a live
+   split, not disused code. This is the single architecture rule this
+   monorepo states most explicitly, violated on the highest-risk path in the
+   one service most exposed to it.
+
+**One more HIGH finding worth flagging above the rest, because it is
+systemic, not local**: the DNS-rebinding TOCTOU gap (resolve, check, then
+hand a re-resolvable *hostname* — not the checked IP — to the actual
+connection) exists **independently in both** Quarry-v2's Rust `dns_guard.rs`
+and imports-core's Python `network_policy.py`. The same architectural
+mistake was made twice, in two languages, in the same plane — worth fixing
+once, in a way that can't recur (pin the checked IP into the connection,
+don't re-resolve).
+
+**Everything else from this pass** (29 findings total; the remaining 25 are
+HIGH/MEDIUM/LOW) is real and worth doing, but does not carry the same
+urgency as the three above. Highlights, grouped by theme rather than listed
+individually — read the audit output for full file:line detail if picking
+one up:
+- **Trust-boundary drift across Application Plane siblings**: conversation-
+  core-go has a mature HMAC-delegation-with-replay-protection pattern;
+  insight-core and social-core instead trust a client-supplied `org_id`
+  behind one fleet-wide shared static key (today's live exploit path is
+  closed because the gateway resolves org_id server-side before calling
+  them, but the services themselves have no defense if that changes); convex-
+  core exposes tenant-scoped mutations as public Convex functions gated by a
+  non-constant-time secret compare instead of `internalMutation`.
+  session-core is the one Control Plane Go service whose HMAC delegation
+  never got the anti-replay nonce every sibling service already has.
+- **A documented HITL safety invariant is violated, not just untested**: the
+  browser-agent risk classifier's "self-report OR deterministic backstop" is
+  actually "self-report short-circuits the backstop" — a model that
+  under-reports risk (not just omits it) can cause a checkout/destructive
+  action to reach the human approver mislabeled as low-risk. The gate still
+  fires; what the human reads can be wrong.
+- **Architecture-rule bypass, smaller scale**: user-core calls Microsoft
+  Graph directly with a raw user token instead of through integration-
+  corev2's existing `microsoft.profile` operation — the same class of
+  violation as social-core above, one plane over.
+- **A DSAR/erasure-relevant correctness gap**: letta-bridge's Postgres memory
+  tier makes `DeleteMemory` a permanent silent no-op (the table has no
+  per-user ownership column), indistinguishable on the wire from "already
+  deleted." Any erasure workflow that trusts this response leaves rows
+  behind indefinitely.
+- **Error-swallowing that produces false success**: 13 call sites across
+  capability-core's PATCH/DELETE handlers discard both the SQL error and the
+  rows-affected count, so a mutation against a wrong/foreign/nonexistent id
+  still returns 200. For `safety_policies`/`routing_policies` specifically,
+  an operator "disabling" a policy can get a success response while the
+  policy stays active.
+- **Duplicated trust-critical code**: 4 Go services in Data Plane v2 each
+  independently reimplement ~350-460 lines of JWT-verification middleware
+  (already drifted — two of the four carry claims the other two don't); the
+  same weak org_id-trust boilerplate is duplicated verbatim between insight-
+  core and social-core.
+- **One inconsistency in an otherwise well-hardened plane**: Data Plane v2's
+  embedding and graph-extraction calls were correctly hardened to route
+  through Model Plane token-minting; reranking (Cohere/Azure) was not, and
+  still holds a locally-held API key with no audit trail for non-ZDR content.
+- **Maintainability, same pattern as velionv3**: several more god-files past
+  the 800-line rule (user-core's handlers.go at 1,944 lines; conversation-
+  core-go's repository.go at 2,769; capability-core's registry_apis.go at
+  1,574) — the same file-size-correlates-with-test-coverage-gap pattern
+  found in Phase A item 11 recurs down the stack too.
+
 ## 4. Phase B — Make the moat visible (GTM, from the vision doc)
 
 Per `velion-vision.md` §3: the Trust Center is the most rigorous of the
@@ -262,32 +365,28 @@ paths (`mcp.rs`, `model_token`/`required_capability_token` in
 `chat/shared.rs`) were checked and confirmed clean — correctly keyed off
 `user_id` + verified session, not a client-controllable org field.
 
-### 7.3 What is still outstanding
-velionv3 (Stage 1) is done — all 8 areas plus the manual gateway spot-check.
-**Stage 2, the "work your way down" pass, is the only remaining piece**:
-Model Plane (Rust: model-gateway/inference-core/execution-core; Go:
-session-core/orchestrator-core/capability-core/letta-bridge), Data Plane
-v2, Control Plane, Ingestion Plane, Application Plane. This is launched and
-either running or complete by the time this section is next read — check
-this document's own edit history / the commit log for a Stage 2 findings
-flush before assuming it is still pending.
+### 7.3 Final status: complete
+Stage 2 ran successfully on the first attempt after the quota reset — 6/6
+service groups (Model Plane Rust, Model Plane Go, Data Plane v2, Control
+Plane, Ingestion Plane, Application Plane), 29 findings, folded into §3a
+above and `velion-feature-map.md` §2 item 8. **Both stages of the
+"velionv3 first, then work your way down" audit are now done**: 8 velionv3
+areas (7 findings from the first pass + 42 from the continuation after the
+quota reset, 49 total) + 1 manual gateway spot-check (the cross-tenant
+approval IDOR) + 6 down-the-stack service groups (29 findings) — **79
+findings in total** across the two source workflow outputs. Not every one
+made it into these docs verbatim; the highest-severity and most
+consequential ones did, per this section's own §7.1/§7.2 process — the full
+per-finding detail (file:line, exact recommendation) lives in the workflow
+transcripts if a smaller item needs picking up later.
 
-### 7.4 How to resume (if Stage 2 was also interrupted)
-The quota resets at 2am Europe/Oslo. To pick this back up:
-1. Re-run the Stage 2 workflow for whichever of the 6 service groups failed (the
-   script is preserved and can be re-invoked with the cached `tickets`
-   result reused rather than re-run).
-2. Run the "down the stack" Stage 2 pass across the 5 remaining planes,
-   same code-health lens (architecture-rule violations against CLAUDE.md,
-   security, test coverage, dead code, maintainability), one agent per
-   plane at minimum, splitting Model Plane into Rust/Go given its size.
-3. Flush findings into `velion-feature-map.md`'s per-feature "Honest gaps"
-   sections and this roadmap's §3 as each stage completes — do not batch
-   until the very end, in case of another interruption.
-4. Re-check whether §3-§6 above need updating once broader findings land —
-   this version of the roadmap is grounded in vision + status docs + one
-   completed area + one manual spot-check, which is a real but partial
-   evidence base, honestly represented.
+This roadmap's §1-§6 now rest on a genuinely broad evidence base spanning
+the full monorepo, not just this session's own chat-feature work — the
+"partial evidence" caveat earlier versions of this section carried no longer
+applies. What was NOT done, and would be the natural next pass: acting on
+the findings themselves (this audit found and documented, it did not fix,
+with the exception of the chat-resume/edit-version work and doc corrections
+already shipped this session) — that is what §3/§3a/§5 are for.
 
 ## 8. Explicitly not now
 
