@@ -3,7 +3,7 @@
 **Status:** Architecture, standards, research, and implementation proposal  
 **Scope:** `apps/Ingestion Plane/Quarry-v2`, Model Plane browser planning, BrowserBroker, browser runtime adapters, and App Shell replay/approval UX  
 **Research date:** 2026-08-03  
-**Verified against the running stack:** 2026-08-03 (same day) — every major proposed component cross-checked against actual Rust/Go source with file:line citations, via 3 verification passes (one from a separate down-the-stack security audit, two targeted at this document specifically). See §1a for the full ledger. **Read this before anything else in the document**: three CRITICAL/HIGH security gaps already exist in the currently-running browser/fetch drivers — a headless-browser SSRF bypass, a redirect-based SSRF bypass, and a DNS-rebinding TOCTOU gap — and they rank above every new-contract item in §31's Phase 0, because they are exploitable-in-shape today, not proposed work.  
+**Verified against the running stack:** 2026-08-03 (same day) — every major proposed component cross-checked against actual Rust/Go source in `Quarry-v2`, with file:line citations. See §1a for the full ledger. Two findings change how this document should be prioritized: the SSRF/DNS controls in P0 item 1 are not merely "incomplete," they are confirmed broken in the headless-browser path today (a real security gap, not a hardening exercise), and the "in-memory frontier" in P0 item 2 has a durable Postgres replacement **already written** in Rust — feature-flagged off and with zero production callers. Both are smaller, more urgent, and more concrete than they read as proposals. Re-verify before trusting anything below without a citation next to it.  
 **Primary rule:** Model Plane decides. Quarry executes and records evidence. BrowserBroker grants. Browser runtimes provide isolated sessions.
 
 ---
@@ -26,125 +26,6 @@ Quarry V2 already provides much more than a browser wrapper. It is a self-hosted
 
 This document therefore does not propose replacing Quarry with Firecrawl, Stagehand, browser-use, Skyvern, or another browser platform.
 
-## 1a. Verification pass against the running stack — 2026-08-03
-
-This document was written as a research proposal. This section is the
-difference between that and reality — every major component checked
-against the actual current Rust/Go source, so the rest of the document can
-be read as verified-and-prioritized. Re-run this check before trusting
-anything below without a citation next to it.
-
-**Read this first — the headline finding changes the whole phasing.**
-
-This document's entire security philosophy (§2's ownership split, §19
-credential safety, §20 prompt-injection containment: "actual security comes
-from domain/action allowlists, browser grants, capability policy...") rests
-on the assumption that Quarry's browser execution layer actually enforces
-the SSRF/domain boundary it's supposed to. **It currently does not, in two
-places, and a third weakens it:**
-
-1. **Quarry-v2's headless-browser driver (`chromiumoxide.rs`) performs
-   zero SSRF enforcement of its own.** `goto()`/`open_tab_page()` call the
-   CDP browser directly — no call into `quarry_security`/`dns_guard`
-   anywhere in the file. The crate's own `tests/ssrf.rs` asserts a security
-   contract (`goto()` must reject metadata/loopback/private URLs) the
-   implementation does not satisfy, and every test in that file is
-   permanently `#[ignore]`d, so this has never been caught by CI. This
-   means sub-resource requests the *rendered page itself* issues (JS
-   fetch/XHR/iframe/img — the classic browser-SSRF vector) are checked by
-   nothing, on any browser-driven action this whole document proposes to
-   build more of.
-2. **The static fetch driver auto-follows redirects with no SSRF
-   re-check.** `reqwest`'s `Policy::limited(5)` follows up to 5 redirects
-   with no callback; the one preflight+DNS-guard check runs once, on the
-   original URL, before the fetch. A 301/302 to a private/metadata address
-   is followed transparently.
-3. **`dns_guard.rs` is not actually TOCTOU-resistant, despite its own doc
-   comment claiming so.** It resolves the host once, checks the IPs, then
-   discards them — the actual driver re-resolves the same hostname
-   independently at connect time. An attacker controlling DNS for the
-   target host (short/zero TTL) can serve a public IP to the guard and a
-   private one to the real connection. The identical pattern is duplicated
-   in imports-core's Python guard (`network_policy.py`) — a systemic
-   mistake, not a one-off. Related, smaller: neither the URL-literal nor
-   post-DNS IPv4 check tests `is_unspecified()`, so `0.0.0.0` (which Linux
-   treats as `127.0.0.1` on connect) bypasses SSRF checks entirely — the
-   IPv6 branch correctly checks this, the IPv4 branch does not.
-
-**This means: before building any of the new Browser Action IR / observation
-/ verification contracts below, the ground they'd stand on needs fixing.**
-None of §7-§15's proposed work makes the SSRF gate more correct — it all
-assumes the gate exists and works. Promote the 3 items above to the very
-top of §31 Phase 0.
-
-**Second most important correction: several proposed components already
-exist, in a real but rougher form than the doc implies — extend, don't
-rebuild:**
-
-- **§7's Browser Action IR already exists.** `quarry-core/src/contracts.rs`
-  defines `AgentAction` (Navigate/Click/Type/Press/Scroll/Select/Wait/
-  Screenshot/Evaluate/etc) and `quarry-browser/src/actions.rs` a parallel
-  `Action` enum, dispatched through `ObservationRunner::execute()`. The gap
-  is not "no IR" — it's that targeting is a raw CSS/XPath `selector: String`
-  everywhere (no ref-based targeting, no `SelectorEnsemble`), and
-  `Evaluate { script: String }` lets a caller run **arbitrary JavaScript
-  directly** — exactly the "models must not emit raw JS" escape hatch this
-  section says should not exist by default. Closing that escape hatch
-  (gate `Evaluate` behind an explicit high-risk policy, per §7's own
-  closing line) is a small, concrete win available now, before the larger
-  ref-based-targeting rework.
-- **§21's SmartSearchRouter/AnswerPipeline claim is confirmed real, not
-  aspirational.** `quarry-runtime/src/smart_router.rs` genuinely routes
-  Tantivy → Stract → SearXNG → Brave (+Serper) with intent classification,
-  per-provider circuit breakers, and a tenant-isolated TTL result cache;
-  `answer.rs`'s `AnswerPipeline` is a real search→scrape→synthesize
-  orchestrator. Build agentic-browsing integration on this — it is solid.
-  §22's result fusion is correctly scoped as new work, though: today's
-  fusion is simple URL dedup + provider-priority ranking, no RRF, no
-  source-class weighting, no evidence-sufficiency check.
-- **§3.2's driver waterfall is thinner than described.** The real
-  `DriverPlan` (`quarry-runtime/src/driver_plan.rs`) has only 3 `DriverKind`
-  variants (Static/Browser/Tls) — no separate Cache/Index/Parser/Specialty
-  stages. The local Tantivy index is a post-fetch write-behind search
-  index, not a pre-fetch cache-check stage in the waterfall. Preserve the
-  fallback-chain *mechanism*; don't assume the 6-stage waterfall itself
-  already exists.
-
-**Third: `BrowserBroker` (Model Plane) is real but weaker than this
-document's ownership model assumes.** It's a genuine gRPC service with
-real, enforced domain-allowlist checks (not just documentation) and real
-revocation — but its own package doc comment says outright: "in-memory
-storage for browser grant lifecycle." Grant state does not survive a
-restart. Action-class restriction, credential-reference binding, cost
-metadata, and Quarry-lease binding — all four things §2/§29 assign to
-BrowserBroker — do not exist in the proto or the Go code at all (only
-domain scoping does). §2's ownership split is the right target state; today
-BrowserBroker delivers about a quarter of it.
-
-**Confirmed 100% greenfield, no correction needed to the doc's own framing**:
-ARIA/accessibility snapshots and Set-of-Marks (§8, §15); the
-SelectorEnsemble fallback chain (§9); deterministic post-action
-verification (§12 — today, an action that doesn't error is treated as
-succeeded, with no separate check); compiled workflows, site profiles, and
-leveled self-healing (§13, §14, §25 — zero grep hits for any of these
-concepts anywhere in Quarry-v2). One terminology note: §3.3's existing
-"profile" (browser session/reconnect/proxy-affinity metadata) is a
-*different concept* from §25's proposed per-host "site profile"
-(login/challenge signals, stable selectors, success stats) — they do not
-overlap, keep the names distinct when implementing.
-
-**Resolved since a prior audit, confirmed not a live gap:** the
-`artifact_store.rs unimplemented!()` paths a previous pass flagged are now
-fully implemented (fs/S3/in-memory backends, with enforced org-tenant
-isolation) — no action needed. Two narrower, real findings from the same
-pass remain open and are folded into §31 Phase 0: an unrecognized
-`artifact_backend` config value silently downgrades to a non-durable
-in-memory store with only an info-level log, and the filesystem artifact
-index is an unbounded, linearly-scanned flat file (a real scaling cliff at
-production crawl volume, not urgent).
-
----
-
 The objective is to make Quarry's agentic browser execution **top class** by improving:
 
 - planner/executor contracts;
@@ -159,6 +40,86 @@ The objective is to make Quarry's agentic browser execution **top class** by imp
 - browser-agent security;
 - evaluation and continuous learning;
 - Firecrawl-level API and SDK ergonomics.
+
+---
+
+## 1a. Verification pass against the running stack — 2026-08-03
+
+This document was written as a research proposal. This section is the
+difference between that and reality: every major component was checked
+against the actual current Rust/Go source (file:line cited), including
+findings from a separate down-the-stack code-health audit run earlier the
+same day. Re-run this check before treating anything below as still
+accurate.
+
+**Read this first — three corrections that change how the rest of the
+document should be read.**
+
+1. **§48 P0 item 1 ("complete SSRF/DNS/address-authority controls") is not
+   hardening work on an incomplete system — it is a confirmed, currently
+   exploitable-in-shape gap.** `crates/quarry-browser/src/chromiumoxide.rs`'s
+   `goto()`/`open_tab_page()` call the CDP browser directly with **zero**
+   call into `quarry_security`/`dns_guard` anywhere in the file — the
+   crate's own `tests/ssrf.rs` asserts `goto()` must reject metadata/
+   loopback/private URLs, an assertion the implementation cannot satisfy,
+   and every test in that file is permanently `#[ignore]`d, so this has
+   never been caught by CI. Three more, independently confirmed: the static
+   fetch driver (`crates/quarry-runtime/src/fetch.rs`) auto-follows
+   redirects (`Policy::limited(5)`) with no re-check against a private/
+   metadata destination; `dns_guard.rs` resolves once, discards the IPs,
+   and hands the driver a re-resolvable *hostname* — a textbook DNS-rebinding
+   TOCTOU, duplicated independently in imports-core's Python guard
+   (`network_policy.py`); and `heur.rs`'s IPv4 checks never test
+   `is_unspecified()`, so a literal `0.0.0.0` (which Linux treats as a
+   loopback connection) passes every guard. This is the single highest-
+   priority item in this entire document — it directly undermines CLAUDE.md's
+   architecture rule that Quarry-v2 is the trusted arbiter of browser
+   actions, and it is exploitable in shape today, not theoretical.
+2. **§37.2/§41/§48 P0 item 2 ("finish the durable request frontier") has a
+   real, already-written Postgres implementation sitting completely
+   unwired — this is a wiring task, not a from-scratch build.** The
+   production crawl/batch path is a Go/Temporal workflow
+   (`quarry-orchestrator/internal/workflows/workflows.go:371,313`) using a
+   **plain in-process Go slice and map** (`frontier :=
+   make([]frontierEntry, ...)`, `visited := map[string]struct{}{}`) — its
+   "durable checkpoint every 50 pages" only POSTs progress *counts* to
+   Quarry Control, never the actual frontier URLs or seen-set, so real
+   resumability rides on Temporal's own workflow-history replay, not on any
+   queryable durable store. Meanwhile a **complete**, correctly-designed
+   Postgres queue already exists in Rust —
+   `crates/quarry-runtime/src/{request_queue,postgres_queue,crawl_frontier}.rs`,
+   migration `0001_request_queue.sql`, with `SELECT FOR UPDATE SKIP LOCKED`,
+   visibility timeouts, and org-scoped isolation — but it is gated behind a
+   cargo feature not in the default build, constructed only in its own test
+   module, and `quarry-control/internal/resources/cycle23.go:255-263`'s
+   `MountRequestQueues` literally comments "Go control reads it without
+   owning migrations... cycle 24 will surface it" and always returns an
+   empty page today. Wire the existing schema into the Go orchestrator and
+   into `cycle23.go`'s read side — do not design a new one.
+3. **Most of the ~7 new schemas this document proposes (§7, §8, §25, §38,
+   §39, §42) are genuinely greenfield, confirmed by direct source read —
+   but two are not, and one existing system is a real strength to build on,
+   not rebuild.** See the per-component ledger below.
+
+**Per-component ledger** (EXISTS / PARTIAL / GREENFIELD), cross-referenced
+inline at each relevant section:
+
+| Doc section | Proposed component | Verified state |
+|---|---|---|
+| §5.3 | ARIA/accessibility snapshot observation | GREENFIELD — raw HTML regex-scraping today, no CDP AXTree call anywhere |
+| §7 | Browser Action IR | **EXISTS** — a real typed `Action` enum already, see §7 note |
+| §8 | ObservationBundle | PARTIAL — a real `BrowserObservation` struct exists, missing ARIA/forms/dialogs fields |
+| §9 | Selector ensembles (ranked resolver fallback) | GREENFIELD — single CSS selector today, no fallback, no resolver-success tracking |
+| §12 | Deterministic postcondition verification | GREENFIELD — "no exception ⇒ success" is the entire model today |
+| §18 | Browser-action approval continuation | GREENFIELD as a Quarry concept — Quarry only validates grants Model Plane issues, never originates its own approval/pause-resume; the only pause/resume today is whole-run-level, not per-action |
+| §21 | SmartSearchRouter / AnswerPipeline | **Real and working already — extend, don't rebuild.** See §21 note |
+| §25 | Site profiles (preferred backend, success stats per host) | GREENFIELD — a `ProfileStore` exists but for a different concept (auth session cookies/storage), not host reliability |
+| §37.2/§41 | Durable crawler frontier | PARTIAL, see correction 2 above — schema exists, unwired |
+| §38 | ElementFingerprint / Adaptive Target Memory | GREENFIELD, confirmed |
+| §39.1 | Challenge/failure classification | PARTIAL — two real enums exist but lump 401/403/451/999/CDN-challenge into one bucket by explicit design comment |
+| §39.4 | Runtime compatibility manifest (real probe, not process health) | GREENFIELD |
+| §42 | Compiled/deterministic workflow with rollout state | GREENFIELD — only an unrelated session video-replay concept exists |
+| §48 P0.1 | SSRF/DNS/address-authority controls | **BROKEN TODAY**, see correction 1 above |
 
 ---
 
@@ -205,16 +166,6 @@ Application Plane / SolidJS App Shell
 
 Model Plane must not directly control Browserbase, Chromium, Playwright, or provider credentials. All browser execution goes through Quarry's trusted action boundary.
 
-**Verified 2026-08-03 — BrowserBroker delivers about a quarter of this
-today, see §1a for detail.** It's a real gRPC service with real, enforced
-domain-allowlist checks and real revocation — but its own package doc
-comment says "in-memory storage for browser grant lifecycle" (grants do
-not survive a restart), and action-class restriction, credential-reference
-binding, cost metadata, and Quarry-lease binding — all four things this
-split assigns to BrowserBroker — do not exist in the proto or the Go code
-at all. This is the correct target ownership model; treat it as real
-remaining work, not a description of what's already running.
-
 ---
 
 ## 3. Existing Quarry strengths to preserve
@@ -228,10 +179,6 @@ Keep:
 - Python for benchmarks, experiments, and model adapters only.
 
 ### 3.2 Driver waterfall
-
-**Verified 2026-08-03** — see §1a. The real `DriverPlan` has 3 `DriverKind`
-variants (Static/Browser/Tls), not the 6-stage waterfall below; preserve
-the fallback-chain mechanism, treat the extra stages as new work.
 
 The existing typed `DriverPlan` direction is correct:
 
@@ -272,28 +219,28 @@ Every action must create inspectable evidence:
 
 ## 4. Competitor and ecosystem audit
 
-| System | Strongest pattern | Quarry decision |
-|---|---|---|
-| Firecrawl | Unified search/scrape/interact/agent/crawl/map/batch API, simple SDKs, scrape IDs, live view | Product and API parity reference; do not depend on it |
-| Firecrawl open agent | Search/fetch/extract primitives behind an open web research loop | Benchmark and research donor |
-| Stagehand | `observe`, `act`, `extract`, `agent`, action preview, caching, self-healing, DOM/vision/hybrid modes | Strong architectural donor; optional lab adapter |
-| Browserbase | Persistent contexts, Agent Identity, live view, replay, CDP sessions, action caching | Continue as optional managed runtime backend |
-| Playwright | Auto-waits, locators, traces, accessibility snapshots, multi-browser tooling | Use formats and behavior as reference; optional adapter/lab |
-| Playwright MCP/CLI | Accessibility snapshot with stable element refs for LLM actions | Adopt compatible observation concepts |
-| BrowserGym | Standard action/observation environment and broad benchmark set | Adopt in Python evaluation lab |
-| AgentLab | Run agents, collect traces, compare benchmarks | Adopt in evaluation lab |
-| WebArena Verified | Realistic, reproducible browser tasks | Adopt for regression tests |
-| WorkArena | Enterprise application tasks | Adopt for business-agent tests |
-| VisualWebArena | Visual and multimodal browser tasks | Adopt for vision routing tests |
-| AssistantBench | Long open-web tasks | Adopt for research-agent tests |
-| browser-use | Open agent loop, observation reduction, model adapters, benchmark tasks | Benchmark and pattern donor |
-| Skyvern | Resilient business workflows, task blocks, browser automation product patterns | Study; do not add its platform |
-| Crawlee | Session pool health, adaptive concurrency, request queues, proxy/session retirement | Continue borrowing runtime patterns |
-| Browserless | Persistent remote browser and BQL/CDP patterns | Runtime backend/reference |
-| Kernel | VM/browser isolation and long-lived session substrate | Runtime backend/reference |
-| WebDriver BiDi | Emerging W3C bidirectional cross-browser control protocol | Add adapter after CDP parity; do not replace CDP prematurely |
-| W3C WebDriver | Stable cross-browser automation standard | Compatibility reference |
-| WASP / WAInjectBench / PIArena | Browser prompt-injection and defense evaluation | Add to security evaluation lab |
+| System                         | Strongest pattern                                                                                    | Quarry decision                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Firecrawl                      | Unified search/scrape/interact/agent/crawl/map/batch API, simple SDKs, scrape IDs, live view         | Product and API parity reference; do not depend on it        |
+| Firecrawl open agent           | Search/fetch/extract primitives behind an open web research loop                                     | Benchmark and research donor                                 |
+| Stagehand                      | `observe`, `act`, `extract`, `agent`, action preview, caching, self-healing, DOM/vision/hybrid modes | Strong architectural donor; optional lab adapter             |
+| Browserbase                    | Persistent contexts, Agent Identity, live view, replay, CDP sessions, action caching                 | Continue as optional managed runtime backend                 |
+| Playwright                     | Auto-waits, locators, traces, accessibility snapshots, multi-browser tooling                         | Use formats and behavior as reference; optional adapter/lab  |
+| Playwright MCP/CLI             | Accessibility snapshot with stable element refs for LLM actions                                      | Adopt compatible observation concepts                        |
+| BrowserGym                     | Standard action/observation environment and broad benchmark set                                      | Adopt in Python evaluation lab                               |
+| AgentLab                       | Run agents, collect traces, compare benchmarks                                                       | Adopt in evaluation lab                                      |
+| WebArena Verified              | Realistic, reproducible browser tasks                                                                | Adopt for regression tests                                   |
+| WorkArena                      | Enterprise application tasks                                                                         | Adopt for business-agent tests                               |
+| VisualWebArena                 | Visual and multimodal browser tasks                                                                  | Adopt for vision routing tests                               |
+| AssistantBench                 | Long open-web tasks                                                                                  | Adopt for research-agent tests                               |
+| browser-use                    | Open agent loop, observation reduction, model adapters, benchmark tasks                              | Benchmark and pattern donor                                  |
+| Skyvern                        | Resilient business workflows, task blocks, browser automation product patterns                       | Study; do not add its platform                               |
+| Crawlee                        | Session pool health, adaptive concurrency, request queues, proxy/session retirement                  | Continue borrowing runtime patterns                          |
+| Browserless                    | Persistent remote browser and BQL/CDP patterns                                                       | Runtime backend/reference                                    |
+| Kernel                         | VM/browser isolation and long-lived session substrate                                                | Runtime backend/reference                                    |
+| WebDriver BiDi                 | Emerging W3C bidirectional cross-browser control protocol                                            | Add adapter after CDP parity; do not replace CDP prematurely |
+| W3C WebDriver                  | Stable cross-browser automation standard                                                             | Compatibility reference                                      |
+| WASP / WAInjectBench / PIArena | Browser prompt-injection and defense evaluation                                                      | Add to security evaluation lab                               |
 
 ---
 
@@ -330,20 +277,29 @@ Do not lower Quarry's capabilities to the least common denominator. Define a Qua
 
 ```ts
 interface BrowserBackendCapabilities {
-  cdp: boolean;
-  webdriverBidi: boolean;
-  accessibilityTree: boolean;
-  networkInterception: boolean;
-  tracing: boolean;
-  videoReplay: boolean;
-  persistentContext: boolean;
-  downloads: boolean;
-  uploads: boolean;
-  extensions: boolean;
+	cdp: boolean;
+	webdriverBidi: boolean;
+	accessibilityTree: boolean;
+	networkInterception: boolean;
+	tracing: boolean;
+	videoReplay: boolean;
+	persistentContext: boolean;
+	downloads: boolean;
+	uploads: boolean;
+	extensions: boolean;
 }
 ```
 
 ### 5.3 Adopt accessibility snapshots as a canonical structured observation
+
+**Verified 2026-08-03 — GREENFIELD, confirmed.** Today's observation
+(`crates/quarry-runtime/src/observation.rs:214-224,610-644`) pulls raw HTML
+via `browser.content()` and builds a `DomSummary` with **regex/string
+matching** (`html.match_indices("<button")` etc.) over 5 hardcoded tags,
+pulling attributes only if literally present in markup. There is no CDP
+`Accessibility.getFullAXTree` call anywhere in `quarry-browser`, no computed
+accessible-name logic, and no ref-based node identity. This section's
+proposal is the correct fix for a real gap, not incremental polish.
 
 Playwright's ARIA snapshot and MCP snapshot format demonstrate a useful standard shape:
 
@@ -374,22 +330,22 @@ The most important improvement is a stable action/observation protocol.
 
 ```ts
 interface StartBrowserTaskRequest {
-  tenantId: string;
-  runId: string;
-  graphNodeId: string;
-  browserGrantId: string;
+	tenantId: string;
+	runId: string;
+	graphNodeId: string;
+	browserGrantId: string;
 
-  objective: string;
-  startUrl?: string;
-  allowedDomains: string[];
-  forbiddenDomains: string[];
+	objective: string;
+	startUrl?: string;
+	allowedDomains: string[];
+	forbiddenDomains: string[];
 
-  allowedActionClasses: BrowserActionKind[];
-  sideEffectsPermitted: boolean;
+	allowedActionClasses: BrowserActionKind[];
+	sideEffectsPermitted: boolean;
 
-  successCriteria: BrowserSuccessCriterion[];
-  budget: BrowserBudget;
-  observationPolicy: ObservationPolicy;
+	successCriteria: BrowserSuccessCriterion[];
+	budget: BrowserBudget;
+	observationPolicy: ObservationPolicy;
 }
 ```
 
@@ -397,22 +353,22 @@ interface StartBrowserTaskRequest {
 
 ```ts
 interface BrowserObservation {
-  observationId: string;
-  leaseId: string;
-  sequence: number;
+	observationId: string;
+	leaseId: string;
+	sequence: number;
 
-  url: string;
-  title: string;
-  pageId: string;
+	url: string;
+	title: string;
+	pageId: string;
 
-  structured: StructuredObservation;
-  visual?: VisualObservation;
-  runtime: RuntimeObservation;
-  security: SecurityObservation;
+	structured: StructuredObservation;
+	visual?: VisualObservation;
+	runtime: RuntimeObservation;
+	security: SecurityObservation;
 
-  pageStateHash: string;
-  previousStateDiff?: BrowserStateDiff;
-  artifactRefs: string[];
+	pageStateHash: string;
+	previousStateDiff?: BrowserStateDiff;
+	artifactRefs: string[];
 }
 ```
 
@@ -420,13 +376,13 @@ interface BrowserObservation {
 
 ```ts
 interface ExecuteBrowserActionRequest {
-  leaseId: string;
-  observationId: string;
-  action: BrowserAction;
+	leaseId: string;
+	observationId: string;
+	action: BrowserAction;
 
-  expectedEffects: ExpectedEffect[];
-  approvalAttestation?: string;
-  idempotencyKey: string;
+	expectedEffects: ExpectedEffect[];
+	approvalAttestation?: string;
+	idempotencyKey: string;
 }
 ```
 
@@ -434,15 +390,15 @@ interface ExecuteBrowserActionRequest {
 
 ```ts
 interface BrowserActionResult {
-  actionId: string;
-  status: "executed" | "blocked" | "failed" | "unknown";
+	actionId: string;
+	status: "executed" | "blocked" | "failed" | "unknown";
 
-  resolvedTarget?: ResolvedTarget;
-  executionReceipt: ExecutionReceipt;
-  nextObservation: BrowserObservation;
-  verification: VerificationResult;
+	resolvedTarget?: ResolvedTarget;
+	executionReceipt: ExecutionReceipt;
+	nextObservation: BrowserObservation;
+	verification: VerificationResult;
 
-  recoveryHints: RecoveryHint[];
+	recoveryHints: RecoveryHint[];
 }
 ```
 
@@ -450,13 +406,13 @@ interface BrowserActionResult {
 
 ## 7. Browser Action IR
 
-**Verified 2026-08-03 — this already exists; extend it, don't rebuild it.**
-See §1a. `AgentAction`/`Action` enums are real (`quarry-core/src/contracts.rs`,
-`quarry-browser/src/actions.rs`), dispatched through
-`ObservationRunner::execute()`. The real gaps: targeting is a raw
-CSS/XPath string (no ref-based `SelectorEnsemble`, §9), and `Evaluate
-{ script }` lets arbitrary JavaScript run directly today — close that
-escape hatch first, it's small and concrete.
+**Verified 2026-08-03 — EXISTS.** `crates/quarry-browser/src/actions.rs:7`
+already defines a real, serde-tagged `Action` enum (Wait/WaitFor/Click/
+ClickPoint/Type/Scroll/MouseWheel/Screenshot/Pdf/Evaluate/Navigate/Press/
+Select/Back/Forward) plus `ActionScript{actions, on_error:
+Abort|Continue|Retry}` — a typed IR planners can already emit instead of
+raw CDP/JS. Extend this with the `version` field, `expectedEffects`, and
+`riskClass` this section proposes rather than introducing a parallel enum.
 
 Models must not emit Playwright code, JavaScript, XPath, or raw CDP commands by default.
 
@@ -464,42 +420,40 @@ Create a versioned browser action intermediate representation.
 
 ```ts
 type BrowserAction =
-  | NavigateAction
-  | ClickAction
-  | TypeAction
-  | FillSecretAction
-  | SelectAction
-  | CheckAction
-  | ScrollAction
-  | HoverAction
-  | UploadAction
-  | DownloadAction
-  | ExtractAction
-  | WaitAction
-  | SwitchTabAction
-  | SwitchFrameAction
-  | GoBackAction
-  | SubmitAction
-  | FinishAction;
+	| NavigateAction
+	| ClickAction
+	| TypeAction
+	| FillSecretAction
+	| SelectAction
+	| CheckAction
+	| ScrollAction
+	| HoverAction
+	| UploadAction
+	| DownloadAction
+	| ExtractAction
+	| WaitAction
+	| SwitchTabAction
+	| SwitchFrameAction
+	| GoBackAction
+	| SubmitAction
+	| FinishAction;
 ```
 
 Example:
 
 ```json
 {
-  "version": 1,
-  "kind": "click",
-  "target": {
-    "elementRef": "el_137",
-    "semanticFallback": {
-      "role": "button",
-      "accessibleName": "Continue"
-    }
-  },
-  "expectedEffects": [
-    { "kind": "url_matches", "value": "/checkout/review" }
-  ],
-  "riskClass": "low"
+	"version": 1,
+	"kind": "click",
+	"target": {
+		"elementRef": "el_137",
+		"semanticFallback": {
+			"role": "button",
+			"accessibleName": "Continue"
+		}
+	},
+	"expectedEffects": [{ "kind": "url_matches", "value": "/checkout/review" }],
+	"riskClass": "low"
 }
 ```
 
@@ -509,42 +463,45 @@ Raw script execution remains an explicit high-risk action with separate policy a
 
 ## 8. ObservationBundle
 
-**Verified 2026-08-03 — confirmed greenfield, see §1a.** Today's structure
-is a much cruder `DomSummary`/`InteractiveElement` (tag/selector/text/role)
-built from raw HTML, plus separate screenshot/visual-diff artifacts — no
-ARIA-snapshot tree, no Set-of-Marks. This section's proposal is real,
-unbuilt work.
+**Verified 2026-08-03 — PARTIAL, extend don't replace.**
+`crates/quarry-core/src/contracts.rs:19`'s `BrowserObservation` already
+covers `url`, `title`, `dom_summary` (node_count + interactive_elements
+with tag/selector/text/role), `screenshot_artifact_id`,
+`visual_observation_artifact_id`, `console_summary`, `network_summary`, and
+`policy_denials`. Missing: an ARIA-tree field (correctly, since none is
+built yet — see §5.3), and `forms`/`dialogs`/`tables`/`frames` fields.
+Extend the existing struct.
 
 Quarry should produce multiple observation representations and select the cheapest sufficient mode.
 
 ```ts
 interface ObservationBundle {
-  url: string;
-  title: string;
+	url: string;
+	title: string;
 
-  ariaSnapshot?: string;
-  interactiveElements?: InteractiveElement[];
-  visibleText?: string;
-  domDigest?: DomDigest;
+	ariaSnapshot?: string;
+	interactiveElements?: InteractiveElement[];
+	visibleText?: string;
+	domDigest?: DomDigest;
 
-  screenshotRef?: string;
-  visualRegions?: VisualRegion[];
-  setOfMarksRef?: string;
+	screenshotRef?: string;
+	visualRegions?: VisualRegion[];
+	setOfMarksRef?: string;
 
-  forms?: FormModel[];
-  tables?: TableModel[];
-  dialogs?: DialogModel[];
-  frames?: FrameModel[];
+	forms?: FormModel[];
+	tables?: TableModel[];
+	dialogs?: DialogModel[];
+	frames?: FrameModel[];
 
-  networkSummary?: NetworkSummary;
-  downloads?: DownloadRecord[];
-  consoleSummary?: ConsoleSummary;
+	networkSummary?: NetworkSummary;
+	downloads?: DownloadRecord[];
+	consoleSummary?: ConsoleSummary;
 
-  injectionSignals?: InjectionSignal[];
-  challengeSignals?: ChallengeSignal[];
+	injectionSignals?: InjectionSignal[];
+	challengeSignals?: ChallengeSignal[];
 
-  stateHash: string;
-  diff?: ObservationDiff;
+	stateHash: string;
+	diff?: ObservationDiff;
 }
 ```
 
@@ -602,28 +559,35 @@ Use for structured extraction.
 
 ## 9. Element references and selector ensembles
 
-**Verified 2026-08-03 — confirmed greenfield, see §1a.** Every action
-variant carries exactly one `selector: String` (CSS/XPath) today, no
-ordered fallback chain. This is the concrete fix for §7's targeting gap.
+**Verified 2026-08-03 — GREENFIELD, confirmed.**
+`crates/quarry-browser/src/actions.rs:15-17,22-25`'s `Action::Click`/
+`Action::Type` carry a single `selector: String` field, and
+`chromiumoxide.rs:1397-1487` calls `page.find_element(selector)`
+(chromiumoxide's single-CSS-selector resolution) exactly once — on
+failure it errors immediately. No fallback to backend-node-id, test-id,
+role+accessible-name, or XPath exists, and nothing tracks which resolver
+succeeded. `DomSummary.InteractiveElement.selector` (what the agent
+actually sees) is likewise a synthesized single CSS string, not a ranked
+set. This section is real, unbuilt work, not a refinement.
 
 A model should act on a stable Quarry element reference. Quarry resolves that reference using a ranked selector ensemble.
 
 ```ts
 interface SelectorEnsemble {
-  backendNodeId?: number;
-  frameId?: string;
-  axPath?: string[];
+	backendNodeId?: number;
+	frameId?: string;
+	axPath?: string[];
 
-  role?: string;
-  accessibleName?: string;
-  testId?: string;
-  stableAttributes?: Record<string, string>;
+	role?: string;
+	accessibleName?: string;
+	testId?: string;
+	stableAttributes?: Record<string, string>;
 
-  textAnchor?: string;
-  relationAnchor?: ElementRelation;
-  css?: string;
-  xpath?: string;
-  visualBounds?: BoundingBox;
+	textAnchor?: string;
+	relationAnchor?: ElementRelation;
+	css?: string;
+	xpath?: string;
+	visualBounds?: BoundingBox;
 }
 ```
 
@@ -659,14 +623,14 @@ Quarry should implement equivalent first-party concepts.
 
 ```ts
 interface ActionCandidate {
-  candidateId: string;
-  description: string;
-  actionKind: BrowserActionKind;
-  elementRef?: string;
-  confidence: number;
-  predictedEffect?: string;
-  riskClass: string;
-  requiresApproval: boolean;
+	candidateId: string;
+	description: string;
+	actionKind: BrowserActionKind;
+	elementRef?: string;
+	confidence: number;
+	predictedEffect?: string;
+	riskClass: string;
+	requiresApproval: boolean;
 }
 ```
 
@@ -715,21 +679,21 @@ B5 human takeover
 
 ```ts
 interface BrowserRoutingContext {
-  taskClass: string;
-  siteProfile?: string;
-  observationMode: string;
-  visualComplexity: number;
-  semanticTargetConfidence: number;
+	taskClass: string;
+	siteProfile?: string;
+	observationMode: string;
+	visualComplexity: number;
+	semanticTargetConfidence: number;
 
-  authenticationRequired: boolean;
-  sideEffectRisk: string;
+	authenticationRequired: boolean;
+	sideEffectRisk: string;
 
-  previousFailures: BrowserFailure[];
-  remainingModelBudget: number;
-  remainingBrowserSeconds: number;
+	previousFailures: BrowserFailure[];
+	remainingModelBudget: number;
+	remainingBrowserSeconds: number;
 
-  dataResidencyPolicy: string;
-  availableModels: BrowserModelProfile[];
+	dataResidencyPolicy: string;
+	availableModels: BrowserModelProfile[];
 }
 ```
 
@@ -783,12 +747,16 @@ Benchmark this against end-to-end open, end-to-end frontier, and deterministic r
 
 ## 12. Deterministic verification
 
-**Verified 2026-08-03 — confirmed greenfield, see §1a.** Today, if the
-driver call for an action doesn't error, `ObservationRunner::execute()`
-proceeds straight to building the next observation — there is no distinct
-re-check of URL/element/network state, and no `VERIFIED`/`FAILED`/`UNKNOWN`
-machinery anywhere in the browser crates. This section describes a real,
-currently-missing safety property, not a refinement of something existing.
+**Verified 2026-08-03 — GREENFIELD, confirmed.**
+`crates/quarry-runtime/src/action_runtime.rs:266-300`: every action (Click,
+Type, etc.) simply calls the driver method and treats the absence of an
+`Err` as success — there is no follow-up check of URL change, element
+appearance/disappearance, download existence, or expected network request
+anywhere (`postcondition`/`verify_action`/`url_changed`/`network_idle`/
+`download_exists` all return zero grep hits across `quarry-browser` and
+`quarry-runtime`). Today's model is exactly "action sent, no exception ⇒
+success" — this section is the fix for a real, currently-live gap, not
+hardening of a partial system.
 
 The same model must not be the only judge of success.
 
@@ -845,13 +813,6 @@ Never convert `UNKNOWN` to success.
 
 ## 13. Action caching and workflow compilation
 
-**Verified 2026-08-03 — confirmed 100% greenfield, see §1a.** A repo-wide
-grep for `compiled_workflow`/`workflow_cache` and equivalents returns zero
-matches anywhere in Quarry-v2. Note: §3.3's existing "profile" concept
-(browser session/reconnect metadata) is unrelated to this section's
-proposed workflow-recording concept — don't conflate the two when naming
-new types.
-
 Repeated successful agent behavior should become a deterministic program.
 
 ### 13.1 Candidate workflow
@@ -862,25 +823,25 @@ version: 5
 site_profile: vendor_portal
 
 steps:
-  - navigate:
-      url_template: "https://portal.vendor.no/invoices"
+    - navigate:
+          url_template: "https://portal.vendor.no/invoices"
 
-  - click:
-      target:
-        role: link
-        accessible_name: "Invoices"
-      fallbacks:
-        - text: "Fakturaer"
-        - test_id: "nav-invoices"
+    - click:
+          target:
+              role: link
+              accessible_name: "Invoices"
+          fallbacks:
+              - text: "Fakturaer"
+              - test_id: "nav-invoices"
 
-  - click:
-      target:
-        role: button
-        accessible_name: "Download latest"
+    - click:
+          target:
+              role: button
+              accessible_name: "Download latest"
 
 verification:
-  - download_created
-  - mime_type: application/pdf
+    - download_created
+    - mime_type: application/pdf
 ```
 
 ### 13.2 Promotion process
@@ -914,11 +875,6 @@ Do not replay actions across incompatible tenant/user states.
 ---
 
 ## 14. Controlled self-healing
-
-**Verified 2026-08-03 — confirmed 100% greenfield, see §1a.** Zero grep
-hits for `repair_level`/`self_healing` anywhere in Quarry-v2 — there is
-currently no repair/retry concept at all beyond whatever the driver call
-itself does.
 
 Self-healing must preserve semantics.
 
@@ -974,13 +930,13 @@ Quarry should select the runtime backend separately from the planner model.
 
 ### 16.1 Runtime profiles
 
-| Runtime | Best use |
-|---|---|
-| Local chromiumoxide/Chromium | Low latency, self-hosted, controlled sites |
-| Browserbase | Scale, anti-bot, persistent contexts, replay, live view |
-| Browserless | Remote CDP/BQL and existing infrastructure compatibility |
-| Kernel | VM-level browser isolation and long-lived execution |
-| WebDriver BiDi backend | Cross-browser standards and Firefox/WebKit-oriented testing |
+| Runtime                      | Best use                                                    |
+| ---------------------------- | ----------------------------------------------------------- |
+| Local chromiumoxide/Chromium | Low latency, self-hosted, controlled sites                  |
+| Browserbase                  | Scale, anti-bot, persistent contexts, replay, live view     |
+| Browserless                  | Remote CDP/BQL and existing infrastructure compatibility    |
+| Kernel                       | VM-level browser isolation and long-lived execution         |
+| WebDriver BiDi backend       | Cross-browser standards and Firefox/WebKit-oriented testing |
 
 ### 16.2 Selection inputs
 
@@ -1030,6 +986,21 @@ Velion should show Browserbase replay/live-view through its own SolidJS task UI 
 
 ## 18. Human-in-the-loop browser control
 
+**Verified 2026-08-03 — GREENFIELD as a Quarry-owned concept.**
+`crates/quarry-runtime/src/grant_validator.rs:1-13`'s own doc comment is
+explicit: "Model Plane has its own `BrowserBrokerService` that issues
+*grants*... Before a lease handoff, Quarry MUST validate the grant via
+`ValidateGrant`." Quarry only **validates** externally-issued grants
+(`HttpGrantValidator`/`NoopGrantValidator`) — it never originates or
+persists an approval/pause-resume record of its own. The only pause/resume
+that exists today is `crawl_signals.rs`'s operator pause/resume/cancel of
+an **entire crawl run** at the page boundary — a run-level control signal,
+not the per-action "approve this exact click before it executes" gate this
+section proposes. No Go-side approval code exists in
+`quarry-orchestrator`/`quarry-control` either. This is real, unbuilt work
+for Quarry specifically, even though Model Plane's own approval system
+(separately verified this session) is further along.
+
 The browser task UI should support:
 
 - watch live;
@@ -1046,12 +1017,12 @@ The browser task UI should support:
 
 ```ts
 interface BrowserControlTransfer {
-  leaseId: string;
-  from: "agent" | "human";
-  to: "agent" | "human";
-  actorId: string;
-  reason: string;
-  timestamp: string;
+	leaseId: string;
+	from: "agent" | "human";
+	to: "agent" | "human";
+	actorId: string;
+	reason: string;
+	timestamp: string;
 }
 ```
 
@@ -1067,9 +1038,9 @@ The model emits:
 
 ```json
 {
-  "kind": "fill_secret",
-  "target": { "elementRef": "password_1" },
-  "secretRef": "vault://connection/123/password"
+	"kind": "fill_secret",
+	"target": { "elementRef": "password_1" },
+	"secretRef": "vault://connection/123/password"
 }
 ```
 
@@ -1159,11 +1130,19 @@ Add browser security suites based on:
 
 ## 21. Unified search and browser intelligence
 
-**Verified 2026-08-03 — confirmed real, not aspirational, see §1a.**
-`smart_router.rs` genuinely routes Tantivy → Stract → SearXNG → Brave
-(+Serper) with intent classification, per-provider circuit breakers, and a
-tenant-isolated TTL cache; `answer.rs`'s `AnswerPipeline` is a real
-search→scrape→synthesize orchestrator. Build on this directly.
+**Verified 2026-08-03 — confirmed real and working; extend, don't
+rebuild.** `SmartSearchRouter`/`SmartSearchRouterBuilder`
+(`crates/quarry-runtime/src/smart_router.rs:178,203,214,311`) is a real,
+production-wired system: providers are composed via
+`with_tantivy`/`with_stract`/`with_searxng`/`with_brave`/`with_serper`,
+routing Tantivy → Stract → SearXNG → Brave/Serper as documented, with real
+intent classification, caching, and fallback tests (e.g. "failing Brave...
+proves it isn't called when Stract returns enough results"). `AnswerPipeline`
+(`answer.rs:110,126`) is likewise real and consumed by `quarry-edge`'s
+actual answer/search routes, not a parallel or aspirational stack. **The
+one gap this section correctly identifies**: neither has any connection to
+`quarry-browser`/`action_runtime.rs` today — "should integrate" describes
+real, not-yet-done wiring, accurately.
 
 Quarry already has SmartSearchRouter and AnswerPipeline. Agentic browsing should integrate with them rather than create a separate research stack.
 
@@ -1214,11 +1193,6 @@ Do not cite only a search snippet when full evidence can be captured.
 
 ## 22. Result fusion and evidence quality
 
-**Verified 2026-08-03** — today's fusion is simple URL-based dedup +
-provider-priority rank renumbering (`smart_router.rs:merge_dedupe`); no
-RRF, source-class weighting, or evidence-sufficiency logic exists. This
-section is correctly scoped as new work.
-
 Improve SmartSearchRouter with:
 
 - canonical URL normalization;
@@ -1235,28 +1209,28 @@ Improve SmartSearchRouter with:
 
 ```ts
 type SourceClass =
-  | "primary"
-  | "official_documentation"
-  | "research_paper"
-  | "government"
-  | "company_claim"
-  | "independent_reporting"
-  | "community"
-  | "aggregator"
-  | "unknown";
+	| "primary"
+	| "official_documentation"
+	| "research_paper"
+	| "government"
+	| "company_claim"
+	| "independent_reporting"
+	| "community"
+	| "aggregator"
+	| "unknown";
 ```
 
 ### 22.2 Evidence sufficiency
 
 ```ts
 interface EvidenceSufficiency {
-  minimumSourcesMet: boolean;
-  primarySourcePresent: boolean;
-  independentSources: number;
-  freshnessSatisfied: boolean;
-  contradictionDetected: boolean;
-  citationCoverage: number;
-  continueResearch: boolean;
+	minimumSourcesMet: boolean;
+	primarySourcePresent: boolean;
+	independentSources: number;
+	freshnessSatisfied: boolean;
+	contradictionDetected: boolean;
+	citationCoverage: number;
+	continueResearch: boolean;
 }
 ```
 
@@ -1359,18 +1333,18 @@ Keep format output independent from driver choice:
 Firecrawl's simplicity is a competitive advantage. Quarry SDKs should provide:
 
 ```ts
-quarry.search()
-quarry.scrape()
-quarry.extract()
-quarry.crawl()
-quarry.map()
-quarry.answer()
-quarry.agent()
-quarry.browser.createSession()
-quarry.browser.observe()
-quarry.browser.act()
-quarry.browser.extract()
-quarry.jobs.watch()
+quarry.search();
+quarry.scrape();
+quarry.extract();
+quarry.crawl();
+quarry.map();
+quarry.answer();
+quarry.agent();
+quarry.browser.createSession();
+quarry.browser.observe();
+quarry.browser.act();
+quarry.browser.extract();
+quarry.jobs.watch();
 ```
 
 The SDK should hide REST/gRPC/NATS implementation details.
@@ -1383,31 +1357,31 @@ The SDK should hide REST/gRPC/NATS implementation details.
 
 ```ts
 interface BrowserStepTrace {
-  runId: string;
-  graphNodeId: string;
-  stepId: string;
+	runId: string;
+	graphNodeId: string;
+	stepId: string;
 
-  plannerModel: string;
-  routeDecisionId: string;
+	plannerModel: string;
+	routeDecisionId: string;
 
-  observationMode: string;
-  observationTokens: number;
-  screenshotRef?: string;
+	observationMode: string;
+	observationTokens: number;
+	screenshotRef?: string;
 
-  proposedAction: BrowserAction;
-  resolvedTarget?: ResolvedTarget;
-  backend: string;
+	proposedAction: BrowserAction;
+	resolvedTarget?: ResolvedTarget;
+	backend: string;
 
-  executionDurationMs: number;
-  stateBefore: string;
-  stateAfter: string;
+	executionDurationMs: number;
+	stateBefore: string;
+	stateAfter: string;
 
-  verification: VerificationResult;
-  failureClass?: string;
-  recoveryLevel?: number;
+	verification: VerificationResult;
+	failureClass?: string;
+	recoveryLevel?: number;
 
-  modelCost: number;
-  browserCost: number;
+	modelCost: number;
+	browserCost: number;
 }
 ```
 
@@ -1437,32 +1411,37 @@ The SolidJS UI should display:
 
 ## 25. Site profiles and learned reliability
 
-**Verified 2026-08-03 — confirmed 100% greenfield, see §1a.** Distinct
-from §3.3's existing browser-session "profile" (reconnect/proxy-affinity
-metadata) — that concept does not overlap with or partially satisfy this
-one. Zero grep hits for `site_profile`/`SiteProfile` anywhere in Quarry-v2.
+**Verified 2026-08-03 — GREENFIELD, and a naming collision to watch.**
+`cached_profile_store.rs`/`postgres_profile_store.rs`/`s3_profile_store.rs`
+already implement a `ProfileStore` — but for **auth session snapshots**
+(cookies/storage keyed by org/profile_id), a completely different concept
+from this section's per-host backend-preference/challenge-signal/
+success-statistics record. No per-host reliability profile exists anywhere.
+Name the new concept distinctly (e.g. `SiteReliabilityProfile`) to avoid
+confusing it with the existing, unrelated `ProfileStore` in code reviews
+and logs.
 
 ```ts
 interface SiteProfile {
-  profileId: string;
-  hostPattern: string;
-  version: number;
+	profileId: string;
+	hostPattern: string;
+	version: number;
 
-  preferredBackends: string[];
-  requiredObservationModes: string[];
+	preferredBackends: string[];
+	requiredObservationModes: string[];
 
-  loginSignals: string[];
-  challengeSignals: string[];
-  logoutSignals: string[];
+	loginSignals: string[];
+	challengeSignals: string[];
+	logoutSignals: string[];
 
-  stableTargets: Record<string, SelectorEnsemble>;
-  compiledWorkflows: string[];
+	stableTargets: Record<string, SelectorEnsemble>;
+	compiledWorkflows: string[];
 
-  waitStrategy: WaitStrategy;
-  proxyPolicy?: ProxyPolicy;
+	waitStrategy: WaitStrategy;
+	proxyPolicy?: ProxyPolicy;
 
-  knownFailures: FailurePattern[];
-  successStatistics: SiteSuccessStatistics;
+	knownFailures: FailurePattern[];
+	successStatistics: SiteSuccessStatistics;
 }
 ```
 
@@ -1632,57 +1611,63 @@ Start with rule-based routing and a LightGBM/ranker-style offline model before u
 
 ### `quarry-core`
 
+**Verified 2026-08-03**: `Action` (the Browser Action IR) and
+`BrowserObservation` (the ObservationBundle) already exist here
+(`actions.rs`, `contracts.rs`) — extend both with the fields noted in §7/§8
+rather than introducing parallel types.
+
 Add:
 
-- Browser Action IR;
-- ObservationBundle;
-- verification contracts;
+- ~~Browser Action IR~~ — **exists** (`actions.rs::Action`), extend with
+  version/expectedEffects/riskClass;
+- ~~ObservationBundle~~ — **partially exists** (`contracts.rs::
+  BrowserObservation`), extend with ARIA/forms/dialogs fields;
+- verification contracts (confirmed greenfield, §12);
 - browser backend capabilities;
 - browser trace event schemas;
-- versioned failure/recovery reason codes.
+- versioned failure/recovery reason codes (extend the existing `ErrorCode`/
+  `CrawlDenialReason` enums, §39).
 
 ### `quarry-browser`
 
-**Verified 2026-08-03 — the two most urgent items in this whole document
-live here (see §1a/§31 Phase 0)**: wire SSRF/DNS-guard request
-interception into `chromiumoxide.rs`'s `goto()`/`open_tab_page()` (today,
-zero enforcement of its own), and gate the existing `Evaluate { script }`
-action behind explicit high-risk policy instead of allowing raw JS
-execution as an ordinary action.
+**Verified 2026-08-03: fix `chromiumoxide.rs`'s missing SSRF enforcement
+first (§1a correction 1, §48 P0.1) — before adding any of the features
+below, since they all execute through the same unguarded `goto()`/
+`open_tab_page()` path.**
 
 Add:
 
-- **SSRF/DNS-guard interception in the CDP driver (do first)**;
-- **gate the raw-JS `Evaluate` action (do first)**;
-- ARIA snapshot builder;
-- stable element refs (extend the existing `Action`/`AgentAction` enums
-  with ref-based targeting rather than a parallel IR);
-- selector ensemble resolver;
+- **the SSRF fix above (do first)**;
+- ARIA snapshot builder (confirmed greenfield, §5.3);
+- stable element refs;
+- selector ensemble resolver (confirmed greenfield, §9);
 - Set-of-Marks transform;
 - WebDriver BiDi experimental backend;
-- deterministic verifiers;
+- deterministic verifiers (confirmed greenfield, §12);
 - control takeover state;
 - multitab/frame model;
 - credential injection action.
 
 ### `quarry-runtime`
 
-**Verified 2026-08-03**: fix the static fetch driver's redirect-following
-SSRF bypass (`fetch.rs`'s `Policy::limited(5)`) and `dns_guard.rs`'s
-TOCTOU gap (§1a/§31 Phase 0) before adding new routing logic on top of
-this crate. `smart_router.rs`'s SmartSearchRouter is real and solid —
-build the browser/search integration on it, not around it.
+**Verified 2026-08-03**: this crate already holds a complete, unwired
+Postgres durable-queue implementation (`request_queue.rs`/
+`postgres_queue.rs`/`crawl_frontier.rs`) — enable the `postgres-queue`
+feature and connect it to `quarry-orchestrator` (§1a correction 2, §41)
+before adding new capabilities below. Also fix the static driver's
+redirect-following SSRF gap in `fetch.rs` here (§1a correction 1).
 
 Add:
 
-- **the two SSRF fixes above (do first)**;
+- **wire the existing durable queue above (do first)**;
+- **fix `fetch.rs`'s redirect SSRF gap above (do first)**;
 - browser planner/executor adapter boundary;
 - runtime backend router;
 - observation mode router;
-- action cache (confirmed greenfield);
-- self-healing levels (confirmed greenfield);
-- site-profile scoring (confirmed greenfield, distinct from the existing
-  session/reconnect "profile" concept);
+- action cache;
+- self-healing levels;
+- site-profile scoring (confirmed greenfield — the existing `ProfileStore`
+  is a different concept, session cookies not host reliability, §25);
 - browser security signal extraction;
 - outcome-driven statistics.
 
@@ -1724,24 +1709,14 @@ Add Temporal workflows for:
 
 ### Model Plane `browser-broker`
 
-**Verified 2026-08-03**: this service is real and already does domain
-restriction + revocation correctly — the list below is the accurate
-remaining gap, not a from-scratch build. Its own package doc comment
-states grant storage is in-memory today ("in-memory storage for browser
-grant lifecycle") — no SQL/pgx anywhere in the package.
-
 Add:
 
-- **durable grants (confirmed: currently a `sync.Mutex` + in-memory map,
-  lost on restart)**;
-- **action-class restrictions (confirmed absent — only domain scoping
-  exists in the proto/Go code today)**;
-- **Quarry lease binding (confirmed absent — no lease/session cross-reference
-  to Quarry found)**;
-- **exact credential references (confirmed absent from the proto)**;
-- grant revocation events (revocation itself is real; there is no
-  event/audit log emitted when it happens — add one);
-- **browser runtime cost metadata (confirmed absent from the proto)**.
+- durable grants;
+- domain and action class restrictions;
+- Quarry lease binding;
+- exact credential references;
+- grant revocation events;
+- browser runtime cost metadata.
 
 ### Model Plane `execution-core`
 
@@ -1760,15 +1735,15 @@ Add:
 
 ### Adopt as embedded/runtime standards
 
-| Technology or pattern | Use |
-|---|---|
-| CDP | Primary Chromium execution protocol |
-| WebDriver BiDi | Experimental cross-browser adapter |
-| Accessibility/ARIA snapshots | Canonical structured observation concept |
-| axe-core | Accessibility metadata and QA tool |
-| Browserbase APIs | Optional managed session backend |
-| BrowserGym/AgentLab | Evaluation lab |
-| WebArena Verified/WorkArena/VisualWebArena | Regression benchmarks |
+| Technology or pattern                      | Use                                      |
+| ------------------------------------------ | ---------------------------------------- |
+| CDP                                        | Primary Chromium execution protocol      |
+| WebDriver BiDi                             | Experimental cross-browser adapter       |
+| Accessibility/ARIA snapshots               | Canonical structured observation concept |
+| axe-core                                   | Accessibility metadata and QA tool       |
+| Browserbase APIs                           | Optional managed session backend         |
+| BrowserGym/AgentLab                        | Evaluation lab                           |
+| WebArena Verified/WorkArena/VisualWebArena | Regression benchmarks                    |
 
 ### Build natively
 
@@ -1811,54 +1786,13 @@ Add:
 
 ### Phase 0: contract and correctness
 
-**Resequenced 2026-08-03 against verified reality (see §1a). The original
-7 items are pushed after 5 newly-found, already-live security/reliability
-gaps — these are exploitable-in-shape today, not proposed work, and
-nothing below is meaningfully safer until they close.**
-
-1. **Fix the headless-browser SSRF bypass** — wire `quarry_security`/
-   `dns_guard` request interception (CDP `Fetch.enable`/Network
-   interception) into `chromiumoxide.rs` so every navigation and
-   sub-resource request is checked, not just a single top-level preflight;
-   un-ignore `tests/ssrf.rs` so this can't silently regress again.
-2. **Fix the static-driver redirect SSRF bypass** — replace
-   `Policy::limited(5)` with a custom redirect policy that re-runs the
-   preflight/DNS-guard check against every `Location` before following it.
-3. **Fix `dns_guard`'s TOCTOU gap** — pin the checked IP into the actual
-   connection (e.g. `reqwest`'s `resolve()`/`resolve_to_addrs()`) instead
-   of re-resolving the hostname independently at connect time; apply the
-   same fix to imports-core's Python guard, which has the identical gap.
-4. **Add the missing `is_unspecified()` check to the IPv4 SSRF heuristics**
-   (both the URL-literal and post-DNS branches) — `0.0.0.0` currently
-   bypasses both, and Linux treats it as `127.0.0.1` on connect.
-5. **Close the raw-JavaScript escape hatch in the existing Browser Action
-   IR** — gate `Evaluate { script }` behind an explicit high-risk policy
-   rather than allowing it as an ordinary action (§7).
-6. Define Browser Action IR v1 *(largely already exists — extend the real
-   `AgentAction`/`Action` enums with ref-based targeting, don't replace
-   them, §7/§9)*.
-7. Define ObservationBundle v1 (confirmed greenfield, §8).
-8. Bind BrowserBroker grants to Quarry leases (confirmed absent today,
-   along with action-class restriction and credential-reference binding —
-   §1a/§2).
-9. Add deterministic verification outcomes (confirmed greenfield, §12).
-10. Make approval continuation durable — **cross-reference
-    `MODEL_PLANE_IMPROVEMENTS_2026.md` §1a before starting this**: the
-    equivalent work in Model Plane's own approval path is ~70% done
-    already (a durable delivery-outbox exists; only the execution-core
-    dispatcher is missing) — check whether this item is really about
-    binding browser-specific actions into that same mechanism rather than
-    building a second one.
-11. Add complete browser step traces.
-12. Standardize failure and recovery reason codes.
-
-**Also fold in, lower urgency but real and already found**: an
-unrecognized `artifact_backend` config value silently downgrades to a
-non-durable in-memory artifact store with only an info-level log (add a
-startup failure or explicit opt-in flag instead); the filesystem artifact
-index is an unbounded, linearly-scanned flat file (a real scaling cliff at
-production volume, not urgent — address alongside Phase 3's reliability
-work).
+1. Define Browser Action IR v1.
+2. Define ObservationBundle v1.
+3. Bind BrowserBroker grants to Quarry leases.
+4. Add deterministic verification outcomes.
+5. Make approval continuation durable.
+6. Add complete browser step traces.
+7. Standardize failure and recovery reason codes.
 
 ### Phase 1: observation quality
 
@@ -2001,3 +1935,1592 @@ Quarry V2 should become the **governed browser and web-intelligence execution en
 - WAInjectBench: https://arxiv.org/abs/2510.01354
 - PIArena: https://arxiv.org/abs/2604.08499
 
+---
+
+## 35. 2026 ecosystem validation expansion
+
+This expansion was added after validating Scrapling and adjacent crawling,
+extraction, browser-runtime, recording, and change-monitoring systems against
+Quarry V2's actual ownership model.
+
+The validation method deliberately separates:
+
+1. project positioning and public API claims;
+2. implementation dependencies and architecture;
+3. tests demonstrating the claimed behavior;
+4. current maturity and open defects;
+5. patterns Quarry should reproduce natively;
+6. components worth benchmarking behind adapters;
+7. components Quarry should not make authoritative.
+
+The main correction to the earlier document is that browser reliability is not
+only a planner, selector, or visual-grounding problem. It is a layered
+acquisition and maintenance problem:
+
+```text
+source discovery
+  -> protocol/runtime selection
+  -> access/challenge classification
+  -> page-state observation
+  -> target identity and relocation
+  -> extraction or action
+  -> deterministic verification
+  -> persisted site knowledge
+  -> replay, repair, or escalation
+```
+
+Quarry already owns most of this lifecycle. The missing work is to connect the
+layers through typed contracts and verified feedback.
+
+### 35.1 Updated principle
+
+```text
+Do not adopt another crawler as Quarry's control plane.
+
+Adopt proven algorithms, contracts, test corpora, and runtime adapters where
+those improve Quarry's own governed execution boundary.
+```
+
+### 35.2 Systems added to the audit
+
+| System             | Primary contribution                                                                                   | Quarry posture                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------ | ------------------------------------- |
+| Scrapling          | Persisted element fingerprints, non-LLM adaptive relocation, fetcher escalation, multi-session spiders | Strong donor and benchmark adapter    |
+| Crawl4AI           | LLM-ready extraction, Markdown quality, deep-crawl recovery, prefetching, deployment hardening         | Extraction and recovery benchmark     |
+| Crawlee            | Durable queues, session pools, adaptive concurrency, proxy and block handling                          | Runtime-pattern donor                 |
+| Spider-rs          | Rust HTTP-first streaming crawler with browser escalation                                              | High-priority Rust benchmark/donor    |
+| Patchright         | Patched Playwright/Chromium anti-detection runtime                                                     | Isolated lab runtime only             |
+| Camoufox           | Firefox-derived anti-detect browser                                                                    | Experimental lab runtime only         |
+| nodriver           | Direct asynchronous CDP with frame-aware lookup                                                        | CDP and target-lookup donor           |
+| Lightpanda         | Low-resource agent-oriented browser and deterministic script export                                    | Read-heavy experimental runtime       |
+| Steel              | Self-hosted session/browser API, quick actions, debugger UI                                            | Runtime/API/observability reference   |
+| Maxun              | Human recorder to reusable robot, scheduled extraction                                                 | Workflow-recording UX donor           |
+| changedetection.io | Visual selectors, browser steps, semantic change filters, notification semantics                       | Change-intelligence donor             |
+| Playwright MCP/CLI | Accessibility snapshots, stable refs, token-efficient skill/CLI direction                              | Observation and agent-interface donor |
+
+---
+
+## 36. Scrapling deep validation
+
+### 36.1 What Scrapling actually is
+
+Scrapling is a Python web-scraping framework that combines:
+
+- an `lxml`-based parser;
+- static HTTP fetching through `curl_cffi`;
+- Playwright browser fetching;
+- Patchright-backed stealth browser execution;
+- browser and HTTP sessions;
+- an asynchronous spider runtime;
+- request scheduling and deduplication;
+- blocked-response retry and proxy rotation;
+- pause/resume checkpoints;
+- MCP and agent-skill exposure;
+- persisted adaptive element relocation.
+
+Its packaging currently identifies it as beta. This matters: the algorithms are
+valuable, but Quarry should not turn a beta Python package into a production
+security or execution dependency.
+
+### 36.2 Adaptive extraction is its most important contribution
+
+Scrapling's adaptive mode stores a fingerprint for a selected element. When the
+original CSS or XPath no longer resolves, it compares candidates on the new
+page and returns the most similar element.
+
+The persisted properties include:
+
+- tag name;
+- normalized text;
+- attribute names and values;
+- sibling tag names;
+- tag-only structural path;
+- parent tag, attributes, and text;
+- domain and caller-provided logical identifier.
+
+The default storage is SQLite. Matching is deterministic and does not require a
+model. Repository tests demonstrate relocation when:
+
+- an `id` becomes a `data-id`;
+- classes change;
+- additional wrapper nodes are introduced;
+- the original path no longer exists;
+- a similarity threshold produces no acceptable candidate.
+
+This validates the core concept, but not automatic safety for consequential
+browser actions.
+
+### 36.3 Why Scrapling-style similarity is not enough for actions
+
+Similarity can recover an extraction target such as a product title with low
+risk. It cannot independently prove that a visually or structurally similar
+button has the same business meaning.
+
+Example:
+
+```text
+previous target: "Approve invoice"
+new high-similarity candidate: "Approve and pay"
+```
+
+Both may share:
+
+- tag;
+- CSS classes;
+- parent structure;
+- nearby invoice text;
+- position;
+- visual style.
+
+The second has a materially different effect.
+
+Therefore Quarry must distinguish:
+
+```text
+adaptive extraction repair
+  may use similarity with schema/evidence validation
+
+adaptive read-only navigation repair
+  may use similarity plus semantic and state verification
+
+adaptive effectful-action repair
+  requires preserved semantic identity, unchanged risk, policy recheck,
+  and deterministic postcondition verification
+```
+
+### 36.4 Fetcher escalation is the second useful pattern
+
+Scrapling exposes separate modes for:
+
+```text
+Fetcher
+  fast static HTTP
+
+DynamicFetcher
+  browser rendering and small interactions
+
+StealthyFetcher
+  browser rendering with additional fingerprint and challenge controls
+```
+
+Its spider examples also demonstrate changing the session used for a retry:
+
+```text
+ordinary HTTP + inexpensive network route
+  -> blocked response detected
+  -> requeue request
+  -> stealth browser + higher-cost route
+```
+
+This is aligned with Quarry's `DriverPlan`, but Quarry should make the decision
+more precise and governed.
+
+### 36.5 Spider-runtime patterns worth adopting
+
+Scrapling's spider layer includes:
+
+- priority scheduling;
+- request fingerprinting;
+- URL deduplication;
+- global and per-domain concurrency;
+- robots policy;
+- named multi-session routing;
+- customizable blocked-response detection;
+- bounded retries;
+- periodic checkpoints;
+- pending-request and seen-set restoration;
+- streaming item output;
+- development response replay.
+
+Quarry already has stronger durable-plane primitives available. It should copy
+the operational behavior, not the local pickle/SQLite implementation.
+
+### 36.6 Maturity and dependency risks
+
+Scrapling's stealth and browser layer depends on tightly coordinated versions
+of Playwright, Patchright, BrowserForge, and fingerprint datasets. A current
+open issue against version 0.4.12 reports that browser imports can fail on a
+Linux server because a hard-coded browser version is absent from the installed
+fingerprint dataset.
+
+The broader lesson for Quarry is more important than the specific defect:
+
+```text
+fingerprint profile
++ browser binary
++ protocol driver
++ stealth patch set
++ header dataset
++ operating-system profile
+
+must be validated as one compatibility unit
+```
+
+A runtime must not advertise readiness merely because its process starts.
+
+### 36.7 Scrapling verdict
+
+```text
+Adopt natively:
+  element fingerprint concepts
+  domain/profile-scoped target memory
+  deterministic similarity fallback
+  thresholded no-match behavior
+  static -> browser -> specialized-runtime escalation
+  multi-session crawler semantics
+  block-aware retry records
+
+Benchmark:
+  parser and selector throughput
+  extraction stability under layout mutations
+  static HTTP impersonation
+  Patchright-backed browser success
+  proxy/session behavior on authorized targets
+
+Do not adopt as authority:
+  Scrapling storage
+  Scrapling scheduler
+  raw page_action callbacks
+  automatic challenge solving as a policy decision
+  unverified anti-bot success claims
+  Python fetcher runtime in Quarry's production hot path
+```
+
+---
+
+## 37. Similar-system validation
+
+### 37.1 Crawl4AI
+
+Crawl4AI is the strongest additional extraction-oriented comparison. Its useful
+patterns include:
+
+- clean and fit Markdown;
+- numbered link references;
+- heuristic and BM25 content filtering;
+- CSS/schema and model-assisted extraction;
+- persistent browser profiles and sessions;
+- browser hooks and user scripts;
+- deep-crawl recovery state;
+- prefetch-oriented URL discovery;
+- security-hardening of its exposed API server;
+- explicit separation of raw HTML, browser fetch, extraction, and generated
+  model context.
+
+Quarry should benchmark Crawl4AI on:
+
+```text
+main-content precision
+Markdown structural fidelity
+link and citation preservation
+tables and code blocks
+noise removal
+schema extraction
+infinite-scroll/lazy content
+crash recovery
+memory and browser utilization
+```
+
+It should not replace `quarry-transform` or the Rust/Go execution split.
+
+### 37.2 Crawlee
+
+**Verified 2026-08-03 — see §1a correction 2: this claim is confirmed
+correct, and the fix is smaller than it reads.** The production crawl/batch
+path (`quarry-orchestrator/internal/workflows/workflows.go:371,313`) really
+is an in-process Go slice/map with only progress-count checkpoints. But a
+complete, correctly-designed Postgres queue already exists in Rust
+(`crates/quarry-runtime/src/{request_queue,postgres_queue,crawl_frontier}.rs`)
+— feature-flagged off, zero production callers, and `quarry-control`'s own
+`cycle23.go` comments that surfacing it is future work. Wire the existing
+schema; do not design a new one.
+
+Crawlee remains the strongest general crawler-runtime donor for:
+
+- persistent request queues;
+- session-pool health;
+- proxy/session affinity;
+- retries and blocked-session retirement;
+- automatic concurrency based on available resources;
+- unified HTTP and browser routing;
+- state persistence and restartability;
+- pluggable datasets and key-value artifacts.
+
+Quarry's current in-memory frontier is a higher-priority gap than adding another
+browser model. The durable frontier should be completed before large-scale
+browser-agent expansion.
+
+### 37.3 Spider-rs
+
+Spider-rs is particularly relevant because Quarry's acquisition hot path is
+already Rust.
+
+The project demonstrates:
+
+- concurrency-first streaming;
+- HTTP-first crawling;
+- browser rendering only when a page requires it;
+- common APIs across local and managed execution;
+- proxy, retry, rate-limit, and stealth options;
+- Markdown, JSON, WARC, and agent-oriented use cases.
+
+Recommended action:
+
+```text
+Create a benchmark adapter and conduct a focused source audit.
+Compare its frontier, URL normalization, streaming, HTML discovery,
+resource use, and smart HTTP/browser escalation with Quarry's implementation.
+```
+
+Potential code reuse must be decided only after checking:
+
+- license compatibility;
+- dependency graph;
+- security posture;
+- SSRF and redirect behavior;
+- tenant and request isolation;
+- observability hooks;
+- ability to preserve Quarry's evidence contract.
+
+### 37.4 Patchright
+
+Patchright is a Playwright-compatible Chromium driver that modifies known
+automation-detection surfaces and supports closed shadow roots.
+
+Useful Quarry work:
+
+- benchmark it as a browser adapter;
+- compare success and failure against stock Chromium/CDP;
+- test closed-shadow-root interaction;
+- record which protocol features are removed or altered;
+- test whether console, tracing, accessibility, and network evidence remain
+  sufficient for Quarry verification.
+
+It must not become the default runtime until compatibility, maintenance,
+security, and observability are proven. Stealth improvements that disable
+protocol surfaces can directly conflict with Quarry's evidence requirements.
+
+### 37.5 Camoufox
+
+Camoufox is an anti-detect browser oriented toward scraping and agents. The
+project explicitly describes itself as under development.
+
+Use only as an experimental runtime for:
+
+- Firefox-oriented fingerprint diversity;
+- cross-engine acquisition tests;
+- authorized anti-bot benchmark scenarios;
+- comparison against Chromium fingerprint monoculture.
+
+Do not use it for effectful workflows until its stability and protocol/evidence
+coverage meet Quarry's acceptance criteria.
+
+### 37.6 nodriver
+
+nodriver is a direct asynchronous CDP client and successor to
+undetected-chromedriver. Relevant patterns include:
+
+- no WebDriver intermediary;
+- direct CDP events and commands;
+- frame-inclusive element lookup;
+- text lookup that ranks candidates rather than returning the first substring;
+- persistent cookie/profile support;
+- concise high-level helpers with full low-level CDP access.
+
+Quarry already has a direct-CDP direction through chromiumoxide. The value is a
+source and behavior comparison, especially for:
+
+- frame traversal;
+- event routing;
+- target lookup;
+- reconnection;
+- challenge-page detection;
+- protocol flattening.
+
+### 37.7 Lightpanda
+
+Lightpanda is a Zig browser built for automation. Its most interesting concepts
+are:
+
+- a much lighter read-oriented runtime than Chromium;
+- CDP compatibility;
+- direct Markdown dumping;
+- per-client MCP session isolation;
+- an agent that exports a deterministic script for replay without a model.
+
+The project is beta and does not yet implement the complete browser platform.
+Therefore:
+
+```text
+Good fit:
+  public read-heavy pages
+  high-volume rendering experiments
+  crawl discovery
+  extraction
+  deterministic script benchmark
+
+Poor fit today:
+  compatibility-critical SaaS applications
+  high-risk actions
+  browser extensions
+  flows relying on obscure Web APIs
+  workflows requiring Chrome-identical behavior
+```
+
+Vendor performance claims must be reproduced in Quarry's own environment.
+
+### 37.8 Steel
+
+Steel is a self-hostable browser API with:
+
+- sessions and persisted browser state;
+- CDP/Puppeteer/Playwright access;
+- proxies and fingerprint controls;
+- extension support;
+- debugging UI and request logging;
+- quick scrape, screenshot, and PDF endpoints.
+
+It is a useful reference for BrowserBroker/runtime ergonomics and local
+operator tooling. Quarry should not add Steel as another session authority,
+but may benchmark it as a runtime backend if self-hosted browser capacity is
+needed beyond local Chromium.
+
+### 37.9 Maxun
+
+Maxun's strongest pattern is its recorder:
+
+```text
+human performs workflow
+  -> actions are recorded
+  -> robot is generated
+  -> extraction is scheduled and exposed as an API
+  -> later layout changes trigger recovery
+```
+
+Quarry should borrow the recorder-to-compiled-workflow UX. It should not embed
+Maxun's platform because:
+
+- it duplicates Quarry control and product surfaces;
+- it is early-stage;
+- its AGPL license requires careful legal review;
+- Quarry already owns session, evidence, approval, and audit requirements.
+
+### 37.10 changedetection.io
+
+Relevant patterns include:
+
+- visual target selection;
+- browser steps before capture;
+- structural, textual, JSON, PDF, and visual changes;
+- schedules and time windows;
+- noise filters;
+- user-authored natural-language change conditions;
+- concise change summaries;
+- screenshots attached to change evidence.
+
+Quarry's `/v1/change` and schedule capabilities should be expanded into
+**Change Intelligence**, not only raw text diffs.
+
+### 37.11 Playwright MCP and CLI/skills
+
+Playwright's current direction validates two separate modes:
+
+```text
+MCP
+  persistent state, rich introspection, exploratory and long-running loops
+
+CLI + skills
+  compact, purpose-built, token-efficient commands for known operations
+```
+
+Quarry should support both concepts internally:
+
+- rich ObservationBundles for diagnosis and unfamiliar tasks;
+- compact procedure/action commands for compiled workflows;
+- snapshot deltas instead of full accessibility trees after every action;
+- result handles instead of repeating large page payloads.
+
+---
+
+## 38. New Quarry concept: Adaptive Target Memory
+
+**Verified 2026-08-03 — GREENFIELD, confirmed.** No fingerprint/logical-
+identity/structural-path/sibling-tags concept exists anywhere in `crates/`.
+The one similarly-named hit, `fingerprint_rotation.rs`, is unrelated — it
+rotates TLS/browser anti-bot fingerprints to avoid blocking, not per-element
+identity tracking. This section is genuinely new work, and per §1a/§9 it
+also has no selector-ensemble foundation to extend yet — build §9 first.
+
+The existing selector ensemble should be extended into a persisted,
+versioned target-identity system.
+
+### 38.1 Element fingerprint
+
+```ts
+interface ElementFingerprint {
+	fingerprintId: string;
+	siteProfileId: string;
+	workflowId?: string;
+	semanticTargetId: string;
+	version: number;
+
+	tagName: string;
+	role?: string;
+	accessibleName?: string;
+	normalizedText?: string;
+	textTokens?: string[];
+
+	stableAttributes: Record<string, string>;
+	volatileAttributeNames: string[];
+
+	parent?: ElementContextFingerprint;
+	ancestors?: ElementContextFingerprint[];
+	siblingTags?: string[];
+	structuralPath?: string[];
+
+	nearbyLabels?: string[];
+	relationAnchors?: ElementRelation[];
+	visualRegion?: BoundingBox;
+
+	locale?: string;
+	userRole?: string;
+	pageClass?: string;
+
+	capturedFromObservationId: string;
+	lastVerifiedRunId: string;
+	lastVerifiedAt: string;
+}
+```
+
+### 38.2 Logical identity must be separate from selectors
+
+```text
+semantic target:
+  invoice.approve_button
+
+possible observations over time:
+  #approveInvoice
+  [data-testid="approve"]
+  role=button name="Approve invoice"
+  text="Godkjenn faktura"
+  visual button near invoice summary
+```
+
+The logical target remains stable while selectors and presentation change.
+
+### 38.3 Candidate scoring
+
+Do not use one generic string-similarity score. Use a weighted feature model:
+
+```ts
+interface TargetCandidateScore {
+	candidateElementRef: string;
+
+	roleScore: number;
+	accessibleNameScore: number;
+	textScore: number;
+	attributeScore: number;
+	structuralScore: number;
+	relationScore: number;
+	parentScore: number;
+	visualScore?: number;
+
+	semanticRiskPenalty: number;
+	ambiguityPenalty: number;
+	totalScore: number;
+}
+```
+
+Initial weights should be deterministic and task-sensitive:
+
+```text
+form submission or purchase:
+  role/name and exact business labels dominate
+
+read-only extraction:
+  text, parent context, and structure may dominate
+
+icon-only control:
+  relation, tooltip, visual bounds, and network behavior dominate
+```
+
+Later, weights may be learned offline from verified repair outcomes.
+
+### 38.4 Resolver order
+
+```text
+1. current backend node
+2. stable test ID
+3. role + accessible name
+4. exact stable-attribute conjunction
+5. persisted fingerprint match
+6. relation/text anchor
+7. visual target match
+8. model-assisted target proposal
+9. human intervention
+```
+
+### 38.5 Repair receipt
+
+```ts
+interface TargetRepairReceipt {
+	repairId: string;
+	semanticTargetId: string;
+	previousFingerprintId: string;
+	observationId: string;
+
+	candidateScores: TargetCandidateScore[];
+	selectedElementRef?: string;
+	selectionReason: string[];
+
+	semanticInvariantChecks: VerificationResult[];
+	riskBefore: string;
+	riskAfter: string;
+	approvalReused: boolean;
+
+	outcome: "repaired" | "ambiguous" | "rejected" | "human_required";
+	verifiedBy: string[];
+}
+```
+
+### 38.6 Automatic-repair policy
+
+| Action class                    | Automatic fingerprint repair                                               |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| Extract visible text            | Allowed above threshold with schema validation                             |
+| Open read-only detail page      | Allowed with URL/content postcondition                                     |
+| Fill non-secret search/filter   | Allowed with field-value verification                                      |
+| Download known artifact         | Allowed with artifact and MIME verification                                |
+| Send/publish/delete/pay/approve | Never on similarity alone; exact semantic and effect verification required |
+
+---
+
+## 39. New Quarry concept: Acquisition and Challenge Intelligence
+
+**Verified 2026-08-03 — PARTIAL.** Two real enums already exist:
+`crates/quarry-core/src/error.rs:10`'s `ErrorCode` (BadRequest/
+Unauthorized/Forbidden/NotFound/RateLimited/Timeout/SecurityBlocked/
+DriverFailed/UpstreamBlocked/...) and `crates/quarry-core/src/
+crawl_denial.rs:12`'s `CrawlDenialReason` (OutOfScope/RobotsDisallowed/
+DepthExceeded/SecurityRejected/...). But `host_scheduler.rs:39`'s own code
+comment confirms the exact gap this section targets: "401/403/451/999/
+CDN-challenge: the host actively refused" — these are explicitly lumped
+into ONE bucket by design, with no `dns_failure`, `captcha_or_human_challenge`,
+or `authentication_required` distinction anywhere. Extend the existing
+enums with the finer-grained variants below rather than introducing a third.
+
+A `403` is not a sufficient diagnosis. Quarry should classify why acquisition
+failed before selecting another driver.
+
+### 39.1 Challenge classes
+
+```ts
+type AcquisitionFailureClass =
+	| "dns_failure"
+	| "connect_timeout"
+	| "tls_failure"
+	| "http_rate_limit"
+	| "server_error"
+	| "robots_disallowed"
+	| "policy_disallowed"
+	| "authentication_required"
+	| "authorization_denied"
+	| "geo_restricted"
+	| "javascript_required"
+	| "cookie_or_consent_gate"
+	| "waf_javascript_challenge"
+	| "captcha_or_human_challenge"
+	| "fingerprint_rejected"
+	| "content_missing"
+	| "unknown";
+```
+
+Do not copy a policy that treats all `401`, `403`, `500`, `502`, `503`, and
+`504` responses as bot blocks. Some are authentication, application failure,
+or transient infrastructure errors and require different recovery.
+
+### 39.2 Escalation plan
+
+```ts
+interface AcquisitionEscalationPlan {
+	requestId: string;
+	currentDriver: string;
+	failureClass: AcquisitionFailureClass;
+
+	nextDriver?: string;
+	sessionAction?: "reuse" | "refresh" | "rotate" | "retire";
+	proxyAction?: "keep" | "rotate" | "change_geo" | "none";
+
+	additionalCostCeiling: number;
+	reasonCodes: string[];
+	policyDecisionId: string;
+	requiresHuman: boolean;
+}
+```
+
+Recommended waterfall:
+
+```text
+owned cache / previous evidence
+  -> static direct HTTP
+  -> impersonated static HTTP
+  -> lightweight JS runtime where compatible
+  -> local Chromium/CDP
+  -> Chromium with approved profile/session/network route
+  -> optional managed runtime
+  -> human challenge/credential handoff
+  -> stop with explicit denial reason
+```
+
+### 39.3 CAPTCHA and access controls
+
+Quarry must not make "solve every challenge" a product invariant.
+
+Policy should distinguish:
+
+- authorized automation where a user may complete a challenge;
+- public crawling where retry/runtime changes are permitted;
+- explicit legal, robots, authentication, or authorization denials;
+- challenge circumvention prohibited by tenant or source policy.
+
+A human takeover or approved first-party API is often the correct route.
+
+### 39.4 Runtime compatibility manifest
+
+**Verified 2026-08-03 — GREENFIELD, confirmed.** No `health_check`/
+`HealthCheck`/manifest-style function exists in `driver.rs`/
+`driver_registry.rs`/`quarry-browser` — the only "readiness" hit in the
+codebase is an unrelated comment about Data Plane retrieval readiness. This
+directly connects to the artifact-store finding from this session's
+down-the-stack audit: `quarry-edge`'s own startup silently downgrades to a
+non-durable in-memory artifact store on any unrecognized/misconfigured
+backend config, logged at `info` level only — the exact "readiness ≠
+process started" failure mode this section warns against, already
+observed in production configuration, not hypothetical.
+
+```ts
+interface BrowserRuntimeManifest {
+	runtimeId: string;
+	runtimeVersion: string;
+	browserEngine: string;
+	browserVersion: string;
+	protocol: "cdp" | "webdriver_bidi" | "webdriver" | "native";
+
+	patchSet?: string;
+	fingerprintDatasetVersion?: string;
+	operatingSystemProfile: string;
+	headerProfileVersion?: string;
+
+	evidenceCapabilities: BrowserBackendCapabilities;
+	compatibilitySuiteVersion: string;
+	compatibilityStatus: "verified" | "degraded" | "blocked";
+	verifiedAt: string;
+}
+```
+
+Readiness must include a real browser-start, navigation, observation, action,
+network, artifact, and teardown probe—not only process health.
+
+---
+
+## 40. New Quarry concept: Extraction Profiles
+
+Browser-agent actions and web extraction share acquisition, but they require
+different optimization.
+
+### 40.1 Extraction profile
+
+```ts
+interface ExtractionProfile {
+	profileId: string;
+	version: number;
+	siteProfileId?: string;
+	pageClass?: string;
+
+	targetSchema: JsonSchema;
+	requiredEvidence: EvidenceRequirement[];
+
+	preferredSources: Array<
+		| "json_ld"
+		| "microdata"
+		| "network_json"
+		| "dom"
+		| "accessibility"
+		| "rendered_text"
+		| "visual_region"
+		| "document_parser"
+	>;
+
+	targetFingerprints: string[];
+	paginationStrategy?: PaginationStrategy;
+	waitStrategy: WaitStrategy;
+	validationRules: ValidationRule[];
+	changeTolerance: ChangeTolerancePolicy;
+}
+```
+
+### 40.2 Evidence-priority order
+
+For extraction, prefer the least lossy and cheapest source:
+
+```text
+first-party API/network JSON when policy permits
+  -> JSON-LD / structured metadata
+  -> stable DOM schema
+  -> accessibility/visible text
+  -> rendered-page region
+  -> model-assisted visual extraction
+```
+
+The browser network layer should identify candidate JSON payloads, but Quarry
+must preserve provenance from each extracted field to its source response,
+DOM region, or artifact.
+
+### 40.3 Markdown quality benchmark
+
+Create a corpus covering:
+
+- articles;
+- documentation;
+- ecommerce products;
+- tables;
+- nested lists;
+- code blocks;
+- footnotes;
+- dashboards;
+- PDFs and office documents;
+- multilingual Norwegian/English pages;
+- cookie and navigation noise;
+- lazy-loaded content.
+
+Compare:
+
+```text
+Quarry transform
+Crawl4AI
+Firecrawl
+Scrapling + markdown conversion
+readability-based extraction
+Docling/Unstructured/Kreuzberg where relevant
+```
+
+Metrics:
+
+- main-content precision and recall;
+- structural fidelity;
+- table accuracy;
+- citation/link preservation;
+- token count;
+- unsupported content insertion;
+- extraction latency and memory;
+- field-level provenance coverage.
+
+---
+
+## 41. Durable crawler frontier and adaptive throughput
+
+**Verified 2026-08-03 — see §1a correction 2 for full detail.** Confirmed:
+`quarry-orchestrator`'s Go/Temporal workflows use a plain in-process
+slice/map today, with only progress *counts* checkpointed, not the actual
+frontier/seen-set. **What changes the scope of this section**: the
+`FrontierRequest` shape below is largely already built in Rust
+(`request_queue.rs`/`postgres_queue.rs`/`crawl_frontier.rs`, migration
+`0001_request_queue.sql`, with `SELECT FOR UPDATE SKIP LOCKED` + visibility
+timeouts + org isolation) — it is feature-flagged off and unwired, not
+unwritten. This section should read as "wire the existing schema into the
+Go orchestrator and into `quarry-control`'s read side," which is a smaller,
+faster, lower-risk task than building the schema below from scratch.
+
+The codebase audit identifies the in-memory request queue as a current Quarry
+gap. This outranks adding several experimental runtimes.
+
+### 41.1 Canonical frontier state
+
+```ts
+interface FrontierRequest {
+	requestId: string;
+	crawlId: string;
+	tenantId: string;
+
+	url: string;
+	canonicalUrl: string;
+	method: string;
+	bodyHash?: string;
+
+	priority: number;
+	depth: number;
+	discoveredFrom?: string;
+	sessionAffinity?: string;
+
+	status: "pending" | "leased" | "completed" | "failed" | "blocked";
+	attempts: number;
+	nextAttemptAt?: string;
+	leaseOwner?: string;
+	leaseExpiresAt?: string;
+
+	policySnapshotId: string;
+	driverHistory: DriverAttempt[];
+}
+```
+
+Persist:
+
+- request queue;
+- seen/fingerprint set;
+- crawl scope;
+- host budgets;
+- session/proxy health;
+- checkpoints;
+- partial outputs;
+- cancellation state;
+- backfill/retry decisions.
+
+Use Postgres/Redis/Temporal according to existing ownership. Do not adopt local
+pickle checkpoints as production authority.
+
+### 41.2 Adaptive throughput controller
+
+Inputs:
+
+```text
+host latency and error rate
+429 and challenge rate
+robots/crawl-delay
+runtime CPU/RAM
+browser capacity
+proxy health
+session health
+queue age
+model/extraction backlog
+tenant cost budget
+```
+
+Outputs:
+
+```text
+global concurrency
+per-host concurrency
+request delay
+runtime mix
+session retirement
+proxy retirement
+retry schedule
+```
+
+Use deterministic AIMD/token-bucket style control first. Train a ranking or
+control model only after sufficient verified telemetry exists.
+
+---
+
+## 42. Recorded workflow and deterministic script compiler
+
+**Verified 2026-08-03 — GREENFIELD, confirmed.** The only "replay" concept
+in the codebase (`kernel.rs`'s `replay_url`/`enable_replay`) is session
+**video replay** for human debugging — unrelated to recording and
+replaying an agent's action trajectory. No rollout-state concept
+(candidate/shadow/active/quarantined) exists anywhere. This is genuinely
+new work with no partial implementation to build from.
+
+Stagehand, Maxun, Scrapling, and Lightpanda all reinforce the same direction:
+exploration should become a replayable procedure.
+
+### 42.1 Sources of candidate workflows
+
+- verified agent trajectory;
+- human live-takeover recording;
+- imported Playwright trace or script;
+- repeated extraction profile;
+- support-authored procedure;
+- existing site-specific automation.
+
+### 42.2 Compilation pipeline
+
+```text
+recorded events
+  -> normalize into Browser Action IR
+  -> remove timing and selector noise
+  -> assign semantic target IDs
+  -> create ElementFingerprints
+  -> infer explicit waits and preconditions
+  -> attach expected effects and postconditions
+  -> mark risk/approval boundaries
+  -> replay against fixtures and live authorized test site
+  -> mutate layout and test target repair
+  -> security review
+  -> candidate compiled workflow
+  -> staged deployment
+```
+
+### 42.3 Compiled workflow contract
+
+```ts
+interface CompiledBrowserWorkflow {
+	workflowId: string;
+	version: number;
+	siteProfileId: string;
+
+	inputSchema: JsonSchema;
+	outputSchema: JsonSchema;
+	steps: CompiledBrowserStep[];
+
+	allowedDomains: string[];
+	requiredRuntimeCapabilities: string[];
+	requiredCredentials: CredentialRequirement[];
+
+	approvalBoundaries: ApprovalBoundary[];
+	verificationPlan: VerificationPlan;
+	compensationPlan?: CompensationPlan;
+
+	fixtureSuiteId: string;
+	liveCanarySuiteId?: string;
+	rolloutState: "candidate" | "shadow" | "active" | "quarantined" | "retired";
+}
+```
+
+### 42.4 Replay policy
+
+A compiled workflow may run without a planner only while:
+
+- the site/profile compatibility signature matches;
+- preconditions pass;
+- target confidence exceeds the workflow threshold;
+- risk and policy snapshots remain compatible;
+- postconditions can be verified;
+- failure rate remains below quarantine threshold.
+
+Otherwise, re-observe and escalate rather than blindly replay.
+
+---
+
+## 43. Change Intelligence
+
+Quarry already has change tracking. Expand it into typed, evidence-aware change
+analysis.
+
+### 43.1 Change classes
+
+```ts
+type ChangeKind =
+	| "text"
+	| "structure"
+	| "metadata"
+	| "json"
+	| "network_api"
+	| "visual"
+	| "document"
+	| "availability"
+	| "price"
+	| "policy"
+	| "workflow_breakage";
+```
+
+### 43.2 Change record
+
+```ts
+interface WebChangeRecord {
+	watchId: string;
+	sourceVersionBefore: string;
+	sourceVersionAfter: string;
+
+	changeKinds: ChangeKind[];
+	normalizedDiffArtifactRef: string;
+	screenshotDiffRef?: string;
+	structuredDiff?: unknown;
+
+	semanticSummary?: string;
+	intentMatched: boolean;
+	suppressionReason?: string;
+
+	affectedFingerprints: string[];
+	affectedExtractionProfiles: string[];
+	affectedWorkflows: string[];
+
+	evidenceRefs: string[];
+	detectedAt: string;
+}
+```
+
+### 43.3 Noise suppression
+
+Support deterministic filters before using a model:
+
+- remove dynamic timestamps and counters;
+- ignore navigation/ads/footer regions;
+- normalize whitespace and attribute order;
+- compare selected structured fields;
+- threshold visual regions;
+- ignore known rotating content;
+- use logical target fingerprints rather than absolute DOM paths.
+
+A model may classify business relevance or summarize a diff, but the raw and
+normalized evidence must remain inspectable.
+
+### 43.4 Workflow impact analysis
+
+When a site changes:
+
+```text
+capture new source version
+  -> compute structural/semantic/visual diff
+  -> locate affected target fingerprints
+  -> run impacted extraction/workflow fixtures
+  -> repair low-risk targets where allowed
+  -> quarantine unsafe workflows
+  -> notify operator with exact evidence
+```
+
+This turns change detection into proactive automation maintenance.
+
+---
+
+## 44. Quarry Quality OS
+
+Quarry needs the same quality discipline proposed for Model Plane, specialized
+for acquisition, extraction, and browser execution.
+
+### 44.1 Test sources
+
+- historical production failures;
+- accepted human repairs;
+- site-version pairs;
+- synthetic DOM/layout mutations;
+- browser/runtime upgrades;
+- challenge and block fixtures;
+- public benchmark tasks;
+- tenant-approved live canaries;
+- security incidents and prompt-injection pages;
+- provider/runtime outage simulations.
+
+### 44.2 Evaluation layers
+
+```text
+Acquisition
+  Was the correct driver/runtime selected and was content captured safely?
+
+Observation
+  Did Quarry produce sufficient, compact, accurate state?
+
+Targeting
+  Did the resolver select the intended semantic element?
+
+Extraction
+  Did the output match schema and source evidence?
+
+Action
+  Was the exact intended effect attempted under authority?
+
+Verification
+  Did independent evidence prove the business outcome?
+
+Recovery
+  Did repair preserve semantics and remain within policy?
+
+Operations
+  Were latency, resource use, cost, and block rate acceptable?
+```
+
+### 44.3 Layout-mutation laboratory
+
+Generate controlled page variants:
+
+- move target to another parent;
+- insert wrapper nodes;
+- rename classes and IDs;
+- alter attribute order;
+- translate labels;
+- reorder lists;
+- add decoy controls;
+- hide content behind tabs/frames/shadow DOM;
+- change responsive layout;
+- modify visual theme without semantic change;
+- introduce a semantically dangerous near-match.
+
+Evaluate exact target recovery and false-repair rate.
+
+### 44.4 Runtime comparison matrix
+
+```text
+Quarry local Chromium/chromiumoxide
+Browserbase
+Browserless
+Steel
+Patchright adapter
+Camoufox adapter
+nodriver reference adapter
+Lightpanda read-only adapter
+```
+
+Compare by site/task class, not one global score.
+
+### 44.5 Required metrics
+
+- verified acquisition rate;
+- verified task completion rate;
+- false-success rate;
+- wrong-target rate;
+- false-repair rate;
+- extraction field precision/recall;
+- provenance coverage;
+- challenge classification accuracy;
+- browser escalation rate;
+- intervention rate;
+- requests/pages per CPU and GiB;
+- p50/p95 latency;
+- model tokens;
+- network/proxy/browser cost;
+- policy and security violations;
+- workflow quarantine rate;
+- mean time to repair after a site change.
+
+### 44.6 Shadow evaluation
+
+For safe read-only tasks, run alternate routes against the same source version:
+
+```text
+selected production route
+vs
+static alternative
+vs
+alternate browser runtime
+vs
+alternate extraction transform
+```
+
+Store artifacts once and replay transforms/model extraction where possible.
+Do not duplicate external effects for action workflows.
+
+---
+
+## 45. Quarry Proof Bundle
+
+Every important acquisition or browser task should produce a portable evidence
+object compatible with the broader Velion Proof Bundle.
+
+```ts
+interface QuarryProofBundle {
+	taskId: string;
+	tenantId: string;
+	objective: string;
+
+	sourceUrls: string[];
+	sourceVersionRefs: string[];
+	policySnapshotId: string;
+
+	discoveryTrace?: SearchTraceRef;
+	driverAttempts: DriverAttempt[];
+	selectedRuntimeManifest?: BrowserRuntimeManifest;
+
+	dnsAndNetworkDecisions: NetworkSecurityReceipt[];
+	sessionProfileRef?: string;
+	proxyProfileRef?: string;
+
+	observations: ObservationRef[];
+	targetRepairs: TargetRepairReceipt[];
+	actions: BrowserActionReceipt[];
+
+	extractedFields?: FieldEvidenceMap[];
+	artifacts: ArtifactRef[];
+	networkReceipts: NetworkReceipt[];
+	verificationResults: VerificationResult[];
+
+	cost: QuarryCostSummary;
+	latency: QuarryLatencySummary;
+	residency: ResidencyRecord;
+	retentionPolicyId: string;
+
+	outcome: "verified_success" | "verified_failure" | "partial" | "unknown";
+}
+```
+
+This should power:
+
+- Run Console evidence;
+- browser replay;
+- change alerts;
+- audit exports;
+- workflow promotion;
+- incident response;
+- quality replay;
+- customer-visible proof of source and action.
+
+---
+
+## 46. Performance architecture updates
+
+### 46.1 Avoid full observations on every step
+
+Use:
+
+```text
+initial compact snapshot
+  -> action
+  -> state/AX/DOM delta
+  -> request richer region only if needed
+```
+
+Track observation cache keys by page state, frame, and runtime.
+
+### 46.2 Use handles for large payloads
+
+The model should receive:
+
+```text
+network_result_17
+  12,402 rows
+  schema: invoice-list-v3
+  filtered preview: 20 rows
+```
+
+not the full response. Quarry stores the payload and exposes bounded
+projection/filter operations.
+
+### 46.3 Prefer programmatic extraction and action batches
+
+For known read-only processing:
+
+- filter network JSON in a sandbox;
+- validate schemas without an LLM;
+- batch repeated field reads;
+- execute compiled action sequences until an observation boundary;
+- summarize evidence after deterministic processing.
+
+Do not batch across approval, unknown state, navigation uncertainty, or
+consequential effects.
+
+### 46.4 Runtime specialization
+
+```text
+Static HTTP
+  highest throughput, no JS
+
+Lightweight browser experiment
+  read-heavy JS pages with supported APIs
+
+Local Chromium
+  general controlled browser work
+
+Stealth runtime experiment
+  authorized sites with demonstrated need
+
+Managed browser
+  scale, geographic routing, replay, or persistent identity
+```
+
+Runtime routing should optimize verified outcome per total cost, not nominal
+page-load speed.
+
+### 46.5 Content-addressed reuse
+
+Deduplicate:
+
+- response bodies;
+- screenshots;
+- page snapshots;
+- downloads;
+- rendered PDFs;
+- extracted document pages;
+- model-ready Markdown;
+- network JSON.
+
+Derived outputs must record the exact source and transform versions.
+
+---
+
+## 47. Updated adoption matrix
+
+### 47.1 Build natively now
+
+- durable crawler frontier and checkpoints;
+- typed challenge/failure classification;
+- acquisition escalation policy;
+- Adaptive Target Memory;
+- weighted target-candidate scoring;
+- repair receipts and semantic invariants;
+- extraction profiles and field provenance;
+- snapshot/delta observation transport;
+- runtime compatibility manifests;
+- Quarry Proof Bundle;
+- workflow recorder/compiler contracts;
+- Change Intelligence impact analysis;
+- Quarry Quality OS schemas and replay.
+
+### 47.2 Benchmark behind adapters
+
+| System             | Benchmark focus                                                   |
+| ------------------ | ----------------------------------------------------------------- |
+| Scrapling          | Adaptive relocation, parser throughput, HTTP/stealth escalation   |
+| Crawl4AI           | Markdown, schema extraction, crash recovery, deep-crawl discovery |
+| Spider-rs          | Rust frontier, streaming throughput, smart browser escalation     |
+| Crawlee            | Queue/session/concurrency behavior                                |
+| Patchright         | Authorized anti-detection and closed-shadow-root access           |
+| Camoufox           | Cross-engine fingerprint diversity                                |
+| nodriver           | Direct CDP, iframe lookup, reconnect behavior                     |
+| Lightpanda         | Memory/throughput for read-heavy JS extraction                    |
+| Steel              | Self-hosted browser sessions and debugging ergonomics             |
+| Firecrawl          | Public API, SDK, stateful interact, output formats                |
+| changedetection.io | Diff quality, filters, visual-watch UX                            |
+| Maxun              | Recorder and robot authoring UX                                   |
+
+### 47.3 Optional production backends only after gates
+
+- Browserbase;
+- Browserless;
+- Steel;
+- Lightpanda for narrowly approved read-only classes;
+- Patchright/Camoufox only if Quarry's compatibility and security suites pass.
+
+### 47.4 Avoid as canonical authorities
+
+- Scrapling/Crawl4AI/Crawlee scheduler or storage;
+- a second browser/session control plane;
+- arbitrary Python/JavaScript `page_action` callbacks from models;
+- automatic CAPTCHA or access-control bypass as a default behavior;
+- model-generated selectors stored without verification;
+- anti-detect runtime readiness inferred from marketing claims;
+- one global runtime score across all sites/tasks;
+- self-healing effectful actions based only on similarity;
+- AGPL platform embedding without legal and architectural review;
+- replacing Quarry evidence with external provider summaries.
+
+---
+
+## 48. Revised dependency-ordered implementation plan
+
+### P0: close current execution and security gaps
+
+**Resequenced 2026-08-03 against verified reality (see §1a).** Item 1 is
+confirmed broken today, not just incomplete — promote it above everything
+else without qualification. Item 2 is now scoped as "wire an existing
+schema," not "build a durable frontier."
+
+1. **Fix the confirmed-broken SSRF/DNS controls first, no exceptions**:
+   wire `quarry_security`/`dns_guard` into `chromiumoxide.rs`'s `goto()`/
+   `open_tab_page()` (currently zero calls); stop `fetch.rs`'s redirect
+   policy from following without a re-check; fix `dns_guard.rs`'s
+   resolve-then-discard TOCTOU (pin the checked IP into the actual
+   connection, don't re-resolve); add `is_unspecified()` to `heur.rs`'s
+   IPv4 checks (0.0.0.0 currently bypasses loopback blocking); un-ignore
+   `quarry-browser/tests/ssrf.rs` so a regression here fails CI. Apply the
+   identical fix to imports-core's Python guard
+   (`network_policy.py`), which has the same TOCTOU gap independently.
+2. **Wire the existing durable-frontier schema, don't design a new one** —
+   `crates/quarry-runtime/src/{request_queue,postgres_queue,crawl_frontier}.rs`
+   is already correct (SKIP LOCKED, visibility timeouts, org isolation);
+   enable the `postgres-queue` feature, connect
+   `quarry-orchestrator`'s Go/Temporal workflows to it instead of an
+   in-process slice/map, and complete `cycle23.go`'s `MountRequestQueues`
+   stub on the read side.
+3. Finish approval continuation for effectful browser work using the current
+   run/step continuation model (confirmed greenfield as a Quarry-owned
+   concept, §18 — Quarry validates Model Plane's grants but has no
+   approval/pause-resume of its own beyond whole-run pause/resume/cancel).
+4. Standardize acquisition, action, verification, and recovery failure codes
+   (extend the existing `ErrorCode`/`CrawlDenialReason` enums per §39, don't
+   introduce a third).
+5. Add runtime compatibility/readiness probes with image and dependency
+   digests (confirmed greenfield, §39.4 — and the artifact-backend
+   silent-downgrade-to-in-memory finding from this session's audit is a
+   live instance of exactly the failure mode this item exists to close).
+6. Ensure every effectful action produces an outcome receipt or `UNKNOWN`
+   (confirmed greenfield, §12 — today's model is "no exception ⇒ success").
+
+### P1: adaptive reliability without additional model cost
+
+1. Implement `ElementFingerprint` and semantic target IDs.
+2. Extend selector ensembles with weighted fingerprint matching.
+3. Add `TargetRepairReceipt` and automatic-repair policy by action class.
+4. Add challenge classification and typed escalation plans.
+5. Add observation deltas and bounded payload handles.
+6. Add extraction profiles with network/JSON-LD/DOM/visual source ordering.
+7. Create the first Quarry Proof Bundle.
+
+### P2: workflow maintenance and quality
+
+1. Record human takeover and verified agent trajectories.
+2. Compile candidate deterministic workflows.
+3. Add layout-mutation and dangerous-near-match tests.
+4. Add workflow-impact analysis to `/v1/change`.
+5. Establish Quarry Quality OS result storage and CI gates.
+6. Benchmark Scrapling, Crawl4AI, Spider-rs, and Crawlee.
+7. Add daily authorized live canaries for critical runtime profiles.
+
+### P3: specialized runtimes and product ergonomics
+
+1. Benchmark Lightpanda for read-heavy extraction.
+2. Benchmark Patchright, Camoufox, and nodriver patterns in isolated labs.
+3. Evaluate Steel as a self-hosted runtime adapter.
+4. Improve Firecrawl-level SDK and stateful interact ergonomics.
+5. Add recorder/procedure authoring UX inspired by Maxun and Stagehand.
+6. Add richer semantic/visual change-monitoring UX.
+
+### Research after measured need
+
+- learned fingerprint feature weights;
+- neural DOM target embeddings;
+- cross-site semantic target transfer;
+- WebDriver BiDi production backend;
+- browser-runtime bandit routing;
+- automatic workflow synthesis from many trajectories;
+- distributed browser fleets beyond demonstrated capacity requirements.
+
+---
+
+## 49. Expanded acceptance criteria
+
+In addition to the earlier criteria, Quarry is ready for this expanded posture
+when:
+
+- a known extraction survives controlled ID/class/path/wrapper changes without
+  invoking a model;
+- a dangerous near-match never passes automatic repair for an effectful action;
+- every repaired target has a candidate score trace and verification receipt;
+- the crawler can restart with no duplicate or lost frontier work after a
+  worker/process failure;
+- challenge classification distinguishes auth, rate limiting, server errors,
+  policy denial, JS requirements, and fingerprint rejection;
+- runtime readiness fails closed when browser/fingerprint/driver versions are
+  incompatible;
+- Markdown and schema-extraction benchmarks are reproducible against fixed
+  source artifacts;
+- network JSON extraction maps every output field to source evidence;
+- static, local-browser, stealth, lightweight, and managed-runtime routes are
+  compared on verified outcome, cost, and latency;
+- a verified human or agent trajectory can become a reviewed deterministic
+  workflow without granting a second system control authority;
+- a source change identifies impacted workflows and quarantines unsafe replay;
+- browser and extraction regressions block promotion before deployment;
+- the Quarry Proof Bundle is sufficient to reconstruct what was fetched,
+  observed, repaired, executed, and verified;
+- anti-bot or challenge handling never overrides legal, robots, tenant, domain,
+  identity, or approval policy.
+
+---
+
+## 50. Additional research references
+
+### Adaptive crawling and extraction
+
+- Scrapling: https://github.com/D4Vinci/Scrapling
+- Scrapling adaptive extraction: https://github.com/D4Vinci/Scrapling/blob/main/docs/parsing/adaptive.md
+- Scrapling spiders: https://github.com/D4Vinci/Scrapling/blob/main/docs/spiders/architecture.md
+- Crawl4AI: https://github.com/unclecode/crawl4ai
+- Crawlee Python: https://github.com/apify/crawlee-python
+- Spider-rs: https://github.com/spider-rs/spider
+
+### Browser runtimes
+
+- Patchright Python: https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python
+- Camoufox: https://github.com/daijro/camoufox
+- nodriver: https://github.com/ultrafunkamsterdam/nodriver
+- Lightpanda: https://github.com/lightpanda-io/browser
+- Steel Browser: https://github.com/steel-dev/steel-browser
+
+### Recording and change intelligence
+
+- Maxun: https://github.com/getmaxun/maxun
+- changedetection.io: https://github.com/dgtlmoon/changedetection.io
+
+### Agent browser interfaces
+
+- Playwright MCP: https://github.com/microsoft/playwright-mcp
+- Playwright CLI: https://github.com/microsoft/playwright-cli
