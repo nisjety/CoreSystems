@@ -91,13 +91,20 @@ func TestCreateJobRequiresIdempotencyAndPinsVerifiedTenant(t *testing.T) {
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%s", response.Code, response.Body.String())
 	}
+	// P2-4: the handler must NOT execute the job. It records intent and returns
+	// 202; `jobs.Worker` claims the row under a lease and runs it. Asserting the
+	// absence is the point — the previous fire-and-forget goroutine pinned work
+	// to this replica and stranded the row in `running` across a restart.
 	select {
 	case <-fake.runInvoked:
-	case <-time.After(time.Second):
-		t.Fatal("new durable job was not launched")
+		t.Fatal("handler executed the job inline; execution belongs to the durable worker")
+	case <-time.After(200 * time.Millisecond):
 	}
+
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
+	// The security property this test exists for: the job is pinned to the
+	// VERIFIED tenant, never the `org_victim` supplied in the request body.
 	if fake.createdInput.OrgID != "org_authorized" || fake.idempotency != "job-request-123" {
 		t.Fatalf("create input = %+v key=%q", fake.createdInput, fake.idempotency)
 	}

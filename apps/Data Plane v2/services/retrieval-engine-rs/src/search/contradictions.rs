@@ -18,7 +18,7 @@ const CONTRADICTIONS_SQL: &str = "SELECT gc.claim_id, gc.claim_text, COALESCE(gc
      WHERE gc.org_id = $1
        AND jsonb_array_length(COALESCE(gc.contradicted_by_claim_ids, '[]')) > 0
        AND ($4::text IS NULL
-            OR to_tsvector('english', gc.claim_text) @@ plainto_tsquery('english', $4))
+            OR to_tsvector('simple', gc.claim_text) @@ plainto_tsquery('simple', $4))
        AND ($2::text IS NULL OR (
            jsonb_array_length(COALESCE(gc.source_refs, '[]')) > 0
            AND NOT EXISTS (

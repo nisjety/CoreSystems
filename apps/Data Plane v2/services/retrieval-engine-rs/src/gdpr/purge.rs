@@ -64,16 +64,18 @@ impl PurgeSummary {
 /// back, so a NAK'd redelivery retries the whole purge cleanly.
 pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
-    let mut summary = PurgeSummary::default();
 
+    // Bound to locals (rather than assigned onto a `default()` struct) so the
+    // statement order stays explicit.
+    //
     // Cascades to `retrieval_candidates` (ON DELETE CASCADE on trace_id).
-    summary.retrieval_runs = sqlx::query("DELETE FROM retrieval_runs WHERE org_id = $1")
+    let retrieval_runs = sqlx::query("DELETE FROM retrieval_runs WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
-    summary.access_audit_log = sqlx::query("DELETE FROM access_audit_log WHERE org_id = $1")
+    let access_audit_log = sqlx::query("DELETE FROM access_audit_log WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -81,27 +83,33 @@ pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Res
 
     // admin_audit_log.org_id is nullable (some admin actions are not
     // org-scoped) — `WHERE org_id = $1` naturally leaves NULL-org rows alone.
-    summary.admin_audit_log = sqlx::query("DELETE FROM admin_audit_log WHERE org_id = $1")
+    let admin_audit_log = sqlx::query("DELETE FROM admin_audit_log WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
-    summary.agent_retrieval_configs =
+    let agent_retrieval_configs =
         sqlx::query("DELETE FROM agent_retrieval_configs WHERE org_id = $1")
             .bind(org_id)
             .execute(&mut *tx)
             .await?
             .rows_affected();
 
-    summary.context_pins = sqlx::query("DELETE FROM context_pins WHERE org_id = $1")
+    let context_pins = sqlx::query("DELETE FROM context_pins WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
     tx.commit().await?;
-    Ok(summary)
+    Ok(PurgeSummary {
+        retrieval_runs,
+        access_audit_log,
+        admin_audit_log,
+        agent_retrieval_configs,
+        context_pins,
+    })
 }
 
 #[cfg(test)]

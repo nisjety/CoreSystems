@@ -20,7 +20,7 @@ const WIKI_SEARCH_SQL: &str = "SELECT p.page_id, p.title, p.path, p.current_vers
        AND p.page_status = 'published'
        AND (cardinality($4::text[]) = 0 OR p.workspace_id = ANY($4))
        AND (p.title ILIKE '%' || $2 || '%' OR p.path ILIKE '%' || $2 || '%'
-            OR to_tsvector('english', COALESCE(v.content, '')) @@ plainto_tsquery('english', $2))
+            OR to_tsvector('simple', COALESCE(v.content, '')) @@ plainto_tsquery('simple', $2))
        AND ($3::text IS NULL OR (
            (jsonb_array_length(COALESCE(v.source_refs, '[]')) = 0
                 AND v.proposed_by_agent IS NULL)

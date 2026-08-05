@@ -180,12 +180,12 @@ pub async fn bm25_search(
             knowledge_id,
             document_id,
             text,
-            ts_rank_cd(content_tsv, plainto_tsquery('english', $1)) AS rank_score,
+            ts_rank_cd(content_tsv, plainto_tsquery('simple', $1)) AS rank_score,
             chunk_index,
             metadata
         FROM knowledge_units
         WHERE org_id = $2
-          AND content_tsv @@ plainto_tsquery('english', $1)
+          AND content_tsv @@ plainto_tsquery('simple', $1)
           -- Phase 4 read-your-writes: the sparse (FTS) arm needs no vectors, so
           -- surface just-chunked content immediately (status 'pending') instead
           -- of waiting for the async embed. Exclude only 'failed'. The ownership

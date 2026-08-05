@@ -12,6 +12,20 @@ import (
 
 type memoryJobStore struct {
 	jobs map[string]*model.Job
+	// P2-4 lease state, kept beside the jobs rather than on model.Job because
+	// the real columns are storage-only and deliberately absent from the model.
+	attempts   map[string]int
+	leaseUntil map[string]time.Time
+	leaseOwner map[string]string
+}
+
+func newMemoryJobStore() *memoryJobStore {
+	return &memoryJobStore{
+		jobs:       map[string]*model.Job{},
+		attempts:   map[string]int{},
+		leaseUntil: map[string]time.Time{},
+		leaseOwner: map[string]string{},
+	}
 }
 
 func (s *memoryJobStore) Create(_ context.Context, job model.Job) (*model.Job, bool, error) {
@@ -83,6 +97,67 @@ func (s *memoryJobStore) Fail(_ context.Context, orgID, jobID, message string) (
 	return &copy, nil
 }
 
+// ClaimNext / ExpireExhausted complete the JobStore interface for P2-4. The
+// in-memory fake models the real claim predicate closely enough to be useful in
+// the worker test below: oldest-first, `pending` or lease-expired `running`,
+// skipping jobs that have exhausted their attempts.
+func (s *memoryJobStore) ClaimNext(
+	_ context.Context,
+	owner string,
+	lease time.Duration,
+	maxAttempts int,
+) (*model.Job, error) {
+	now := time.Now()
+	var pick *model.Job
+	for _, job := range s.jobs {
+		if s.attempts[job.JobID] >= maxAttempts {
+			continue
+		}
+		claimable := job.Status == model.StatusPending ||
+			(job.Status == model.StatusRunning && s.leaseUntil[job.JobID].Before(now))
+		if !claimable {
+			continue
+		}
+		if pick == nil || job.CreatedAt.Before(pick.CreatedAt) {
+			pick = job
+		}
+	}
+	if pick == nil {
+		return nil, nil
+	}
+	if s.attempts == nil {
+		s.attempts = map[string]int{}
+	}
+	s.attempts[pick.JobID]++
+	s.leaseUntil[pick.JobID] = now.Add(lease)
+	s.leaseOwner[pick.JobID] = owner
+	if pick.Status == model.StatusPending {
+		pick.Status = model.StatusRunning
+		pick.StartedAt = &now
+	}
+	pick.UpdatedAt = now
+	copy := *pick
+	return &copy, nil
+}
+
+func (s *memoryJobStore) ExpireExhausted(_ context.Context, maxAttempts int) (int64, error) {
+	now := time.Now()
+	var n int64
+	for _, job := range s.jobs {
+		if job.Status != model.StatusPending && job.Status != model.StatusRunning {
+			continue
+		}
+		if s.attempts[job.JobID] < maxAttempts {
+			continue
+		}
+		msg := "job abandoned after exhausting attempts"
+		job.Status, job.CompletedAt, job.UpdatedAt = model.StatusFailed, &now, now
+		job.ErrorMessage = &msg
+		n++
+	}
+	return n, nil
+}
+
 type recordingPublisher struct {
 	subjects []string
 	failAt   int
@@ -97,7 +172,7 @@ func (p *recordingPublisher) Publish(subject string, _ []byte) error {
 }
 
 func TestProductionExecutorCannotPublishUnsignedTenantEvents(t *testing.T) {
-	executor := NewExecutorWithDependencies(&memoryJobStore{}, disabledEventPublisher{})
+	executor := NewExecutorWithDependencies(newMemoryJobStore(), disabledEventPublisher{})
 	_, _, err := executor.CreateJob(context.Background(), model.CreateJobInput{
 		OrgID: "org-a", JobType: model.JobReindex, DocumentIDs: []string{"doc-1"},
 	}, "secure-containment")
@@ -107,7 +182,7 @@ func TestProductionExecutorCannotPublishUnsignedTenantEvents(t *testing.T) {
 }
 
 func TestExecutorPersistsLifecycleProgressAndResult(t *testing.T) {
-	store := &memoryJobStore{}
+	store := newMemoryJobStore()
 	publisher := &recordingPublisher{}
 	executor := NewExecutorWithDependencies(store, publisher)
 	job, created, err := executor.CreateJob(context.Background(), model.CreateJobInput{
@@ -139,7 +214,7 @@ func TestExecutorPersistsLifecycleProgressAndResult(t *testing.T) {
 }
 
 func TestExecutorPersistsFailureAndRejectsTerminalReplay(t *testing.T) {
-	store := &memoryJobStore{}
+	store := newMemoryJobStore()
 	executor := NewExecutorWithDependencies(store, &recordingPublisher{failAt: 1})
 	job, _, err := executor.CreateJob(context.Background(), model.CreateJobInput{
 		OrgID: "org-a", JobType: model.JobGraphBuild, DocumentIDs: []string{"doc-1"},
@@ -160,7 +235,7 @@ func TestExecutorPersistsFailureAndRejectsTerminalReplay(t *testing.T) {
 }
 
 func TestExecutorIdempotencyAndTenantLookup(t *testing.T) {
-	store := &memoryJobStore{}
+	store := newMemoryJobStore()
 	executor := NewExecutorWithDependencies(store, &recordingPublisher{})
 	input := model.CreateJobInput{OrgID: "org-a", JobType: model.JobReindex}
 	first, firstCreated, err := executor.CreateJob(context.Background(), input, "same-request")

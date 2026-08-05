@@ -24,7 +24,19 @@ pub async fn setup_stream(js: &JsContext) -> anyhow::Result<()> {
             SUBJECT_UPDATED.to_string(),
             SUBJECT_DELETED.to_string(),
         ],
-        retention: jetstream::stream::RetentionPolicy::WorkQueue,
+        // `Interest`, not `WorkQueue`: this is a fan-out stream. WorkQueue
+        // permits exactly one consumer per subject, which silently locked
+        // quickwit-adapter out of `dataplane.documents.deleted` and forced it
+        // onto a lossy core-NATS subscription — leaving the lexical index
+        // behind the corpus with no alarm. `Interest` keeps at-least-once
+        // delivery per durable consumer while allowing legitimate second
+        // readers. DATAPLANE_KNOWLEDGE already uses it.
+        //
+        // Retention is immutable on an existing stream: a deployment created
+        // before this change keeps WorkQueue until the (empty) stream is
+        // deleted and recreated. quickwit-adapter logs a loud, actionable
+        // error when its durable bind is refused, so that state is visible.
+        retention: jetstream::stream::RetentionPolicy::Interest,
         max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
         ..Default::default()
     };

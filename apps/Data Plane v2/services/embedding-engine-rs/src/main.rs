@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
                     "visual embedding (Embed v4) enabled"
                 );
                 let nats_client = nats_connection::connect(&cfg.nats_url).await?;
-                let js = async_nats::jetstream::new(nats_client);
+                let js = async_nats::jetstream::new(nats_client.clone());
                 if let Err(e) = qdrant_writer::ensure_collection(
                     &qdrant,
                     &cfg.qdrant_visual_collection,
@@ -187,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 if let Err(e) = image_consumer::spawn(
                     js,
+                    nats_client,
                     qdrant.clone(),
                     visual,
                     cfg.qdrant_visual_collection.clone(),

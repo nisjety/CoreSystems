@@ -2,9 +2,48 @@ use std::collections::HashMap;
 
 use qdrant_client::qdrant::{
     value::Kind as QdrantKind, Condition, CreateCollectionBuilder, DeletePointsBuilder, Distance,
-    Filter, PointStruct, UpsertPointsBuilder, Value as QdrantValue, VectorParamsBuilder,
+    Filter, PointStruct, QuantizationType, ScalarQuantization, UpsertPointsBuilder,
+    Value as QdrantValue, VectorParamsBuilder,
 };
 use qdrant_client::Qdrant;
+
+/// int8 scalar quantization for new collections (plan P2-2, closes D13).
+///
+/// # Why, and why now
+///
+/// A 3072-dim float32 vector is ~12 KB; int8 scalar quantization stores a 1-byte
+/// proxy per dimension, so the searchable copy is ~4x smaller and fits in RAM at
+/// corpus sizes where the raw vectors would not.
+///
+/// The reason this lands *now*, while the corpus is small, is that
+/// `quantization_config` is fixed at collection creation: switching it later
+/// means recreating the collection and re-embedding everything. Doing it at 221
+/// points costs nothing; doing it at a million is a migration.
+///
+/// `quantile: 0.99` clips the extreme 1% of the value distribution before
+/// choosing the int8 scale, so a handful of outlier dimensions cannot compress
+/// the range that every other value has to share.
+///
+/// `always_ram: true` keeps the quantized vectors resident even when the raw
+/// vectors spill to disk — that is the entire point of quantizing, and without it
+/// the fast path can still fault to disk.
+///
+/// Accuracy: quantization is lossy, so this is only sound because Qdrant
+/// rescores candidates against the raw vectors. Rescoring is on by default for
+/// quantized collections; the raw vectors are retained, not replaced. If a
+/// future change disables rescore or oversampling, recall becomes approximate —
+/// re-measure against the golden set (P0.5) before doing that.
+///
+/// NOTE: applies to collections created from here on. The four collections that
+/// already exist keep `quantization_config: None` until they are recreated,
+/// which is a re-embed and therefore rides with the reindex.
+fn int8_quantization() -> ScalarQuantization {
+    ScalarQuantization {
+        r#type: QuantizationType::Int8 as i32,
+        quantile: Some(0.99),
+        always_ram: Some(true),
+    }
+}
 
 pub async fn ensure_collection(qdrant: &Qdrant, collection: &str, dim: u64) -> anyhow::Result<()> {
     let exists = qdrant.collection_exists(collection).await?;
@@ -12,10 +51,16 @@ pub async fn ensure_collection(qdrant: &Qdrant, collection: &str, dim: u64) -> a
         qdrant
             .create_collection(
                 CreateCollectionBuilder::new(collection)
-                    .vectors_config(VectorParamsBuilder::new(dim, Distance::Cosine)),
+                    .vectors_config(VectorParamsBuilder::new(dim, Distance::Cosine))
+                    .quantization_config(int8_quantization()),
             )
             .await?;
-        tracing::info!(collection, "qdrant collection created");
+        tracing::info!(
+            collection,
+            dim,
+            quantization = "scalar-int8(quantile=0.99,always_ram)",
+            "qdrant collection created"
+        );
     }
     Ok(())
 }

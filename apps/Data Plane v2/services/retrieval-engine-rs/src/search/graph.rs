@@ -16,10 +16,10 @@ use crate::pipeline::types::ScoredCandidate;
 /// step-6 canonical gate still re-filters every candidate afterwards.
 const GRAPH_ARM_SQL: &str = "WITH matched AS (
         SELECT ge.entity_id,
-               ts_rank_cd(to_tsvector('english', ge.entity_text), plainto_tsquery('english', $2)) AS rank
+               ts_rank_cd(to_tsvector('simple', ge.entity_text), plainto_tsquery('simple', $2)) AS rank
         FROM graph_entities ge
         WHERE ge.org_id = $1
-          AND to_tsvector('english', ge.entity_text) @@ plainto_tsquery('english', $2)
+          AND to_tsvector('simple', ge.entity_text) @@ plainto_tsquery('simple', $2)
         ORDER BY rank DESC
         LIMIT 25
      ),
@@ -57,8 +57,8 @@ fn graph_arm_sql() -> &'static str {
 const SEED_ENTITY_SQL: &str = "SELECT ge.entity_id
      FROM graph_entities ge
      WHERE ge.org_id = $1
-       AND to_tsvector('english', ge.entity_text) @@ plainto_tsquery('english', $2)
-     ORDER BY ts_rank_cd(to_tsvector('english', ge.entity_text), plainto_tsquery('english', $2)) DESC
+       AND to_tsvector('simple', ge.entity_text) @@ plainto_tsquery('simple', $2)
+     ORDER BY ts_rank_cd(to_tsvector('simple', ge.entity_text), plainto_tsquery('simple', $2)) DESC
      LIMIT $3";
 
 /// Entities → chunks grounding for the remote arm. Takes the traversed
@@ -201,7 +201,7 @@ pub struct GraphClaimHit {
 
 const GRAPH_ENTITY_SQL: &str = "SELECT entity_id, entity_text, entity_type, COALESCE(confidence, 0)
      FROM graph_entities
-     WHERE org_id = $1 AND to_tsvector('english', entity_text) @@ plainto_tsquery('english', $2)
+     WHERE org_id = $1 AND to_tsvector('simple', entity_text) @@ plainto_tsquery('simple', $2)
        AND ($4::text IS NULL OR (
            jsonb_array_length(COALESCE(graph_entities.source_refs, '[]')) > 0
            AND NOT EXISTS (
@@ -220,7 +220,7 @@ const GRAPH_ENTITY_SQL: &str = "SELECT entity_id, entity_text, entity_type, COAL
                   )
            )
        ))
-     ORDER BY ts_rank_cd(to_tsvector('english', entity_text), plainto_tsquery('english', $2)) DESC
+     ORDER BY ts_rank_cd(to_tsvector('simple', entity_text), plainto_tsquery('simple', $2)) DESC
      LIMIT $3";
 
 const GRAPH_RELATIONSHIP_SQL: &str =

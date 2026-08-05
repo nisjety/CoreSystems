@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod community;
 mod config;
+mod contradiction;
 mod extractor;
 mod gdpr;
 mod gdpr_nats;

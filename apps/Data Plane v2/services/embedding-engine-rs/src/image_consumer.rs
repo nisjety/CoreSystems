@@ -33,6 +33,14 @@ pub const SUBJECT_PAGE_IMAGE_CREATED: &str = "dataplane.page_images.created";
 pub const SUBJECT_PAGE_IMAGE_DELETED: &str = "dataplane.page_images.deleted";
 pub const PAGE_IMAGE_STREAM: &str = "DATAPLANE_PAGE_IMAGES";
 pub const PAGE_IMAGE_CONSUMER: &str = "embedding-engine-page-images";
+/// Terminal-failure sink for page images, mirroring the text consumers
+/// (`dataplane.dlq.index-engine`, `dataplane.dlq.graph-index`). Without it a
+/// page whose fetch or embed kept failing was simply dropped once
+/// `MAX_DELIVER` was exhausted, so a rendered page could vanish from the
+/// visual corpus with nothing recording that it had.
+pub const PAGE_IMAGE_DLQ_SUBJECT: &str = "dataplane.dlq.embedding-engine-page-images";
+/// Must match `max_deliver` on the durable consumer below.
+const MAX_DELIVER: i64 = 5;
 
 #[derive(Debug, Deserialize)]
 struct PageImageCreatedEvent {
@@ -142,6 +150,7 @@ fn prepare_image_data_url(bytes: &[u8]) -> anyhow::Result<String> {
 
 pub async fn spawn(
     js: JsContext,
+    nats: async_nats::Client,
     qdrant: qdrant_client::Qdrant,
     visual: VisualEmbeddingProvider,
     collection: String,
@@ -247,8 +256,33 @@ pub async fn spawn(
                         let _ = msg.ack().await;
                     }
                     Err(e) => {
-                        // No ack → JetStream redelivers (up to max_deliver).
-                        tracing::warn!(error = %e, subject = %subject, "page-image handling failed; will redeliver");
+                        let delivered = msg.info().map(|info| info.delivered).unwrap_or(1);
+                        if delivered < MAX_DELIVER {
+                            // No ack → JetStream redelivers (up to max_deliver).
+                            tracing::warn!(error = %e, subject = %subject, delivered, "page-image handling failed; will redeliver");
+                        } else {
+                            // Final attempt: route to the DLQ and ack, so the
+                            // failure is recorded instead of silently dropped
+                            // when JetStream stops redelivering.
+                            tracing::error!(
+                                error = %e,
+                                subject = %subject,
+                                delivered,
+                                "page-image handling failed permanently; routing to DLQ"
+                            );
+                            let dlq = serde_json::json!({
+                                "original_subject": subject,
+                                "stream": PAGE_IMAGE_STREAM,
+                                "error": e.to_string(),
+                                "attempts": delivered,
+                            });
+                            if let Err(error) =
+                                nats.publish(PAGE_IMAGE_DLQ_SUBJECT, dlq.to_string().into()).await
+                            {
+                                tracing::error!(%error, "page-image DLQ publish failed");
+                            }
+                            let _ = msg.ack().await;
+                        }
                     }
                 }
             }

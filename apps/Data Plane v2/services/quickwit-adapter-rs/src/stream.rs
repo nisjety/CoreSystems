@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
+use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
 use event_envelope_rs::{EventClaims, EventVerifier};
 use futures::StreamExt;
 use serde_json::Value;
@@ -14,6 +16,42 @@ pub const SUBJECT_DOCUMENT_DELETED: &str = "dataplane.documents.deleted";
 pub const SUBJECT_WIKI_PUBLISHED: &str = "dataplane.wiki.version.published";
 pub const SUBJECT_SOURCE_OBJECT_CHANGED: &str = "dataplane.source_objects.changed";
 pub const SUBJECT_SOURCE_OBJECT_DELETED: &str = "dataplane.source_objects.deleted";
+
+/// Durable consumer name this service registers on every stream it reads.
+/// Consumer names only need to be unique *within* a stream, so one name is
+/// reused across streams.
+const CONSUMER_NAME: &str = "quickwit-adapter";
+/// Terminal-failure sink. Unlike the text consumers, this service holds no
+/// event *signing* key (compose mounts four `.pub` verifiers and no `.pem`),
+/// so DLQ envelopes are plain JSON and are an operator/diagnostic surface
+/// only — never an input to a verified consumer. Provisioning a signing key
+/// is tracked as a follow-up in
+/// `docs/retrieval-quality-and-durability-plan-2026-08-05.md`.
+const DLQ_SUBJECT: &str = "dataplane.dlq.quickwit-adapter";
+const ACK_WAIT: Duration = Duration::from_secs(60);
+const MAX_DELIVER: i64 = 5;
+const FETCH_BATCH: usize = 64;
+const FETCH_EXPIRES: Duration = Duration::from_secs(2);
+const NAK_BACKOFF: Duration = Duration::from_secs(5);
+
+/// The JetStream stream that carries each subscribed subject, grouped so one
+/// durable consumer covers every subject this service needs from that stream.
+///
+/// Stream ownership stays with the producers (index-engine, embedding-engine,
+/// documents-api, wiki-store); this service only ever *binds a consumer* to an
+/// already-created stream. It never creates or reconfigures one.
+fn consumer_plan() -> [(&'static str, &'static [&'static str]); 5] {
+    [
+        ("DATAPLANE_KNOWLEDGE", &[SUBJECT_KNOWLEDGE_CREATED]),
+        ("DATAPLANE_GRAPH", &[SUBJECT_DOCUMENT_INDEXED]),
+        ("DATAPLANE_DOCUMENTS", &[SUBJECT_DOCUMENT_DELETED]),
+        ("DATAPLANE_WIKI", &[SUBJECT_WIKI_PUBLISHED]),
+        (
+            "DATAPLANE_SOURCE_OBJECTS",
+            &[SUBJECT_SOURCE_OBJECT_CHANGED, SUBJECT_SOURCE_OBJECT_DELETED],
+        ),
+    ]
+}
 
 fn subscribed_subjects() -> [&'static str; 6] {
     [
@@ -85,12 +123,110 @@ fn decode_event(
     })
 }
 
+/// Starts the live FTS-sync consumers.
+///
+/// Each subscribed subject is served by a **durable JetStream pull consumer**
+/// with explicit ack, bounded redelivery, and a terminal DLQ — so an event
+/// published while this service is down is redelivered on restart instead of
+/// being lost. The previous implementation used a plain core-NATS
+/// `subscribe()`, which has no ack and no redelivery; anything published while
+/// the adapter was restarting was dropped permanently, leaving the lexical
+/// index silently behind the corpus.
+///
+/// Binding is per-stream and independent: if one stream refuses the consumer,
+/// the others still upgrade. A refusal is expected while a stream still uses
+/// `WorkQueue` retention, which permits only one consumer per subject — see
+/// [`bind_durable`] for the operator remediation.
 pub async fn spawn(
     nats: async_nats::Client,
     ctx: Arc<RebuildContext>,
     security: Arc<EventSecurity>,
 ) -> anyhow::Result<()> {
-    for subject in subscribed_subjects() {
+    let js = jetstream::new(nats.clone());
+
+    for (stream_name, subjects) in consumer_plan() {
+        match bind_durable(&js, stream_name, subjects).await {
+            Ok(consumer) => {
+                let ctx = ctx.clone();
+                let security = security.clone();
+                let nats = nats.clone();
+                tokio::spawn(async move {
+                    tracing::info!(
+                        stream = stream_name,
+                        ?subjects,
+                        "Quickwit durable consumer online"
+                    );
+                    run_durable(consumer, ctx, security, nats, stream_name).await;
+                });
+            }
+            Err(error) => {
+                // Strictly-better-than-before fallback: keep the legacy
+                // ephemeral subscriber for this stream's subjects so indexing
+                // does not stop, but make the durability gap impossible to
+                // miss. Once the stream is migrated the same code binds
+                // durably with no further change.
+                tracing::error!(
+                    stream = stream_name,
+                    ?subjects,
+                    %error,
+                    "Quickwit durable consumer REFUSED — falling back to lossy ephemeral \
+                     subscription for these subjects. Events published while this service \
+                     is down WILL BE LOST. Remediation: the stream must allow a second \
+                     consumer (retention `interest`, as DATAPLANE_KNOWLEDGE already uses); \
+                     `WorkQueue` retention permits only one consumer per subject and cannot \
+                     be altered in place."
+                );
+                spawn_ephemeral_fallback(&nats, subjects, &ctx, &security).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Binds this service's durable pull consumer to an existing stream.
+///
+/// Deliberately uses `get_stream` (not `get_or_create_stream`): stream
+/// lifecycle belongs to the producing service, and creating a stream here with
+/// guessed subjects/retention would silently diverge from the producer's
+/// definition.
+async fn bind_durable(
+    js: &jetstream::Context,
+    stream_name: &str,
+    subjects: &'static [&'static str],
+) -> anyhow::Result<PullConsumer> {
+    let stream = js
+        .get_stream(stream_name)
+        .await
+        .with_context(|| format!("get stream {stream_name}"))?;
+
+    let consumer = stream
+        .get_or_create_consumer(
+            CONSUMER_NAME,
+            jetstream::consumer::pull::Config {
+                durable_name: Some(CONSUMER_NAME.to_string()),
+                filter_subjects: subjects.iter().map(|s| (*s).to_string()).collect(),
+                ack_wait: ACK_WAIT,
+                max_deliver: MAX_DELIVER,
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("bind durable consumer {CONSUMER_NAME} on {stream_name}"))?;
+
+    Ok(consumer)
+}
+
+/// Legacy no-ack subscriber, retained only as the degraded path when a durable
+/// consumer cannot be bound. Behaviourally identical to the pre-JetStream
+/// implementation.
+async fn spawn_ephemeral_fallback(
+    nats: &async_nats::Client,
+    subjects: &'static [&'static str],
+    ctx: &Arc<RebuildContext>,
+    security: &Arc<EventSecurity>,
+) -> anyhow::Result<()> {
+    for subject in subjects {
         let mut sub = nats
             .subscribe(subject.to_string())
             .await
@@ -98,7 +234,7 @@ pub async fn spawn(
         let ctx = ctx.clone();
         let security = security.clone();
         tokio::spawn(async move {
-            tracing::info!(subject, "Quickwit live subscriber online");
+            tracing::warn!(subject, "Quickwit ephemeral (lossy) subscriber online");
             while let Some(msg) = sub.next().await {
                 let decoded = decode_event(&security, msg.subject.as_str(), &msg.payload, false);
                 let event = match decoded {
@@ -114,8 +250,102 @@ pub async fn spawn(
             }
         });
     }
-
     Ok(())
+}
+
+/// Fetch/ack loop for one durable consumer.
+///
+/// Ack policy:
+/// - decode rejection  → `ack` (terminal; a bad signature never becomes valid)
+/// - handler success   → `ack`
+/// - handler failure   → `nak` with backoff, until `MAX_DELIVER`, then DLQ + `ack`
+///
+/// A handler failure is never silently swallowed: it either retries or lands in
+/// the DLQ.
+async fn run_durable(
+    consumer: PullConsumer,
+    ctx: Arc<RebuildContext>,
+    security: Arc<EventSecurity>,
+    nats: async_nats::Client,
+    stream_name: &'static str,
+) {
+    loop {
+        let mut messages = match consumer
+            .fetch()
+            .max_messages(FETCH_BATCH)
+            .expires(FETCH_EXPIRES)
+            .messages()
+            .await
+        {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(stream = stream_name, %error, "Quickwit consumer fetch failed");
+                tokio::time::sleep(NAK_BACKOFF).await;
+                continue;
+            }
+        };
+
+        while let Some(msg_result) = messages.next().await {
+            let msg = match msg_result {
+                Ok(msg) => msg,
+                Err(error) => {
+                    tracing::warn!(stream = stream_name, %error, "Quickwit consumer message error");
+                    continue;
+                }
+            };
+
+            let subject = msg.subject.as_str().to_string();
+            let delivered = msg.info().map(|info| info.delivered).unwrap_or(1);
+            let redelivery = delivered > 1;
+
+            let event = match decode_event(&security, &subject, &msg.payload, redelivery) {
+                Ok(event) => event,
+                Err(error) => {
+                    // Unauthorized/undecodable is terminal — redelivering it
+                    // would loop to max_deliver for no benefit.
+                    tracing::warn!(subject = %subject, %error, "Quickwit rejected unauthorized live event");
+                    let _ = msg.ack().await;
+                    continue;
+                }
+            };
+
+            match handle_message(&ctx, &subject, event).await {
+                Ok(()) => {
+                    let _ = msg.ack().await;
+                }
+                Err(error) if delivered < MAX_DELIVER => {
+                    tracing::warn!(
+                        subject = %subject,
+                        delivered,
+                        %error,
+                        "Quickwit live update failed; will redeliver"
+                    );
+                    let _ = msg.ack_with(AckKind::Nak(Some(NAK_BACKOFF))).await;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        subject = %subject,
+                        delivered,
+                        %error,
+                        "Quickwit live update failed permanently; routing to DLQ"
+                    );
+                    let dlq = serde_json::json!({
+                        "original_subject": subject,
+                        "stream": stream_name,
+                        "error": error.to_string(),
+                        "attempts": delivered,
+                    });
+                    if let Err(error) = nats
+                        .publish(DLQ_SUBJECT, dlq.to_string().into())
+                        .await
+                    {
+                        tracing::error!(%error, "Quickwit DLQ publish failed");
+                    }
+                    let _ = msg.ack().await;
+                }
+            }
+        }
+    }
 }
 
 /// Starts the historical raw-JSON subscribers only for the caller's explicit,

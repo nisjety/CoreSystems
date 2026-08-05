@@ -28,6 +28,12 @@ pub struct Config {
     pub model_plane_inference_service_id: String,
     #[serde(default)]
     pub model_plane_inference_service_api_key: String,
+    /// Retention posture auth-core is configured to mint for this service's
+    /// `inference-core` audience: `persistent` (zdr:false) or `zdr` (zdr:true).
+    /// Must match the principal's `retentionByAudience` entry in
+    /// `PLANE_SERVICE_PRINCIPALS_JSON`, or every mint fails closed.
+    #[serde(default = "default_model_plane_inference_retention_posture")]
+    pub model_plane_inference_retention_posture: String,
 
     #[serde(default)]
     pub azure_openai_api_key: String,
@@ -75,6 +81,11 @@ pub struct Config {
     pub w_bm25: f32,
     #[serde(default = "default_w_graph")]
     pub w_graph: f32,
+    /// RRF rank constant `k` in `1/(k+rank+1)` (plan P2-5). Was hardcoded at
+    /// four fusion call sites; exposed so it can be tuned against the golden set
+    /// without a rebuild. See `search::fusion::DEFAULT_RRF_K`.
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f32,
     #[serde(default = "default_w_wiki")]
     pub w_wiki: f32,
     #[serde(default = "default_w_visual")]
@@ -219,6 +230,13 @@ fn default_model_plane_inference_token_url() -> String {
 fn default_model_plane_inference_token_issuer() -> String {
     "http://localhost:3011/api/convex-auth".into()
 }
+/// Matches the deployed registry, which pins `retrieval-engine` ->
+/// `inference-core` to `persistent`. Note this is the opposite of auth-core's
+/// own default for an *unconfigured* audience (`zdr`), so tightening the
+/// registry requires setting this variable too.
+fn default_model_plane_inference_retention_posture() -> String {
+    "persistent".into()
+}
 fn default_embedding_dim() -> usize {
     3072
 }
@@ -251,6 +269,11 @@ fn default_w_bm25() -> f32 {
 }
 fn default_w_graph() -> f32 {
     0.2
+}
+/// Single source of truth with the fusion module, so config and the algorithm
+/// cannot drift.
+fn default_rrf_k() -> f32 {
+    crate::search::fusion::DEFAULT_RRF_K
 }
 fn default_w_wiki() -> f32 {
     0.1

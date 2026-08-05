@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/jobs"
@@ -88,7 +87,7 @@ func (h *OrchestratorHandler) CreateJob(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	job, created, err := h.executor.CreateJob(r.Context(), input, idempotencyKey)
+	job, _, err := h.executor.CreateJob(r.Context(), input, idempotencyKey)
 	if errors.Is(err, jobs.ErrExecutionUnavailable) {
 		writeError(w, http.StatusServiceUnavailable, "durable signed job execution unavailable")
 		return
@@ -102,11 +101,14 @@ func (h *OrchestratorHandler) CreateJob(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Detach cancellation but retain only in-memory request identity so a
-	// short-lived internal callback can forward the same verified bearer.
-	if created {
-		h.launch(r.Context(), *job)
-	}
+	// P2-4: the job is now performed by the durable worker (`jobs.Worker`),
+	// which claims it from `data_orchestrator_jobs` under a lease. This handler
+	// only records intent and returns 202.
+	//
+	// It deliberately no longer starts a goroutine. The previous
+	// fire-and-forget pinned the work to whichever replica served this request
+	// and stranded the row in `running` forever if the process restarted
+	// mid-job, because nothing polled the table.
 
 	writeJSON(w, http.StatusAccepted, job)
 }
@@ -127,7 +129,7 @@ func (h *OrchestratorHandler) Reindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, created, err := h.executor.CreateJob(r.Context(), model.CreateJobInput{
+	job, _, err := h.executor.CreateJob(r.Context(), model.CreateJobInput{
 		OrgID:       orgID,
 		JobType:     model.JobReindex,
 		DocumentIDs: req.DocumentIDs,
@@ -145,10 +147,7 @@ func (h *OrchestratorHandler) Reindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if created {
-		h.launch(r.Context(), *job)
-	}
-
+	// P2-4: performed by the durable worker; see the note in CreateJob.
 	writeJSON(w, http.StatusAccepted, job)
 }
 
@@ -168,15 +167,6 @@ func (h *OrchestratorHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
-}
-
-func (h *OrchestratorHandler) launch(ctx context.Context, job model.Job) {
-	jobCtx := context.WithoutCancel(ctx)
-	go func() {
-		if err := h.executor.Run(jobCtx, job); err != nil {
-			log.Error().Err(err).Str("job_id", job.JobID).Msg("durable job execution failed")
-		}
-	}()
 }
 
 func supportedJobType(jobType model.JobType) bool {

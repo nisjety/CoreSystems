@@ -91,6 +91,21 @@ func main() {
 	staleDetector := jobs.NewStaleDetector(pool)
 	orchHandler := handler.NewOrchestratorHandler(executor, staleDetector)
 
+	// P2-4 (closes D12): durable job worker. The HTTP handlers now only record
+	// intent; this claims `data_orchestrator_jobs` rows under a lease and runs
+	// them. Replaces the old fire-and-forget goroutine, which pinned work to one
+	// replica and stranded a row in `running` forever across a restart.
+	//
+	// The owner id includes the hostname so `lease_owner` identifies which
+	// replica holds a job — otherwise a stuck lease is untraceable.
+	workerOwner := "data-orchestrator"
+	if host, err := os.Hostname(); err == nil && host != "" {
+		workerOwner = "data-orchestrator@" + host
+	}
+	jobWorkerCtx, stopJobWorker := context.WithCancel(context.Background())
+	defer stopJobWorker()
+	go jobs.NewWorker(jobs.NewPostgresJobStore(pool), executor, workerOwner).Run(jobWorkerCtx)
+
 	// GDPR org-erasure durable consumer. Deliberately a SEPARATE NATS
 	// connection from nc above: nc is this service's plane-local Data Plane
 	// v2 broker connection (cost ledger, reindex jobs); this is a dedicated

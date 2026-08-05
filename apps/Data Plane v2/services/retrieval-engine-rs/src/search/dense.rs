@@ -6,6 +6,48 @@ use qdrant_client::Qdrant;
 
 use crate::pipeline::types::ScoredCandidate;
 
+/// Similarity cutoff for the dense arm (plan P1-7).
+///
+/// Applied here, at the Qdrant query, rather than after fusion — because this is
+/// the only place in the pipeline where the score is *calibrated*. Cosine
+/// similarity is an absolute 0..1 quantity, so "below 0.30 is not a real match"
+/// is a statement that means something. RRF's `final_score` is not: a rank-1
+/// fused score is ~0.03 (1/(60+1)), so any absolute threshold on it would be
+/// arbitrary and would trip on good results.
+///
+/// Purpose: when nothing in the corpus actually answers the query, the dense arm
+/// previously still returned its `top_k` nearest neighbours — whatever they were
+/// — and RRF happily ranked them. That fed the model confident-looking but
+/// irrelevant context instead of an honest empty result.
+///
+/// `None`/unset keeps the previous behaviour exactly, so this is opt-in.
+fn dense_score_threshold() -> Option<f32> {
+    static THRESHOLD: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        let raw = std::env::var("DENSE_SCORE_THRESHOLD").ok()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match trimmed.parse::<f32>() {
+            // A threshold outside 0..1 cannot be a cosine score. Refusing it is
+            // safer than silently filtering everything (>1) or nothing (<0).
+            Ok(v) if (0.0..=1.0).contains(&v) => Some(v),
+            Ok(v) => {
+                tracing::warn!(
+                    value = v,
+                    "DENSE_SCORE_THRESHOLD outside 0.0..=1.0; ignoring (cosine scores are 0..1)"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(value = %trimmed, "DENSE_SCORE_THRESHOLD is not a number; ignoring");
+                None
+            }
+        }
+    })
+}
+
 #[tracing::instrument(
     name = "qdrant.search",
     skip(qdrant, query_vector, filter_conditions),
@@ -41,9 +83,14 @@ pub async fn vector_search(
         ..Default::default()
     };
 
-    let search = SearchPointsBuilder::new(collection, query_vector, top_k as u64)
+    let mut search = SearchPointsBuilder::new(collection, query_vector, top_k as u64)
         .filter(filter)
         .with_payload(true);
+    // P1-7: let Qdrant drop sub-threshold neighbours server-side rather than
+    // returning them for the pipeline to rank anyway.
+    if let Some(threshold) = dense_score_threshold() {
+        search = search.score_threshold(threshold);
+    }
 
     let results = qdrant
         .search_points(search)

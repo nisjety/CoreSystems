@@ -50,7 +50,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_crawl_url_dedup
 
 -- full-text search on document content
 CREATE INDEX IF NOT EXISTS idx_documents_content_fts
-    ON documents USING GIN(to_tsvector('english', content));
+    ON documents USING GIN(to_tsvector('simple', content));
 
 -- ── source_objects ──────────────────────────────────────────────────────────
 -- Canonical source inventory for connectors such as SharePoint/OneDrive.
@@ -133,7 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_ku_embedded_at      ON knowledge_units (embedded_
 CREATE INDEX IF NOT EXISTS idx_ku_org_id           ON knowledge_units (org_id);
 CREATE INDEX IF NOT EXISTS idx_ku_embedding_status ON knowledge_units (embedding_status);
 CREATE INDEX IF NOT EXISTS idx_ku_content_hash     ON knowledge_units (content_hash);
-CREATE INDEX IF NOT EXISTS idx_ku_text_fts         ON knowledge_units USING GIN(to_tsvector('english', text));
+CREATE INDEX IF NOT EXISTS idx_ku_text_fts         ON knowledge_units USING GIN(to_tsvector('simple', text));
 
 -- ── document_acl REMOVED (Per-User Data Ownership & Sharing phase) ────────────
 -- The dormant, duplicated document_acl table was consolidated into user-core's
@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS graph_entities (
 
 CREATE INDEX IF NOT EXISTS idx_ge_org  ON graph_entities (org_id);
 CREATE INDEX IF NOT EXISTS idx_ge_type ON graph_entities (org_id, entity_type);
-CREATE INDEX IF NOT EXISTS idx_ge_text ON graph_entities USING GIN(to_tsvector('english', entity_text));
+CREATE INDEX IF NOT EXISTS idx_ge_text ON graph_entities USING GIN(to_tsvector('simple', entity_text));
 
 -- ── graph_relationships ──────────────────────────────────────────────────────
 
@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS graph_claims (
 
 CREATE INDEX IF NOT EXISTS idx_gc_org    ON graph_claims (org_id);
 CREATE INDEX IF NOT EXISTS idx_gc_status ON graph_claims (org_id, claim_status);
-CREATE INDEX IF NOT EXISTS idx_gc_text   ON graph_claims USING GIN(to_tsvector('english', claim_text));
+CREATE INDEX IF NOT EXISTS idx_gc_text   ON graph_claims USING GIN(to_tsvector('simple', claim_text));
 
 -- ── graph_communities ────────────────────────────────────────────────────────
 
@@ -656,7 +656,7 @@ CREATE INDEX IF NOT EXISTS idx_admin_audit_log_org
 -- Wave-3.3 §16.3.3 — precomputed BM25 tsvector + GIN index
 ALTER TABLE knowledge_units
     ADD COLUMN IF NOT EXISTS content_tsv tsvector
-    GENERATED ALWAYS AS (to_tsvector('english', text)) STORED;
+    GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED;
 CREATE INDEX IF NOT EXISTS idx_ku_content_tsv_gin
     ON knowledge_units USING GIN (content_tsv);
 

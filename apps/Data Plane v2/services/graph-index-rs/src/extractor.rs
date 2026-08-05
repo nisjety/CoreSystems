@@ -7,7 +7,7 @@ use tonic::transport::{Channel, Endpoint};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::inference_auth::InferenceTokenClient;
+use crate::inference_auth::{InferenceTokenClient, RetentionPosture};
 use crate::model::ExtractionResult;
 
 // Model Plane inference client (compiled by build.rs from the shared
@@ -64,12 +64,15 @@ impl GraphExtractor {
                     .connect_timeout(timeout)
                     .timeout(timeout)
                     .connect_lazy();
+                let retention_posture =
+                    RetentionPosture::parse(&cfg.model_plane_inference_retention_posture)?;
                 let token_client = if standalone_startup() {
                     InferenceTokenClient::new_allow_unconfigured(
                         &cfg.model_plane_inference_token_url,
                         &cfg.model_plane_inference_token_issuer,
                         &cfg.model_plane_inference_service_id,
                         &cfg.model_plane_inference_service_api_key,
+                        retention_posture,
                     )?
                 } else {
                     InferenceTokenClient::new(
@@ -77,6 +80,7 @@ impl GraphExtractor {
                         &cfg.model_plane_inference_token_issuer,
                         &cfg.model_plane_inference_service_id,
                         &cfg.model_plane_inference_service_api_key,
+                        retention_posture,
                     )?
                 };
                 Backend::ModelPlane(Box::new(ModelPlaneExtractor {
@@ -144,6 +148,90 @@ impl GraphExtractor {
         );
         Ok(result)
     }
+
+    /// Summarises one GraphRAG community from its member entities (plan P1-5).
+    ///
+    /// This is GraphRAG's "global search" input: a short thematic description of
+    /// a cluster, which answers questions no single chunk can ("what areas does
+    /// this organisation work in?"). `graph_communities.summary` and
+    /// `retrieval-engine`'s `community_summary_search` already existed; only the
+    /// generator was missing.
+    ///
+    /// Reuses the exact same backend dispatch and ZDR posture as [`extract`] —
+    /// including the hard refusal to egress restrictive content to the direct
+    /// Azure path. In practice graph entities only exist for non-restrictive
+    /// content (the ingest consumer drops restrictive-ZDR events before
+    /// extraction), so `zdr` is expected to be false here; the guard stays so
+    /// that assumption cannot silently rot.
+    ///
+    /// Returns prose, not JSON — there is nothing to parse, so a provider that
+    /// wraps or chats around the answer degrades to a slightly noisier summary
+    /// rather than a hard failure.
+    pub async fn summarize_community(
+        &self,
+        entity_labels: &[String],
+        org_id: &str,
+        zdr: bool,
+    ) -> anyhow::Result<String> {
+        if entity_labels.is_empty() {
+            anyhow::bail!("cannot summarise a community with no member entities");
+        }
+        let prompt = build_community_summary_prompt(entity_labels);
+        let content = match &self.backend {
+            Backend::ModelPlane(inner) => inner.infer(org_id, &prompt, zdr).await?,
+            Backend::AzureOpenAi(inner) => {
+                if zdr {
+                    anyhow::bail!(
+                        "ZDR community summarisation must not egress to the direct-Azure path"
+                    );
+                }
+                inner.chat(&prompt).await?
+            }
+        };
+        let summary = content.trim().to_string();
+        if summary.is_empty() {
+            anyhow::bail!("community summary came back empty");
+        }
+        Ok(summary)
+    }
+}
+
+/// Caps how many member labels are sent for one summary.
+///
+/// A community can span hundreds of entities; sending all of them would blow the
+/// prompt budget and cost for no gain, since a thematic summary is determined by
+/// the dominant members. Labels arrive ordered by the caller (highest-confidence
+/// first), so truncation drops the weakest.
+const MAX_SUMMARY_LABELS: usize = 60;
+
+fn build_community_summary_prompt(entity_labels: &[String]) -> String {
+    let shown: Vec<&str> = entity_labels
+        .iter()
+        .take(MAX_SUMMARY_LABELS)
+        .map(String::as_str)
+        .collect();
+    let omitted = entity_labels.len().saturating_sub(shown.len());
+    let more = if omitted > 0 {
+        format!("\n(and {omitted} further related entities)")
+    } else {
+        String::new()
+    };
+    format!(
+        r#"These entities form one cluster in a knowledge graph built from an organisation's own documents:
+
+{labels}{more}
+
+Write 2-3 sentences describing what this cluster is about, as a factual topic
+summary someone could use to decide whether it is relevant to their question.
+
+Rules:
+- Use ONLY the entities listed. Do not add facts, figures, or claims that are not present.
+- If the entities are too disparate to share a theme, say exactly that.
+- Answer in the dominant language of the entity names.
+- Return the summary text only — no preamble, no headings, no bullet points."#,
+        labels = shown.join("\n"),
+        more = more,
+    )
 }
 
 fn standalone_startup() -> bool {
@@ -272,6 +360,15 @@ impl AzureExtractor {
 }
 
 fn build_prompt(max_entities: usize, text: &str) -> String {
+    // `entity_type` is constrained to the closed ontology (P1-3). Left free, the
+    // extractor produced 61 distinct types across 547 entities — including
+    // `Aquatiq` as both `Organization` and `Company`, which split one company
+    // into two unrelated graph nodes.
+    //
+    // This prompt only *steers*: there is no provider-side enum here (the schema
+    // is prose, and the Anthropic path drops structured-output schemas), so
+    // `store::canonical_entity_type` remains the authoritative gate and maps
+    // anything unrecognised to `Concept`.
     format!(
         r#"Extract entities, relationships, and claims from the following text.
 Return JSON with this schema:
@@ -280,10 +377,20 @@ Return JSON with this schema:
   "relationships": [{{ "source_entity": "...", "target_entity": "...", "relation_type": "...", "confidence": 0.0-1.0 }}],
   "claims": [{{ "claim_text": "...", "related_entities": ["..."], "confidence": 0.0-1.0 }}]
 }}
+
+"entity_type" MUST be exactly one of these {type_count} values — never invent another:
+{types}
+
+Pick the closest match. Use "Concept" for anything abstract that fits no other
+type (an industry, a field, a risk, a property). Do not emit "Claim" as an
+entity type; assertions belong in "claims".
+
 Max {max} entities. Only return valid JSON.
 
 Text:
 {text}"#,
+        type_count = crate::store::ENTITY_TYPES.len(),
+        types = crate::store::ENTITY_TYPES.join(", "),
         max = max_entities,
         text = text
     )
@@ -321,6 +428,44 @@ fn normalize_provider(provider: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn community_summary_prompt_lists_members_and_forbids_invention() {
+        let labels = vec![
+            "Aquatiq".to_string(),
+            "Hygieneanlegg".to_string(),
+            "Næringsmiddelindustri".to_string(),
+        ];
+        let p = build_community_summary_prompt(&labels);
+        for l in &labels {
+            assert!(p.contains(l.as_str()), "prompt must list {l}");
+        }
+        // Grounding rules: the summary must not become a source of new facts,
+        // and it must not silently invent a theme for unrelated members.
+        assert!(p.contains("ONLY the entities listed"));
+        assert!(p.contains("too disparate"));
+        assert!(p.contains("dominant language"), "corpus is NO+EN mixed");
+        assert!(!p.contains("further related entities"), "nothing omitted at n=3");
+    }
+
+    #[test]
+    fn community_summary_prompt_truncates_and_says_so() {
+        // A community can span hundreds of entities; the prompt must cap them
+        // and disclose the omission rather than silently dropping members.
+        let labels: Vec<String> = (0..MAX_SUMMARY_LABELS + 25)
+            .map(|i| format!("entity-{i}"))
+            .collect();
+        let p = build_community_summary_prompt(&labels);
+        assert!(p.contains("entity-0"), "highest-ranked member kept");
+        assert!(
+            !p.contains(&format!("entity-{}", MAX_SUMMARY_LABELS + 24)),
+            "weakest member beyond the cap must be dropped"
+        );
+        assert!(
+            p.contains("and 25 further related entities"),
+            "truncation must be disclosed to the model"
+        );
+    }
+
     fn test_config(provider: &str) -> Config {
         Config {
             database_url: String::new(),
@@ -332,6 +477,7 @@ mod tests {
             model_plane_extraction_model: "gpt-4o".to_string(),
             model_plane_extraction_provider: "azure_openai".to_string(),
             model_plane_extraction_timeout_ms: 60_000,
+            model_plane_inference_retention_posture: "persistent".to_string(),
             model_plane_inference_token_url:
                 "http://auth-core:3011/api/inference-core/internal-token".to_string(),
             model_plane_inference_token_issuer: "http://auth-core:3011/api/convex-auth".to_string(),

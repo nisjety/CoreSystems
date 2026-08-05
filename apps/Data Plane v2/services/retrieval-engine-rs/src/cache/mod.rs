@@ -13,6 +13,43 @@ const RETRIEVAL_PREFIX: &str = "dpv2:ret:";
 const EMBED_TTL: u64 = 3600;
 const RETRIEVAL_TTL: u64 = 300;
 
+/// Derives the authorization scope that partitions the retrieval cache.
+///
+/// Two callers may share a cache entry only if they would pass the *same*
+/// ownership post-filter. That is determined by the viewer identity plus the
+/// exact set of documents specifically granted to them, so both go into the
+/// token.
+///
+/// - `None` viewer → `"org-shared"`. Sound because with no viewer the pipeline
+///   applies no per-user ownership filter at all: the result is the org-visible
+///   set, identical for every such caller.
+/// - `Some(viewer)` → viewer id plus a hash of their **sorted** grant set.
+///   Sorting matters: `user-core` returns grants in no guaranteed order, and an
+///   unsorted token would fragment the cache for one user (a miss, not a leak —
+///   but it would quietly make the cache useless).
+///
+/// A grant change alters the hash, so newly granted or revoked access is never
+/// served from a pre-change entry.
+pub fn viewer_scope_token(viewer: Option<&str>, granted_docs: &[String]) -> String {
+    let Some(viewer) = viewer.map(str::trim).filter(|v| !v.is_empty()) else {
+        return "org-shared".to_string();
+    };
+    let mut grants: Vec<&str> = granted_docs.iter().map(String::as_str).collect();
+    grants.sort_unstable();
+    grants.dedup();
+
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    viewer.hash(&mut hasher);
+    for g in &grants {
+        // Domain separator: without it, grants ["ab","c"] and ["a","bc"] would
+        // hash identically and two different grant sets could share an entry.
+        hasher.write_u8(0);
+        g.hash(&mut hasher);
+    }
+    format!("{viewer}:{:x}", hasher.finish())
+}
+
 #[derive(Clone)]
 pub struct CacheLayer {
     conn: ConnectionManager,
@@ -47,22 +84,58 @@ impl CacheLayer {
         let _: Result<(), _> = self.conn.clone().set_ex(&key, bytes, EMBED_TTL).await;
     }
 
-    /// §16.2.2 — retrieval cache keys now include the org_version. A
-    /// document mutation bumps the version → all prior keys for that org
-    /// become unreachable instantly, eliminating the up-to-5-min staleness
-    /// window of pure TTL invalidation.
+    /// §16.2.2 — retrieval cache keys include the org_version. A document
+    /// mutation bumps the version → all prior keys for that org become
+    /// unreachable instantly, eliminating the up-to-5-min staleness window of
+    /// pure TTL invalidation.
+    ///
+    /// # Why `scope` is mandatory (plan P1-6)
+    ///
+    /// Retrieval results are **viewer-dependent**: the orchestrator's step-6
+    /// ownership gate keeps a document only if
+    /// `owner_id = viewer OR visibility = 'org' OR it is in the viewer's grants`.
+    /// Two users in the same org issuing the same query at the same
+    /// `org_version` legitimately get *different* result sets.
+    ///
+    /// Keying on `org_id` alone — as this tier originally did — would therefore
+    /// serve one user's private and specifically-granted documents to another
+    /// user in the same organisation. That is the same class of defect as the
+    /// org-IDOR this plane has already had to fix once.
+    ///
+    /// So `scope` is a required parameter and an **empty scope fails closed**:
+    /// a miss on read, a no-op on write. It is deliberately impossible to use
+    /// this cache without deciding whose results are being cached. Derive the
+    /// value with [`viewer_scope_token`]; the sibling semantic cache enforces
+    /// the same rule via `semantic_cache_require_scope`.
     pub async fn get_retrieval(
         &self,
         org_id: &str,
         org_version: i64,
+        scope: &str,
         cache_key: &str,
     ) -> Option<String> {
-        let key = format!("{RETRIEVAL_PREFIX}{org_id}:v{org_version}:{cache_key}");
+        if scope.trim().is_empty() {
+            return None;
+        }
+        let key = format!("{RETRIEVAL_PREFIX}{org_id}:v{org_version}:s{scope}:{cache_key}");
         self.conn.clone().get(&key).await.ok()?
     }
 
-    pub async fn set_retrieval(&self, org_id: &str, org_version: i64, cache_key: &str, json: &str) {
-        let key = format!("{RETRIEVAL_PREFIX}{org_id}:v{org_version}:{cache_key}");
+    /// Stores a retrieval result. See [`Self::get_retrieval`] for why `scope` is
+    /// required; an empty scope is silently not cached rather than cached
+    /// unsafely.
+    pub async fn set_retrieval(
+        &self,
+        org_id: &str,
+        org_version: i64,
+        scope: &str,
+        cache_key: &str,
+        json: &str,
+    ) {
+        if scope.trim().is_empty() {
+            return;
+        }
+        let key = format!("{RETRIEVAL_PREFIX}{org_id}:v{org_version}:s{scope}:{cache_key}");
         let _: Result<(), _> = self.conn.clone().set_ex(&key, json, RETRIEVAL_TTL).await;
     }
 
@@ -118,4 +191,67 @@ impl CacheLayer {
 
 pub fn hash_text(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_viewer_is_org_shared() {
+        // With no viewer the pipeline applies no ownership filter, so every such
+        // caller sees the identical org-visible set and may share one entry.
+        assert_eq!(viewer_scope_token(None, &[]), "org-shared");
+        assert_eq!(viewer_scope_token(Some("   "), &[]), "org-shared");
+        assert_eq!(
+            viewer_scope_token(None, &["doc-1".to_string()]),
+            "org-shared",
+            "grants are irrelevant when no ownership filter runs"
+        );
+    }
+
+    #[test]
+    fn different_viewers_never_share_a_scope() {
+        // The leak this guards: same org, same org_version, same query, but
+        // different viewers must not collide.
+        assert_ne!(
+            viewer_scope_token(Some("user-a"), &[]),
+            viewer_scope_token(Some("user-b"), &[])
+        );
+        assert_ne!(
+            viewer_scope_token(Some("user-a"), &[]),
+            viewer_scope_token(None, &[]),
+            "a viewer must not share the org-shared bucket"
+        );
+    }
+
+    #[test]
+    fn grant_set_changes_the_scope_but_order_does_not() {
+        let a = viewer_scope_token(Some("u"), &["d1".to_string(), "d2".to_string()]);
+        let reordered = viewer_scope_token(Some("u"), &["d2".to_string(), "d1".to_string()]);
+        assert_eq!(a, reordered, "user-core returns grants in no stable order");
+        let dup = viewer_scope_token(
+            Some("u"),
+            &["d2".to_string(), "d1".to_string(), "d2".to_string()],
+        );
+        assert_eq!(a, dup, "duplicate grants must not fragment the cache");
+
+        // Gaining or losing access must invalidate: a pre-change entry must not
+        // be reachable after the grant set changes.
+        assert_ne!(a, viewer_scope_token(Some("u"), &["d1".to_string()]));
+        assert_ne!(
+            a,
+            viewer_scope_token(Some("u"), &["d1".to_string(), "d2".to_string(), "d3".to_string()])
+        );
+    }
+
+    #[test]
+    fn grant_boundaries_cannot_be_confused() {
+        // Without a domain separator, ["ab","c"] and ["a","bc"] would hash the
+        // same and two different grant sets could share an entry.
+        assert_ne!(
+            viewer_scope_token(Some("u"), &["ab".to_string(), "c".to_string()]),
+            viewer_scope_token(Some("u"), &["a".to_string(), "bc".to_string()])
+        );
+    }
 }

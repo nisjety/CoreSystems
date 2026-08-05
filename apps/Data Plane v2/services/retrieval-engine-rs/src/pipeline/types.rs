@@ -115,6 +115,10 @@ pub struct ModeMixWeights {
 impl ModeMixWeights {
     /// Resolve unset weights from defaults and renormalize so they sum to 1.0.
     /// Returns the fully-specified weights that will be persisted with the trace.
+    /// `rrf_k` is passed through **unnormalised** — it is the RRF rank constant,
+    /// not a blend weight, so it must not participate in the sum-to-1.0
+    /// renormalisation below. It travels with the weights so the persisted trace
+    /// records the exact `k` that produced a ranking (plan P2-5).
     pub fn resolve(
         &self,
         default_dense: f32,
@@ -122,6 +126,7 @@ impl ModeMixWeights {
         default_graph: f32,
         default_wiki: f32,
         default_visual: f32,
+        rrf_k: f32,
     ) -> ResolvedWeights {
         let d = self.w_dense.unwrap_or(default_dense);
         let b = self.w_bm25.unwrap_or(default_bm25);
@@ -136,6 +141,7 @@ impl ModeMixWeights {
             w_wiki: w / sum,
             w_visual: v / sum,
             rerank: self.rerank.unwrap_or(true),
+            rrf_k,
         }
     }
 }
@@ -148,6 +154,9 @@ pub struct ResolvedWeights {
     pub w_wiki: f32,
     pub w_visual: f32,
     pub rerank: bool,
+    /// RRF rank constant applied by `fuse_arms` (plan P2-5). Recorded in the
+    /// trace so a ranking is reproducible.
+    pub rrf_k: f32,
 }
 
 /// Which retrieval engines to run for a query, derived from the resolved blend
@@ -331,6 +340,7 @@ mod tests {
             w_wiki: 0.0,
             w_visual: 0.0,
             rerank: true,
+            rrf_k: crate::search::fusion::DEFAULT_RRF_K,
         }
     }
 

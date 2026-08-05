@@ -178,7 +178,12 @@ pub async fn setup_stream(js: &JsContext) -> anyhow::Result<()> {
     let config = jetstream::stream::Config {
         name: STREAM_NAME.to_string(),
         subjects: vec![SUBJECT.to_string()],
-        retention: jetstream::stream::RetentionPolicy::WorkQueue,
+        // `Interest`, not `WorkQueue`: `dataplane.documents.indexed` fans out
+        // to BOTH graph-index (extraction) and quickwit-adapter (lexical
+        // index). WorkQueue allows exactly one consumer per subject, so the
+        // second reader was silently refused and fell back to a lossy
+        // core-NATS subscription. Matches DATAPLANE_KNOWLEDGE above.
+        retention: jetstream::stream::RetentionPolicy::Interest,
         max_age: Duration::from_secs(7 * 24 * 3600),
         ..Default::default()
     };
@@ -287,6 +292,7 @@ pub async fn run_consumer(
             let mut total_entities = 0usize;
             let mut total_rels = 0usize;
             let mut total_claims = 0usize;
+            let mut all_claim_ids: Vec<String> = Vec::new();
 
             for (kid, text) in &chunks {
                 match extractor.extract(text, &org_id, claims.zdr).await {
@@ -326,6 +332,11 @@ pub async fn run_consumer(
                             total_entities += persisted.entity_ids.len();
                             total_rels += persisted.rel_ids.len();
                             total_claims += persisted.claim_ids.len();
+                            // Collected for the post-ack contradiction sweep:
+                            // detection needs the whole document's claims, and
+                            // the text_unit mappings above must already exist
+                            // for the visibility join to resolve.
+                            all_claim_ids.extend(persisted.claim_ids.iter().cloned());
                         }
                         Err(e) => {
                             tracing::error!(err = %e, knowledge_id = kid, "persist extraction failed")
@@ -388,6 +399,38 @@ pub async fn run_consumer(
                     crate::community::detect_communities(&store, &org_id, community_min_size).await
                 {
                     tracing::warn!(err = %e, org_id, "community refresh failed (non-fatal)");
+                } else if let Err(e) =
+                    crate::community::summarize_communities(&store, &extractor, &org_id).await
+                {
+                    // P1-5: fill `graph_communities.summary` for communities that
+                    // still lack one. Gated on `COMMUNITY_SUMMARY_ENABLED` and
+                    // capped per run, so a backlog drains over successive
+                    // ingests instead of stalling one on many LLM calls. Only
+                    // runs when detection succeeded — summarising against a
+                    // half-updated community set would key summaries to
+                    // memberships that never existed.
+                    tracing::warn!(err = %e, org_id, "community summarisation failed (non-fatal)");
+                }
+            }
+
+            // P1-4: flag claims this document contradicts. Post-ack for the same
+            // reason as the community refresh — keeping it inside the ack window
+            // would extend the JetStream deadline under bulk ingest and risk
+            // redelivery. Best-effort and additive: a failure leaves existing
+            // flags untouched, and the write only ever unions ids and sets
+            // `claim_status`, so a partial run cannot erase prior findings.
+            if !all_claim_ids.is_empty() {
+                match store
+                    .detect_claim_contradictions(&org_id, &all_claim_ids)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(pairs) => {
+                        tracing::info!(org_id, pairs, "claim contradictions recorded")
+                    }
+                    Err(e) => {
+                        tracing::warn!(err = %e, org_id, "contradiction detection failed (non-fatal)")
+                    }
                 }
             }
         }

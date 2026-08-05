@@ -23,7 +23,9 @@ nats-connection-rs = { path = "../nats-connection-rs" }
 futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 jsonwebtoken.workspace = true
-uuid = { version = "1", features = ["v4"] }
+# v5 (SHA-1, name-based) gives deterministic graph identifiers so re-extracting
+# the same content resolves onto the same entity instead of minting a new one.
+uuid = { version = "1", features = ["v4", "v5"] }
 chrono.workspace = true
 thiserror.workspace = true
 event-envelope-rs = { path = "../event-envelope-rs" }

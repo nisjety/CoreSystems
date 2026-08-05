@@ -53,11 +53,16 @@ pub async fn spawn(
     verifier: Arc<EventVerifier>,
 ) -> anyhow::Result<()> {
     // Disjoint subject → its own stream (JetStream requires a subject belong
-    // to exactly one stream). WorkQueue: a message is removed once acked.
+    // to exactly one stream). `Interest`, not `WorkQueue`: the published wiki
+    // version fans out to BOTH this embedding consumer and quickwit-adapter's
+    // lexical index. WorkQueue permits exactly one consumer per subject, which
+    // silently refused the second reader and forced it onto a lossy core-NATS
+    // subscription. `Interest` still removes a message once every registered
+    // durable consumer has acked it.
     js.get_or_create_stream(jetstream::stream::Config {
         name: WIKI_STREAM.to_string(),
         subjects: vec![SUBJECT_WIKI_PUBLISHED.to_string()],
-        retention: jetstream::stream::RetentionPolicy::WorkQueue,
+        retention: jetstream::stream::RetentionPolicy::Interest,
         max_age: Duration::from_secs(7 * 24 * 3600),
         ..Default::default()
     })

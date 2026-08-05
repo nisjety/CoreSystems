@@ -258,11 +258,25 @@ func fetchLintItems(ctx context.Context, baseURL, orgID string) ([]sweepItem, er
 
 	// Only wiki-relevant kinds are forwarded to the sweep endpoint; doc-side
 	// findings (orphan_doc, stale_doc) belong to the documents-api lifecycle.
+	//
+	// "contradiction" is deliberately NOT here. It used to be, for a kind the
+	// linter never emitted — dead wiring. Now that data-quality does emit it
+	// (plan P1-9, once graph-index started populating
+	// `graph_claims.contradicted_by_claim_ids` in P1-4), forwarding it would be
+	// actively wrong: below we map `Issue.ID` onto `sweepItem.PageID`, but
+	// data-quality's contradiction findings are **claim-scoped**, so the ID is a
+	// claim_id. `/v1/wiki/maintenance/sweep` does not verify the page exists, so
+	// each one would be written into `wiki_maintenance_logs` as a maintenance
+	// record against a page that never existed.
+	//
+	// wiki-store still accepts "contradiction" in its own allowed-kinds set, and
+	// that stays correct: a *wiki-page-level* contradiction from a Model Plane
+	// wiki-maintenance agent is a legitimate producer for that endpoint. This
+	// linter is simply not that producer.
 	wikiKinds := map[string]bool{
 		"orphan_wiki":   true,
 		"stale_wiki":    true,
 		"weak_citation": true,
-		"contradiction": true,
 	}
 	items := make([]sweepItem, 0, len(lintResp.Issues))
 	for _, it := range lintResp.Issues {

@@ -295,7 +295,7 @@ mod tests {
     fn resolve_renormalizes_smart_output() {
         // Whatever the heuristics emit must renormalize to a valid blend.
         let m = smart_mode_mix("how is Ada connected to the diagram of INV-1?");
-        let r = m.resolve(0.45, 0.2, 0.2, 0.1, 0.05);
+        let r = m.resolve(0.45, 0.2, 0.2, 0.1, 0.05, crate::search::fusion::DEFAULT_RRF_K);
         let sum = r.w_dense + r.w_bm25 + r.w_graph + r.w_wiki + r.w_visual;
         assert!((sum - 1.0).abs() < 1e-5, "sum = {sum}");
     }

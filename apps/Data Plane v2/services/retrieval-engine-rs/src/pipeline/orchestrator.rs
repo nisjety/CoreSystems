@@ -228,6 +228,10 @@ fn fuse_arms(
     mix: &ResolvedWeights,
     route_dense: bool,
 ) -> (Vec<ScoredCandidate>, usize) {
+    // P2-5: `k` now travels on the resolved mix (and into the trace) instead of
+    // being a literal at each fusion call.
+    let rrf_k = mix.rrf_k;
+
     // Step 4 — dense + sparse.
     let (mut fused, sparse_count) = match sparse {
         Some(sparse_candidates) => {
@@ -242,7 +246,7 @@ fn fuse_arms(
                     b / sum
                 };
                 (
-                    reciprocal_rank_fusion(&dense, &sparse_candidates, 60.0, bm25_share),
+                    reciprocal_rank_fusion(&dense, &sparse_candidates, rrf_k, bm25_share),
                     sparse_count,
                 )
             } else {
@@ -257,17 +261,17 @@ fn fuse_arms(
     // additive RRF). Closes §16.1.1: w_graph now affects scoring, not just the
     // trace.
     if mix.w_graph > 0.0 && !graph.is_empty() {
-        fused = reciprocal_rank_fusion(&fused, &graph, 60.0, mix.w_graph);
+        fused = reciprocal_rank_fusion(&fused, &graph, rrf_k, mix.w_graph);
     }
 
     // Step 5 — wiki 4-way merge by its w_wiki share.
     if mix.w_wiki > 0.0 && !wiki.is_empty() {
-        fused = reciprocal_rank_fusion(&fused, &wiki, 60.0, mix.w_wiki);
+        fused = reciprocal_rank_fusion(&fused, &wiki, rrf_k, mix.w_wiki);
     }
 
     // Visual arm — layer Embed v4 page-image hits by w_visual (purely additive).
     if mix.w_visual > 0.0 && !visual.is_empty() {
-        fused = reciprocal_rank_fusion(&fused, &visual, 60.0, mix.w_visual);
+        fused = reciprocal_rank_fusion(&fused, &visual, rrf_k, mix.w_visual);
     }
 
     (fused, sparse_count)
@@ -641,6 +645,7 @@ impl RetrievalPipeline {
             self.config.w_graph,
             self.config.w_wiki,
             self.config.w_visual,
+            self.config.rrf_k,
         );
 
         // Best-tool routing: run only the engines the blend actually weights.
@@ -956,11 +961,38 @@ impl RetrievalPipeline {
         };
         let candidate_count_reranked = reranked.len();
 
-        // 8. Confidence gate
-        let low_confidence = reranked
-            .first()
-            .map(|c| c.rerank_score < self.config.confidence_threshold)
-            .unwrap_or(true);
+        // 8. Confidence gate.
+        //
+        // This is a RERANKER-based gate: `confidence_threshold` (0.35) is
+        // calibrated against cross-encoder scores, and `rerank_score` is left at
+        // 0.0 by every retrieval arm -- dense, sparse and graph all initialise it
+        // to zero, and RRF writes only `final_score`. So reading it when no
+        // reranker ran compared 0.0 against 0.35 and marked EVERY query
+        // low-confidence. Because rerank failure is deliberately non-fatal
+        // (above), an unset `COHERE_API_KEY` or any provider outage silently
+        // turned that into a blanket low-confidence verdict on every answer.
+        //
+        // `rerank_used_count` is the honest signal: `input_count` when the
+        // reranker actually produced this order, 0 when it failed or was opted
+        // out of. With no reranker we have no calibrated score, so we decline to
+        // judge rather than fabricate a verdict -- note RRF `final_score` is NOT
+        // a substitute, since a rank-1 fused score is ~0.03 and would trip the
+        // same threshold for the opposite reason.
+        //
+        // An empty result set is genuinely low-confidence either way.
+        let low_confidence = if reranked.is_empty() {
+            true
+        } else if rerank_used_count > 0 {
+            reranked
+                .first()
+                .is_some_and(|c| c.rerank_score < self.config.confidence_threshold)
+        } else {
+            tracing::debug!(
+                candidates = reranked.len(),
+                "confidence gate inactive: no reranker scored this query"
+            );
+            false
+        };
 
         // 9. Source join from Postgres
         let source_start = Instant::now();
@@ -1295,6 +1327,9 @@ mod tests {
         embed_zdr_for_mode, embedding_cache_allowed, encode_cost_event, fuse_arms,
         reciprocal_rank_fusion, text_rerank_allowed, ResolvedWeights, ScoredCandidate, ZdrMode,
     };
+    // P2-5: tests bind to the same constant the config defaults to, so a change
+    // to the default is caught here rather than silently reordering results.
+    use crate::search::fusion::DEFAULT_RRF_K;
     use event_envelope_rs::{EventSigner, EventVerifier};
     use rsa::{
         pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey},
@@ -1411,6 +1446,7 @@ mod tests {
             w_wiki,
             w_visual,
             rerank: true,
+            rrf_k: crate::search::fusion::DEFAULT_RRF_K,
         }
     }
 
@@ -1451,7 +1487,7 @@ mod tests {
         let dense = dense_fixture();
         let sparse = sparse_fixture();
         let m = mix(0.7, 0.3, 0.0, 0.0);
-        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let expected = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
 
         let (got, sparse_count) = fuse_arms(
             dense.clone(),
@@ -1477,8 +1513,8 @@ mod tests {
         ];
         let m = mix(0.7, 0.3, 0.5, 0.0);
 
-        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
-        let expected = reciprocal_rank_fusion(&base, &wiki, 60.0, m.w_wiki);
+        let base = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
+        let expected = reciprocal_rank_fusion(&base, &wiki, DEFAULT_RRF_K, m.w_wiki);
 
         let (got, _) = fuse_arms(
             dense.clone(),
@@ -1501,9 +1537,9 @@ mod tests {
         let visual = vec![cand("k-v1", "doc-v1", 0.6)];
         let m = mix(0.6, 0.2, 0.4, 0.3);
 
-        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
-        let with_wiki = reciprocal_rank_fusion(&base, &wiki, 60.0, m.w_wiki);
-        let expected = reciprocal_rank_fusion(&with_wiki, &visual, 60.0, m.w_visual);
+        let base = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
+        let with_wiki = reciprocal_rank_fusion(&base, &wiki, DEFAULT_RRF_K, m.w_wiki);
+        let expected = reciprocal_rank_fusion(&with_wiki, &visual, DEFAULT_RRF_K, m.w_visual);
 
         let (got, _) = fuse_arms(
             dense.clone(),
@@ -1553,7 +1589,7 @@ mod tests {
         // Contrast: sparse = Some(empty) (route on, zero hits) STILL runs RRF,
         // re-weighting dense — proving the Option distinction is load-bearing.
         let m2 = mix(0.7, 0.3, 0.0, 0.0);
-        let expected_empty_rrf = reciprocal_rank_fusion(&dense, &[], 60.0, bm25_share(&m2));
+        let expected_empty_rrf = reciprocal_rank_fusion(&dense, &[], DEFAULT_RRF_K, bm25_share(&m2));
         let (got_empty, count_empty) = fuse_arms(
             dense.clone(),
             Some(vec![]),
@@ -1573,7 +1609,7 @@ mod tests {
         let dense = dense_fixture();
         let sparse = sparse_fixture();
         let base_mix = mix(0.7, 0.3, 0.0, 0.0);
-        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&base_mix));
+        let expected = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
 
         // w_wiki = 0 but a wiki list IS supplied → wiki must be ignored.
         let (got_weight_off, _) = fuse_arms(
@@ -1589,7 +1625,7 @@ mod tests {
 
         // w_wiki/w_visual > 0 but the arms returned nothing → both skipped.
         let m = mix(0.6, 0.2, 0.5, 0.3);
-        let expected_empty_arms = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let expected_empty_arms = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
         let (got_empty_arms, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
@@ -1610,6 +1646,7 @@ mod tests {
             w_wiki: 0.0,
             w_visual: 0.0,
             rerank: true,
+            rrf_k: crate::search::fusion::DEFAULT_RRF_K,
         }
     }
 
@@ -1625,8 +1662,8 @@ mod tests {
 
         // Oracle: dense+sparse RRF, THEN graph RRF by w_graph (peer position,
         // before the empty wiki/visual arms).
-        let base = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
-        let expected = reciprocal_rank_fusion(&base, &graph, 60.0, m.w_graph);
+        let base = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
+        let expected = reciprocal_rank_fusion(&base, &graph, DEFAULT_RRF_K, m.w_graph);
 
         let (got, _) = fuse_arms(
             dense.clone(),
@@ -1648,7 +1685,7 @@ mod tests {
 
         // w_graph = 0 but a graph list IS supplied → graph must be ignored.
         let base_mix = mix(0.7, 0.3, 0.0, 0.0);
-        let expected = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&base_mix));
+        let expected = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
         let (got_weight_off, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
@@ -1662,7 +1699,7 @@ mod tests {
 
         // w_graph > 0 but the graph arm returned nothing → skipped.
         let m = mix_graph(0.6, 0.2, 0.4);
-        let expected_empty = reciprocal_rank_fusion(&dense, &sparse, 60.0, bm25_share(&m));
+        let expected_empty = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
         let (got_empty, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),

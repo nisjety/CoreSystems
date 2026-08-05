@@ -45,6 +45,54 @@ pub fn pack_context_with_pins(
     }
 }
 
+/// "Lost in the middle" mitigation (plan P1-8).
+///
+/// LLMs attend most reliably to the **start and end** of a long context and
+/// degrade in the middle (Liu et al., *Lost in the Middle*). The packer fills in
+/// descending relevance order, so before this the least-relevant surviving fact
+/// always occupied the tail — one of the two positions the model reads best —
+/// while the mid-ranked evidence was buried where it reads worst.
+///
+/// Opt-in via `LONG_CONTEXT_REORDER=true`, default **off**. This changes the
+/// prompt the model sees and therefore its output, and there is no scored golden
+/// set yet (P0.5 is seeded but not yet runnable), so it must not flip silently.
+/// Turn it on together with a before/after eval.
+fn long_context_reorder_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LONG_CONTEXT_REORDER")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
+/// Interleaves a relevance-ordered list so relevance decreases toward the middle.
+///
+/// `[1,2,3,4,5,6]` (1 = most relevant) becomes `[1,3,5,6,4,2]`: rank 1 at the
+/// head, rank 2 at the tail, the weakest facts buried in the centre.
+///
+/// Pure and order-only — every fact keeps its `score`, ids and token estimate, so
+/// citation rendering and any score-sorted consumer are unaffected.
+fn reorder_for_long_context(facts: Vec<ContextFact>) -> Vec<ContextFact> {
+    if facts.len() < 4 {
+        // Below four items there is no meaningful "middle" to protect, and
+        // shuffling two or three facts only obscures the ranking.
+        return facts;
+    }
+    let mut head = Vec::with_capacity(facts.len());
+    let mut tail = Vec::with_capacity(facts.len() / 2);
+    for (i, fact) in facts.into_iter().enumerate() {
+        if i % 2 == 0 {
+            head.push(fact);
+        } else {
+            tail.push(fact);
+        }
+    }
+    tail.reverse();
+    head.extend(tail);
+    head
+}
+
 /// Pack candidates into a token-budgeted context bundle.
 /// Uses 4-chars-per-token heuristic (matches cl100k_base for English).
 pub fn pack_context(
@@ -90,6 +138,15 @@ pub fn pack_context(
             estimated_tokens: est_tokens,
         });
         used_tokens += est_tokens;
+    }
+
+    // P1-8: place the strongest facts at both ends of the window.
+    //
+    // Deliberately AFTER the budget loop: the loop must consume candidates in
+    // relevance order so that what fits is the best content. Only the surviving
+    // set is reordered.
+    if long_context_reorder_enabled() {
+        facts = reorder_for_long_context(facts);
     }
 
     ContextPack {
@@ -149,6 +206,82 @@ mod tests {
             chunk_index: 0,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    fn fact(id: &str, score: f32) -> ContextFact {
+        ContextFact {
+            knowledge_id: id.to_string(),
+            document_id: format!("doc-{id}"),
+            text: format!("text {id}"),
+            score,
+            source_title: String::new(),
+            source_type: String::new(),
+            estimated_tokens: 1,
+        }
+    }
+
+    fn ids(facts: &[ContextFact]) -> Vec<String> {
+        facts.iter().map(|f| f.knowledge_id.clone()).collect()
+    }
+
+    #[test]
+    fn reorder_puts_strongest_facts_at_both_ends() {
+        // Ranked most→least relevant.
+        let input: Vec<ContextFact> = (1..=6)
+            .map(|i| fact(&i.to_string(), 1.0 - (i as f32) * 0.1))
+            .collect();
+        let out = reorder_for_long_context(input);
+        assert_eq!(
+            ids(&out),
+            vec!["1", "3", "5", "6", "4", "2"],
+            "rank 1 at the head, rank 2 at the tail, weakest in the middle"
+        );
+        // The two positions the model reads best hold the two best facts.
+        assert_eq!(out.first().unwrap().knowledge_id, "1");
+        assert_eq!(out.last().unwrap().knowledge_id, "2");
+    }
+
+    #[test]
+    fn reorder_is_a_permutation_and_preserves_scores() {
+        let input: Vec<ContextFact> = (1..=7)
+            .map(|i| fact(&i.to_string(), 1.0 - (i as f32) * 0.1))
+            .collect();
+        let before: std::collections::HashMap<String, f32> =
+            input.iter().map(|f| (f.knowledge_id.clone(), f.score)).collect();
+        let out = reorder_for_long_context(input);
+        assert_eq!(out.len(), before.len(), "no facts added or dropped");
+        let mut seen = ids(&out);
+        seen.sort();
+        assert_eq!(seen, vec!["1", "2", "3", "4", "5", "6", "7"]);
+        for f in &out {
+            assert_eq!(
+                before[&f.knowledge_id], f.score,
+                "reordering must not alter scores (citations depend on them)"
+            );
+        }
+    }
+
+    #[test]
+    fn reorder_leaves_short_packs_alone() {
+        // Under four facts there is no middle worth protecting; shuffling would
+        // only obscure the ranking.
+        for n in 0..4usize {
+            let input: Vec<ContextFact> =
+                (1..=n).map(|i| fact(&i.to_string(), 0.5)).collect();
+            let expected = ids(&input);
+            assert_eq!(ids(&reorder_for_long_context(input)), expected, "n={n}");
+        }
+    }
+
+    #[test]
+    fn reorder_is_off_by_default_so_pack_order_is_unchanged() {
+        // Guards the opt-in contract: without LONG_CONTEXT_REORDER the packer
+        // must emit strict relevance order.
+        let cands: Vec<ScoredCandidate> = (1..=6)
+            .map(|i| cand(&i.to_string(), "some text"))
+            .collect();
+        let pack = pack_context(&cands, &[], 500, "json");
+        assert_eq!(ids(&pack.facts), vec!["1", "2", "3", "4", "5", "6"]);
     }
 
     #[test]
