@@ -251,6 +251,10 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		"aqencia.reasoning.run.>", "app.session.>", ConvexControlDLQSubject,
 		GDPRErasureRequestedSubject, GDPRErasureDLQSubject, GDPROwnershipTransferredSubject,
 		DocumentsOrgPurgeDLQSubject, OrgDeletionSubjectWildcard,
+		LegacyGDPRErasureRequestedSubject, LegacyGDPRErasureDLQSubject,
+		LegacyGDPROwnershipTransferredSubject, LegacyDocumentsOrgPurgeDLQSubject,
+		LegacySessionSubjectWildcard, LegacyAgentSubjectWildcard,
+		LegacyConvexControlDLQSubject, LegacyOrgDeletionSubjectWildcard,
 	}) {
 		t.Fatalf("shared subjects = %v", info.Config.Subjects)
 	}
@@ -418,6 +422,200 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 			got.Config.AckPolicy != nats.AckExplicitPolicy ||
 			got.Config.MaxDeliver != 20 {
 			t.Fatalf("unexpected push consumer %s: %+v", wanted.Durable, got.Config)
+		}
+	}
+}
+
+// TestProvisionControlSharedRuntimePreservesLegacyGDPRSubjectsDuringMigration
+// reproduces the live 2026-08-05 Velion->Verevon state: a stream that already
+// only captures the OLD `velion.*` GDPR subjects (as if every prior
+// provisioning run predates the rename), converged against source that now
+// declares the NEW `verevon.*` names. The stream must end up capturing BOTH —
+// dropping the legacy subject here would silently stop persisting messages
+// from every publisher that has not been rebuilt yet, turning one already-
+// broken consumer into a fleet-wide outage the moment this ran.
+func TestProvisionControlSharedRuntimePreservesLegacyGDPRSubjectsDuringMigration(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go natsServer.Start()
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(func() { natsServer.Shutdown(); natsServer.WaitForShutdown() })
+	nc, err := nats.Connect(natsServer.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the PRE-rename stream shape: only the legacy names, nothing else on
+	// this stream yet (mirrors a stream that has never seen post-rename
+	// source).
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name: ControlSharedStreamName,
+		Subjects: []string{
+			LegacyGDPRErasureRequestedSubject, LegacyGDPRErasureDLQSubject,
+			LegacyGDPROwnershipTransferredSubject, LegacyDocumentsOrgPurgeDLQSubject,
+			LegacySessionSubjectWildcard, LegacyAgentSubjectWildcard,
+			LegacyConvexControlDLQSubject, LegacyOrgDeletionSubjectWildcard,
+		},
+		Storage: nats.FileStorage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a consumer with the OLD filter, exactly like retrieval-engine-rs's
+	// pre-rename durable on the live broker: ensureFixedConsumer must refuse to
+	// touch it (a filter-subject change is NOT a safe auto-migration) while the
+	// stream still converges around it.
+	preExisting := retrievalEngineOrgErasureConsumerConfig()
+	preExisting.FilterSubject = LegacyGDPRErasureRequestedSubject
+	if _, err := js.AddConsumer(ControlSharedStreamName, preExisting); err != nil {
+		t.Fatal(err)
+	}
+
+	err = Provision(context.Background(), js, Bus{Name: "shared-control", Plane: "shared"})
+	if err == nil {
+		t.Fatal("expected the pre-existing mismatched consumer to be refused, not silently mutated")
+	}
+	if !strings.Contains(err.Error(), "refusing destructive replacement") {
+		t.Fatalf("expected a refusing-destructive-replacement error, got: %v", err)
+	}
+
+	info, err := js.StreamInfo(ControlSharedStreamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		LegacyGDPRErasureRequestedSubject, LegacyGDPRErasureDLQSubject,
+		LegacyGDPROwnershipTransferredSubject, LegacyDocumentsOrgPurgeDLQSubject,
+		LegacySessionSubjectWildcard, LegacyAgentSubjectWildcard,
+		LegacyConvexControlDLQSubject, LegacyOrgDeletionSubjectWildcard,
+		GDPRErasureRequestedSubject, GDPRErasureDLQSubject,
+		GDPROwnershipTransferredSubject, DocumentsOrgPurgeDLQSubject,
+		"verevon.session.>", "verevon.agent.>",
+	} {
+		found := false
+		for _, got := range info.Config.Subjects {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("stream lost subject %q after migration converge; subjects = %v", want, info.Config.Subjects)
+		}
+	}
+
+	// The pre-existing consumer's filter must be UNCHANGED — still the legacy
+	// subject — since only an explicit delete-and-let-recreate (outside this
+	// package; see cmd/nats-consumer-migrate) may move a consumer across a
+	// subject rename.
+	consumer, err := js.ConsumerInfo(ControlSharedStreamName, RetrievalEngineOrgErasureConsumerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumer.Config.FilterSubject != LegacyGDPRErasureRequestedSubject {
+		t.Fatalf("pre-existing consumer's filter was mutated: %+v", consumer.Config)
+	}
+}
+
+func TestEnsureOrgErasureConsumerCreatesAndIsIdempotent(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go natsServer.Start()
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(func() { natsServer.Shutdown(); natsServer.WaitForShutdown() })
+	nc, err := nats.Connect(natsServer.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:     ControlSharedStreamName,
+		Subjects: []string{GDPRErasureRequestedSubject},
+		Storage:  nats.FileStorage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for run := 0; run < 2; run++ {
+		if err := EnsureOrgErasureConsumer(js, ControlSharedStreamName, RetrievalEngineOrgErasureConsumerName); err != nil {
+			t.Fatalf("run %d: %v", run+1, err)
+		}
+	}
+	info, err := js.ConsumerInfo(ControlSharedStreamName, RetrievalEngineOrgErasureConsumerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Config.FilterSubject != GDPRErasureRequestedSubject ||
+		info.Config.DeliverSubject != "" || info.Config.DeliverGroup != "" {
+		t.Fatalf("unexpected consumer config: %+v", info.Config)
+	}
+}
+
+func TestEnsureOrgErasureConsumerRejectsAnUnknownDurable(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go natsServer.Start()
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(func() { natsServer.Shutdown(); natsServer.WaitForShutdown() })
+	nc, err := nats.Connect(natsServer.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:     ControlSharedStreamName,
+		Subjects: []string{GDPRErasureRequestedSubject},
+		Storage:  nats.FileStorage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureOrgErasureConsumer(js, ControlSharedStreamName, "not-a-real-consumer"); err == nil {
+		t.Fatal("expected an error for an unknown durable name")
+	}
+}
+
+// TestOrgErasureConsumerConfigsCoversAllFourteen pins the map's size against
+// the doc comment on ProvisionControlSharedRuntime's consumer block ("The
+// eight Data Plane v2 / Model Plane... consumers added alongside
+// documents-api-gdpr/session-core-gdpr/conversation-core-gdpr/
+// quarry-control-gdpr/notification-core-gdpr"). Notification-core's three
+// org-DELETION consumers are excluded on purpose: they are not org-ERASURE
+// consumers and are not in provisioner.orgErasureConsumerConfigs.
+func TestOrgErasureConsumerConfigsCoversAllFourteen(t *testing.T) {
+	configs := orgErasureConsumerConfigs()
+	if len(configs) != 14 {
+		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 14: %v", len(configs), configs)
+	}
+	for name, cfg := range configs {
+		if cfg.Durable != name {
+			t.Fatalf("map key %q does not match its own config's Durable %q", name, cfg.Durable)
+		}
+		if cfg.FilterSubject != GDPRErasureRequestedSubject {
+			t.Fatalf("consumer %s has FilterSubject %q, want %q", name, cfg.FilterSubject, GDPRErasureRequestedSubject)
 		}
 	}
 }

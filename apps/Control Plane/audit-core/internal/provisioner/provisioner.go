@@ -86,6 +86,35 @@ const (
 	CostCoreOrgErasureConsumerName               = "cost-core-org-erasure"
 	CostCoreOrgErasureDelivery                   = "_VEREVON.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
 	EmbeddingEngineOrgErasureConsumerName        = "embedding-engine-org-erasure"
+
+	// TEMPORARY rename-migration compatibility (added 2026-08-05, remove once
+	// every publisher AND every consumer on this bus is confirmed running
+	// source built after the Velion->Verevon rename). ensureControlStream
+	// converges a stream's subject list to EXACTLY what is passed in —
+	// wholesale replace, not a union (see TestProvisionIsIdempotentAndPreserves
+	// LegacyConsumer, which pins that as intentional) — so any subject renamed
+	// in source and not ALSO listed here in its old form stops being captured
+	// the moment this provisioner next runs, silently, for every publisher
+	// still on pre-rename source. Consumers have an independent, second
+	// safeguard: ensureFixedConsumer refuses to mutate an existing consumer
+	// whose FilterSubject differs from wanted (see its doc comment), so a
+	// consumer only migrates once its own service is rebuilt and its stale
+	// durable is explicitly deleted first (cmd/nats-consumer-migrate) — but
+	// that safeguard does nothing for the STREAM side, which is why every
+	// renamed subject the stream captures needs its old form listed below
+	// too, not only the four GDPR ones.
+	//
+	// Delete this block and the legacy subjects below from
+	// ProvisionControlSharedRuntime's `subjects` slice in the same commit that
+	// confirms the last consumer/publisher on this bus has moved to verevon.*.
+	LegacyGDPRErasureRequestedSubject     = "velion.gdpr.erasure.requested"
+	LegacyGDPRErasureDLQSubject           = "velion.gdpr.erasure.dlq.documents-api"
+	LegacyGDPROwnershipTransferredSubject = "velion.gdpr.ownership.transferred"
+	LegacyDocumentsOrgPurgeDLQSubject     = "velion.gdpr.erasure.dlq.documents-api-org-purge"
+	LegacySessionSubjectWildcard          = "velion.session.>"
+	LegacyAgentSubjectWildcard            = "velion.agent.>"
+	LegacyConvexControlDLQSubject         = "velion.application.dlq.convex.controlplane"
+	LegacyOrgDeletionSubjectWildcard      = "velion.org.deletion.>"
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
@@ -411,6 +440,16 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 		GDPROwnershipTransferredSubject,
 		DocumentsOrgPurgeDLQSubject,
 		OrgDeletionSubjectWildcard,
+		// See the "TEMPORARY rename-migration compatibility" comment on the
+		// Legacy* constants above.
+		LegacyGDPRErasureRequestedSubject,
+		LegacyGDPRErasureDLQSubject,
+		LegacyGDPROwnershipTransferredSubject,
+		LegacyDocumentsOrgPurgeDLQSubject,
+		LegacySessionSubjectWildcard,
+		LegacyAgentSubjectWildcard,
+		LegacyConvexControlDLQSubject,
+		LegacyOrgDeletionSubjectWildcard,
 	}
 	if err := ensureControlStream(js, ControlSharedStreamName, subjects); err != nil {
 		return err
@@ -824,6 +863,48 @@ func ensureBillingPlanConsumer(js nats.JetStreamContext) error {
 		return fmt.Errorf("create consumer %s: %w", BillingPlanConsumerName, err)
 	}
 	return nil
+}
+
+// orgErasureConsumerConfigs maps every one of the 14 org-erasure/GDPR durable
+// consumer names on ControlSharedStreamName to its current wanted config.
+// Exists so a single named consumer can be converged (see
+// EnsureOrgErasureConsumer) without depending on every OTHER resource in
+// ProvisionControlSharedRuntime already being convergent -- that function
+// stops at the first resource that fails to converge (by design: it never
+// partially applies a topology it cannot fully verify), which means an
+// unrelated pre-existing mismatch earlier in its sequence (e.g. the legacy
+// bridge consumer) would otherwise block ever reaching a GDPR consumer that
+// is itself ready to migrate.
+func orgErasureConsumerConfigs() map[string]*nats.ConsumerConfig {
+	return map[string]*nats.ConsumerConfig{
+		DocumentsGDPRConsumerName:              gdprDocumentsConsumerConfig(),
+		DocumentsOrgErasureConsumerName:        documentsOrgErasureConsumerConfig(),
+		ConversationOrgErasureConsumerName:     conversationOrgErasureConsumerConfig(),
+		SessionGDPRErasureConsumerName:         sessionGDPRErasureConsumerConfig(),
+		QuarryControlOrgErasureConsumerName:    quarryControlOrgErasureConsumerConfig(),
+		IndexEngineOrgErasureConsumerName:      indexEngineOrgErasureConsumerConfig(),
+		GraphIndexOrgErasureConsumerName:       graphIndexOrgErasureConsumerConfig(),
+		WikiStoreOrgErasureConsumerName:        wikiStoreOrgErasureConsumerConfig(),
+		RetrievalEngineOrgErasureConsumerName:  retrievalEngineOrgErasureConsumerConfig(),
+		DataQualityOrgErasureConsumerName:      dataQualityOrgErasureConsumerConfig(),
+		DataOrchestratorOrgErasureConsumerName: dataOrchestratorOrgErasureConsumerConfig(),
+		QuickwitAdapterOrgErasureConsumerName:  quickwitAdapterOrgErasureConsumerConfig(),
+		CostCoreOrgErasureConsumerName:         costCoreOrgErasureConsumerConfig(),
+		EmbeddingEngineOrgErasureConsumerName:  embeddingEngineOrgErasureConsumerConfig(),
+	}
+}
+
+// EnsureOrgErasureConsumer converges exactly one of the 14 named org-erasure
+// consumers on the given stream to its current wanted config (create if
+// missing; error, never mutate, if an existing one has drifted -- same
+// contract as ensureFixedConsumer). The desired shape lives in exactly one
+// place (orgErasureConsumerConfigs); this only look it up and applies it.
+func EnsureOrgErasureConsumer(js nats.JetStreamContext, stream, durable string) error {
+	wanted, ok := orgErasureConsumerConfigs()[durable]
+	if !ok {
+		return fmt.Errorf("%q is not a known org-erasure consumer durable name", durable)
+	}
+	return ensureFixedConsumer(js, stream, wanted)
 }
 
 func ensureConsumer(js nats.JetStreamContext, bus Bus, kind string) error {
