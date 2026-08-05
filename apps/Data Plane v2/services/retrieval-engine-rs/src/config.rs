@@ -192,6 +192,15 @@ pub struct Config {
     pub grpc_tls_cert_path: Option<String>,
     #[serde(default)]
     pub grpc_tls_key_path: Option<String>,
+
+    // Recency decay (P2-3). OFF by default: changes ranking for every query
+    // and has not yet been measured against the P0.5 golden set. See
+    // `pipeline::postprocess::RecencyDecay` for the decay curve and the
+    // reasoning on why an unknown document_date is never penalized.
+    #[serde(default)]
+    pub recency_decay_enabled: bool,
+    #[serde(default = "default_recency_decay_half_life_days")]
+    pub recency_decay_half_life_days: f32,
 }
 
 fn default_http_port() -> u16 {
@@ -294,6 +303,9 @@ fn default_visual_dim() -> usize {
 }
 fn default_visual_rerank_top_k() -> usize {
     20
+}
+fn default_recency_decay_half_life_days() -> f32 {
+    180.0
 }
 fn default_embed_v4_deployment() -> String {
     "Cohere-embed-4".into()

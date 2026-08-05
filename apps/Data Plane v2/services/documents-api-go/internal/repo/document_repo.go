@@ -29,7 +29,7 @@ func NewDocumentRepo(pool *pgxpool.Pool) *DocumentRepo {
 // Per-User Data Ownership phase).
 const documentColumns = `document_id, org_id, source, type, title, content, status, metadata,
 	       error_message, zdr_classification, zdr_reason, extraction_trace,
-	       created_by, deleted_by, created_at, updated_at, deleted_at, owner_id, visibility`
+	       created_by, deleted_by, document_date, created_at, updated_at, deleted_at, owner_id, visibility`
 
 // Get returns a single document, enforcing ownership when a viewer is supplied.
 // The viewer filter is a single static predicate so the tenant-isolation lint
@@ -240,11 +240,11 @@ func (r *DocumentRepo) CreateWithOutbox(
 				updatedRow := tx.QueryRow(ctx, `
 					UPDATE documents SET source=$3,type=$4,title=$5,content=$6,metadata=$7,
 					zdr_classification=$8,extraction_trace=$9,status='pending',error_message=NULL,
-					deleted_at=NULL,updated_at=NOW()
+					deleted_at=NULL,updated_at=NOW(),document_date=COALESCE($11,document_date)
 					WHERE org_id=$1 AND document_id=$2 AND owner_id=$10
 					RETURNING `+documentColumns,
 					input.OrgID, existing.DocumentID, input.Source, input.Type, input.Title,
-					input.Content, meta, zdr, trace, ownerID)
+					input.Content, meta, zdr, trace, ownerID, input.DocumentDate)
 				updated, updateErr := scanDocument(updatedRow)
 				if updateErr != nil {
 					tx.Rollback(ctx)
@@ -265,11 +265,11 @@ func (r *DocumentRepo) CreateWithOutbox(
 
 		row := tx.QueryRow(ctx, `
 			INSERT INTO documents (org_id,source,type,title,content,metadata,zdr_classification,
-				extraction_trace,created_by,owner_id,visibility,idempotency_key,status)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending')
+				extraction_trace,created_by,owner_id,visibility,idempotency_key,status,document_date)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13)
 			RETURNING `+documentColumns,
 			input.OrgID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace,
-			nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey))
+			nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey), input.DocumentDate)
 		doc, insertErr := scanDocument(row)
 		if insertErr != nil {
 			tx.Rollback(ctx)
@@ -374,11 +374,11 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 	}
 
 	row := r.pool.QueryRow(ctx, `
-		INSERT INTO documents (org_id, source, type, title, content, metadata, zdr_classification, extraction_trace, created_by, owner_id, visibility, idempotency_key, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending')
+		INSERT INTO documents (org_id, source, type, title, content, metadata, zdr_classification, extraction_trace, created_by, owner_id, visibility, idempotency_key, status, document_date)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', $13)
 		RETURNING `+documentColumns+`
 	`, input.OrgID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace,
-		nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey))
+		nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey), input.DocumentDate)
 
 	doc, err := scanDocument(row)
 	if err != nil {
@@ -438,10 +438,11 @@ func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID, own
 		UPDATE documents
 		   SET source = $3, type = $4, title = $5, content = $6, metadata = $7,
 		       zdr_classification = $8, extraction_trace = $9, status = 'pending',
-		       error_message = NULL, deleted_at = NULL, updated_at = NOW()
+		       error_message = NULL, deleted_at = NULL, updated_at = NOW(),
+		       document_date = COALESCE($11, document_date)
 		 WHERE org_id = $1 AND document_id = $2 AND owner_id = $10
 		RETURNING `+documentColumns+`
-	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace, ownerID)
+	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace, ownerID, input.DocumentDate)
 
 	return scanDocument(row)
 }
@@ -608,7 +609,7 @@ func scanDocument(row pgx.Row) (*model.Document, error) {
 	err := row.Scan(
 		&d.DocumentID, &d.OrgID, &d.Source, &d.Type, &d.Title, &d.Content,
 		&d.Status, &d.Metadata, &d.ErrorMessage, &d.ZDRClassification, &d.ZDRReason,
-		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
+		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.DocumentDate, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
 		&d.OwnerID, &d.Visibility,
 	)
 	if err != nil {
@@ -622,7 +623,7 @@ func scanDocumentFromRows(rows pgx.Rows) (*model.Document, error) {
 	err := rows.Scan(
 		&d.DocumentID, &d.OrgID, &d.Source, &d.Type, &d.Title, &d.Content,
 		&d.Status, &d.Metadata, &d.ErrorMessage, &d.ZDRClassification, &d.ZDRReason,
-		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
+		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.DocumentDate, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
 		&d.OwnerID, &d.Visibility,
 	)
 	if err != nil {

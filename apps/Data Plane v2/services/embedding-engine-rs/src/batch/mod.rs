@@ -24,6 +24,12 @@ pub struct BatchItem {
     /// egress to a retaining (direct-Azure) embedding provider.
     pub zdr: bool,
     pub user_id: Option<String>,
+    /// P2-3: the owning document's `document_date` (source content's own
+    /// last-modified time), sourced from the `documents` row at enqueue time
+    /// alongside `zdr`. `None` for the common case of a document with no
+    /// connector-supplied date -- the retrieval decay stage treats that as no
+    /// penalty, not maximum penalty.
+    pub document_date: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn process_batch(
@@ -56,14 +62,24 @@ pub async fn process_batch(
     let points: Vec<EmbeddingPoint> = items
         .iter()
         .zip(vectors.into_iter())
-        .map(|(item, vec)| EmbeddingPoint {
-            knowledge_id: item.knowledge_id.clone(),
-            document_id: item.document_id.clone(),
-            org_id: item.org_id.clone(),
-            chunk_index: item.chunk_index,
-            text: item.text.clone(),
-            vector: vec,
-            metadata: HashMap::new(),
+        .map(|(item, vec)| {
+            let mut metadata = HashMap::new();
+            // P2-3: threaded through as a plain RFC3339 string, matching every
+            // other value in this map -- qdrant_writer's generic passthrough
+            // (`for (k, v) in p.metadata { payload.insert(k, StringValue(v)) }`)
+            // takes String, not a typed timestamp.
+            if let Some(date) = item.document_date {
+                metadata.insert("document_date".to_string(), date.to_rfc3339());
+            }
+            EmbeddingPoint {
+                knowledge_id: item.knowledge_id.clone(),
+                document_id: item.document_id.clone(),
+                org_id: item.org_id.clone(),
+                chunk_index: item.chunk_index,
+                text: item.text.clone(),
+                vector: vec,
+                metadata,
+            }
         })
         .collect();
 

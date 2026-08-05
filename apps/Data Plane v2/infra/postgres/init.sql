@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS documents (
     owner_id      TEXT         NOT NULL DEFAULT 'org-system-account',
     visibility    TEXT         NOT NULL DEFAULT 'org',
     idempotency_key TEXT,
+    -- P2-3: the SOURCE content's own last-modified time (e.g. SharePoint's
+    -- lastModifiedDateTime), distinct from updated_at (this row's own
+    -- bookkeeping). NULL means unknown, not "old" — see the decay stage.
+    document_date TIMESTAMPTZ,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at    TIMESTAMPTZ,

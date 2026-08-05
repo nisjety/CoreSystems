@@ -21,6 +21,10 @@ type Document struct {
 	ExtractionTrace   json.RawMessage `json:"extraction_trace,omitempty"`
 	CreatedBy         *string         `json:"created_by,omitempty"`
 	DeletedBy         *string         `json:"deleted_by,omitempty"`
+	// DocumentDate is the source content's own last-modified time (e.g.
+	// SharePoint's lastModifiedDateTime), not this row's own CreatedAt/UpdatedAt.
+	// Nil means unknown — the retrieval decay stage treats that as no penalty.
+	DocumentDate      *time.Time      `json:"document_date,omitempty"`
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
 	DeletedAt         *time.Time      `json:"deleted_at,omitempty"`
@@ -43,6 +47,11 @@ type CreateDocumentInput struct {
 	CreatedBy         string          `json:"created_by,omitempty"`
 	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
 	IngestPolicy      *IngestPolicy   `json:"ingest_policy,omitempty"`
+	// DocumentDate, when supplied, is persisted as-is on create; on an
+	// idempotent content refresh it only overwrites the stored value when
+	// non-nil (a caller that doesn't know this field must not blank out a
+	// previously-known date). See model.Document.DocumentDate.
+	DocumentDate      *time.Time      `json:"document_date,omitempty"`
 	// OwnerID, when set, stamps the document's owner; otherwise it falls back to
 	// CreatedBy, then the org-system account. Visibility (private|org|shared): when
 	// empty it defaults to 'private' for an end-user create (a viewer is present)

@@ -1380,8 +1380,103 @@ landed in P1-7 as a Qdrant-native `score_threshold` (pre-fusion, in the dense
 arm — moving it into a post-fusion stage would make it fire against
 uncalibrated RRF scores); long-context reordering landed in P1-8 inside
 `context_pack` (it reorders the *packed* context, not the candidate list);
-recency decay does not exist yet and is blocked on P2-3's `document_date`
-column; and there is no dedup step in the pipeline today.
+recency decay landed in P2-3 (below) as a `NodePostprocessor` in this same
+chain; and there is no dedup step in the pipeline today.
+
+---
+
+### 2026-08-05 — P2-3 `document_date` + recency decay (closed)
+
+Spans two planes: Data Plane v2 (schema, embedding pipeline, retrieval) and
+Ingestion Plane (`finspo-core`'s SharePoint connector). Five layers, in the
+order data actually flows:
+
+1. **Migration** (`20260805160000_document_date.sql`): `documents.document_date
+   TIMESTAMPTZ`, nullable, no default — "unknown" must stay distinguishable
+   from "known to be old," since the decay stage treats them oppositely. A
+   one-time backfill joins `source_objects.modified_at` onto
+   `type='sharepoint_file'` documents via `(org_id, drive_id, item_id)` — the
+   only document type whose `metadata` carries that pair.
+   `sharepoint_page`/`web_page` documents have no matching join key and stay
+   NULL until re-ingested through the now-fixed connector. Live result:
+   1/1 sharepoint_file backfilled; 175 sharepoint_page + 13 web_page correctly
+   untouched.
+2. **documents-api-go**: `CreateDocumentInput.DocumentDate` threads through
+   both INSERT paths and both UPDATE (content-refresh) paths. The refresh
+   paths use `COALESCE($N, document_date)`, not a blind overwrite — a caller
+   that doesn't know this field (most callers, still) must not blank out a
+   previously-known date on an unrelated re-ingest.
+3. **finspo-core** (`internal/dataplane/documents.go` +
+   `internal/content/{ingestor,pages_ingestor}.go`): `CreateDocumentInput`
+   gains `ModifiedAt`, forwarded as `document_date` — a DIFFERENT wire name
+   than `SourceObjectClient`'s existing `modified_at`, because they are
+   different tables with different meanings (this row's content freshness vs.
+   a file's own change-detection bookkeeping). Site pages prefer their own
+   `LastModifiedDateTime`, falling back to the wrapping drive item's when the
+   Pages API omits it.
+4. **embedding-engine-rs**: `BatchItem.document_date`, sourced from
+   `documents` in the SAME per-chunk query that already reads
+   `zdr_classification` (one round trip serving both document-level facts,
+   not two). Threaded into `EmbeddingPoint.metadata` as a plain RFC3339
+   string — `qdrant_writer`'s existing generic passthrough (`for (k, v) in
+   p.metadata { payload.insert(k, StringValue(v)) }`) already handles it; no
+   new payload-writing code needed.
+5. **retrieval-engine-rs**: a new `RecencyDecay` `NodePostprocessor` (the P2-1
+   chain's first real payoff — this would have been ~40 more inline lines in
+   `retrieve()` before that refactor). Exponential half-life decay on
+   `final_score`, reading `document_date` out of the candidate's own Qdrant
+   payload (`ScoredCandidate.metadata` already carries it — no new Postgres
+   join). `RECENCY_DECAY_ENABLED` defaults **false**: this changes ranking for
+   every query and has not been measured against the P0.5 golden set yet.
+   Placed AFTER `text_rerank`, not before — the reranker overwrites
+   `final_score` outright with its own cross-encoder score, so decay applied
+   earlier would be erased the instant a reranker is configured and working,
+   which is the common case in this stack. A missing/unparseable/future
+   `document_date` is left UNCHANGED, never penalized: the corpus is
+   overwhelmingly undated until re-ingestion catches up, and treating unknown
+   as maximally-old would bury most of it.
+
+**Verified:**
+- Go: `cargo`-equivalent (`go build`/`go vet`) clean; full `-tags integration`
+  suite (testcontainers-postgres, real disposable Postgres) green, including a
+  new test proving the COALESCE preserve-on-refresh behavior end-to-end.
+- Rust (embedding-engine-rs): `cargo check`/clippy clean; all 41 pre-existing
+  tests still pass (this module's `process_batch` has zero unit tests of its
+  own — it is inherently integration-level, matching existing convention; not
+  a gap this change introduced).
+- Rust (retrieval-engine-rs): `cargo check`/clippy/fmt clean; 156 lib tests
+  pass, including 7 new ones covering the decay curve, the missing/
+  unparseable/future-date non-penalty cases, the non-positive-half-life guard,
+  and a reordering test proving decay can promote a fresher low scorer above a
+  stale high scorer.
+- Live: migration applied to the running Postgres, backfill counts confirmed
+  by direct query. `documents-api`, `embedding-engine`, `retrieval-engine`
+  rebuilt and redeployed (with the cross-plane overlay); all three healthy.
+  The exact new `stream.rs` SELECT was run directly against the live
+  `documents` table and returned the expected two-column shape with a real
+  TIMESTAMPTZ value.
+- **Not driven end-to-end live**: no real SharePoint sync ran during this
+  session, and no synthetic signed NATS event was fabricated to force one, so
+  the full connector→Qdrant-payload round trip was not observed on the wire.
+  The remaining risk is narrow and low: sqlx decoding `TIMESTAMPTZ` into
+  `Option<DateTime<Utc>>` and Go's `encoding/json` respecting a struct tag are
+  both the same well-established mechanism already used identically
+  elsewhere in each of these exact files (e.g. `embedded_at`, `Metadata`) —
+  not new custom logic — but it is still an honest gap between "verified" and
+  "fully proven on the wire."
+
+**Self-inflicted incident, found and fixed mid-task:** rebuilding
+`documents-api` for this change (unrelated to GDPR) triggered the *same*
+Velion→Verevon subject-drift landmine as retrieval-engine's earlier fix
+(1478b3fb) — except `documents-api-go` treats a mismatched pre-provisioned
+GDPR consumer as `log.Fatal`, so it crash-looped rather than retry-looping.
+Fixed the same way: `nats-consumer-migrate` against its two consumers
+(`documents-api-gdpr-erasure-v1`, `documents-api-org-erasure`), both
+confirmed zero-backlog first. Recovered within one migration cycle; no
+message loss. This is exactly the recurrence the earlier fix's memory note
+predicted — every one of the other 12 GDPR consumers will hit the same thing
+the moment its own service is next rebuilt for an unrelated reason, not only
+when someone deliberately revisits the rename.
 
 ---
 

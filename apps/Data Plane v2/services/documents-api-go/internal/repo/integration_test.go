@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS documents (
     owner_id     TEXT NOT NULL DEFAULT 'org-system-account',
     visibility   TEXT NOT NULL DEFAULT 'org',
     idempotency_key TEXT,
+    document_date TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at   TIMESTAMPTZ,
@@ -235,6 +236,95 @@ func TestZDRClassificationRoundTrip(t *testing.T) {
 	}
 	if gotInternal.ZDRClassification != "internal" {
 		t.Fatalf("expected empty zdr_classification to default to internal, got %q", gotInternal.ZDRClassification)
+	}
+}
+
+// TestDocumentDateRoundTripAndPreservedOnUnrelatedUpdate covers P2-3: a
+// connector-supplied document_date persists, an omitted one leaves the column
+// NULL rather than defaulting to something that would look like a real date,
+// and a later re-ingest that doesn't know about this field must not blank out
+// a previously-known date -- exactly the failure mode COALESCE in the repo's
+// update paths exists to prevent.
+func TestDocumentDateRoundTripAndPreservedOnUnrelatedUpdate(t *testing.T) {
+	pool, cleanup := setupPostgres(t)
+	defer cleanup()
+
+	r := repo.NewDocumentRepo(pool)
+	ctx := context.Background()
+
+	sourceModified := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	withDate, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID:        "org-date",
+		Source:       "sharepoint",
+		Type:         "sharepoint_file",
+		Title:        "Q1 Report",
+		Content:      "body",
+		DocumentDate: &sourceModified,
+	})
+	if err != nil {
+		t.Fatalf("create with document_date: %v", err)
+	}
+	got, err := r.Get(ctx, "org-date", withDate.Document.DocumentID, "", nil)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.DocumentDate == nil || !got.DocumentDate.Equal(sourceModified) {
+		t.Fatalf("document_date = %v, want %v", got.DocumentDate, sourceModified)
+	}
+
+	withoutDate, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID:   "org-date",
+		Source:  "quarry",
+		Type:    "web_page",
+		Title:   "Undated crawl",
+		Content: "body",
+	})
+	if err != nil {
+		t.Fatalf("create without document_date: %v", err)
+	}
+	gotUndated, err := r.Get(ctx, "org-date", withoutDate.Document.DocumentID, "", nil)
+	if err != nil {
+		t.Fatalf("get undated: %v", err)
+	}
+	if gotUndated.DocumentDate != nil {
+		t.Fatalf("expected a nil document_date to stay NULL, got %v", gotUndated.DocumentDate)
+	}
+
+	// A re-ingest that supplies no document_date (idempotency_key drives the
+	// content-refresh path) must not clobber the value set above.
+	refreshInput := model.CreateDocumentInput{
+		OrgID:          "org-date",
+		Source:         "sharepoint",
+		Type:           "sharepoint_file",
+		Title:          "Q1 Report",
+		Content:        "body v2",
+		IdempotencyKey: "q1-report",
+	}
+	first, err := r.Create(ctx, model.CreateDocumentInput{
+		OrgID:          "org-date",
+		Source:         "sharepoint",
+		Type:           "sharepoint_file",
+		Title:          "Q1 Report",
+		Content:        "body v1",
+		IdempotencyKey: "q1-report",
+		DocumentDate:   &sourceModified,
+	})
+	if err != nil {
+		t.Fatalf("create idempotent v1: %v", err)
+	}
+	if first.Document.DocumentDate == nil {
+		t.Fatal("v1 lost its document_date immediately after create")
+	}
+	refreshed, err := r.Create(ctx, refreshInput)
+	if err != nil {
+		t.Fatalf("create idempotent v2 (refresh): %v", err)
+	}
+	if !refreshed.Updated {
+		t.Fatal("expected the content change to trigger the refresh path")
+	}
+	if refreshed.Document.DocumentDate == nil || !refreshed.Document.DocumentDate.Equal(sourceModified) {
+		t.Fatalf("refresh with no document_date clobbered the stored value: got %v, want %v",
+			refreshed.Document.DocumentDate, sourceModified)
 	}
 }
 

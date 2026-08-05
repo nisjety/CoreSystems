@@ -49,6 +49,7 @@ use crate::search::rerank::RerankClient;
 pub const STAGE_VISUAL_RERANK: &str = "visual_rerank";
 pub const STAGE_TRUNCATE_OVERFETCH: &str = "truncate:overfetch";
 pub const STAGE_TEXT_RERANK: &str = "text_rerank";
+pub const STAGE_RECENCY_DECAY: &str = "recency_decay";
 pub const STAGE_VISIBILITY_GATE: &str = "visibility_gate";
 pub const STAGE_TRUNCATE_TOP_N: &str = "truncate:top_n";
 pub const STAGE_ZDR_FILTER: &str = "zdr_filter";
@@ -314,6 +315,92 @@ impl NodePostprocessor for TextRerank<'_> {
                 Ok(nodes.into_iter().take(self.out_n).collect())
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage: recency decay (P2-3)
+// ---------------------------------------------------------------------------
+
+/// Multiplicatively dampens `final_score` by content age, read from the
+/// `document_date` Qdrant payload key. Half-life decay: a candidate exactly
+/// `half_life_days` old scores 0.5x, one twice that old scores 0.25x, and so
+/// on — a smooth curve, not a hard cutoff.
+///
+/// Runs AFTER [`TextRerank`], not before: the reranker OVERWRITES
+/// `final_score` outright with its own cross-encoder score, so decay applied
+/// before it would be erased the instant a reranker is configured and
+/// working — which is the common case in this stack. Placed here, it
+/// dampens whatever score is live at this point in the chain: the reranker's
+/// when one ran, the fused RRF score when it did not.
+///
+/// A candidate with no `document_date` (absent, unparseable, or dated in the
+/// future relative to `now`) is left UNCHANGED. Treating "unknown" as "old"
+/// would bury every document that predates this column — the vast majority
+/// of the corpus until P2-3's backfill and re-ingestion catch up — which is a
+/// worse distortion than not decaying at all. A future-dated candidate
+/// (clock skew, bad connector data) is clamped to age zero rather than
+/// rewarded with a multiplier above 1.0.
+pub struct RecencyDecay {
+    /// `RECENCY_DECAY_ENABLED` — OFF by default. This changes ranking for
+    /// every query and has not yet been measured against the P0.5 golden
+    /// set; shipping it on unmeasured would be a regression risk, not a
+    /// free improvement.
+    pub enabled: bool,
+    pub half_life_days: f32,
+    /// Injected rather than read via `chrono::Utc::now()` inside the stage,
+    /// so tests can pin "now" and get a deterministic multiplier instead of
+    /// a flaky one that depends on wall-clock time at the moment the test
+    /// happens to run.
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+impl RecencyDecay {
+    /// `None` (no decay applied) for a missing/unparseable date or a
+    /// non-positive half-life (misconfiguration); otherwise the multiplier
+    /// to apply to `final_score`.
+    fn multiplier(&self, document_date: Option<&str>) -> Option<f32> {
+        if self.half_life_days <= 0.0 {
+            return None;
+        }
+        let parsed = document_date?
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .ok()?;
+        let age_days = (self.now - parsed).num_seconds() as f32 / 86400.0;
+        let age_days = age_days.max(0.0);
+        Some(0.5_f32.powf(age_days / self.half_life_days))
+    }
+}
+
+#[async_trait]
+impl NodePostprocessor for RecencyDecay {
+    fn name(&self) -> &'static str {
+        STAGE_RECENCY_DECAY
+    }
+
+    async fn postprocess(
+        &self,
+        mut nodes: Vec<ScoredCandidate>,
+        _ctx: &mut PostprocessCtx<'_>,
+    ) -> anyhow::Result<Vec<ScoredCandidate>> {
+        if !self.enabled {
+            return Ok(nodes);
+        }
+        use qdrant_client::qdrant::value::Kind;
+        for node in &mut nodes {
+            let date = match node
+                .metadata
+                .get("document_date")
+                .and_then(|v| v.kind.as_ref())
+            {
+                Some(Kind::StringValue(s)) => Some(s.as_str()),
+                _ => None,
+            };
+            if let Some(multiplier) = self.multiplier(date) {
+                node.final_score *= multiplier;
+            }
+        }
+        Ok(nodes)
     }
 }
 
@@ -686,5 +773,161 @@ mod tests {
         assert_eq!((timings[0].before, timings[0].after), (4, 3));
         assert_eq!(timings[1].name, "truncate:top_n");
         assert_eq!((timings[1].before, timings[1].after), (3, 1));
+    }
+
+    // --- RecencyDecay -------------------------------------------------------
+
+    fn cand_dated(document_id: &str, score: f32, document_date: &str) -> ScoredCandidate {
+        let mut c = cand(document_id, score);
+        c.metadata.insert(
+            "document_date".to_string(),
+            qdrant_client::qdrant::Value {
+                kind: Some(qdrant_client::qdrant::value::Kind::StringValue(
+                    document_date.to_string(),
+                )),
+            },
+        );
+        c
+    }
+
+    fn fixed_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[tokio::test]
+    async fn disabled_decay_leaves_scores_untouched_even_with_a_dated_candidate() {
+        let stage = RecencyDecay {
+            enabled: false,
+            half_life_days: 30.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        let got = stage
+            .postprocess(vec![cand_dated("a", 1.0, "2020-01-01T00:00:00Z")], &mut c)
+            .await
+            .unwrap();
+        assert_eq!(got[0].final_score, 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_candidate_exactly_one_half_life_old_is_halved() {
+        let stage = RecencyDecay {
+            enabled: true,
+            half_life_days: 30.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        // Exactly 30 days before fixed_now().
+        let got = stage
+            .postprocess(vec![cand_dated("a", 1.0, "2026-07-06T00:00:00Z")], &mut c)
+            .await
+            .unwrap();
+        assert!(
+            (got[0].final_score - 0.5).abs() < 1e-4,
+            "score = {}, want ~0.5",
+            got[0].final_score
+        );
+    }
+
+    #[tokio::test]
+    async fn a_candidate_with_no_document_date_is_unchanged() {
+        let stage = RecencyDecay {
+            enabled: true,
+            half_life_days: 30.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        let got = stage
+            .postprocess(vec![cand("a", 0.73)], &mut c)
+            .await
+            .unwrap();
+        assert_eq!(got[0].final_score, 0.73);
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_document_date_is_treated_as_unknown_not_penalized() {
+        let stage = RecencyDecay {
+            enabled: true,
+            half_life_days: 30.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        let got = stage
+            .postprocess(vec![cand_dated("a", 0.5, "not-a-date")], &mut c)
+            .await
+            .unwrap();
+        assert_eq!(got[0].final_score, 0.5);
+    }
+
+    #[tokio::test]
+    async fn a_future_dated_candidate_is_clamped_to_zero_age_not_boosted() {
+        let stage = RecencyDecay {
+            enabled: true,
+            half_life_days: 30.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        // One day AFTER fixed_now() -- clock skew or bad connector data.
+        let got = stage
+            .postprocess(vec![cand_dated("a", 1.0, "2026-08-06T00:00:00Z")], &mut c)
+            .await
+            .unwrap();
+        assert_eq!(
+            got[0].final_score, 1.0,
+            "a future date must not produce a multiplier above 1.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_positive_half_life_disables_decay_rather_than_dividing_by_zero() {
+        let stage = RecencyDecay {
+            enabled: true,
+            half_life_days: 0.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        let got = stage
+            .postprocess(vec![cand_dated("a", 1.0, "2020-01-01T00:00:00Z")], &mut c)
+            .await
+            .unwrap();
+        assert_eq!(got[0].final_score, 1.0);
+    }
+
+    #[tokio::test]
+    async fn decay_can_reorder_a_stale_high_scorer_below_a_fresh_low_scorer() {
+        let stage = RecencyDecay {
+            enabled: true,
+            half_life_days: 30.0,
+            now: fixed_now(),
+        };
+        let mut c = ctx();
+        let got = stage
+            .postprocess(
+                vec![
+                    // 120 days old (4 half-lives): 1.0 * 0.5^4 = 0.0625.
+                    cand_dated("stale", 1.0, "2026-04-07T00:00:00Z"),
+                    // Fresh, undecayed.
+                    cand_dated("fresh", 0.5, "2026-08-05T00:00:00Z"),
+                ],
+                &mut c,
+            )
+            .await
+            .unwrap();
+        let stale_score = got
+            .iter()
+            .find(|c| c.document_id == "stale")
+            .unwrap()
+            .final_score;
+        let fresh_score = got
+            .iter()
+            .find(|c| c.document_id == "fresh")
+            .unwrap()
+            .final_score;
+        assert!(
+            fresh_score > stale_score,
+            "fresh={fresh_score} should now outrank stale={stale_score}"
+        );
     }
 }

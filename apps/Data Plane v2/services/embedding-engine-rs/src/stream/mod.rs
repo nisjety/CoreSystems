@@ -203,17 +203,26 @@ pub async fn run_consumer(
                     // the embed egress guard enforces it downstream. We read it
                     // here (the real column) rather than trusting the event
                     // payload, so a stale/forged event can't downgrade ZDR.
-                    let zdr = if doc_id.is_empty() {
-                        false
+                    //
+                    // document_date rides the same query (P2-3): both are
+                    // document-level facts the batch pipeline needs per chunk,
+                    // so one lookup serves both rather than doubling the
+                    // per-item Postgres round trip.
+                    let (zdr, document_date) = if doc_id.is_empty() {
+                        (false, None)
                     } else {
-                        let row: Option<(Option<String>,)> = sqlx::query_as(
-                            "SELECT zdr_classification FROM documents WHERE document_id = $1 AND org_id = $2",
-                        )
-                        .bind(&doc_id)
-                        .bind(&event_claims.org_id)
-                        .fetch_optional(&pool)
-                        .await?;
-                        event_claims.zdr || matches!(row, Some((Some(c),)) if c == "restricted")
+                        let row: Option<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
+                            sqlx::query_as(
+                                "SELECT zdr_classification, document_date FROM documents WHERE document_id = $1 AND org_id = $2",
+                            )
+                            .bind(&doc_id)
+                            .bind(&event_claims.org_id)
+                            .fetch_optional(&pool)
+                            .await?;
+                        let zdr = event_claims.zdr
+                            || matches!(&row, Some((Some(c), _)) if c == "restricted");
+                        let document_date = row.and_then(|(_, d)| d);
+                        (zdr, document_date)
                     };
 
                     buffer.push((
@@ -226,6 +235,7 @@ pub async fn run_consumer(
                             text,
                             zdr,
                             user_id: event_claims.user_id,
+                            document_date,
                         },
                     ));
                 }
@@ -271,6 +281,7 @@ pub async fn run_consumer(
                     text: item.text.clone(),
                     zdr: item.zdr,
                     user_id: item.user_id.clone(),
+                    document_date: item.document_date,
                 })
                 .collect();
 

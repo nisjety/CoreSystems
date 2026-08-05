@@ -830,6 +830,17 @@ impl RetrievalPipeline {
             requested: rerank_requested,
             out_n: rerank_out_n,
         };
+        // P2-3, OFF by default. Runs AFTER text_stage (dampens whatever score
+        // is live at this point — the reranker's or the fused RRF's — rather
+        // than before it, where the reranker would overwrite final_score and
+        // erase the effect) and BEFORE the visibility gate (an authority
+        // filter, not a scoring step; order relative to it doesn't matter,
+        // but it must still precede top_n_trim like every scoring stage does).
+        let recency_stage = postprocess::RecencyDecay {
+            enabled: self.config.recency_decay_enabled,
+            half_life_days: self.config.recency_decay_half_life_days,
+            now: chrono::Utc::now(),
+        };
         let visibility_stage = postprocess::VisibilityGate {
             pool: &self.pool,
             viewer: effective_viewer,
@@ -840,10 +851,11 @@ impl RetrievalPipeline {
             label: postprocess::STAGE_TRUNCATE_TOP_N,
         };
         let zdr_stage = postprocess::ZdrFilter { pool: &self.pool };
-        let chain: [&dyn postprocess::NodePostprocessor; 6] = [
+        let chain: [&dyn postprocess::NodePostprocessor; 7] = [
             &visual_stage,
             &overfetch_trim,
             &text_stage,
+            &recency_stage,
             &visibility_stage,
             &top_n_trim,
             &zdr_stage,
