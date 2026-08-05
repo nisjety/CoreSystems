@@ -1270,14 +1270,95 @@ nothing in Data Plane, Model Plane, Ingestion, or Application. That breaks
 constraint 4 (ZDR/GDPR propagation) and constraint 5 (policy metadata travels
 with data).
 
-**Not fixed here — deliberately.** The fix is to re-run the Control Plane
-provisioner so the stream gains the `verevon.*` subjects and the consumer
-filters are updated. That is a **Control Plane** change to **running state**,
-which this workstream is scoped out of. It needs an explicit decision, and it
-should be sequenced so the provisioner runs *before* any publisher is rebuilt.
-Note the same drift applies to `velion.session.>`, `velion.agent.>`,
-`velion.org.deletion.>`, `velion.application.dlq.*`, and
-`velion.gdpr.ownership.transferred` — this is not only the erasure subject.
+#### Resolved 2026-08-05, in `apps/Control Plane/audit-core`
+
+The user asked for this fixed directly, which crosses into Control Plane
+source and running state. Three changes, in `internal/provisioner/provisioner.go`
+plus tests, `cmd/nats-consumer-migrate` (new), and the Dockerfile:
+
+1. **`ProvisionControlSharedRuntime`'s subject list now lists both names for
+   every renamed subject on this bus**, not only the four GDPR ones — see
+   below for why that widened mid-fix. `ensureControlStream` converges a
+   stream's subjects to *exactly* what it is given (a wholesale replace, not
+   a union — `TestProvisionIsIdempotentAndPreservesLegacyConsumer` pins this
+   as intentional design, so that semantic was correctly left alone). The
+   fix is additive at the literal level instead: eight `Legacy*` constants,
+   each with a comment marking it for deletion once every publisher and
+   consumer on the bus is confirmed on `verevon.*` source.
+2. **`EnsureOrgErasureConsumer(js, stream, durable)`**, exported from
+   `provisioner`: converges exactly one of the 14 named org-erasure
+   consumers from its already-declared wanted config, independent of every
+   other resource on the bus. Needed because `ProvisionControlSharedRuntime`
+   stops at the first resource that fails to converge — see below.
+3. **`cmd/nats-consumer-migrate`** (new binary, same image as
+   `nats-provisioner`): given a stream and durable name, deletes the
+   consumer if and only if it has zero pending and zero ack-pending messages
+   (refuses otherwise — a hard safety gate, unit-tested), then calls
+   `EnsureOrgErasureConsumer` to recreate it from current source. Self-healing:
+   works whether the consumer currently exists with a stale filter or has
+   already been deleted. Exists because `ensureFixedConsumer` correctly
+   refuses to mutate a consumer whose config differs from wanted — a
+   deliberate safety property, not a bug — so a consumer whose FilterSubject
+   changed because the *source* was renamed never converges on its own.
+
+**Applied to exactly one of the 14 consumers**, `retrieval-engine-gdpr-erasure-v1`
+— the only one whose service has actually been rebuilt with `verevon.*`
+source. Verified end-to-end: the stream now carries 21 subjects (13 original
++ 8 legacy-form duplicates for the renamed ones, since `application.dlq`/
+`session`/`agent`/`org.deletion` needed the same treatment, not just GDPR);
+all 13 untouched consumers still read `filter_subject: velion.gdpr.erasure.requested`
+byte-for-byte; `retrieval-engine-gdpr-erasure-v1` now reads
+`verevon.gdpr.erasure.requested`; and retrieval-engine-rs's own log went from
+a 5-second retry loop straight to `retrieval-engine GDPR erasure consumer
+ready` on its next cycle, with no container restart.
+
+**Two mistakes made and corrected during this fix, recorded because both are
+easy to repeat:**
+
+- **First correction — the collateral damage was wider than GDPR.** The
+  first version of this fix added `Legacy*` compatibility only for the four
+  GDPR subjects. Running the (now-partially-fixed) provisioner nonetheless
+  *silently dropped* `velion.session.>`, `velion.agent.>`,
+  `velion.application.dlq.convex.controlplane`, and `velion.org.deletion.>`
+  from the stream — `ensureControlStream`'s wholesale-replace semantics
+  apply to the *whole* subjects slice, and those four subjects were also
+  renamed in source but had no legacy pairing yet. Every publisher for
+  session/agent/org-deletion is still on pre-rename source, so for the
+  minutes this was live, those messages were not being persisted by the
+  stream at all. Caught by re-reading the post-run subject list rather than
+  assuming success from an idempotency test passing; fixed by extending the
+  same `Legacy*` pattern to all four and rebuilding.
+- **Second correction — the delete step outran the recreate step.**
+  `nats-provisioner`'s `ProvisionControlSharedRuntime` returns on the first
+  resource that fails to converge, and `control-shared-legacy-bridge` (an
+  unrelated, pre-existing `_VELION.*` → `_VEREVON.*` DeliverSubject drift on
+  a different consumer entirely — see below) sits earlier in that function
+  than every GDPR consumer check. So deleting `retrieval-engine-gdpr-erasure-v1`
+  and then re-running `nats-provisioner`, expecting it to recreate the
+  consumer, left retrieval-engine with **no GDPR consumer at all** for
+  several minutes — strictly worse than the original mismatch, since a
+  missing consumer can't even retry. Caught by checking `consumer_count`
+  after the "successful" run rather than trusting the exit code; fixed by
+  adding `EnsureOrgErasureConsumer` so the migration tool never depends on
+  unrelated resources converging first.
+
+**Discovered, not fixed — same pattern, different consumers, out of the
+scope actually asked for:** `control-shared-legacy-bridge` and
+`billing-core-organization-plan-changed` fail the identical way
+(`nats-provisioner` reports "exists with incompatible configuration;
+refusing destructive replacement") because their `DeliverSubject` constants
+were also renamed (`_VELION.CONTROL.SHARED.DELIVER.legacy` /
+`_VELION.CONTROL.DELIVER.billing.organization-plan-changed`) and neither
+consuming service has been rebuilt yet. `audit-nats-provisioner` currently
+exits 1 on every run because of these two — confirmed pre-existing (identical
+failure with every change in this section stashed out) and unrelated to
+anything above. Same fix shape applies whenever those two services are
+rebuilt: `EnsureOrgErasureConsumer`-style targeted migration, not a blind
+provisioner re-run.
+
+Delete the `Legacy*` constants and their four entries in the subjects slice
+(all eight, not just the GDPR four) once every publisher and consumer on
+`control-shared-nats` is confirmed on `verevon.*` source.
 
 **Also fixed in passing:** my first redeploy used a bare
 `docker compose up -d --no-deps retrieval-engine`, which resolved
