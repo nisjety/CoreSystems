@@ -35,6 +35,8 @@
 //! `approval_id` can read or decide it regardless of org. Flagged for a
 //! dedicated fix in session-core/model-gateway, not in scope for this proxy.
 
+use std::time::Duration;
+
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -128,6 +130,22 @@ fn requires_execution_delegation(path: &str) -> bool {
     path.ends_with("/decide") || path.ends_with("/resume")
 }
 
+/// A response worth retrying once: a literal upstream 502 (model-gateway's own
+/// quarantine placeholder for not-yet-durable continuation delivery fires
+/// unconditionally on every first-time approval grant — see
+/// `mg_post_decide_with_retry` — and the generic `Err(_) => 502` fallback in
+/// `proxy_model_json_with_delegations` for a dropped connection also lands
+/// here, whether or not that connection ever reached the network), or a 503
+/// from our own `delegated_auth_unavailable` short-circuit (that one always
+/// fires before any upstream request is sent, so retrying it is trivially
+/// side-effect-free).
+fn is_retryable_decide_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE
+    )
+}
+
 async fn mg_proxy(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -193,6 +211,67 @@ async fn mg_post(
         requires_execution_delegation(path),
     )
     .await
+}
+
+/// Retries `/decide` exactly once on a retryable status, after a short fixed
+/// backoff. Safe ONLY for this route: session-core's `DecideApproval` is a
+/// single CAS-guarded state transition with no side effects of its own (a
+/// repeat of the same decision is a clean no-op, a genuine conflict cleanly
+/// 412s — never a silent re-execution), unlike `/resume`/`/cancel`/plan
+/// approve-reject, which are NOT confirmed idempotent and must never be
+/// retried this way. The retry also self-heals model-gateway's own quarantine
+/// placeholder: it 502s only on the literal Requested->Granted transition, and
+/// by the second attempt the DB row is already Granted, so that branch is
+/// skipped.
+const DECIDE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const DECIDE_RETRY_TIMEOUT: Duration = Duration::from_secs(8);
+
+async fn mg_post_decide_with_retry(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Json<Value>) {
+    mg_post_decide_with_retry_bounded(state, user, headers, path, body, DECIDE_RETRY_TIMEOUT).await
+}
+
+/// `mg_post_decide_with_retry` with the retry's own timeout as a parameter —
+/// split out so tests can shrink it instead of waiting out the real
+/// `DECIDE_RETRY_TIMEOUT`. The timeout keeps a hung retry from doubling the
+/// worst-case wait past `state.client`'s own 25s ceiling; if it fires, the
+/// original (already-known) response is returned rather than surfacing a
+/// second, less informative failure.
+async fn mg_post_decide_with_retry_bounded(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    path: &str,
+    body: Value,
+    retry_timeout: Duration,
+) -> (StatusCode, Json<Value>) {
+    let first = mg_post(state, user, headers, path, body.clone()).await;
+    if !is_retryable_decide_status(first.0) {
+        return first;
+    }
+    tracing::warn!(
+        path,
+        status = %first.0,
+        "decide_approval: retrying after a transient/quarantine response"
+    );
+    tokio::time::sleep(DECIDE_RETRY_BACKOFF).await;
+    match tokio::time::timeout(retry_timeout, mg_post(state, user, headers, path, body)).await {
+        Ok(second) => second,
+        Err(_elapsed) => {
+            tracing::warn!(
+                path,
+                original_status = %first.0,
+                retry_timeout = ?retry_timeout,
+                "decide_approval: the retry itself timed out; returning the original response"
+            );
+            first
+        }
+    }
 }
 
 /// Proxy a model-gateway orchestration POST with no body (run resume/cancel).
@@ -327,7 +406,7 @@ async fn decide_approval(
     Path(approval_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    mg_post(
+    mg_post_decide_with_retry(
         &state,
         &user,
         &headers,
@@ -420,7 +499,21 @@ async fn cancel_run(
 
 #[cfg(test)]
 mod tests {
-    use super::requires_execution_delegation;
+    use std::time::Duration;
+
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::Json;
+    use serde_json::json;
+
+    use crate::{
+        audience_tokens::new_audience_token_cache, cache::ResultCache, config::AppState,
+        middleware::AuthenticatedUser,
+    };
+
+    use super::{
+        is_retryable_decide_status, mg_post_decide_with_retry_bounded,
+        requires_execution_delegation,
+    };
 
     #[test]
     fn execution_delegation_is_required_only_for_execution_mutations() {
@@ -436,5 +529,273 @@ mod tests {
         assert!(!requires_execution_delegation(
             "/v1/orchestration/runs/run-1/cancel"
         ));
+    }
+
+    #[test]
+    fn only_502_and_503_are_treated_as_retryable() {
+        assert!(is_retryable_decide_status(StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_decide_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!is_retryable_decide_status(StatusCode::OK));
+        assert!(!is_retryable_decide_status(StatusCode::NOT_FOUND));
+        // 412 is session-core's real "already decided differently" conflict —
+        // must never be retried, it isn't transient.
+        assert!(!is_retryable_decide_status(StatusCode::PRECONDITION_FAILED));
+        assert!(!is_retryable_decide_status(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+    }
+
+    fn test_state(allow_dev_auth_bypass: bool) -> AppState {
+        AppState {
+            client: reqwest::Client::new(),
+            streaming_client: reqwest::Client::new(),
+            internal_api_key: "test-key".into(),
+            enforcement_mode: "off".to_string(),
+            auth_core_url: "http://127.0.0.1:1".into(),
+            velion_public_origin: "http://localhost:5173".into(),
+            session_core_url: "http://127.0.0.1:1".into(),
+            session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
+            user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
+            billing_core_url: "http://127.0.0.1:1".into(),
+            billing_core_service_token: "billing-test-secret-at-least-32-bytes".into(),
+            cost_core_url: "http://127.0.0.1:1".into(),
+            org_core_url: "http://127.0.0.1:1".into(),
+            org_core_service_token: "org-test-secret-at-least-32-bytes".into(),
+            integration_core_url: "http://127.0.0.1:1".into(),
+            audit_core_url: "http://127.0.0.1:1".into(),
+            audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
+            insight_core_url: "http://127.0.0.1:1".into(),
+            leads_core_url: "http://127.0.0.1:1".into(),
+            shipping_core_url: "http://127.0.0.1:1".into(),
+            user_core_url: "http://127.0.0.1:1".into(),
+            graph_index_url: "http://127.0.0.1:1".into(),
+            quarry_edge_url: "http://127.0.0.1:1".into(),
+            model_recommend_url: "http://127.0.0.1:1".into(),
+            model_gateway_url: "http://127.0.0.1:1".into(),
+            model_gateway_dev_bearer: String::new(),
+            inference_core_url: "http://127.0.0.1:1".into(),
+            documents_api_url: "http://127.0.0.1:1".into(),
+            retrieval_engine_url: "http://127.0.0.1:1".into(),
+            wiki_store_url: "http://127.0.0.1:1".into(),
+            embedding_engine_url: "http://127.0.0.1:1".into(),
+            quickwit_adapter_url: "http://127.0.0.1:1".into(),
+            finspo_core_url: "http://127.0.0.1:1".into(),
+            imports_api_url: "http://127.0.0.1:1".into(),
+            notification_core_url: "http://127.0.0.1:1".into(),
+            notification_core_service_token: "notification-test-secret-at-least-32-bytes".into(),
+            conversation_core_service_token: "conversation-test-secret-at-least-32-bytes".into(),
+            information_core_url: "http://127.0.0.1:1".into(),
+            conversation_core_url: "http://127.0.0.1:1".into(),
+            social_core_url: "http://127.0.0.1:1".into(),
+            searxng_url: "http://127.0.0.1:1".into(),
+            autocomplete_core_url: "http://127.0.0.1:1".into(),
+            autocomplete_token: String::new(),
+            zammad_api_url: "http://127.0.0.1:1".into(),
+            zammad_api_token: String::new(),
+            audience_token_cache: new_audience_token_cache(),
+            browser_run_store: crate::domains::browser::new_browser_run_store(),
+            rate_limiter: crate::rate_limit::RateLimiter::from_cache(&ResultCache::disabled()),
+            cache: ResultCache::disabled(),
+            chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
+            studio_store: crate::domains::studio::StudioStore::new(),
+            allow_dev_actor_headers: false,
+            allow_dev_auth_bypass,
+            enhanced_scrape_provider: String::new(),
+            enhanced_scrape_api_key: String::new(),
+            enhanced_scrape_zone: String::new(),
+            enhanced_scrape_country: String::new(),
+        }
+    }
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn mount_token_mocks(
+        server: &wiremock::MockServer,
+    ) -> impl std::future::Future<Output = ()> + '_ {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, ResponseTemplate,
+        };
+        async move {
+            Mock::given(method("GET"))
+                .and(path("/api/session-core/token"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"token": "session-test-token"})),
+                )
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/execution-core/token"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"token": "execution-test-token"})),
+                )
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// Regression coverage for task_d6420100: a real approve/reject decision
+    /// that comes back as a transient 502 — whether from model-gateway's own
+    /// quarantine placeholder on a first-time grant, or a dropped connection —
+    /// must not be surfaced to the browser as a failure when a single retry
+    /// would have succeeded.
+    #[tokio::test]
+    async fn decide_retries_once_after_502_and_returns_the_eventual_success() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_token_mocks(&server).await;
+
+        // First attempt: the deterministic model-gateway quarantine 502 (or an
+        // equally-transient network blip) — must be consumed exactly once.
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/approvals/apr-1/decide"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Second attempt: the decision has already flipped to Granted, so
+        // model-gateway's quarantine branch is skipped and this succeeds.
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/approvals/apr-1/decide"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"approval": {"id": "apr-1", "status": "GRANTED"}})),
+            )
+            .with_priority(2)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+
+        let (status, Json(body)) = mg_post_decide_with_retry_bounded(
+            &state,
+            &test_user(),
+            &HeaderMap::new(),
+            "/v1/orchestration/approvals/apr-1/decide",
+            json!({"decision": "approve", "reason": ""}),
+            Duration::from_secs(8),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["approval"]["status"], "GRANTED");
+        // Both `.expect(1)` mocks are verified when `server` drops at the end
+        // of this test — proving exactly one 502 followed by exactly one 200.
+    }
+
+    /// A non-retryable status (a real, permanent conflict) must be returned
+    /// immediately — retrying it would just be a wasted round trip, and
+    /// retrying a 412 in particular would misrepresent an already-settled
+    /// conflict as still in flight.
+    #[tokio::test]
+    async fn decide_does_not_retry_a_non_retryable_status() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_token_mocks(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/approvals/apr-2/decide"))
+            .respond_with(
+                ResponseTemplate::new(412)
+                    .set_body_json(json!({"error": {"code": "already_decided", "message": "approval is already decided"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+
+        let (status, _) = mg_post_decide_with_retry_bounded(
+            &state,
+            &test_user(),
+            &HeaderMap::new(),
+            "/v1/orchestration/approvals/apr-2/decide",
+            json!({"decision": "approve", "reason": ""}),
+            Duration::from_secs(8),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        // The `.expect(1)` mock is verified on drop — proving no retry happened.
+    }
+
+    /// If the retry itself hangs past its own timeout, the original (already
+    /// fully known) response must be returned rather than leaving the caller
+    /// waiting on a second, less-informative failure. Uses a short bounded
+    /// timeout (not the real 8s `DECIDE_RETRY_TIMEOUT`) so this stays fast.
+    #[tokio::test]
+    async fn decide_falls_back_to_the_original_response_if_the_retry_itself_times_out() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_token_mocks(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/approvals/apr-3/decide"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The retry attempt: deliberately slower than the test's short retry
+        // timeout below, so the `tokio::time::timeout` wrapping it elapses.
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/approvals/apr-3/decide"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+
+        let (status, _) = mg_post_decide_with_retry_bounded(
+            &state,
+            &test_user(),
+            &HeaderMap::new(),
+            "/v1/orchestration/approvals/apr-3/decide",
+            json!({"decision": "approve", "reason": ""}),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        // The retry's own 100ms timeout elapsed before the 500ms-delayed
+        // response arrived, so the original 502 is what comes back.
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
     }
 }

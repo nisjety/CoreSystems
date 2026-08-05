@@ -291,11 +291,32 @@ export default function AgentRunConsole() {
   const refreshApprovals = async (runId: string) => {
     try {
       const approvals = await listApprovals(runId, controller?.signal)
-      setState('approvals', approvals)
+      // The user may have switched to a different run while this was in
+      // flight (a new run, or a history replay) — don't stomp its approvals
+      // with a stale fetch for a run that's no longer live.
+      if (state.runId === runId) setState('approvals', approvals)
     } catch {
       // A run with no orchestration worker has no approvals endpoint state yet —
       // keep whatever we have; a sparse run must never surface as an error.
     }
+  }
+
+  // Shared by the decide happy path and by the catch-block reconciliation below
+  // (task_d6420100): once a decision is known to have landed — whether from
+  // decideApproval() succeeding outright, or discovered via re-fetch after it
+  // errored — the follow-through is identical either way.
+  const applyDecisionFollowThrough = async (targetRunId: string, decision: ApprovalDecision) => {
+    if (decision === 'approve') {
+      await resumeRun(targetRunId).catch(() => undefined)
+    } else {
+      // A rejection records the denial; the agent may route around the tool,
+      // but the user intent here is to stop the gated path — cancel the run.
+      await cancelRun(targetRunId).catch(() => undefined)
+      // Guard against a newer run having started while cancelRun was in
+      // flight — don't stomp its status with this stale decision's outcome.
+      if (state.runId === targetRunId) setState('status', 'cancelled')
+    }
+    await refreshApprovals(targetRunId)
   }
 
   const handleApprovalDecision = async (approvalId: string, decision: ApprovalDecision) => {
@@ -305,23 +326,58 @@ export default function AgentRunConsole() {
     setState('decidingIds', (prev) => (prev.includes(approvalId) ? prev : [...prev, approvalId]))
     // Optimistically drop the decided approval so the card resolves instantly.
     setState('approvals', (prev) => prev.filter((approval) => approval.id !== approvalId))
+    // Clear any stale banner from an earlier decision in this run — nothing else
+    // does, so a confirmed-success reconciliation below would otherwise leave a
+    // stale error on screen indefinitely.
+    setState('error', null)
     try {
       await decideApproval(approvalId, decision)
-      if (runId) {
-        if (decision === 'approve') {
-          await resumeRun(runId)
-        } else {
-          // A rejection records the denial; the agent may route around the tool,
-          // but the user intent here is to stop the gated path — cancel the run.
-          await cancelRun(runId).catch(() => undefined)
-          setState('status', 'cancelled')
-        }
-        await refreshApprovals(runId)
-      }
+      if (runId) await applyDecisionFollowThrough(runId, decision)
     } catch {
-      // Surface the failure and re-sync from the source of truth.
-      setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
-      if (runId) void refreshApprovals(runId)
+      // The gateway already retries this call once (task_d6420100), so landing
+      // here is rare — but a 502 can still mean the decision was recorded
+      // server-side while the response itself was lost. Re-fetch the real
+      // state before asserting failure, instead of trusting the network error
+      // alone.
+      if (!runId) {
+        setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
+      } else {
+        const fresh = await listApprovals(runId, controller?.signal).catch(() => null)
+        if (state.runId !== runId) {
+          // A new/replayed run has already reset state under us — bail rather
+          // than clobber it with a reconciliation for a run that's gone.
+        } else if (fresh === null) {
+          setState('error', i18n.tr(
+            'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
+            "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
+          ))
+        } else {
+          setState('approvals', fresh)
+          const match = fresh.find((approval) => approval.id === approvalId)
+          // Canonicalized already by normalizeApproval, but matched the same
+          // defensive uppercasing `pendingApprovals` uses on this same field —
+          // a casing regression there must not misroute a real success into
+          // the "decided differently" branch below.
+          const matchStatus = (match?.status ?? '').toUpperCase()
+          const expected = decision === 'approve' ? 'GRANTED' : 'DENIED'
+          if (matchStatus === expected) {
+            // It actually went through — proceed exactly as success would have.
+            await applyDecisionFollowThrough(runId, decision)
+          } else if (matchStatus === 'PENDING') {
+            setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
+          } else if (match) {
+            setState('error', i18n.tr(
+              'Denne forespørselen er allerede avgjort — trolig av en annen bruker.',
+              'This request has already been decided — likely by someone else.',
+            ))
+          } else {
+            setState('error', i18n.tr(
+              'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
+              "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
+            ))
+          }
+        }
+      }
     } finally {
       setState('decidingIds', (prev) => prev.filter((id) => id !== approvalId))
     }
