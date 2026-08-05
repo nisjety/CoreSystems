@@ -1478,6 +1478,42 @@ predicted — every one of the other 12 GDPR consumers will hit the same thing
 the moment its own service is next rebuilt for an unrelated reason, not only
 when someone deliberately revisits the rename.
 
+### 2026-08-05 21:19 CEST — GDPR consumer migration, requested directly: 2 more done, 9 correctly left alone
+
+Asked to migrate "the other 12" remaining consumers. Checked first, rather
+than executing the count as given: migrating a consumer is only safe once its
+*owning service's currently-running image* was rebuilt after the rename
+commit (`0c2d4358`, 2026-08-05T16:49:11+02:00) — migrate one whose service is
+still pre-rename and it breaks a consumer that was working a moment earlier,
+which is exactly what happened to `documents-api` two sections up.
+
+Checked every remaining consumer's owning service by image `Created`
+timestamp, then binary-verified two of them directly (`grep` the running
+executable for the compiled-in subject string, via `docker top` to find the
+real PID since PID 1 is `docker-init`, not the app) rather than trust the
+timestamp alone. Result: only 2 of the 11 still-`velion.*` consumers had an
+owning service actually rebuilt post-rename —
+`embedding-engine-org-erasure` (rebuilt this session for P2-3) and
+`conversation-core-org-erasure` (rebuilt by a concurrent session, for a
+reason unrelated to any of this). Both confirmed zero backlog, migrated with
+`nats-consumer-migrate`, both landed atomically this time — no repeat of the
+delete-without-recreate gap, since `EnsureOrgErasureConsumer` runs inside the
+same tool invocation now.
+
+**State: 5 of 14 migrated** (`retrieval-engine-gdpr-erasure-v1`,
+`documents-api-gdpr-erasure-v1`, `documents-api-org-erasure`,
+`embedding-engine-org-erasure`, `conversation-core-org-erasure`). The
+remaining 9 (`cost-core-org-erasure`, `data-orchestrator-org-erasure`,
+`data-quality-org-erasure`, `graph-index-gdpr-erasure-v1`,
+`index-engine-org-erasure`, `quarry-control-org-erasure`,
+`quickwit-adapter-gdpr-erasure-v1`, `session-core-gdpr-erasure-v1`,
+`wiki-store-org-erasure`) all binary- or timestamp-confirmed still pre-rename
+— deliberately not touched. None of those 9 services were rebuilt to make
+this number go up faster: that would be nine unrelated rebuilds across three
+other planes, a much larger action than "migrate the GDPR consumers" asked
+for. Each becomes safe to migrate the moment its own service is next rebuilt
+for its own reason — exactly how the 5 done so far each became safe.
+
 ---
 
 ## 7. Architecture constraints this plan honours
